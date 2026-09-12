@@ -354,9 +354,9 @@ describe("extendRecallWithLegacyBanks known-legacy candidate past the scan cap",
 // against the `jj` CLI directly — no separate fixture needed here), and
 // non-colocated jj workspaces of one repository all used to get their own
 // isolated per-project bank. Ports the Hindsight backend's `projectLabel`
-// fix for #2232 (`git.repo.primaryRootSync`, plus the new
-// `jj.repo.primaryRootSync` for the non-colocated case) into
-// `projectBank`/`resolveProjectRoot`.
+// fix for #2232 into `projectBank`/`resolveProjectRoot`, which resolve the
+// primary root through the shared native `vcs.repo(directory)?.primaryRoot()`
+// (`@oh-my-pi/pi-natives/vcs`, backed by `crates/pi-vcs`).
 describe("computeMnemopiBankScope worktree/workspace collapsing", () => {
 	let baseDir: TempDir;
 	let primaryRoot: string;
