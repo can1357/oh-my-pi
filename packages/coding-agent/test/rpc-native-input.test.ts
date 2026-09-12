@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { Server, Subprocess } from "bun";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { RpcCommand, RpcExtensionUIResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 
 type Frame = Record<string, unknown>;
@@ -341,6 +342,22 @@ for (const mode of ["rpc", "rpc-ui"] as const) {
 
 		test("transforms before builtin, native command, skill, and template dispatch", async () => {
 			const probe = new NativeInputProbe();
+			const image: ImageContent = {
+				type: "image",
+				mimeType: "image/png",
+				data: await new Bun.Image(
+					Buffer.from(
+						"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+						"base64",
+					),
+				)
+					.resize(4096, 2048)
+					.png()
+					.toBase64(),
+			};
+			const normalized = (await normalizeModelContextImages([image]))?.[0];
+			if (!normalized) throw new Error("Missing normalized attachment");
+			expect(normalized.data).not.toBe(image.data);
 			try {
 				await probe.start(mode);
 				const state = await probe.command({ type: "get_state" });
@@ -367,11 +384,19 @@ for (const mode of ["rpc", "rpc-ui"] as const) {
 					},
 				]) {
 					const index = probe.requests.length;
-					const response = await probe.command({ type: "prompt", message: `rewrite:${row.text}` });
+					const response = await probe.command({
+						type: "prompt",
+						message: `rewrite:${row.text}`,
+						images: [image],
+					});
 					const request = await probe.request(index);
 					expect(userContent(request)).toContain(row.body);
 					expect(userContent(request)).toContain(row.argument);
 					expect(userContent(request)).not.toContain("rewrite:");
+					expect(userContent(request)).toContain(`data:${normalized.mimeType};base64,${normalized.data}`);
+					expect(probe.events.filter(event => event.event === "before_agent_start").at(-1)?.images).toEqual([
+						normalized,
+					]);
 					expect(probe.input(`rewrite:${row.text}`)).toHaveLength(1);
 					expect(probe.input(row.text)).toHaveLength(0);
 					// Ack is already received while the local provider remains gated.

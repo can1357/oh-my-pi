@@ -12,6 +12,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { once } from "node:events";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -157,12 +158,13 @@ export async function runRpcSkillCommand(
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	images?: ImageContent[],
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
-			content: built.message,
+			content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
 			display: true,
 			details: built.details,
 			attribution: "user",
@@ -1109,7 +1111,7 @@ export async function runRpcMode(
 					const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
 					return {
 						completion: isCurrent()
-							? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built)
+							? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built, images)
 							: Promise.resolve(false),
 					};
 				}

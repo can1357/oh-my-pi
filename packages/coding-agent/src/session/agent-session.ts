@@ -6406,6 +6406,22 @@ export class AgentSession {
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			// Queued custom prompts normalize at enqueue; idle custom prompts reach this boundary raw.
+			if (
+				message.role === "custom" &&
+				typeof message.content !== "string" &&
+				message.content.some(part => part.type === "image")
+			) {
+				message = await this.#normalizeAgentMessageImages(message);
+				if (this.#promptGeneration !== generation || this.#isDisposed) return false;
+				options = {
+					...options,
+					images:
+						typeof message.content === "string"
+							? undefined
+							: message.content.filter((part): part is ImageContent => part.type === "image"),
+				};
+			}
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
