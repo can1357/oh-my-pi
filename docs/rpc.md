@@ -113,6 +113,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "remove_queued_message", message: string, queue: "steering" | "followUp" }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
@@ -229,6 +230,23 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 ```
 
 Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+
+### `remove_queued_message` payload
+
+Remove the first matching user-authored message from the selected pending queue:
+
+```json
+{"id":"req_2","type":"remove_queued_message","message":"Use the existing parser","queue":"steering"}
+{"id":"req_2","type":"response","command":"remove_queued_message","success":true,"data":{"removed":true}}
+```
+
+`message` matches the queue-chip text or its prompt-template expansion. Queued RPC skill commands retain their original `/skill:<name>` invocation as the chip text. Removal also drops that message's attachments and contiguous preceding hidden user companions (keyword notices, image descriptions, and video source paths), preserving other messages and the other queue.
+
+Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
+
+The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
+
+Clients must hide the chip or restore its draft only after `removed: true`. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
 
 ### `get_state` payload
 

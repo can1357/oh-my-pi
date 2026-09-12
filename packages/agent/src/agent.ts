@@ -976,6 +976,16 @@ export class Agent {
 		this.#notifySteeringWaiters();
 	}
 
+	/** Replace one pending queue without changing the other queue. */
+	replaceQueue(queue: "steering" | "followUp", messages: readonly AgentMessage[]): void {
+		if (queue === "steering") {
+			this.#steeringQueue = messages.slice();
+			this.#notifySteeringWaiters();
+		} else {
+			this.#followUpQueue = messages.slice();
+		}
+	}
+
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.replaceQueue()` to replace one pending queue without changing the other queue.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added
