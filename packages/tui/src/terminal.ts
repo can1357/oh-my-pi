@@ -334,14 +334,19 @@ function ttyInputQueueRead(handler: (data: string) => void): number {
 		// Re-probe the count each round: bytes can arrive mid-drain, and
 		// reading at most the queued count never blocks.
 		for (let queued = ttyInputQueueBytes(); queued > 0; queued = ttyInputQueueBytes()) {
-			const n = ttyDirectRead(process.stdin.fd, bufPtr, Math.min(queued, buf.length));
+			// isize returns BigInt — convert before arithmetic; mixing the
+			// two throws, and a throw after read(2) has consumed the bytes
+			// would drop them undelivered.
+			const n = Number(ttyDirectRead(process.stdin.fd, bufPtr, Math.min(queued, buf.length)));
 			if (n <= 0) break;
 			delivered += n;
 			handler(stdinDirectDecoder.decode(buf.subarray(0, n), { stream: true }));
 		}
 		handler(stdinDirectDecoder.decode());
-	} catch {
-		// A failed syscall round just retries on the next stall tick.
+	} catch (err) {
+		// Delivery must never fail silently: a throw here can follow a read
+		// that already consumed bytes from the kernel queue.
+		logger.warn("stdin stall watchdog: direct read failed", { err: String(err), delivered });
 	}
 	return delivered;
 }
