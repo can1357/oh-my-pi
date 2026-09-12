@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { containsVersionSentinel, versionSentinelFor } from "../native/loader-state.js";
+import { containsVersionSentinel, versionSentinelFor } from "../native/version-sentinel.js";
 
 const outputPath = path.join(import.meta.dir, "../native/embedded-addon.js");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
