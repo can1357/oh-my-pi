@@ -70,6 +70,7 @@ import {
 	targetsLocalSandbox,
 	unwrapHashlineHeaderPath,
 } from "./plan-mode-guard";
+import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
 import {
 	cachedRenderedString,
@@ -399,7 +400,25 @@ async function readCurrentWriteSource(
 	}
 }
 
-async function assertNotTruncatedReadProjection(
+function assertNotShorterReadProjection(
+	displayPath: string,
+	content: string,
+	cleanContent: string,
+	currentContent: string | undefined,
+): void {
+	if (
+		!endsWithReadTruncationNotice(content) ||
+		currentContent === undefined ||
+		cleanContent.length >= currentContent.length
+	) {
+		return;
+	}
+	throw new ToolError(
+		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the replacement ends with an omp read truncation notice and is shorter than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+	);
+}
+
+async function assertNotTruncatedFileReadProjection(
 	session: ToolSession,
 	requestedPath: string,
 	absolutePath: string,
@@ -409,10 +428,7 @@ async function assertNotTruncatedReadProjection(
 ): Promise<void> {
 	if (!endsWithReadTruncationNotice(content)) return;
 	const currentContent = await readCurrentWriteSource(session, requestedPath, absolutePath);
-	if (currentContent === undefined || cleanContent.length >= currentContent.length) return;
-	throw new ToolError(
-		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the replacement ends with an omp read truncation notice and is shorter than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
-	);
+	assertNotShorterReadProjection(displayPath, content, cleanContent, currentContent);
 }
 
 /**
@@ -696,6 +712,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async #writeArchiveEntry(
 		content: string,
+		rawContent: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
@@ -735,6 +752,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const sel = readSelectorForEmptyWrite(writeTarget, content);
 		if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 			throwReadSelectorMisfire(writeTarget, sel);
+		}
+		const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
+		if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+			const existingBytes =
+				existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
+			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
+			assertNotShorterReadProjection(writeTarget, rawContent, content, existingText ?? undefined);
 		}
 		entries.set(resolvedArchivePath.archiveSubPath, content);
 
@@ -1303,7 +1327,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(cleanContent, content, resolvedArchivePath);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1344,7 +1368,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (await fs.exists(absolutePath)) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
-			await assertNotTruncatedReadProjection(this.session, path, absolutePath, displayPath, content, cleanContent);
+			await assertNotTruncatedFileReadProjection(
+				this.session,
+				path,
+				absolutePath,
+				displayPath,
+				content,
+				cleanContent,
+			);
 
 			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 

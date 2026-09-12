@@ -9,6 +9,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	return {
@@ -108,6 +109,28 @@ describe("write tool read projection guard", () => {
 			"incomplete read projection",
 		);
 		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects actual bounded archive-member output without changing the archive", async () => {
+		const archivePath = path.join(tmpDir, "bundle.zip");
+		const member = "member.txt";
+		const original = `${Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
+		await writeArchive(archivePath, "zip", [[member, original]]);
+		const before = await Bun.file(archivePath).bytes();
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-archive", {
+				path: `${archivePath}:${member}:1-20`,
+			}),
+		);
+		expect(projection).toContain("[37 more lines in archive entry. Use :24 to continue]");
+
+		await expect(
+			new WriteTool(session).execute("write-archive", { path: `${archivePath}:${member}`, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(archivePath).bytes()).toEqual(before);
+		const entries = await readArchiveEntries({ bytes: before, format: "zip" });
+		expect(new TextDecoder().decode(entries.get(member))).toBe(original);
 	});
 
 	it("compares against the ACP buffer before bridge writes", async () => {
