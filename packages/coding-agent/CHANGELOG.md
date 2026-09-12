@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the collab guest reconnect/resync path eagerly disposing the previous transcript before the replacement finished staging, which defeated the staged rebuild's rollback; a live tool block orphaned by a failed resync now stops instead of leaking its shared spinner-ticker registration for the rest of the process ([#9377](https://github.com/can1357/oh-my-pi/pull/9377) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
