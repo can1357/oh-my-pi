@@ -5,6 +5,7 @@
 ### Added
 
 - Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+
 ### Fixed
 
 - Fixed OpenRouter multi-turn tool-call sessions wedging with `400 Referenced reasoning item ... was not found or has expired` on Meta Muse Spark models by suppressing synthetic reasoning replay when reasoning history is filtered ([#10966](https://github.com/can1357/oh-my-pi/issues/10966)).

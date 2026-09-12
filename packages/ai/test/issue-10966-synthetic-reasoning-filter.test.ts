@@ -165,4 +165,64 @@ describe("issue #10966: Responses synthetic reasoning suppression when allowsSyn
 		expect(functionCall).toBeDefined();
 		expect(functionCall?.call_id).toBe("call_abc123");
 	});
+
+	it("preserves required reasoning item replay for OpenRouter DeepSeek with real thinking", () => {
+		const deepseekOpenRouterModel = buildModel({
+			id: "deepseek/deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			contextWindow: 1_048_576,
+			maxTokens: 384_000,
+		});
+
+		expect(deepseekOpenRouterModel.compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(deepseekOpenRouterModel.compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
+
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "deepseek thinking trace" },
+				{
+					type: "toolCall",
+					id: "call_ds123",
+					name: "bash",
+					arguments: { command: "echo ds" },
+				},
+			],
+			api: "openrouter",
+			provider: "openrouter",
+			model: "deepseek/deepseek-v4-pro",
+			usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20 },
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Run ds", timestamp: Date.now() },
+				assistantMessage,
+				{ role: "toolResult", toolCallId: "call_ds123", toolName: "bash", content: [{ type: "text", text: "ds\n" }], isError: false, timestamp: Date.now() },
+				{ role: "user", content: "Next ds", timestamp: Date.now() },
+			],
+		};
+
+		const { params } = buildParams(
+			deepseekOpenRouterModel as unknown as Model<"openai-responses">,
+			context,
+			{ reasoning: "high" },
+			undefined,
+		);
+
+		const reasoningItems = (params.input as Array<{ type?: string; content?: Array<{ text?: string }> }>).filter(
+			item => item.type === "reasoning",
+		);
+
+		// With surviving reasoning text, DeepSeek gets the required reasoning item with real thinking text
+		expect(reasoningItems).toHaveLength(1);
+		expect(reasoningItems[0].content?.[0]?.text).toBe("deepseek thinking trace");
+	});
 });
