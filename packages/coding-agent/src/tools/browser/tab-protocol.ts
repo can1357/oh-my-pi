@@ -77,6 +77,7 @@ export type WorkerInitPayload =
 			activateForScreenshot?: boolean;
 	  };
 
+/** Result of one host tool requested by browser-run JavaScript. */
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 export type WorkerInbound =

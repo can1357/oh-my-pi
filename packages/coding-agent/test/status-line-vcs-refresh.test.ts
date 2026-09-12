@@ -468,6 +468,19 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 });
 
 describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
+	it("reuses one repository handle across repeated paints", () => {
+		const repoSpy = vi.spyOn(vcs, "repo");
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+
+		expect(repoSpy).toHaveBeenCalledTimes(1);
+		component.dispose();
+	});
+
 	it("discovers a repository created after setup with bounded single-flight polling", async () => {
 		let now = 1_000_000;
 		const repositoryCreatedAt = now + 5_000;

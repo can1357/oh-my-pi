@@ -30,7 +30,7 @@ import {
 	type CatalogProviderDescriptor,
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
-import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { getCatalogProviderEntry, PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	ABLITERATION_STATIC_MODELS,
@@ -44,11 +44,13 @@ import {
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
 	fetchWellKnownModels,
+	FIREPASS_STATIC_MODELS,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	kimiCodeMaxTokens,
 	META_MUSE_STATIC_MODELS,
+	MUSE_CODE_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS,
@@ -265,7 +267,10 @@ function applyGlobalModelsDevFallback(
 			model.provider === "baseten" ||
 			// Meta's first-party rows come from the reviewed seed; a same-id
 			// gateway row would overwrite their display names.
-			model.provider === "meta"
+			model.provider === "meta" ||
+			// Providers whose discovery is the deployment truth and whose
+			// corrections live in KDL opt out of same-id reference fills.
+			getCatalogProviderEntry(model.provider)?.skipCrossProviderReferenceFills === true
 		) {
 			return model;
 		}
@@ -296,6 +301,8 @@ function applyGlobalModelsDevFallback(
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
 			maxTokens: model.maxTokens ?? reference.maxTokens,
+			int: model.int ?? reference.int,
+			tps: model.tps ?? reference.tps,
 		};
 	});
 }
@@ -659,7 +666,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
 	}
-	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
+	// Seed Fire Pass router models so the provider is usable when generation has
+	// no live key. Dedicated `fpk_...` keys only authorize router endpoints, not
+	// `/v1/models`, so dynamic discovery is never performed.
+	if (!authoritativeCatalogProviders.has("firepass")) {
+		allModels.push(...FIREPASS_STATIC_MODELS);
+	}
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
 	// built-in catalog. The descriptor deliberately has NO `catalogDiscovery`, so it is
 	// excluded from the generator's discovery loop (`isCatalogDescriptor` filter above):
@@ -679,6 +691,9 @@ async function generateModels() {
 	// default must resolve synchronously at boot, before credential-scoped
 	// runtime discovery replaces the seed with the account's live catalog.
 	allModels.push(...DEVIN_STATIC_MODELS);
+	// Muse Code discovery is scoped to the signed-in subscription. Bundle the
+	// documented seed, then replace it with the account's live roster at runtime.
+	allModels.push(...MUSE_CODE_STATIC_MODELS);
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -723,6 +738,7 @@ async function generateModels() {
 		...authoritativeCatalogProviders,
 		...authoritativeSpecialDiscoveryProviders,
 		...modelsDevSnapshotExcludedProviders,
+		"firepass",
 	]);
 
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
@@ -733,7 +749,6 @@ async function generateModels() {
 		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
 		previousSnapshotExcludedProviders,
 	);
-
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.

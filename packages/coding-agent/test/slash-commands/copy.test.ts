@@ -3,6 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import * as opener from "@oh-my-pi/pi-coding-agent/utils/open";
 
 function assistantText(text: string): AgentMessage {
 	return { role: "assistant", content: [{ type: "text", text }] } as unknown as AgentMessage;
@@ -72,6 +73,30 @@ describe("/copy slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 
+	it("copies the last link's URL with /copy link", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([
+			assistantText("first https://example.com/old"),
+			assistantText("see [docs](https://example.com/docs) and https://example.com/last."),
+		]);
+
+		expect(await executeBuiltinSlashCommand("/copy link", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith("https://example.com/last");
+		expect(harness.showStatus).toHaveBeenCalledWith("Copied link to clipboard");
+		expect(harness.showCopySelector).not.toHaveBeenCalled();
+	});
+
+	it("reports when there is no link to copy", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([assistantText("no links")]);
+
+		expect(await executeBuiltinSlashCommand("/copy link", harness.runtime)).toBe(true);
+
+		expect(copySpy).not.toHaveBeenCalled();
+		expect(harness.showStatus).toHaveBeenCalledWith("No link to copy.");
+	});
+
 	it("keeps bare /copy on the picker", async () => {
 		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		const harness = createRuntimeHarness([assistantText("answer")]);
@@ -81,5 +106,37 @@ describe("/copy slash command", () => {
 		expect(harness.showCopySelector).toHaveBeenCalledTimes(1);
 		expect(copySpy).not.toHaveBeenCalled();
 		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+});
+
+describe("/open slash command", () => {
+	it("opens the last assistant link with the system opener", async () => {
+		const openSpy = spyOn(opener, "openPath").mockImplementation(() => {});
+		const harness = createRuntimeHarness([
+			assistantText("older https://example.com/old"),
+			assistantText(
+				"CI: https://github.com/dalilshorja/dalilshorja/actions/runs/1 and the PR https://github.com/dalilshorja/dalilshorja/pull/4.",
+			),
+		]);
+
+		expect(await executeBuiltinSlashCommand("/open", harness.runtime)).toBe(true);
+
+		expect(openSpy).toHaveBeenCalledWith("https://github.com/dalilshorja/dalilshorja/pull/4");
+		expect(harness.showStatus).toHaveBeenCalledWith("Opening https://github.com/dalilshorja/dalilshorja/pull/4");
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("reports when there is no link and rejects unknown arguments", async () => {
+		const openSpy = spyOn(opener, "openPath").mockImplementation(() => {});
+		const harness = createRuntimeHarness([assistantText("no links")]);
+
+		expect(await executeBuiltinSlashCommand("/open", harness.runtime)).toBe(true);
+		expect(harness.showStatus).toHaveBeenCalledWith("No link to open.");
+
+		expect(await executeBuiltinSlashCommand("/open code", harness.runtime)).toBe(true);
+		expect(harness.showStatus).toHaveBeenLastCalledWith(
+			"Usage: /open [link]  (pick a specific link: /copy, → blocks, o)",
+		);
+		expect(openSpy).not.toHaveBeenCalled();
 	});
 });

@@ -98,7 +98,8 @@ Contract:
 - `reason` becomes the tool error text the LLM sees.
 - If a handler **throws**, the tool is also blocked (fail-closed).
 - Last non-blocking return wins; first `block: true` short-circuits.
-- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. Handlers do not see earlier input revisions, and input replacement is ignored for `computer` calls.
+- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. Handlers do not see earlier input revisions.
+- Eval prelude calls such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are not tool calls and do not emit these hooks.
 
 ## Post-tool override contract
 

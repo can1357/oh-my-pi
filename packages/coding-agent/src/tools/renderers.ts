@@ -15,15 +15,12 @@ import { askToolRenderer } from "./ask";
 import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
-import { browserToolRenderer } from "./browser/render";
-import { computerToolRenderer } from "./computer-renderer";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
 import { githubToolRenderer } from "./gh-renderer";
 import { globToolRenderer } from "./glob";
 import { grepToolRenderer } from "./grep";
 import { hubToolRenderer } from "./hub";
-import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
 import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
@@ -100,8 +97,6 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	ast_grep: astGrepToolRenderer as ToolRenderer,
 	ast_edit: astEditToolRenderer as ToolRenderer,
 	bash: bashToolRenderer as ToolRenderer,
-	browser: browserToolRenderer as ToolRenderer,
-	computer: computerToolRenderer as ToolRenderer,
 	debug: debugToolRenderer as ToolRenderer,
 	eval: evalToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
@@ -109,7 +104,6 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	glob: globToolRenderer as ToolRenderer,
 	grep: grepToolRenderer as ToolRenderer,
 	lsp: lspToolRenderer as ToolRenderer,
-	inspect_image: inspectImageToolRenderer as ToolRenderer,
 	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →
 	// persisted-agents → vibe/runtime → task/executor → sdk) close an import
 	// cycle back here, so reading it at init order-dependently hits its

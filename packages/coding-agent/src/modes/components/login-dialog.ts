@@ -15,6 +15,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	#abortController = new AbortController();
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
+	#inputAbortCleanup?: () => void;
 
 	constructor(
 		tui: TUI,
@@ -33,11 +34,10 @@ export class LoginDialogComponent extends OverlayPanel {
 		// Input (always present, used when needed)
 		this.#input = new Input();
 		this.#input.onSubmit = () => {
-			if (this.#inputResolver) {
-				this.#inputResolver(this.#input.getValue());
-				this.#inputResolver = undefined;
-				this.#inputRejecter = undefined;
-			}
+			const resolve = this.#inputResolver;
+			if (!resolve) return;
+			this.#clearInputHandlers();
+			resolve(this.#input.getValue());
 		};
 		this.#input.onEscape = () => {
 			this.#cancel();
@@ -50,11 +50,9 @@ export class LoginDialogComponent extends OverlayPanel {
 
 	#cancel(): void {
 		this.#abortController.abort();
-		if (this.#inputRejecter) {
-			this.#inputRejecter(new Error("Login cancelled"));
-			this.#inputResolver = undefined;
-			this.#inputRejecter = undefined;
-		}
+		const reject = this.#inputRejecter;
+		this.#clearInputHandlers();
+		reject?.(new Error("Login cancelled"));
 		this.onComplete(false, "Login cancelled");
 	}
 
@@ -107,7 +105,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	/**
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
-	showManualInput(prompt: string): Promise<string> {
+	showManualInput(prompt: string, signal?: AbortSignal): Promise<string> {
 		// Invalid pastes re-prompt (the OAuth callback loop calls this again), so
 		// reuse the already-mounted input instead of stacking duplicate prompt and
 		// hint lines beneath the dialog. Reset the value so each retry starts clean.
@@ -120,9 +118,21 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#input.setValue("");
 		this.#tui.requestRender();
 
+		if (signal?.aborted) {
+			return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Login input cancelled"));
+		}
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		this.#inputResolver = resolve;
 		this.#inputRejecter = reject;
+		if (signal) {
+			const onAbort = () => {
+				if (this.#inputRejecter !== reject) return;
+				this.#clearInputHandlers();
+				reject(signal.reason instanceof Error ? signal.reason : new Error("Login input cancelled"));
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			this.#inputAbortCleanup = () => signal.removeEventListener("abort", onAbort);
+		}
 		return promise;
 	}
 
@@ -144,10 +154,19 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#input.setValue("");
 		this.#tui.requestRender();
 
+		this.#inputAbortCleanup?.();
+		this.#inputAbortCleanup = undefined;
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		this.#inputResolver = resolve;
 		this.#inputRejecter = reject;
 		return promise;
+	}
+
+	#clearInputHandlers(): void {
+		this.#inputAbortCleanup?.();
+		this.#inputAbortCleanup = undefined;
+		this.#inputResolver = undefined;
+		this.#inputRejecter = undefined;
 	}
 
 	/**

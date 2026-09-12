@@ -40,7 +40,7 @@ provider "openai" {
 				reasoning-disable-mode "none-effort"
 			}
 		}
-		revision ">=5 <6" {
+		revision ">=5 <7" {
 			apply-patch-tool-type "freeform"
 		}
 	}
@@ -70,6 +70,19 @@ provider "openai" {
 			output 18.0
 			cache-read 0.4
 			cache-write 5.0
+		}
+	}
+	// Astra API route bills the documented long-context tier above 272K input:
+	// 2x input and cache rates, 1.5x output for the full request; cache writes
+	// stay 1.25x the long input rate (25.0). The Codex subscription route stays
+	// exempt (credit-equivalent, free cache writes) — see openai-codex.kdl.
+	models "gpt-6-astra*" {
+		long-context-cost {
+			input-threshold 272000
+			input 20.0
+			output 75.0
+			cache-read 2.0
+			cache-write 25.0
 		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen

@@ -192,8 +192,13 @@ function darwinWhich(command: string, options?: Bun.WhichOptions): string | null
 	return null;
 }
 
-// Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'
-export const whichFresh = os.platform() === "darwin" ? darwinWhich : Bun.which;
+// Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'.
+// Look `Bun.which` up per call rather than capturing it at import, so a `Bun.which`
+// stub installed later (the per-test seam) is honoured on every platform.
+export const whichFresh =
+	os.platform() === "darwin"
+		? darwinWhich
+		: (command: string, options?: Bun.WhichOptions): string | null => Bun.which(command, options);
 
 // Derive stable cache key from command and lookup options
 function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {

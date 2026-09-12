@@ -36,7 +36,7 @@ There is no native `PhotonImage` class, `image.rs`, or ProjFS overlay helper mod
 | `countTokens(input, encoding?)`          | `count_tokens`                 | `tokens.rs`      |
 | `detectMacOSAppearance()`                | `detect_macos_appearance`      | `appearance.rs`  |
 | `MacAppearanceObserver.start(cb)`        | `MacAppearanceObserver::start` | `appearance.rs`  |
-| `MacOSPowerAssertion.start(options?)`    | `MacOSPowerAssertion::start`   | `power.rs`       |
+| `PowerAssertion.start(options?)`         | `PowerAssertion::start`        | `power.rs`       |
 | `getWorkProfile(lastSeconds)`            | `get_work_profile`             | `prof.rs`        |
 | `deviceCheckGenerateToken()`             | `device_check_generate_token`  | `devicecheck.rs` |
 
@@ -95,11 +95,11 @@ There is no current `packages/natives` TS wrapper that emits OSC52, handles Term
 
 `deviceCheckGenerateToken()` resolves within the native helper's one-second wait with `{ supported, tokenBase64?, error?, latencyMs }`. It reports unsupported platforms/devices and generation failures in the result rather than requiring a token to be present.
 
-### macOS appearance and power helpers
+### macOS appearance and cross-platform power helpers
 
 - `detectMacOSAppearance()` returns `"dark"`, `"light"`, or `null` on non-macOS.
 - `MacAppearanceObserver.start(callback)` returns a handle with `stop()`; on macOS it uses distributed notifications plus a 2-second polling fallback, and on non-macOS it is a no-op observer.
-- `MacOSPowerAssertion.start(options?)` returns a handle with `stop()`; on macOS it acquires one or more IOKit assertions, and on other platforms it is a no-op handle.
+- `PowerAssertion.start(options?)` returns a handle with `stop()`; it uses IOKit on macOS, a login1 inhibitor on Linux, and thread-affine execution state on Windows. Unsupported platforms receive a no-op handle.
 - Power assertion options are `{ reason?, idle?, system?, user?, display? }`. If every boolean is unset or omitted, `idle` behavior is used by default.
 
 ### Work profiling (`prof`)

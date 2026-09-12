@@ -20,7 +20,8 @@ export function getSegmentGalleryInventory(): readonly StatusLineSegmentId[] {
 	return [...ALL_SEGMENT_IDS];
 }
 
-function baseContext(sessionOptions?: GallerySessionOptions): SegmentContext {
+/** Deterministic full context for isolated status-segment previews and tests. */
+export function createGallerySegmentContext(sessionOptions?: GallerySessionOptions): SegmentContext {
 	return {
 		session: createGallerySession(sessionOptions),
 		now: FIXED_NOW,
@@ -45,6 +46,7 @@ function baseContext(sessionOptions?: GallerySessionOptions): SegmentContext {
 		loopMode: null,
 		goalMode: null,
 		vibeMode: null,
+		vim: null,
 		collab: { role: "host", participantCount: 3 },
 		usageStats: {
 			input: 12_400,
@@ -89,6 +91,10 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "idle", context: { turnElapsedMs: null } },
 				{ label: "active", context: { turnElapsedMs: 92_000 } },
 				{ label: "focused subagent", context: { focusedAgentId: "Scout" } },
+			];
+		case "status":
+			return [
+				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
 			];
 		case "model":
 			return [
@@ -233,13 +239,32 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "host active", context: { collab: { role: "host", participantCount: 3 } } },
 				{ label: "guest active", context: { collab: { role: "guest", participantCount: 3 } } },
 			];
+		case "vim":
+			return [
+				{
+					label: "normal",
+					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "text" } },
+				},
+				{
+					label: "insert",
+					context: { vim: { mode: "insert", pending: "", selectedLines: 0, display: "text" } },
+				},
+				{
+					label: "visual with count",
+					context: { vim: { mode: "visual-line", pending: "2d", selectedLines: 4, display: "text" } },
+				},
+				{
+					label: "icon mode",
+					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "icon" } },
+				},
+			];
 		default:
 			return [{ label: "canonical" }];
 	}
 }
 
 function renderIsolatedSegment(id: StatusLineSegmentId, spec: SegmentVariantSpec, width: number): readonly string[] {
-	const base = baseContext(spec.session);
+	const base = createGallerySegmentContext(spec.session);
 	const override = spec.context;
 	const context: SegmentContext = {
 		...base,

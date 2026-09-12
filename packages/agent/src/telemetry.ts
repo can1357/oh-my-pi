@@ -1638,7 +1638,7 @@ export async function recordManualChatTelemetry(
 /**
  * Options accepted by {@link instrumentedCompleteSimple}. Mirrors the
  * `streamAssistantResponse` chat-span lifecycle for oneshot LLM calls
- * (compaction summaries, handoff document, branch summary, inspect_image).
+ * (compaction summaries, handoff document, branch summary, image_question).
  */
 export interface InstrumentedChatSpanOptions {
 	readonly telemetry: AgentTelemetry | undefined;
@@ -1649,7 +1649,7 @@ export interface InstrumentedChatSpanOptions {
 	/**
 	 * Tag stamped onto `pi.gen_ai.oneshot.kind`. Values used by the agent:
 	 * `compaction_summary`, `compaction_short_summary`, `compaction_turn_prefix`,
-	 * `handoff`, `branch_summary`, `inspect_image`. Free-form to allow callers
+	 * `handoff`, `branch_summary`, `image_question`. Free-form to allow callers
 	 * outside this package to add new kinds without bumping the helper.
 	 */
 	readonly oneshotKind?: string;

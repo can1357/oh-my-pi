@@ -158,11 +158,6 @@ rlimit = "0.11.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
-[target.'cfg(target_arch = "aarch64")'.dependencies]
-# Enable runtime-dispatched ARMv8 hash instructions for uucore's checksum implementations.
-sha2 = { version = "0.10", features = ["asm"] }
-sha3 = { version = "0.10", features = ["asm"] }
-
 [target."cfg(windows)".dependencies]
 notify = "=8.2.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }

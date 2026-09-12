@@ -11,7 +11,10 @@
  * - exchangeToken(): Exchange authorization code for tokens
  */
 import * as os from "node:os";
+import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
+import * as nativeSchemeCallback from "./native-scheme-callback";
+import type { NativeSchemeCallbackReceiver } from "./native-scheme-callback";
 import templateHtml from "./oauth.html" with { type: "text" };
 import type { OAuthController, OAuthCredentials } from "./types";
 
@@ -102,6 +105,43 @@ export interface OAuthCallbackFlowOptions {
 	allowPortFallback?: boolean;
 	/** Skip the local callback server entirely; the user pastes the code or redirect URL back. */
 	manualInputOnly?: boolean;
+	/** Receive a custom-scheme redirect through the native OS handler when supported. */
+	nativeScheme?: boolean;
+}
+
+function parseNativeCallback(input: string, redirectUri: string, expectedState: string): CallbackResult {
+	let callback: URL;
+	let expected: URL;
+	try {
+		callback = new URL(input);
+		expected = new URL(redirectUri);
+	} catch {
+		throw new AIError.OAuthError("OAuth application callback was not a valid URL", { kind: "device-auth" });
+	}
+	if (
+		callback.protocol !== expected.protocol ||
+		callback.host !== expected.host ||
+		callback.pathname !== expected.pathname
+	) {
+		throw new AIError.OAuthError("OAuth application returned an unexpected callback target", {
+			kind: "device-auth",
+		});
+	}
+	const state = callback.searchParams.get("state") ?? "";
+	if (expectedState && state !== expectedState) {
+		throw new AIError.OAuthError("State mismatch - possible CSRF attack", { kind: "device-auth" });
+	}
+	const error = callback.searchParams.get("error");
+	if (error) {
+		const description = callback.searchParams.get("error_description") || error;
+		throw new AIError.OAuthError(`Authorization failed: ${description}`, { kind: "device-auth" });
+	}
+	const code = callback.searchParams.get("code") ?? callback.searchParams.get("authCode");
+	if (!code)
+		throw new AIError.OAuthError("OAuth application callback omitted the authorization code", {
+			kind: "device-auth",
+		});
+	return { code, state };
 }
 
 /**
@@ -115,6 +155,7 @@ export abstract class OAuthCallbackFlow {
 	redirectUri?: string;
 	allowPortFallback: boolean;
 	#manualInputOnly: boolean;
+	#nativeScheme: boolean;
 	#callbackResolve?: (result: CallbackResult) => void;
 	#callbackReject?: (error: Error) => void;
 	/**
@@ -138,6 +179,7 @@ export abstract class OAuthCallbackFlow {
 			this.callbackHostname = DEFAULT_HOSTNAME;
 			this.allowPortFallback = true;
 			this.#manualInputOnly = false;
+			this.#nativeScheme = false;
 			return;
 		}
 
@@ -147,6 +189,7 @@ export abstract class OAuthCallbackFlow {
 		this.redirectUri = preferredPortOrOptions.redirectUri;
 		this.allowPortFallback = preferredPortOrOptions.allowPortFallback ?? true;
 		this.#manualInputOnly = preferredPortOrOptions.manualInputOnly ?? false;
+		this.#nativeScheme = preferredPortOrOptions.nativeScheme ?? false;
 	}
 
 	/**
@@ -198,9 +241,41 @@ export abstract class OAuthCallbackFlow {
 		const { server, redirectUri, launchUrl } = this.#manualInputOnly
 			? { server: undefined, redirectUri: this.#buildRedirectUri(), launchUrl: undefined }
 			: await this.#startCallbackServer(state);
+		const receiverAbort = new AbortController();
+		let receiver: NativeSchemeCallbackReceiver | undefined;
+		let nativeCallback: Promise<CallbackResult> | undefined;
 
 		try {
 			this.#throwIfCancelled();
+			if (this.#nativeScheme) {
+				const redirect = new URL(redirectUri);
+				if (redirect.protocol !== "http:" && redirect.protocol !== "https:") {
+					try {
+						receiver = await nativeSchemeCallback.createNativeSchemeCallbackReceiver(
+							redirect.protocol.slice(0, -1),
+							{ signal: this.ctrl.signal },
+						);
+					} catch (error) {
+						this.#throwIfCancelled();
+						this.#reportNativeWarning(
+							"Native OAuth callback setup failed; paste the authorization code instead",
+							error,
+						);
+					}
+				}
+			}
+			this.#throwIfCancelled();
+
+			// Attach rejection handling before invoking callbacks: onAuth and
+			// onProgress are allowed to cancel synchronously, which aborts the
+			// native waiter before #waitForCallback gets a chance to observe it.
+			if (receiver) {
+				nativeCallback = receiver
+					.waitForCallback(receiverAbort.signal)
+					.then(input => parseNativeCallback(input, redirectUri, state));
+				void nativeCallback.catch(() => undefined);
+			}
+
 			// Generate auth URL with the ACTUAL redirect URI (may differ from expected if port was busy)
 			const { url: authUrl, instructions } = await this.generateAuthUrl(state, redirectUri);
 			this.#throwIfCancelled();
@@ -213,21 +288,64 @@ export abstract class OAuthCallbackFlow {
 
 			// Notify controller that auth is ready
 			this.ctrl.onAuth?.({ url: authUrl, launchUrl, instructions });
+			this.#throwIfCancelled();
 			this.ctrl.onProgress?.(
-				this.#manualInputOnly
-					? "Waiting for pasted authorization code..."
-					: "Waiting for browser authentication...",
+				receiver || !this.#manualInputOnly
+					? "Waiting for browser authentication..."
+					: "Waiting for pasted authorization code...",
 			);
-
-			const { code } = await this.#waitForCallback(state);
 			this.#throwIfCancelled();
 
-			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
+			let callback: CallbackResult;
+			try {
+				callback = await this.#waitForCallback(state, nativeCallback);
+			} catch (error) {
+				// UI escape handlers commonly abort the controller and reject the
+				// active manual prompt in the same turn. Cancellation remains the
+				// authoritative outcome regardless of which rejection wins the race.
+				this.#throwIfCancelled();
+				throw error;
+			}
+			this.#throwIfCancelled();
 
-			return await this.exchangeToken(code, state, redirectUri);
+			receiverAbort.abort("OAuth callback received");
+			await nativeCallback?.catch(() => undefined);
+			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
+			this.#throwIfCancelled();
+
+			return await this.exchangeToken(callback.code, state, redirectUri);
 		} finally {
 			this.#pendingAuthUrl = undefined;
+			receiverAbort.abort("OAuth login finished");
+			await nativeCallback?.catch(() => undefined);
+			if (receiver) {
+				try {
+					await receiver.dispose();
+				} catch (error) {
+					this.#reportNativeWarning(
+						"Native OAuth callback cleanup failed; recovery information was retained",
+						error,
+					);
+				}
+			}
 			server?.stop();
+		}
+	}
+
+	/**
+	 * Surface native callback failures without allowing reporting hooks to
+	 * replace the login result they are meant to describe.
+	 */
+	#reportNativeWarning(message: string, error: unknown): void {
+		const detail = error instanceof Error ? error.message : String(error);
+		const warning = `${message}: ${detail}`;
+		logger.warn(warning, { error });
+		try {
+			this.ctrl.onProgress?.(warning);
+		} catch (progressError) {
+			logger.warn("OAuth progress callback failed while reporting a native callback warning", {
+				error: progressError,
+			});
 		}
 	}
 
@@ -483,46 +601,56 @@ export abstract class OAuthCallbackFlow {
 	/**
 	 * Wait for OAuth callback or manual input (whichever comes first).
 	 */
-	#waitForCallback(expectedState: string): Promise<CallbackResult> {
+	#waitForCallback(expectedState: string, nativeCallback?: Promise<CallbackResult>): Promise<CallbackResult> {
 		const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT);
-		const signal = this.ctrl.signal ? AbortSignal.any([this.ctrl.signal, timeoutSignal]) : timeoutSignal;
+		const settledSignal = new AbortController();
+		const signals = this.ctrl.signal
+			? [this.ctrl.signal, timeoutSignal, settledSignal.signal]
+			: [timeoutSignal, settledSignal.signal];
+		const signal = AbortSignal.any(signals);
 		if (signal.aborted) return Promise.reject(this.#loginCancelledError());
 
 		const callback = Promise.withResolvers<CallbackResult>();
 		this.#callbackResolve = callback.resolve;
 		this.#callbackReject = callback.reject;
 
-		signal.addEventListener("abort", () => {
-			this.#callbackResolve = undefined;
-			this.#callbackReject = undefined;
-			callback.reject(new AIError.LoginCancelledError(`OAuth callback cancelled: ${signal.reason}`));
-		});
+		signal.addEventListener(
+			"abort",
+			() => {
+				this.#callbackResolve = undefined;
+				this.#callbackReject = undefined;
+				callback.reject(new AIError.LoginCancelledError(`OAuth callback cancelled: ${signal.reason}`));
+			},
+			{ once: true },
+		);
 		const callbackPromise = callback.promise;
 
-		// Manual input race (if supported)
+		const candidates = [callbackPromise];
+		if (nativeCallback) candidates.push(nativeCallback);
 		if (this.ctrl.onManualCodeInput) {
 			const requestManualInput = this.ctrl.onManualCodeInput;
 			const manualPromise = (async (): Promise<CallbackResult> => {
 				while (true) {
 					const result = await Promise.race([
 						callbackPromise,
-						requestManualInput()
-							.then((input): CallbackResult | null => {
-								const parsed = parseCallbackInput(input);
-								if (!parsed.code) return null;
-								if (expectedState && parsed.state && parsed.state !== expectedState) return null;
-								return { code: parsed.code, state: parsed.state ?? "" };
-							})
-							.catch((): CallbackResult | null => null),
+						requestManualInput(signal).then((input): CallbackResult | null => {
+							const parsed = parseCallbackInput(input);
+							if (!parsed.code) return null;
+							if (expectedState && parsed.state && parsed.state !== expectedState) return null;
+							return { code: parsed.code, state: parsed.state ?? "" };
+						}),
 					]);
 					if (result) return result;
 				}
 			})();
-
-			return Promise.race([callbackPromise, manualPromise]);
+			candidates.push(manualPromise);
 		}
 
-		return callbackPromise;
+		return Promise.race(candidates).finally(() => {
+			this.#callbackResolve = undefined;
+			this.#callbackReject = undefined;
+			settledSignal.abort("OAuth callback settled");
+		});
 	}
 }
 

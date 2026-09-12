@@ -1,3 +1,4 @@
+import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
@@ -211,7 +212,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Collab",
 		"Magic Keywords",
 		"Startup & Updates",
-		"Power (macOS)",
+		"Power",
 		"Agent",
 		"Git",
 	],
@@ -238,6 +239,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 /** Status line segment identifiers */
 export type StatusLineSegmentId =
 	| "pi"
+	| "status"
 	| "model"
 	| "mode"
 	| "path"
@@ -260,7 +262,8 @@ export type StatusLineSegmentId =
 	| "cache_hit"
 	| "session_name"
 	| "usage"
-	| "collab";
+	| "collab"
+	| "vim";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -494,17 +497,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// macOS power assertions (caffeinate flags). No-op on other platforms.
+	// Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 	"power.sleepPrevention": {
 		type: "enum",
 		values: ["off", "idle", "display", "system"] as const,
 		default: "idle",
 		ui: {
 			tab: "interaction",
-			group: "Power (macOS)",
+			group: "Power",
 			label: "Sleep Prevention",
 			description:
-				"Prevent macOS sleep during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
+				"Prevent the system sleeping during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
 			options: [
 				{
 					value: "off",
@@ -514,17 +517,18 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "idle",
 					label: "Prevent Idle Sleep",
-					description: "Keep the system awake while a session is open (caffeinate -i)",
+					description: "Keep the system awake while a session is open (macOS `caffeinate -i`)",
 				},
 				{
 					value: "display",
 					label: "Prevent Display Sleep",
-					description: "Also keep the display from idle-sleeping (caffeinate -i -d)",
+					description: "Also keep the display from idle-sleeping (macOS `caffeinate -i -d`)",
 				},
 				{
 					value: "system",
 					label: "Prevent System Sleep",
-					description: "Also block all system sleep on AC and declare the user active (caffeinate -i -d -s -u)",
+					description:
+						"Also block all system sleep on AC and declare the user active (macOS `caffeinate -i -d -s -u`)",
 				},
 			],
 		},
@@ -580,6 +584,25 @@ export const SETTINGS_SCHEMA = {
 				{ value: "3", label: "3 turns", description: "Default." },
 				{ value: "4", label: "4 turns" },
 				{ value: "5", label: "5 turns" },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxNotesPerUpdate": {
+		type: "number",
+		default: ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Max Notes Per Update",
+			description:
+				"Maximum non-blocker advice notes accepted per advisor prompt update (1–32; UI offers 1–5 quick picks). Blockers are exempt.",
+			options: [
+				{ value: "1", label: "1 note", description: "Anti-flood (strict)." },
+				{ value: "2", label: "2 notes" },
+				{ value: "3", label: "3 notes" },
+				{ value: "4", label: "4 notes", description: "Default." },
+				{ value: "5", label: "5 notes" },
 			],
 			condition: "advisorEnabled",
 		},
@@ -1207,6 +1230,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.reactions": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Agent Reactions",
+			description: "Invite the agent to react to your message with an emoji badge on its bubble",
+		},
+	},
+
 	"tui.codexResetFireworks": {
 		type: "boolean",
 		default: false,
@@ -1243,6 +1277,17 @@ export const SETTINGS_SCHEMA = {
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
+	"tui.mouse": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Mouse Click-to-Focus",
+			description:
+				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		},
+	},
 	"tui.tight": {
 		type: "boolean",
 		default: false,
@@ -1267,6 +1312,23 @@ export const SETTINGS_SCHEMA = {
 				{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 				{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
 				{ value: "disabled", label: "Disabled", description: "No animation; static muted text" },
+			],
+		},
+	},
+	"display.pinnedAgents": {
+		type: "enum",
+		values: ["off", "collapsed", "full"] as const,
+		default: "collapsed",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Pinned Agents",
+			description:
+				"Pinned live-agent jump list above the editor (off hides it; collapsed shows a few rows with an expander; full lists all)",
+			options: [
+				{ value: "off", label: "Off", description: "Hide the pinned jump list" },
+				{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
+				{ value: "full", label: "Full", description: "Always list every live agent" },
 			],
 		},
 	},
@@ -1535,6 +1597,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Include Workspace Tree",
 			description:
 				"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+		},
+	},
+
+	skillful: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "List Skills in Prompt",
+			description:
+				"List available skills in the system prompt; disable to save context and toggle per-session with /skillful",
 		},
 	},
 
@@ -1812,6 +1886,17 @@ export const SETTINGS_SCHEMA = {
 				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
 		},
 	},
+	"retry.waitForUsageReset": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Wait For Usage Reset",
+			description:
+				"When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (Esc) but also hold subagents, so leave off for unattended runs.",
+		},
+	},
 	"retry.modelFallback": {
 		type: "boolean",
 		default: true,
@@ -1965,6 +2050,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.vimMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Editing Mode",
+			description:
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		},
+	},
+
+	"tui.vimModeDisplay": {
+		type: "enum",
+		values: ["text", "icon", "none"] as const,
+		default: "text",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Mode Indicator",
+			description: "How the current Vim mode appears in the status line",
+			condition: "vimModeEnabled",
+			options: [
+				{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE" },
+				{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
+				{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			],
+		},
+	},
+
 	"loop.mode": {
 		type: "enum",
 		values: ["prompt", "compact", "reset"] as const,
@@ -1990,7 +2105,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"loop.conditionTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Loop Condition Timeout (ms)",
+			description:
+				"Max wait for a `/loop --while` / `--until` condition command before treating it as broken and stopping the loop. Set to 0 to wait indefinitely",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "10000", label: "10 seconds" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "120000", label: "2 minutes" },
+			],
+		},
+	},
+
 	// Input and startup
+	"composer.recallClearedDrafts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Recall Cleared Drafts",
+			description:
+				"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["rewind", "tree", "none"] as const,
@@ -2477,9 +2622,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Premium long-context tiers (OpenAI GPT-5.6 bills 2x input / 1.5x output
-	// above 272K input tokens). Off caps affected models at the threshold so
-	// compaction kicks in before any request crosses into premium billing.
+	// Opt in to advertised maximum context windows and premium long-context
+	// tiers. Off preserves default windows and caps premium models before
+	// requests cross into their higher pricing tier.
 	extendedContext: {
 		type: "boolean",
 		default: false,
@@ -2488,7 +2633,7 @@ export const SETTINGS_SCHEMA = {
 			group: "General",
 			label: "Extended Context",
 			description:
-				"Use premium long-context windows on models that bill extra past a threshold (e.g. GPT-5.6 1M charges 2x input above 272K); off caps them at the standard-pricing window",
+				"Use larger context windows where supported; may incur premium pricing. Off keeps default or standard-pricing windows",
 		},
 	},
 
@@ -2501,6 +2646,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Auto-Compact",
 			description: "Automatically compact context when it gets too large",
+		},
+	},
+	"compaction.experimentalContextManagement": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Notes-backed context windows (experimental)",
+			description:
+				"Keep persistent notes and searchable raw history across context windows. Restart to update available tools.",
 		},
 	},
 
@@ -3849,6 +4005,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"bash.allowCompoundCommands": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Allow Compound Commands",
+			description:
+				"Evaluate literal && chains per command; unmatched commands use normal bash approval policy and mode",
+		},
+	},
+
 	"bash.autoBackground.enabled": {
 		type: "boolean",
 		default: true,
@@ -3967,25 +4135,27 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"eval.rb": {
+	"eval.tools.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
-			label: "Ruby Eval Backend",
-			description: "Allow the eval tool to dispatch Ruby cells to the persistent Ruby kernel",
+			label: "Eval-Defined Tools",
+			description:
+				"Let eval cells define tools (@tool in Python, tool(fn) in JS) that task, agent(), and workpool() subagents can call",
 		},
 	},
 
-	"eval.jl": {
+	"eval.workpool.freshAgents": {
 		type: "boolean",
 		default: false,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
-			label: "Julia Eval Backend",
-			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
+			label: "Fresh Workpool Agents",
+			description:
+				"Spawn a new subagent for every workpool item instead of reusing workers or batching queued items",
 		},
 	},
 
@@ -4026,28 +4196,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Python Interpreter",
 			description:
 				"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
-		},
-	},
-	"ruby.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Ruby Interpreter",
-			description:
-				"Optional path to an exact Ruby executable. When set, automatic Ruby runtime discovery is skipped.",
-		},
-	},
-	"julia.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Julia Interpreter",
-			description:
-				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
 		},
 	},
 
@@ -4293,31 +4441,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Legacy boolean kept only for back-compat migration to `inspect_image.mode`
-	// (see config/settings.ts). Hidden from UI.
-	"inspect_image.enabled": {
-		type: "boolean",
-		default: false,
-	},
-
-	"inspect_image.mode": {
-		type: "enum",
-		values: ["auto", "on", "off"] as const,
-		default: "auto",
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Inspect Image",
-			description:
-				"Controls the inspect_image tool, which delegates image understanding to a vision-capable model. 'auto' exposes it only when the active model lacks native image input; 'on' always exposes it; 'off' never does.",
-			options: [
-				{ value: "auto", label: "Auto (only for models without vision)" },
-				{ value: "on", label: "On" },
-				{ value: "off", label: "Off" },
-			],
-		},
-	},
-
 	"computer.enabled": {
 		type: "boolean",
 		default: false,
@@ -4325,7 +4448,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Computer",
-			description: "Enable the scriptable host-desktop control tool (screenshots, input, accessibility)",
+			description: "Enable the scriptable host-desktop eval prelude (screenshots, input, accessibility)",
 		},
 	},
 
@@ -4362,15 +4485,15 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"inspect_image.timeoutMs": {
+	"images.questionTimeoutMs": {
 		type: "number",
 		default: 300_000,
 		ui: {
 			tab: "tools",
 			group: "Execution",
-			label: "Inspect Image Timeout",
+			label: "Image Question Timeout",
 			description:
-				"Per-request timeout for the inspect_image vision-model call, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
+				"Per-request timeout for the vision-model call behind read's ?q= image questions, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "60000", label: "1 minute" },
@@ -4504,7 +4627,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Browser",
-			description: "Enable the browser tool for scripted Chromium automation (puppeteer)",
+			description: "Enable the browser eval prelude for scripted Chromium automation (Puppeteer)",
 		},
 	},
 
@@ -4528,7 +4651,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Grep & Browser",
 			label: "Browser Relay",
 			description:
-				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser tool needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
+				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser prelude needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
 		},
 	},
 
@@ -4563,6 +4686,34 @@ export const SETTINGS_SCHEMA = {
 			label: "cmux Browser",
 			description:
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
+		},
+	},
+	"browser.freezeOnTurnEnd": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Freeze Browser Tabs On Turn End",
+			description:
+				"Freeze OMP-owned headless browser tabs when a turn settles so animated pages stop burning CPU/GPU while idle. Tabs unfreeze automatically on next use; pass persist:true on open to opt a tab out.",
+		},
+	},
+	"browser.idleCloseSec": {
+		type: "number",
+		default: 1800,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Idle Close Timeout",
+			description:
+				"Close OMP-owned headless browser tabs idle longer than this many seconds (0 = never; session dispose still reaps). Applies only to OMP-launched headless tabs, never relay/CDP/spawned browsers or other sessions' tabs.",
+			options: [
+				{ value: "0", label: "Never" },
+				{ value: "900", label: "15 minutes" },
+				{ value: "1800", label: "30 minutes" },
+				{ value: "3600", label: "1 hour" },
+			],
 		},
 	},
 	"browser.screenshotDir": {
@@ -4801,6 +4952,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"plan.autosave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Plans",
+			description: "Automatically save approved plans to disk when plan mode completes",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosaveDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Directory",
+			description:
+				"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
+			condition: "planAutosaveEnabled",
+		},
+	},
+
 	"goal.enabled": {
 		type: "boolean",
 		default: true,
@@ -4901,6 +5077,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Clone Checkout into Worktrees",
 			description:
 				"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone",
+		},
+	},
+
+	"worktree.cleanSource": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Clean Source Checkout on /wt",
+			description:
+				"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
 		},
 	},
 
@@ -5548,7 +5736,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Tiny Model",
 			label: "Tiny Model Device",
 			description:
-				"ONNX execution provider for local tiny models (titles + memory). Default uses CPU-only inference. The PI_TINY_DEVICE env var overrides this.",
+				"Inference backend for local tiny models (titles + memory): an ONNX execution provider, or `mlx` to download MLX weights and run them through mlx-lm on Apple silicon. Default uses CPU-only ONNX. The PI_TINY_DEVICE env var overrides this.",
 			options: TINY_MODEL_DEVICE_SETTING_OPTIONS,
 		},
 	},
@@ -5561,7 +5749,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Tiny Model",
 			label: "Tiny Model Precision",
 			description:
-				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. The PI_TINY_DTYPE env var overrides this.",
+				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.",
 			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
 		},
 	},
@@ -5700,7 +5888,7 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",
@@ -5781,7 +5969,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.fetch": {
 		type: "enum",
-		values: ["auto", "native", "trafilatura", "lynx", "parallel", "jina"] as const,
+		values: ["auto", "native", "trafilatura", "lynx", "parallel", "firecrawl", "jina"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
@@ -5792,12 +5980,13 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "auto",
 					label: "Auto",
-					description: "Priority: native > trafilatura > lynx > parallel > jina",
+					description: "Priority: native > trafilatura > lynx > parallel > firecrawl > jina",
 				},
 				{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
 				{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
 				{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
 				{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
+				{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
 				{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
 			],
 		},
@@ -6145,6 +6334,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	experimentalContextManagement?: boolean;
 	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
 	thresholdTokens: number;
@@ -6181,6 +6371,7 @@ export interface RetrySettings {
 	maxRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
+	waitForUsageReset: boolean;
 	modelFallback: boolean;
 	usageAwareFallback: boolean;
 	usageReservePct: number;

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EditTool, type ExecuteHashlineSingleOptions, executeHashlineSingle } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -17,10 +17,10 @@ function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 		.join("\n");
 }
 
-function createSession(cwd: string, approvedPlan?: { artifactsDir: string; planFilePath: string }): ToolSession {
+function createSession(cwd: string): ToolSession {
 	const settings = Settings.isolated();
 	settings.set("read.summarize.enabled", false);
-	const artifactsDir = approvedPlan?.artifactsDir ?? path.join(cwd, "artifacts");
+	const artifactsDir = path.join(cwd, "artifacts");
 	return {
 		cwd,
 		hasUI: false,
@@ -29,32 +29,7 @@ function createSession(cwd: string, approvedPlan?: { artifactsDir: string; planF
 		getArtifactsDir: () => artifactsDir,
 		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
 		settings,
-		...(approvedPlan
-			? {
-					getPlanReferencePath: () => approvedPlan.planFilePath,
-					localProtocolOptions: {
-						getArtifactsDir: () => artifactsDir,
-						getSessionId: () => "approved-plan-session",
-					},
-				}
-			: {}),
 	} as unknown as ToolSession;
-}
-
-function editOptions(session: ToolSession, input: string): ExecuteHashlineSingleOptions {
-	return {
-		session,
-		input,
-		writethrough: async (targetPath, content) => {
-			await Bun.write(targetPath, content);
-			return undefined;
-		},
-		beginDeferredDiagnosticsForPath: () => ({
-			onDeferredDiagnostics: () => {},
-			signal: new AbortController().signal,
-			finalize: () => {},
-		}),
-	};
 }
 
 // Regression: reading a file *outside* the session cwd (e.g. `~/.claude/settings.json`)
@@ -66,6 +41,7 @@ function editOptions(session: ToolSession, input: string): ExecuteHashlineSingle
 describe("read → edit round-trip for out-of-cwd files", () => {
 	let cwdDir: string;
 	let outDir: string;
+	let homeDir: string | undefined;
 
 	beforeEach(async () => {
 		cwdDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-edit-cwd-"));
@@ -75,6 +51,7 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 	afterEach(async () => {
 		await removeWithRetries(cwdDir);
 		await removeWithRetries(outDir);
+		if (homeDir) await removeWithRetries(homeDir);
 	});
 
 	it("anchors the out-of-cwd path in the header so a follow-up edit lands", async () => {
@@ -89,11 +66,31 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 		expect(header).toMatch(/^\[.+settings\.json#[0-9A-F]{4}\]$/);
 		expect(header).toContain(path.basename(outDir));
 
-		const result = await executeHashlineSingle(editOptions(session, `${header}\nPUT 1-1:\n+ALPHA\n`));
+		const result = await new EditTool(session, "hashline").execute("edit-out", {
+			input: `${header}\nPUT 1-1:\n+ALPHA\n`,
+		});
 		const resultText = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 
 		expect(resultText).not.toContain("File not found");
 		expect(await Bun.file(outFile).text()).toBe("ALPHA\nbeta\n");
+	});
+
+	it("round-trips a home-relative path through read and edit", async () => {
+		homeDir = await fs.mkdtemp(path.join(os.homedir(), ".omp-read-edit-"));
+		const homeFile = path.join(homeDir, "settings.txt");
+		const authoredPath = `~/${path.relative(os.homedir(), homeFile)}`;
+		await Bun.write(homeFile, "alpha\nbeta\n");
+
+		const session = createSession(cwdDir);
+		const header = textOutput(await new ReadTool(session).execute("read-home", { path: authoredPath })).split(
+			"\n",
+		)[0];
+		const result = await new EditTool(session, "hashline").execute("edit-home", {
+			input: `${header}\nPUT 1-1:\n+ALPHA\n`,
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(homeFile).text()).toBe("ALPHA\nbeta\n");
 	});
 
 	it("keeps an in-cwd relative path so an existing basename cannot capture a follow-up edit", async () => {
@@ -110,37 +107,12 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 		// existing cwd file and the snapshot-tag guard rejects the valid edit.
 		expect(header).toBe(`[${path.join("src", "settings.json")}#${header.slice(-5, -1)}]`);
 
-		await executeHashlineSingle(editOptions(session, `${header}\nPUT 1.=1:\n+ALPHA\n`));
+		await new EditTool(session, "hashline").execute("edit-in", {
+			input: `${header}\nPUT 1.=1:\n+ALPHA\n`,
+		});
 
 		expect(await Bun.file(nestedFile).text()).toBe("ALPHA\nbeta\n");
 		expect(await Bun.file(rootFile).text()).toBe("root\n");
-	});
-
-	it("recovers a missing cwd path from the active approved local plan", async () => {
-		const artifactsDir = path.join(outDir, "artifacts");
-		const planFilePath = "local://windows-packaging-plan.md";
-		const planPath = path.join(artifactsDir, "local", "windows-packaging-plan.md");
-		await Bun.write(planPath, "# Windows packaging\n\nBuild the installer.\n");
-
-		const session = createSession(cwdDir, { artifactsDir, planFilePath });
-		const cwdPlanPath = path.join(cwdDir, "windows-packaging-plan.md");
-		const result = await new ReadTool(session).execute("read-approved-plan", { path: cwdPlanPath });
-		expect(textOutput(result)).toContain("Build the installer.");
-	});
-
-	it("prefers an existing cwd file over the approved local plan alias", async () => {
-		const artifactsDir = path.join(outDir, "artifacts");
-		const planFilePath = "local://windows-packaging-plan.md";
-		const planPath = path.join(artifactsDir, "local", "windows-packaging-plan.md");
-		const cwdPlanPath = path.join(cwdDir, "windows-packaging-plan.md");
-		await Bun.write(planPath, "# Local plan\n\nArtifact content.\n");
-		await Bun.write(cwdPlanPath, "# Working tree\n\nWorkspace content.\n");
-
-		const session = createSession(cwdDir, { artifactsDir, planFilePath });
-		const result = await new ReadTool(session).execute("read-workspace-plan", { path: cwdPlanPath });
-
-		expect(textOutput(result)).toContain("Workspace content.");
-		expect(textOutput(result)).not.toContain("Artifact content.");
 	});
 
 	it("uses the read-resolved workspace suffix across direct edit modes", async () => {
@@ -223,22 +195,5 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 
 		expect(await Bun.file(workspaceFile).text()).toBe("rewritten\n");
 		expect(await Bun.file(path.join(cwdDir, fileName)).exists()).toBe(false);
-	});
-
-	it("prefers a unique workspace suffix match over the approved local plan alias", async () => {
-		const artifactsDir = path.join(outDir, "artifacts");
-		const planFilePath = "local://windows-packaging-plan.md";
-		const planPath = path.join(artifactsDir, "local", "windows-packaging-plan.md");
-		const workspacePlanPath = path.join(cwdDir, "docs", "windows-packaging-plan.md");
-		await Bun.write(planPath, "# Local plan\n\nArtifact content.\n");
-		await Bun.write(workspacePlanPath, "# Workspace plan\n\nNested workspace content.\n");
-
-		const session = createSession(cwdDir, { artifactsDir, planFilePath });
-		const result = await new ReadTool(session).execute("read-workspace-suffix-plan", {
-			path: "windows-packaging-plan.md",
-		});
-
-		expect(textOutput(result)).toContain("Nested workspace content.");
-		expect(textOutput(result)).not.toContain("Artifact content.");
 	});
 });

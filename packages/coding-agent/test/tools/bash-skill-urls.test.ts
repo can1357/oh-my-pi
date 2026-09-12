@@ -204,6 +204,37 @@ describe("expandInternalUrls", () => {
 		expect(observedPathOnly).toBe(true);
 	});
 
+	it("forwards the session's scoped rules to the router when expanding rule:// URLs", async () => {
+		const sourcePath = "/tmp/rules/scout-only.md";
+		const scopedRules = [
+			{
+				name: "scout-only",
+				path: sourcePath,
+				content: "stay on plan",
+				_source: { provider: "test", providerName: "test", path: sourcePath, level: "user" as const },
+			},
+		];
+		let observedRules: unknown;
+		const router = {
+			canHandle: (input: string) => input === "rule://scout-only",
+			resolve: async (input: string, context?: ResolveContext) => {
+				observedRules = context?.rules;
+				return {
+					url: input,
+					content: "",
+					contentType: "text/plain" as const,
+					sourcePath,
+					immutable: true,
+				};
+			},
+		};
+
+		await expect(
+			expandInternalUrls("cat rule://scout-only", { skills: [], internalRouter: router, rules: scopedRules }),
+		).resolves.toBe(`cat ${shellEscape(sourcePath)}`);
+		expect(observedRules).toBe(scopedRules);
+	});
+
 	it("expands quoted non-skill URLs and shell-escapes quotes in paths", async () => {
 		const router = createInternalRouter({
 			"artifact://7": { sourcePath: "/tmp/artifacts/with'quote.log" },

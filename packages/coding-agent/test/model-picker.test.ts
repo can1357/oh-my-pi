@@ -182,6 +182,34 @@ describe("ModelPicker", () => {
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("bb-model");
 	});
 
+	test("search jumps to the first result when choices through the current model change", () => {
+		const models = [makeModel("test", "aa-unrelated"), makeModel("test", "bb-match"), makeModel("test", "cc-match")];
+		const { picker, onPick } = createPicker({
+			models,
+			scoped: true,
+			picker: { currentSelector: "test/cc-match" },
+		});
+
+		picker.handleInput("match");
+		picker.handleInput("\n");
+
+		expect(onPick.mock.calls[0]?.[0]?.id).toBe("bb-match");
+	});
+
+	test("search keeps the selection when every choice through it stays unchanged", () => {
+		const models = [makeModel("test", "aa-shared"), makeModel("test", "bb-shared"), makeModel("test", "cc-shared")];
+		const { picker, onPick } = createPicker({
+			models,
+			scoped: true,
+			picker: { currentSelector: "test/cc-shared" },
+		});
+
+		picker.handleInput("shared");
+		picker.handleInput("\n");
+
+		expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-shared");
+	});
+
 	test("shows and applies ctrl+p quick roles when search starts with @", () => {
 		const smol = makeModel("test", "smol-model");
 		const slow = makeModel("test", "slow-model");

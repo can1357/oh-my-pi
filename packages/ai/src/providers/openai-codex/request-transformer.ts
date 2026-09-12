@@ -39,10 +39,8 @@ export interface CodexRequestOptions {
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
 	/**
-	 * Responses Lite transport override; defaults to the model's
-	 * `useResponsesLite`. Lite moves instructions/tools into input items,
-	 * strips image detail, and disables parallel tool calling (codex-rs
-	 * `use_responses_lite`).
+	 * Responses Lite transport opt-in. Normal inference defaults to full
+	 * Responses so the model can emit independent tool calls in parallel.
 	 */
 	responsesLite?: boolean;
 }
@@ -93,21 +91,17 @@ export interface RequestBody {
 }
 
 /**
- * Resolve whether a Codex request uses the Responses Lite transport: an
- * explicit option wins, then the `PI_CODEX_RESPONSES_LITE` env override
- * (`1`/`true` forces Lite, `0`/`false` forces the full Responses body),
- * otherwise the model's catalog flag (codex-rs `model_info.use_responses_lite`)
- * decides.
+ * Resolve whether a Codex request explicitly opts into Responses Lite.
+ *
+ * Provider-native compaction passes the model's `useResponsesLite` flag as an
+ * explicit option; normal inference defaults to the full Responses contract.
  */
-export function resolveCodexResponsesLite(
-	model: Model<"openai-codex-responses">,
-	requested: boolean | undefined,
-): boolean {
+export function resolveCodexResponsesLite(requested: boolean | undefined): boolean {
 	if (requested !== undefined) return requested;
 	const env = $env.PI_CODEX_RESPONSES_LITE?.trim().toLowerCase();
 	if (env === "1" || env === "true") return true;
 	if (env === "0" || env === "false") return false;
-	return model.useResponsesLite === true;
+	return false;
 }
 
 /**
@@ -449,7 +443,7 @@ export async function transformRequestBody(
 		}
 	}
 
-	const responsesLite = resolveCodexResponsesLite(model, options.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options.responsesLite);
 	if (responsesLite) {
 		applyCodexResponsesLiteShape(body);
 	}

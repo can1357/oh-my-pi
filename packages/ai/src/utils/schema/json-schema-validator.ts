@@ -173,6 +173,120 @@ function resolveLocalRef(root: unknown, ref: string): unknown | undefined {
 	return current;
 }
 
+/** A presence-only constraint, as distinct from restrictions on a property's value. */
+function requiresOnlyPropertyPresence(schema: unknown, key: string, root: unknown, depth = 0): boolean {
+	if (!isJsonObject(schema) || depth >= MAX_REF_DEPTH) return false;
+	for (const keyword of Object.keys(schema)) {
+		switch (keyword) {
+			case "required":
+			case "type":
+			case "$ref":
+			case "description":
+			case "title":
+			case "$comment":
+				break;
+			default:
+				return false;
+		}
+	}
+	if ("$ref" in schema) {
+		if (typeof schema.$ref !== "string" || schema.required !== undefined || schema.type !== undefined) return false;
+		return requiresOnlyPropertyPresence(resolveLocalRef(root, schema.$ref), key, root, depth + 1);
+	}
+	return (
+		(schema.type === undefined || schema.type === "object") &&
+		Array.isArray(schema.required) &&
+		schema.required.includes(key) &&
+		schema.required.every(entry => typeof entry === "string")
+	);
+}
+
+/** Whether any same-instance schema declaration or constraint owns this property name. */
+export function schemaDefinesProperty(schema: unknown, key: string): boolean {
+	const root = schema;
+	const visited = new WeakMap<object, number>();
+	const visit = (node: unknown, context: "positive" | "negative" | "predicate" = "positive"): boolean => {
+		if (!isJsonObject(node)) return false;
+		const contextBit = context === "positive" ? 1 : context === "negative" ? 2 : 4;
+		const previousContexts = visited.get(node) ?? 0;
+		if (previousContexts & contextBit) return false;
+		visited.set(node, previousContexts | contextBit);
+		if (isJsonObject(node.const) && Object.hasOwn(node.const, key)) return true;
+		if (Array.isArray(node.enum) && node.enum.some(value => isJsonObject(value) && Object.hasOwn(value, key))) {
+			return true;
+		}
+		const properties = node.properties;
+		if (isJsonObject(properties) && Object.hasOwn(properties, key)) {
+			return properties[key] !== false || context !== "positive";
+		}
+		const required = node.required;
+		if (Array.isArray(required) && required.includes(key)) return true;
+		if (
+			node.propertyNames !== undefined &&
+			node.additionalProperties !== false &&
+			validateSchemaValueInRoot(node.propertyNames, key, root).success
+		) {
+			return true;
+		}
+		const patternProperties = node.patternProperties;
+		if (isJsonObject(patternProperties)) {
+			for (const [pattern, patternSchema] of Object.entries(patternProperties)) {
+				try {
+					if (new RegExp(pattern).test(key)) {
+						if (patternSchema !== false) return true;
+					}
+				} catch {
+					// Invalid patterns are rejected by validation and cannot declare ownership.
+				}
+			}
+		}
+		if (isJsonObject(node.unevaluatedProperties)) return true;
+		if (isJsonObject(node.additionalProperties)) return true;
+		for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
+			const branches = node[keyword];
+			if (Array.isArray(branches) && branches.some(branch => visit(branch, context))) return true;
+		}
+		if (visit(node.if, "predicate")) return true;
+		for (const keyword of ["then", "else"] as const) {
+			if (visit(node[keyword], context)) return true;
+		}
+		// `not: { required: [key] }` forbids the name rather than declaring data.
+		// Negated value constraints still own their inputs and must be validated.
+		if (
+			(context !== "positive" || !requiresOnlyPropertyPresence(node.not, key, root)) &&
+			visit(node.not, context === "predicate" ? "predicate" : context === "positive" ? "negative" : "positive")
+		) {
+			return true;
+		}
+		const dependentSchemas = node.dependentSchemas;
+		if (isJsonObject(dependentSchemas)) {
+			if (Object.hasOwn(dependentSchemas, key)) return true;
+			if (Object.values(dependentSchemas).some(dependency => visit(dependency, context))) return true;
+		}
+		const dependentRequired = node.dependentRequired;
+		if (isJsonObject(dependentRequired)) {
+			if (Object.hasOwn(dependentRequired, key)) return true;
+			for (const dependencies of Object.values(dependentRequired)) {
+				if (Array.isArray(dependencies) && dependencies.includes(key)) return true;
+			}
+		}
+		const dependencies = node.dependencies;
+		if (isJsonObject(dependencies)) {
+			if (Object.hasOwn(dependencies, key)) return true;
+			for (const dependency of Object.values(dependencies)) {
+				if (Array.isArray(dependency) && dependency.includes(key)) return true;
+				if (visit(dependency, context)) return true;
+			}
+		}
+		if (typeof node.$ref === "string") {
+			const resolved = resolveLocalRef(root, node.$ref);
+			if (resolved !== undefined && visit(resolved, context)) return true;
+		}
+		return false;
+	};
+	return visit(schema);
+}
+
 /** Resolve a `#/path/to/node` pointer against the root schema. Returns `undefined` for external/unsupported refs. */
 
 function isRequiredSet(value: unknown): value is string[] {
@@ -615,16 +729,20 @@ function validateNumberKeywords(
 	return valid;
 }
 
-export function validateJsonSchemaValue(schema: unknown, value: unknown): JsonSchemaValidationResult {
+function validateSchemaValueInRoot(schema: unknown, value: unknown, root: unknown): JsonSchemaValidationResult {
 	const issues: JsonSchemaValidationIssue[] = [];
 	const success = validateSchemaNode(
 		schema,
 		value,
 		[],
-		{ root: schema, seenPairs: new Set(), objectIds: new WeakMap(), nextObjectId: { value: 0 }, refDepth: 0 },
+		{ root, seenPairs: new Set(), objectIds: new WeakMap(), nextObjectId: { value: 0 }, refDepth: 0 },
 		issues,
 	);
 	return { success, issues };
+}
+
+export function validateJsonSchemaValue(schema: unknown, value: unknown): JsonSchemaValidationResult {
+	return validateSchemaValueInRoot(schema, value, schema);
 }
 
 export function isJsonSchemaValueValid(schema: unknown, value: unknown): boolean {

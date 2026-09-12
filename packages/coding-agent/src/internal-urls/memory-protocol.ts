@@ -4,6 +4,7 @@ import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
+import type { AgentSession } from "../session/agent-session";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -12,6 +13,16 @@ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, Ur
 
 const DEFAULT_MEMORY_FILE = "memory_summary.md";
 const MEMORY_NAMESPACE = "root";
+
+/**
+ * Hindsight keeps memories server-side and exposes no `memory://<id>`
+ * addressing, yet the shared `recall` tool description still steers a
+ * follow-up `read memory://<id>`. This corrective pointer lets that stray read
+ * self-correct in one turn instead of derailing on the generic namespace
+ * error (issue #7587).
+ */
+const HINDSIGHT_UNADDRESSABLE =
+	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.";
 
 /**
  * Snapshot of memory roots for every registered session, deduped.
@@ -30,8 +41,15 @@ export function memoryRootsFromRegistry(): string[] {
 	return roots;
 }
 
-function memoryRootsForContext(context?: ResolveContext): string[] {
-	if (context?.cwd) return [getMemoryRoot(getAgentDir(), context.cwd)];
+/**
+ * File-backed memory roots visible to one caller. A context that names a cwd
+ * pins the root to it; otherwise the bound caller's own cwd is used, so a
+ * session-id-only caller never reads a peer project's summary. Contextless
+ * legacy callers keep the registry-wide sweep.
+ */
+function memoryRootsForContext(context: ResolveContext | undefined, caller: AgentSession | undefined): string[] {
+	const cwd = context?.cwd ?? caller?.sessionManager.getCwd();
+	if (cwd) return [getMemoryRoot(getAgentDir(), cwd)];
 	return memoryRootsFromRegistry();
 }
 
@@ -235,6 +253,73 @@ function memoryBackendFromContext(context?: ResolveContext): string | undefined 
 }
 
 /**
+ * Memory identity of the session that issued a `memory://` URL.
+ *
+ * `session` is the live caller once it is bound. `legacy` marks the callers
+ * that named no identity at all — contextless reads and settings-only
+ * contexts — which keep the historical registry-wide lookup; a context that
+ * names a cwd is scoped even when no single live session sits in it.
+ */
+interface MemoryCallerBinding {
+	readonly session: AgentSession | undefined;
+	readonly backend: string | undefined;
+	readonly legacy: boolean;
+}
+
+/**
+ * Live session that issued the URL. `sessionFile` and `sessionId` are exact
+ * identities and win; a shared cwd only binds when exactly one live session
+ * sits in it, so two sessions in one worktree never impersonate each other.
+ */
+function findCallerSession(context: ResolveContext): AgentSession | undefined {
+	const refs = (context.agentRegistry ?? AgentRegistry.global()).list();
+	if (context.sessionFile !== undefined) {
+		const byFile = refs.find(ref => ref.session?.sessionFile === context.sessionFile)?.session;
+		if (byFile) return byFile;
+	}
+	if (context.sessionId !== undefined) {
+		const byId = refs.find(ref => ref.session?.sessionManager.getSessionId() === context.sessionId)?.session;
+		if (byId) return byId;
+	}
+	// An exact identity that matches no live session is a stale caller, never a
+	// cue to fall back to whoever else shares its cwd.
+	if (context.sessionFile !== undefined || context.sessionId !== undefined) return undefined;
+	if (context.cwd === undefined) return undefined;
+	const sameCwd = refs.filter(ref => ref.session?.sessionManager.getCwd() === context.cwd);
+	return sameCwd.length === 1 ? (sameCwd[0]?.session ?? undefined) : undefined;
+}
+
+function resolveMemoryCaller(context?: ResolveContext): MemoryCallerBinding {
+	if (!context) return { session: undefined, backend: undefined, legacy: true };
+	const session = findCallerSession(context);
+	// The caller's own session owns the backend decision: not every tool threads
+	// its settings blob, and a same-cwd peer's backend is not an answer.
+	if (session) return { session, backend: session.settings.get("memory.backend"), legacy: false };
+	if (context.sessionFile !== undefined || context.sessionId !== undefined) {
+		// The named caller is gone; a surviving peer may not answer for it.
+		return { session: undefined, backend: "off", legacy: false };
+	}
+	// A cwd that names no single live session still scopes the file-backed root,
+	// but it identifies no bank: peer memory ids stay unreachable.
+	return { session: undefined, backend: memoryBackendFromContext(context), legacy: context.cwd === undefined };
+}
+
+/**
+ * Canonical mnemopi state of one session. Subagents alias their parent's
+ * state, so the alias is resolved to the state that owns the banks.
+ */
+function callerMnemopiState(session: AgentSession): MnemopiSessionState | undefined {
+	const state = getMnemopiSessionState(session);
+	return state?.aliasOf ?? state;
+}
+
+function unknownNamespaceError(namespace: string): Error {
+	return new Error(
+		`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+	);
+}
+
+/**
  * Look up a mnemopi memory row by id across every live session's scoped banks.
  * First hit wins; returns `null` when the id is not stored anywhere in scope.
  */
@@ -281,16 +366,18 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
 
 /**
  * Protocol handler for memory:// URLs.
- * Resolves file-backed roots against the calling session cwd when provided.
- * Contextless callers fall back to the live-session registry for legacy
- * cross-session lookups.
+ * Binds the URL to the session that issued it: the caller's own memory
+ * backend decides how `memory://<id>` is answered, and its cwd decides which
+ * file-backed root is read. Callers that name no identity keep the legacy
+ * registry-wide lookup.
  */
 export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "memory";
 	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const backend = memoryBackendFromContext(context);
+		const caller = resolveMemoryCaller(context);
+		const backend = caller.backend;
 		if (backend === "off") {
 			throw new Error("Unknown protocol: memory://");
 		}
@@ -305,6 +392,18 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
+			if (!caller.legacy) {
+				if (backend === "hindsight") throw new Error(HINDSIGHT_UNADDRESSABLE);
+				if (backend === "mnemopi") {
+					const hit = caller.session ? callerMnemopiState(caller.session)?.getScopedMemory(namespace) : undefined;
+					if (hit) return renderMnemopiMemory(url, hit);
+					throw new Error(
+						`Mnemopi memory ${namespace} not found in the calling session's scoped bank. Use \`recall\` to list available ids.`,
+					);
+				}
+				throw unknownNamespaceError(namespace);
+			}
+
 			const mnemopiStates = mnemopiSessionStatesFromRegistry();
 			const hindsightActive =
 				backend === "hindsight" ||
@@ -313,20 +412,10 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 						.list()
 						.some(ref => ref.session?.getHindsightSessionState?.()));
 			if (hindsightActive) {
-				// Hindsight keeps memories server-side and exposes no
-				// `memory://<id>` addressing, yet the shared `recall` tool
-				// description still steers a follow-up `read memory://<id>`.
-				// Return a corrective pointer so that stray read self-corrects in
-				// one turn instead of derailing on the generic namespace error
-				// (issue #7587).
-				throw new Error(
-					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
-				);
+				throw new Error(HINDSIGHT_UNADDRESSABLE);
 			}
 			if (mnemopiStates.length === 0) {
-				throw new Error(
-					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
-				);
+				throw unknownNamespaceError(namespace);
 			}
 			const hit = tryResolveMnemopiMemory(namespace);
 			if (hit) return renderMnemopiMemory(url, hit);
@@ -335,7 +424,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			);
 		}
 
-		const roots = memoryRootsForContext(context);
+		const roots = memoryRootsForContext(context, caller.session);
 		if (roots.length === 0) {
 			throw new Error(
 				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
@@ -365,11 +454,18 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		const caller = resolveMemoryCaller(context);
+		if (caller.backend === "off") return [];
 		const completions: UrlCompletion[] = [];
-		if (memoryRootsForContext(context).length > 0) {
+		if (memoryRootsForContext(context, caller.session).length > 0) {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
-		if (mnemopiSessionStatesFromRegistry().length > 0) {
+		const mnemopiAvailable = caller.legacy
+			? mnemopiSessionStatesFromRegistry().length > 0
+			: caller.backend === "mnemopi" &&
+				caller.session !== undefined &&
+				callerMnemopiState(caller.session) !== undefined;
+		if (mnemopiAvailable) {
 			completions.push({
 				value: "<memory-id>",
 				description: "Full mnemopi memory by id (from recall)",

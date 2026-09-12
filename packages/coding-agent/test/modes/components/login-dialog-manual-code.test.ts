@@ -31,6 +31,17 @@ describe("LoginDialogComponent manual code input", () => {
 		expect(await pending).toBe(url);
 	});
 
+	it("rejects the pending input when another callback path wins", async () => {
+		const dialog = makeDialog();
+		const settled = new AbortController();
+		const error = new Error("native callback received");
+		const pending = dialog.showManualInput("Paste the authorization code:", settled.signal);
+
+		settled.abort(error);
+
+		await expect(pending).rejects.toBe(error);
+	});
+
 	it("reuses the mounted input across re-prompts instead of stacking duplicates", async () => {
 		// The OAuth callback loop re-invokes onManualCodeInput after an invalid
 		// paste; the second prompt must not append a duplicate input/hint block.

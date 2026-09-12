@@ -5,7 +5,7 @@ This document describes how MCP servers are discovered, connected, exposed as to
 ## Lifecycle at a glance
 
 1. **SDK startup** kicks off MCP discovery (unless MCP is disabled): headless/SDK sessions await `discoverAndLoadMCPTools()`; interactive sessions (`hasUI: true`) create the manager up front and defer `discoverAndConnect()` until the session is live.
-2. **Discovery** (`loadAllMCPConfigs`) resolves MCP server configs from capability sources, filters disabled/project/Exa entries and browser MCP servers when the built-in browser tool is enabled, and preserves source metadata.
+2. **Discovery** (`loadAllMCPConfigs`) resolves MCP server configs from capability sources, filters disabled/project/Exa entries and browser MCP servers when the built-in browser prelude is enabled, and preserves source metadata.
 3. **Manager connect phase** (`MCPManager.connectServers`) starts per-server connect + `tools/list` in parallel.
 4. **Fast startup gate** waits up to 250ms, then may return:
    - fully loaded `MCPTool`s,
@@ -27,7 +27,7 @@ This document describes how MCP servers are discovered, connected, exposed as to
 
 Both paths:
 
-- pass `authStorage`, cache storage, `mcp.enableProjectConfig`, and browser-MCP filtering based on the `browser.enabled` setting,
+- pass `authStorage`, cache storage, `mcp.enableProjectConfig`, and browser-MCP filtering based on the `browser.enabled` prelude setting,
 - always set `filterExa: true`,
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.

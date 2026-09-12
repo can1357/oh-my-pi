@@ -196,7 +196,7 @@ describe("auth grammar", () => {
 					'\t\tclient-id "aWQ=" encoding="base64" env="X_CLIENT_ID"',
 					'\t\tauthorize-url "https://a"',
 					"\t\tpkce #true",
-					'\t\tcallback port=4242 path="/cb"',
+					'\t\tcallback port=4242 path="/cb" native-scheme=#true',
 					'\t\ttoken url="https://t" body="json" { params { state "{state}" } }',
 					'\t\tcredential { expires "seconds" from="created_at" skew-ms=0 }',
 					"\t}",
@@ -212,6 +212,7 @@ describe("auth grammar", () => {
 		expect(x.login).toMatchObject({
 			kind: "oauth-code",
 			clientId: { value: "aWQ=", encoding: "base64", env: ["X_CLIENT_ID"] },
+			callback: { nativeScheme: true },
 			credential: { expires: { mode: "seconds", path: "expires_in", fromPath: "created_at", skewMs: 0 } },
 		});
 		expect(x.refresh).toMatchObject({

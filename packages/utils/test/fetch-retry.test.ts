@@ -1,5 +1,18 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry } from "@oh-my-pi/pi-utils/fetch-retry";
+import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+
+describe("isUnexpectedSocketCloseMessage", () => {
+	it.each(["Socket is closed", "Error: Socket is closed.", "The socket connection was closed unexpectedly"])(
+		"recognizes %s",
+		message => expect(isUnexpectedSocketCloseMessage(message)).toBe(true),
+	);
+
+	it("does not match socket wording embedded in an application error", () => {
+		expect(isUnexpectedSocketCloseMessage("validation failed because socket is closed to remote control")).toBe(
+			false,
+		);
+	});
+});
 
 describe("fetchWithRetry", () => {
 	it("routes requests through the `fetch` override when provided", async () => {
@@ -134,6 +147,25 @@ describe("extractRetryHint", () => {
 	it("prefers the account reset window over a shorter retry hint", () => {
 		expect(extractRetryHint(undefined, "Please retry in 5s. Your limit will reset in 13 minutes")).toBe(13 * 60_000);
 	});
+	// The appended header hint is already the max across response headers
+	// (getRetryAfterMsFromHeaders in pi-ai). When it outlasts the textual
+	// account reset, it must win so the retry honors the provider's retry
+	// window instead of re-hitting a blocked credential.
+	it("prefers a longer appended retry hint over a shorter account reset", () => {
+		expect(
+			extractRetryHint(undefined, "429 quota exceeded. Your limit will reset in 5 minutes. retry-after-ms=3600000"),
+		).toBe(3600000);
+	});
+
+	it("prefers a longer legacy retry-after over a shorter reset phrase", () => {
+		expect(extractRetryHint(undefined, "429 quota exceeded. reset in 5 minutes; retry-after=3600")).toBe(3_600_000);
+	});
+
+	it("parses x-ratelimit-reset epoch seconds in the body", () => {
+		const hint = extractRetryHint(undefined, "rate limited, x-ratelimit-reset=9999999999");
+		expect(hint).toBeDefined();
+		expect(hint!).toBeGreaterThan(8_000_000_000_000);
+	});
 
 	it("parses retry-after-ms in error body", () => {
 		expect(
@@ -141,7 +173,18 @@ describe("extractRetryHint", () => {
 				undefined,
 				'429 {"type":"error","error":{"type":"rate_limit_error","code":"1310"}} retry-after-ms=98497000',
 			),
-		).toBe(98497000);
+		).toBe(98_497_000);
+	});
+
+	it("parses colon-delimited and spaced retry-after-ms forms", () => {
+		expect(extractRetryHint(undefined, "429 quota exceeded. retry-after-ms: 7200000")).toBe(7_200_000);
+		expect(extractRetryHint(undefined, "429 quota exceeded. retry-after-ms = 7200000")).toBe(7_200_000);
+	});
+
+	it("keeps a longer colon-delimited retry-after-ms over a shorter reset phrase", () => {
+		expect(extractRetryHint(undefined, "429 quota exceeded. reset in 5 minutes. retry-after-ms: 3600000")).toBe(
+			3_600_000,
+		);
 	});
 
 	it.each([
@@ -167,5 +210,32 @@ describe("extractRetryHint", () => {
 		const hint = extractRetryHint(undefined, `已达到使用上限。您的限额将在 ${future} 重置。`);
 		expect(hint).toBeGreaterThan(3_500_000);
 		expect(hint).toBeLessThanOrEqual(3_600_000);
+	});
+
+	// Zero-valued and elapsed signals are authoritative "retry now" replies:
+	// collapsing them into `undefined` lets callers substitute a heuristic
+	// wait (30-minute quota guess) for a provider that said retry immediately.
+	it("preserves an explicit zero retry-after-ms as retry-now", () => {
+		expect(extractRetryHint(undefined, "429 quota exceeded. retry-after-ms=0")).toBe(0);
+	});
+
+	it("preserves an explicit zero legacy retry-after as retry-now", () => {
+		expect(extractRetryHint(undefined, "rate limited; retry-after=0")).toBe(0);
+	});
+
+	it("treats elapsed x-ratelimit-reset epochs as retry-now", () => {
+		expect(extractRetryHint(undefined, `rate limited, x-ratelimit-reset-ms=${Date.now() - 60_000}`)).toBe(0);
+		expect(extractRetryHint(undefined, `rate limited, x-ratelimit-reset=${Math.floor(Date.now() / 1000) - 60}`)).toBe(
+			0,
+		);
+	});
+
+	it("lets a longer reset phrase win over a zero retry hint", () => {
+		expect(extractRetryHint(undefined, "429 quota exceeded. reset in 5 minutes. retry-after-ms=0")).toBe(5 * 60_000);
+	});
+
+	it("still returns undefined when only elapsed account resets are present", () => {
+		const past = new Date(Date.now() - 60_000).toISOString();
+		expect(extractRetryHint(undefined, `Your limit will reset at ${past}`)).toBeUndefined();
 	});
 });

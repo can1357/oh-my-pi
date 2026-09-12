@@ -154,6 +154,16 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
+	it("forwards anthropicCompaction so gateway compaction survives the hop", () => {
+		const compaction = { triggerInputTokens: 50_000, pauseAfterCompaction: true, instructions: "Summarize." };
+		const parsed = parseRequest({
+			modelId: "anthropic/claude-fable-5",
+			context: baseContext,
+			options: { anthropicCompaction: compaction },
+		});
+		expect(parsed.options.anthropicCompaction).toEqual(compaction);
+	});
+
 	it("forwards an explicit statefulResponses disablement to the native stream", () => {
 		const parsed = parseRequest({
 			modelId: "openai/gpt-5",
@@ -206,6 +216,15 @@ describe("pi-native parseRequest", () => {
 			guardrailVersion: "7",
 			guardrailTrace: "enabled_full",
 		});
+	});
+	it("preserves requestMetadata in the canonical options bag", () => {
+		const parsed = parseRequest({
+			modelId: "amazon-bedrock/amazon.nova-lite-v1:0",
+			context: baseContext,
+			options: { requestMetadata: { team: "growth" } },
+		});
+
+		expect(parsed.options.requestMetadata).toEqual({ team: "growth" });
 	});
 
 	it("forwards the explicit prompt-cache policy through the canonical options bag", () => {

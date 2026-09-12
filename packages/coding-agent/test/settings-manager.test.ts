@@ -21,7 +21,7 @@ import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -965,6 +965,87 @@ describe("Settings", () => {
 			expect(settings.getModelRole("global_role")).toBe("openai/global");
 			expect(settings.getModelRole("project_role")).toBe("openai/project");
 		});
+		it("refreshes native project settings without changing overlay or runtime precedence", async () => {
+			await writeSettings({
+				task: { enableEffort: true, maxConcurrency: 2 },
+				retry: { modelFallback: true },
+			});
+			const overlayPath = tempDir.join("reload-overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ task: { enableEffort: false } }, null, 2));
+			const reloadProjectDir = tempDir.join("reload-project");
+			await fsp.mkdir(reloadProjectDir, { recursive: true });
+			const projectConfigPath = path.join(getProjectAgentDir(reloadProjectDir), "config.yml");
+			const settings = await Settings.loadIsolated({
+				cwd: reloadProjectDir,
+				agentDir,
+				configFiles: [overlayPath],
+				overrides: { "task.maxConcurrency": 7 },
+			});
+
+			expect(await Bun.file(projectConfigPath).exists()).toBe(false);
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "xai-oauth/grok-4.6:medium" },
+							enableEffort: true,
+							maxConcurrency: 3,
+						},
+						retry: { modelFallback: false },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				task: "xai-oauth/grok-4.6:medium",
+			});
+			expect(settings.get("retry.modelFallback")).toBe(false);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "openai/gpt-4o" },
+							enableEffort: true,
+							maxConcurrency: 4,
+						},
+						retry: { modelFallback: true },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({ task: "openai/gpt-4o" });
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ task: { enableEffort: true, maxConcurrency: 4 } }, null, 2),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+
+			await fsp.rm(projectConfigPath);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+		});
 		it("retries when a persisted setting changes while files are being read", async () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -1658,6 +1739,17 @@ describe("Settings", () => {
 		});
 	});
 	describe("migrations", () => {
+		it("moves the legacy image question timeout and removes its tool settings", async () => {
+			await writeSettings({ inspect_image: { mode: "on", timeoutMs: 42 } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("images.questionTimeoutMs")).toBe(42);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).inspect_image).toBeUndefined();
+		});
+
 		it("migrates nested task isolation mode none to disabled", async () => {
 			await writeSettings({ task: { isolation: { mode: "none" } } });
 
@@ -2271,6 +2363,85 @@ describe("Settings", () => {
 
 			settings.override("extensions", ["../override-ext"]);
 			expect(settings.extensionsSourceLevel()).toBe("user");
+		});
+	});
+
+	describe("project .claude/settings.json parse warnings", () => {
+		it("logs capability warnings when project settings.json fails to parse", async () => {
+			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
+			expect(settings.get("symbolPreset")).toBe("unicode");
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
+			);
+
+			warnSpy.mockRestore();
+		});
+
+		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
+			const projectSettingsJson = path.join(projectDir, ".claude", "settings.json");
+			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
+				items: [],
+				all: [],
+				warnings: [
+					`[Claude Code] Failed to parse JSON in ${path.join(tempDir.path(), "home", ".claude", "settings.json")}`,
+					"[Claude Code] Failed to load: boom",
+					`[Claude Code] Failed to parse JSON in ${projectSettingsJson}`,
+				],
+				providers: [],
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettingsJson));
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("home"))).toEqual([]);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to load"))).toEqual([]);
+		});
+
+		it("logs project warnings when the cwd is a filesystem root", async () => {
+			const root = path.parse(projectDir).root;
+			const rootSettingsJson = path.join(root, ".claude", "settings.json");
+			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
+				items: [],
+				all: [],
+				warnings: [`[Claude Code] Failed to parse JSON in ${rootSettingsJson}`],
+				providers: [],
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: root, agentDir, inMemory: true });
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(rootSettingsJson));
+		});
+
+		it("logs a persistently malformed project file once across reloads", async () => {
+			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+
+			await settings.reloadFromDisk();
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+		});
+
+		it("surfaces a project file that becomes malformed after startup", async () => {
+			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(0);
+
+			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			await settings.reloadFromDisk();
+
+			expect(settings.get("symbolPreset")).toBe("unicode");
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
 		});
 	});
 });

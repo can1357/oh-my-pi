@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
 	findFreeCdpPort,
 	pickElectronTarget,
@@ -31,7 +31,10 @@ function makeSession(): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "browser.headless": true }),
+		settings: Settings.isolated({
+			"browser.enabled": true,
+			"browser.headless": true,
+		}),
 	};
 }
 
@@ -257,7 +260,10 @@ describe("pickElectronTarget", () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
 			const endpoint = new URL(launched.browser.wsEndpoint());
-			const tool = new BrowserTool(makeSession());
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invokeBrowser = (parameters: unknown) =>
+				prelude.invoke(parameters, { session, toolCallId: "browser-attach-navigation" });
 			let opened = false;
 			const tabName = `attach-navigation-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			const requested = "data:text/html,<title>attached-navigation-target</title>";
@@ -265,7 +271,7 @@ describe("pickElectronTarget", () => {
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
-				await tool.execute("open", {
+				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
@@ -273,13 +279,13 @@ describe("pickElectronTarget", () => {
 				});
 				opened = true;
 
-				const closeResult = await tool.execute("close", { action: "close", name: tabName });
+				const closeResult = await invokeBrowser({ action: "close", name: tabName });
 				opened = false;
 				expect(closeResult.content).toEqual([{ type: "text", text: `Released managed tab "${tabName}"` }]);
 				expect(targetPage.isClosed()).toBe(false);
 				expect(targetPage.url()).toBe(requested);
 			} finally {
-				if (opened) await tool.execute("close", { action: "close", name: tabName });
+				if (opened) await invokeBrowser({ action: "close", name: tabName });
 			}
 		},
 		30_000,

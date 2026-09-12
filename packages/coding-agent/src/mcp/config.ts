@@ -18,7 +18,7 @@ export interface LoadMCPConfigsOptions {
 	enableProjectConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
-	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
+	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
@@ -346,6 +346,18 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 	return errors;
 }
 
+export interface BrowserMCPPreludeFilterOptions {
+	restrictToolNames: boolean;
+	browserEnabled: boolean;
+	evalRegistered: boolean;
+	evalActive: boolean;
+}
+
+/** Browser MCP filtering is valid only when the built-in prelude is callable. */
+export function shouldFilterBrowserMCPForPrelude(options: BrowserMCPPreludeFilterOptions): boolean {
+	return !options.restrictToolNames && options.browserEnabled && options.evalRegistered && options.evalActive;
+}
+
 /** Known browser automation MCP server names (lowercase) */
 const BROWSER_MCP_NAMES = new Set([
 	"puppeteer",
@@ -411,7 +423,7 @@ export interface BrowserFilterResult {
 
 /**
  * Filter out browser automation MCP servers.
- * Since we have a native browser tool, we don't need these MCP servers.
+ * Since we have a native browser capability, we don't need these MCP servers.
  */
 export function filterBrowserMCPServers(
 	configs: Record<string, MCPServerConfig>,

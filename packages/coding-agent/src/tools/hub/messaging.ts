@@ -572,12 +572,14 @@ function renderErrorResult(
  */
 export function createIrcMessageCard(
 	card: {
-		kind: "incoming" | "autoreply" | "relay";
+		kind: "incoming" | "autoreply" | "relay" | "workpool";
 		from?: string;
 		to?: string;
 		body?: string;
 		replyTo?: string;
 		timestamp?: number;
+		pool?: string;
+		mode?: string;
 	},
 	getExpanded: () => boolean,
 	uiTheme: Theme,
@@ -588,10 +590,13 @@ export function createIrcMessageCard(
 			? `IRC ${uiTheme.nav.back} ${from}`
 			: card.kind === "autoreply"
 				? `IRC ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
-				: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
+				: card.kind === "workpool"
+					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
+					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
 	const body = card.body ?? "";
 	const meta: string[] = [];
 	if (card.kind === "autoreply") meta.push("auto");
+	if (card.kind === "workpool" && card.mode) meta.push(card.mode);
 	if (card.replyTo) meta.push("reply");
 	const age = messageAge(card.timestamp);
 	if (age) meta.push(age);

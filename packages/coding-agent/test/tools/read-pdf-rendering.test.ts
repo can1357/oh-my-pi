@@ -21,7 +21,7 @@ function makeSession(cwd: string): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "images.autoResize": false, "inspect_image.mode": "off" }),
+		settings: Settings.isolated({ "images.autoResize": false }),
 	} as ToolSession;
 }
 

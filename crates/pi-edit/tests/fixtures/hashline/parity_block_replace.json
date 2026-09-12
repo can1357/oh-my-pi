@@ -1,0 +1,47 @@
+{
+	"source": "packages/coding-agent/test/core/block-replace.test.ts",
+	"cases": [
+		{
+			"name": "resolves the inner `if` block (line 2) and replaces its full span"
+		},
+		{
+			"name": "resolves the enclosing function block (line 1) and replaces the whole construct"
+		},
+		{
+			"name": "deletes the resolved `if` block (line 2) end-to-end via `CUT N*`"
+		},
+		{
+			"name": "inserts after an Emacs Lisp top-level macro-style form"
+		},
+		{
+			"name": "inserts after an extensionless .emacs top-level form"
+		},
+		{
+			"name": "reports the diff for a resolved block edit"
+		},
+		{
+			"name": "echoes the resolved span in the result text for PUT N*:"
+		},
+		{
+			"name": "echoes the resolved span in the result text for CUT N*"
+		},
+		{
+			"name": "rejects a lone closing delimiter (no block begins there) and steers to `SWAP N.=M:`"
+		},
+		{
+			"name": "suggests the next block opener for a blank anchor without modifying the file"
+		},
+		{
+			"name": "suggests the enclosing block and exact statement range without modifying the file"
+		},
+		{
+			"name": "rejects a block edit on an unrecognized language"
+		},
+		{
+			"name": "CUT N* at a `## H2` deletes the entire section, including nested subsections"
+		},
+		{
+			"name": "PUT >N*: at a `## H2` lands after the whole section, past nested subsections"
+		}
+	]
+}

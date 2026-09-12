@@ -352,7 +352,7 @@ export async function readTextFromClipboard(): Promise<string> {
 		const hasX11Display = Boolean(process.env.DISPLAY);
 		if (hasWaylandDisplay) {
 			try {
-				return await spawnCapture(["wl-paste", "--type", "text/plain", "--no-newline"]);
+				return await spawnCapture(["wl-paste", "--type", "text", "--no-newline"]);
 			} catch {
 				if (hasX11Display) {
 					return await readTextFromX11Clipboard();

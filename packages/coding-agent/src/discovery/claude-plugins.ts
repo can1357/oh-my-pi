@@ -18,7 +18,7 @@ import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
 	expandEnvVarsDeep,
@@ -45,7 +45,7 @@ async function allowedRoots(
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
 	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
-	const scopedRoots = userEnabled ? roots : roots.filter(r => r.scope === "project");
+	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
 	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
 	return { roots: scopedRoots.filter((_, i) => flags[i]), warnings };
 }
@@ -59,6 +59,13 @@ interface ClaudePluginManifest {
 interface ResolvedPluginDir {
 	dirs: string[];
 	warnings: string[];
+}
+
+interface ResolvePluginDirOptions {
+	manifestKeys: ReadonlyArray<keyof ClaudePluginManifest>;
+	fallback: string;
+	includeFallback: boolean;
+	marketplaceRootManifest?: ClaudePluginManifest | null;
 }
 
 interface ResolvedMCPConfig {
@@ -98,21 +105,35 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 	return isRecord(value) && Object.values(value).every(v => typeof v === "string");
 }
 
-async function skillsManifestReplacesFallback(root: ClaudePluginRoot): Promise<boolean> {
-	const raw = await readFile(path.join(root.path, "marketplace.json"));
-	if (raw === null) return false;
+async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<ClaudePluginManifest | null> {
+	const catalogs = await Promise.all(
+		[
+			path.join(root.path, "marketplace.json"),
+			path.join(root.path, ".omp-plugin", "marketplace.json"),
+			path.join(root.path, ".claude-plugin", "marketplace.json"),
+		].map(catalogPath => readFile(catalogPath)),
+	);
 
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (!isRecord(parsed)) return false;
-		const plugins = parsed.plugins;
-		return (
-			Array.isArray(plugins) &&
-			plugins.some(entry => isRecord(entry) && entry.name === root.plugin && entry.source === "./")
-		);
-	} catch {
-		return false;
+	for (const raw of catalogs) {
+		if (raw === null) continue;
+		try {
+			const parsed: unknown = JSON.parse(raw);
+			if (!isRecord(parsed) || !Array.isArray(parsed.plugins)) continue;
+			const entry = parsed.plugins.find(
+				candidate => isRecord(candidate) && candidate.name === root.plugin && candidate.source === "./",
+			);
+			if (!isRecord(entry)) continue;
+
+			if (typeof entry.skills === "string") return { skills: entry.skills };
+			if (Array.isArray(entry.skills)) {
+				return { skills: entry.skills.filter((value): value is string => typeof value === "string") };
+			}
+			return {};
+		} catch {
+			continue;
+		}
 	}
+	return null;
 }
 
 function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
@@ -121,80 +142,65 @@ function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
 }
 
 /**
- * Resolve a manifest-declared directory field to absolute paths within the
- * plugin root.
+ * Resolve manifest-declared component paths within a plugin root.
  *
  * Manifest path fields may be `string` or `string[]`
- * (https://code.claude.com/docs/en/plugins-reference#path-behavior-rules);
- * both shapes are normalized here. The first `manifestKeys` entry that
- * supplies at least one non-empty path wins (later keys are ignored — used for
- * the `commands` > `slash-commands` legacy fallback).
+ * (https://code.claude.com/docs/en/plugins-reference#path-behavior-rules).
+ * The first populated key wins within each manifest, preserving the
+ * `commands` > `slash-commands` legacy fallback.
  *
- * `fallback` is the default subdirectory (e.g. `skills/`, `commands/`) and
- * `includeFallback` controls the Claude-documented merge semantic per field:
- *
- * - `skills` **adds to** the default: `fallback` is always scanned, and any
- *   manifest entries load alongside it. Callers pass `includeFallback: true`.
- * - `commands` / `slash-commands` **replace** the default: an explicit
- *   manifest key means the default `commands/` directory is not scanned.
- *   Callers pass `includeFallback: false` (the manifest itself may still
- *   list `./commands` explicitly to keep it).
- *
- * When no matching key is set, the fallback is used regardless. Entries that
- * resolve outside the plugin root are dropped with a warning so misconfigured
- * manifests remain observable and cannot escape via traversal.
+ * Skills normally add to the default `skills/` directory. For a marketplace
+ * entry whose source is the marketplace root, its listed skill paths and any
+ * plugin-manifest paths are the complete selection, so the shared root
+ * `skills/` directory is not scanned. If neither manifest declares a matching
+ * path, the conventional fallback is still used.
  */
-async function resolvePluginDir(
-	root: ClaudePluginRoot,
-	manifestKeys: ReadonlyArray<keyof ClaudePluginManifest>,
-	fallback: string,
-	includeFallback: boolean,
-): Promise<ResolvedPluginDir> {
-	const manifest = await readPluginManifest(root);
-	const fallbackDir = path.join(root.path, fallback);
+async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDirOptions): Promise<ResolvedPluginDir> {
+	const pluginManifest = await readPluginManifest(root);
+	const manifests = options.marketplaceRootManifest
+		? [pluginManifest, options.marketplaceRootManifest]
+		: [pluginManifest];
+	const fallbackDir = path.join(root.path, options.fallback);
+	const configured: Array<{ entryPath: string; key: keyof ClaudePluginManifest }> = [];
 
-	let configured: string[] | undefined;
-	let matchedKey: keyof ClaudePluginManifest | undefined;
-	for (const key of manifestKeys) {
-		const val = manifest?.[key];
-		const candidates: string[] = [];
-		if (typeof val === "string") {
-			const trimmed = val.trim();
-			if (trimmed) candidates.push(trimmed);
-		} else if (Array.isArray(val)) {
-			for (const entry of val) {
-				if (typeof entry !== "string") continue;
-				const trimmed = entry.trim();
+	for (const manifest of manifests) {
+		if (manifest === null) continue;
+		for (const key of options.manifestKeys) {
+			const val = manifest[key];
+			const candidates: string[] = [];
+			if (typeof val === "string") {
+				const trimmed = val.trim();
 				if (trimmed) candidates.push(trimmed);
+			} else if (Array.isArray(val)) {
+				for (const entry of val) {
+					if (typeof entry !== "string") continue;
+					const trimmed = entry.trim();
+					if (trimmed) candidates.push(trimmed);
+				}
 			}
-		}
-		if (candidates.length > 0) {
-			configured = candidates;
-			matchedKey = key;
-			break;
+			if (candidates.length > 0) {
+				configured.push(...candidates.map(entryPath => ({ entryPath, key })));
+				break;
+			}
 		}
 	}
 
-	if (configured === undefined) {
+	if (configured.length === 0) {
 		return { dirs: [fallbackDir], warnings: [] };
 	}
 
-	// Dedup preserves order: default entry (when included) first, then declared
-	// entries in manifest order. Deduping the paths themselves means a plugin
-	// author can still list `./commands` explicitly when they want the default
-	// alongside extras without producing double-loads.
 	const seen = new Set<string>();
 	const dirs: string[] = [];
 	const warnings: string[] = [];
-	if (includeFallback) {
+	if (options.includeFallback && !options.marketplaceRootManifest) {
 		seen.add(fallbackDir);
 		dirs.push(fallbackDir);
 	}
-	for (const entry of configured) {
-		const resolved = path.resolve(root.path, entry);
+	for (const { entryPath, key } of configured) {
+		const resolved = path.resolve(root.path, entryPath);
 		if (!isWithinPluginRoot(root.path, resolved)) {
 			warnings.push(
-				`[claude-plugins] Ignoring ${String(matchedKey)} path outside plugin root for ${root.id}: ${entry}`,
+				`[claude-plugins] Ignoring ${String(key)} path outside plugin root for ${root.id}: ${entryPath}`,
 			);
 			continue;
 		}
@@ -217,13 +223,13 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	warnings.push(...rootWarnings);
 	const results = await Promise.all(
 		roots.map(async root => {
-			const includeFallback = !(await skillsManifestReplacesFallback(root));
-			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(
-				root,
-				["skills"],
-				"skills",
-				includeFallback,
-			);
+			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
+			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+				manifestKeys: ["skills"],
+				fallback: "skills",
+				includeFallback: true,
+				marketplaceRootManifest,
+			});
 			const scanResults = await Promise.all(
 				skillsDirs.map(dir =>
 					scanSkillsFromDir(ctx, {
@@ -231,6 +237,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.scope,
 						includeSelf: true,
+						origin: root.origin,
 					}),
 				),
 			);
@@ -264,7 +271,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
 				extensions: ["md", "mdc"],
 				transform: (name, content, filePath, source) =>
-					buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+					discoverRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
 			}),
 		),
 	);
@@ -289,12 +296,11 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 
 	const results = await Promise.all(
 		roots.map(async root => {
-			const { dirs: commandsDirs, warnings: resolveWarnings } = await resolvePluginDir(
-				root,
-				["commands", "slash-commands"],
-				"commands",
-				false,
-			);
+			const { dirs: commandsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+				manifestKeys: ["commands", "slash-commands"],
+				fallback: "commands",
+				includeFallback: false,
+			});
 			const commandResults = await Promise.all(
 				commandsDirs.map(async dir => {
 					try {

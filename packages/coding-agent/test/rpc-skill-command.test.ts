@@ -20,7 +20,7 @@ describe("tryRunRpcSkillCommand", () => {
 		);
 
 		let message: Pick<CustomMessage, "attribution" | "content" | "customType" | "details" | "display"> | undefined;
-		let options: { streamingBehavior?: "steer" | "followUp" } | undefined;
+		let options: { streamingBehavior?: "steer" | "followUp" | "aside" } | undefined;
 
 		const handled = await tryRunRpcSkillCommand(
 			{
@@ -57,7 +57,7 @@ describe("tryRunRpcSkillCommand", () => {
 			"---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code carefully.\n",
 		);
 
-		let options: { streamingBehavior?: "steer" | "followUp" } | undefined;
+		let options: { streamingBehavior?: "steer" | "followUp" | "aside" } | undefined;
 		try {
 			const handled = await tryRunRpcSkillCommand(
 				{

@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -8,7 +9,7 @@ import type {
 } from "@oh-my-pi/pi-utils/acp";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
+import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 
@@ -58,6 +59,10 @@ interface BinaryLikeContent extends TypedValue {
 
 interface PathContainer {
 	path?: unknown;
+}
+
+interface ResolvedPathContainer {
+	resolvedPath?: unknown;
 }
 
 interface OldPathContainer {
@@ -642,23 +647,34 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
+function existingFileLocationPath(raw: string | undefined, cwd?: string): string | undefined {
+	if (!raw || INTERNAL_URL_SUBJECT.test(raw)) return undefined;
+	const resolved = toAcpLocationPath(raw, cwd);
+	try {
+		return fs.statSync(resolved).isFile() ? resolved : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
- * For the `read` tool, peel a trailing read selector (`:1-20`, `:raw`,
- * `:1-20:raw`, comma-separated ranges) off the filesystem path so the ACP
- * location names the file actually accessed rather than the selector-bearing
- * expression — Zed Follow otherwise treats the selector as part of the
- * filename and opens an empty buffer. Literal POSIX filenames that legitimately
- * end in selector-shaped text (e.g. `report:1-20`) are preserved via the same
- * literal-path precedence the read tool uses. Non-read tools and internal URLs
- * pass through unchanged — colons in write/edit targets are valid filenames.
+ * Return the single existing file represented by a `read` argument.
+ *
+ * ACP locations are editor navigation targets, not tool inputs. Read inputs may
+ * name selectors, delimited paths, globs, directories, archive members, or
+ * internal resources, so only a path that resolves to a regular file is safe
+ * to publish. Literal selector-shaped filenames retain read-tool precedence.
  */
 function readLocationBasePath(
 	raw: string | undefined,
 	cwd: string | undefined,
 	toolName: string | undefined,
 ): string | undefined {
-	if (raw === undefined || toolName !== "read" || INTERNAL_URL_SUBJECT.test(raw)) return raw;
-	return cwd ? splitPathAndSelPreferringLiteralSync(raw, cwd).path : splitPathAndSel(raw).path;
+	if (raw === undefined || toolName !== "read") return raw;
+	if (!cwd || INTERNAL_URL_SUBJECT.test(raw)) return undefined;
+
+	const candidate = splitPathAndSelPreferringLiteralSync(raw, cwd).path;
+	return existingFileLocationPath(candidate, cwd);
 }
 
 function extractToolLocations(args: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
@@ -685,6 +701,13 @@ function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCall
 	const details = (result as { details?: unknown }).details;
 	if (typeof details !== "object" || details === null) return [];
 	const direct = extractToolLocations(details, cwd);
+	const resolvedFile = existingFileLocationPath(
+		extractStringProperty<ResolvedPathContainer>(details, "resolvedPath"),
+		cwd,
+	);
+	if (resolvedFile && !direct.some(location => location.path === resolvedFile)) {
+		direct.push({ path: resolvedFile });
+	}
 	const perFile = (details as { perFileResults?: unknown }).perFileResults;
 	if (!Array.isArray(perFile)) {
 		return direct;

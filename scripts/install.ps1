@@ -19,8 +19,29 @@ $ErrorActionPreference = "Stop"
 $Repo = "can1357/oh-my-pi"
 $Package = "@oh-my-pi/pi-coding-agent"
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
-$BinaryName = "omp-windows-x64.exe"
+$NativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+if ($NativeArchitecture -notin @("x64", "arm64")) {
+    throw "Unsupported Windows architecture: $NativeArchitecture"
+}
+$BinaryName = "omp-windows-$NativeArchitecture.exe"
 $MinimumBunVersion = "1.3.14"
+
+# PowerShell 5.1 raises a terminating NativeCommandError for any line a native
+# executable writes to stderr while $ErrorActionPreference is "Stop", regardless
+# of the process exit code. Tools like bun and git emit normal progress on
+# stderr, so run them with the preference relaxed to "Continue" and let callers
+# gate on $LASTEXITCODE. Global "Stop" stays in effect for the cmdlet-driven
+# operations (Invoke-WebRequest/Invoke-RestMethod) that depend on it.
+function Invoke-Native {
+    param([Parameter(Mandatory = $true)][scriptblock]$Command)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
 
 function Test-BunInstalled {
     try {
@@ -165,7 +186,7 @@ function Configure-BashShell {
 
 function Install-Bun {
     Write-Host "Installing bun..."
-    irm bun.sh/install.ps1 | iex
+    Invoke-Native { irm bun.sh/install.ps1 | iex }
     # Refresh PATH
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "User") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     Assert-BunVersion $MinimumBunVersion
@@ -183,19 +204,18 @@ function Install-ViaBun {
 
         try {
             $repoUrl = "https://github.com/$Repo.git"
-            $cloneOk = $false
-            try {
-                git clone --depth 1 --branch $Ref $repoUrl $tmpRoot | Out-Null
-                $cloneOk = $true
-            } catch {
-                $cloneOk = $false
-            }
-
-            if (-not $cloneOk) {
-                git clone $repoUrl $tmpRoot | Out-Null
+            Invoke-Native { git clone --depth 1 --branch $Ref $repoUrl $tmpRoot 2>&1 | Out-Null }
+            if ($LASTEXITCODE -ne 0) {
+                Invoke-Native { git clone $repoUrl $tmpRoot 2>&1 | Out-Null }
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to clone $repoUrl"
+                }
                 Push-Location $tmpRoot
                 try {
-                    git checkout $Ref | Out-Null
+                    Invoke-Native { git checkout $Ref 2>&1 | Out-Null }
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to checkout $Ref"
+                    }
                 } finally {
                     Pop-Location
                 }
@@ -205,7 +225,7 @@ function Install-ViaBun {
             if (Test-GitLfsInstalled) {
                 Push-Location $tmpRoot
                 try {
-                    git lfs pull | Out-Null
+                    Invoke-Native { git lfs pull 2>&1 | Out-Null }
                 } finally {
                     Pop-Location
                 }
@@ -216,7 +236,7 @@ function Install-ViaBun {
                 throw "Expected package at $packagePath"
             }
 
-            bun install -g $packagePath
+            Invoke-Native { bun install -g $packagePath }
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to install from $packagePath via bun"
             }
@@ -224,7 +244,7 @@ function Install-ViaBun {
             Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
         }
     } else {
-        bun install -g $Package
+        Invoke-Native { bun install -g $Package }
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to install $Package via bun"
         }

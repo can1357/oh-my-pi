@@ -286,6 +286,7 @@ export class BashRunner {
 			exitCode: result.exitCode,
 			cancelled: result.cancelled,
 			truncated: result.truncated,
+			images: result.images,
 			meta,
 			timestamp: Date.now(),
 			excludeFromContext: options?.excludeFromContext,

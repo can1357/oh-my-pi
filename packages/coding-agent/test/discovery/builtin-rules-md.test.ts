@@ -149,6 +149,23 @@ test("alwaysApply is forced even when frontmatter says false", async () => {
 	expect(userRule?.content).toContain("Stick around anyway.");
 });
 
+test("enabled false omits a discovered rule", async () => {
+	const rulesDir = path.join(home, ".omp", "agent", "rules");
+	writeFile(
+		path.join(rulesDir, "disabled-example.md"),
+		"---\nenabled: false\ncondition: DISABLED_EXAMPLE\nscope: [tool:edit]\n---\nDisabled rule.\n",
+	);
+	writeFile(
+		path.join(rulesDir, "active-example.md"),
+		"---\ncondition: ACTIVE_EXAMPLE\nscope: [tool:edit]\n---\nActive rule.\n",
+	);
+
+	const rules = await loadNativeRules({ cwd: project, home, repoRoot: project });
+
+	expect(rules.find(rule => rule.name === "disabled-example")).toBeUndefined();
+	expect(rules.find(rule => rule.name === "active-example")?.condition).toEqual(["ACTIVE_EXAMPLE"]);
+});
+
 test("absent RULES.md does not produce a rule", async () => {
 	// No RULES.md anywhere — only a sibling .omp/rules/ to make sure the directory exists.
 	writeFile(path.join(home, ".omp", "agent", "rules", "other.md"), "# Unrelated rule\n");

@@ -1,0 +1,71 @@
+{
+	"source": "packages/coding-agent/test/core/hashline.test.ts",
+	"cases": [
+		{
+			"name": "rejects file creation and directs to the write tool"
+		},
+		{
+			"name": "applies duplicate pure-insert payload literally"
+		},
+		{
+			"name": "preserves UTF-8 BOM bytes when hashline edits decoded text"
+		},
+		{
+			"name": "edits BOM-prefixed notebooks through the virtual cell text"
+		},
+		{
+			"name": "emits an actionable no-op diagnostic when the payload matches the file byte-for-byte"
+		},
+		{
+			"name": "preflights every section before writing multi-file edits"
+		},
+		{
+			"name": "rejects duplicate canonical targets before writing stale section results"
+		},
+		{
+			"name": "applies multiple sections targeting the same file against the original snapshot"
+		},
+		{
+			"name": "recovers when the file was modified out-of-band after a read"
+		},
+		{
+			"name": "falls back to mismatch error when the cache does not cover the failing anchor"
+		},
+		{
+			"name": "captures the post-edit result so the next edit can recover from anchors against it"
+		},
+		{
+			"name": "rejects replay when a prior in-session edit rewrote the line the model re-targets"
+		},
+		{
+			"name": "redirects a bare filename to the full path of the file its tag names"
+		},
+		{
+			"name": "refuses redirects that escalate privilege or leave the working tree"
+		},
+		{
+			"name": "recovers a bare plan-file name onto the local:// sandbox in plan mode"
+		},
+		{
+			"name": "still rejects an existing working-tree edit in plan mode after the recovery reorder"
+		}
+	],
+	"skipped": [
+		{
+			"name": "declares only `input` as the model-facing field",
+			"reason": "omptype/schema validation is TypeScript-owned and outside Rust engine parity."
+		},
+		{
+			"name": "tolerates provider extra fields without declaring `path`",
+			"reason": "omptype/schema validation is TypeScript-owned and outside Rust engine parity."
+		},
+		{
+			"name": "rejects `_input` as an alias for `input`",
+			"reason": "omptype/schema validation is TypeScript-owned and outside Rust engine parity."
+		},
+		{
+			"name": "still requires `input`",
+			"reason": "omptype/schema validation is TypeScript-owned and outside Rust engine parity."
+		}
+	]
+}

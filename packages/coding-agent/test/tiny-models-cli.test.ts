@@ -8,27 +8,31 @@ afterEach(() => {
 });
 
 describe("tiny-models download model resolution", () => {
-	it("excludes load-blocked models from `all` so the bulk prefetch stays green", () => {
-		const unsupported = TINY_LOCAL_MODELS.filter(spec => "unsupportedReason" in spec && spec.unsupportedReason).map(
-			spec => spec.key,
-		);
+	it("excludes ONNX-blocked models from `all` so the bulk prefetch stays green", () => {
+		const unsupported = TINY_LOCAL_MODELS.filter(
+			spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason,
+		).map(spec => spec.key);
 		// Guard: keep this regression meaningful — at least one registry entry must be load-blocked.
 		expect(unsupported.length).toBeGreaterThan(0);
 
-		const all = resolveModels("all");
+		const all = resolveModels("all", false);
 		for (const key of unsupported) expect(all).not.toContain(key);
 
-		const usable = TINY_LOCAL_MODELS.filter(spec => !("unsupportedReason" in spec) || !spec.unsupportedReason).map(
-			spec => spec.key,
-		);
+		const usable = TINY_LOCAL_MODELS.filter(
+			spec => !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
+		).map(spec => spec.key);
 		for (const key of usable) expect(all).toContain(key);
 	});
 
+	it("includes ONNX-blocked models in `all` when the MLX backend is active", () => {
+		expect(resolveModels("all", true)).toEqual(TINY_LOCAL_MODELS.map(spec => spec.key));
+	});
+
 	it("still resolves an explicitly requested unsupported model (only `all` is filtered)", () => {
-		const blocked = TINY_LOCAL_MODELS.find(spec => "unsupportedReason" in spec && spec.unsupportedReason);
+		const blocked = TINY_LOCAL_MODELS.find(spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason);
 		expect(blocked).toBeDefined();
 		if (!blocked) return;
-		expect(resolveModels(blocked.key)).toEqual([blocked.key]);
+		expect(resolveModels(blocked.key, false)).toEqual([blocked.key]);
 	});
 
 	it("includes worker error details in JSON failures", async () => {
@@ -43,11 +47,11 @@ describe("tiny-models download model resolution", () => {
 		});
 
 		await expect(
-			runTinyModelsCommand({ action: "download", model: "lfm2-700m", flags: { json: true } }),
+			runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: { json: true } }),
 		).rejects.toThrow("One or more tiny title models failed to download");
 
 		expect(JSON.parse(output.join(""))).toEqual({
-			results: [{ model: "lfm2-700m", ok: false, error: "Error: runtime install failed\n    at worker" }],
+			results: [{ model: "lfm2.5-350m", ok: false, error: "Error: runtime install failed\n    at worker" }],
 		});
 	});
 
@@ -65,7 +69,7 @@ describe("tiny-models download model resolution", () => {
 		});
 
 		try {
-			await expect(runTinyModelsCommand({ action: "download", model: "lfm2-700m", flags: {} })).rejects.toThrow(
+			await expect(runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: {} })).rejects.toThrow(
 				"One or more tiny title models failed to download",
 			);
 		} finally {
@@ -73,7 +77,7 @@ describe("tiny-models download model resolution", () => {
 			else Reflect.deleteProperty(process.stdout, "isTTY");
 		}
 
-		expect(output.join("")).toContain("Failed to download LFM2 700M: runtime install failed.");
+		expect(output.join("")).toContain("Failed to download LFM2.5 350M: runtime install failed.");
 	});
 
 	it("prints actionable CUDA provider diagnostics from worker errors", async () => {
@@ -97,7 +101,7 @@ describe("tiny-models download model resolution", () => {
 		});
 
 		try {
-			await expect(runTinyModelsCommand({ action: "download", model: "lfm2-700m", flags: {} })).rejects.toThrow(
+			await expect(runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: {} })).rejects.toThrow(
 				"One or more tiny title models failed to download",
 			);
 		} finally {
@@ -106,7 +110,7 @@ describe("tiny-models download model resolution", () => {
 		}
 
 		const text = output.join("");
-		expect(text).toContain("Failed to download LFM2 700M:");
+		expect(text).toContain("Failed to download LFM2.5 350M:");
 		expect(text).toContain("PI_TINY_DEVICE=cuda");
 		expect(text).toContain("libcudnn.so.9");
 		expect(text).toContain("tiny-title-runtime");

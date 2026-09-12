@@ -860,7 +860,7 @@ describe("AgentSession handoff", () => {
 			type: "toolCall",
 			id: "call_yield_done",
 			name: "yield",
-			arguments: { result: { data: { done: true } } },
+			arguments: { data: { done: true } },
 		};
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",

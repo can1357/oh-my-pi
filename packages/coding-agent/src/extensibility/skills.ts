@@ -167,6 +167,13 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (provider === "native" && level === "project") return enablePiProject;
 		if (provider === "agents" && level === "user") return enableAgentsUser;
 		if (provider === "agents" && level === "project") return enableAgentsProject;
+		// User-scope claude-plugins skills carry the root's origin (#10743). omp's
+		// own installs (`omp` registry, `--plugin-dir`) are not the foreign
+		// ~/.claude/plugins tree, so the foreign opt-in gate applies only to
+		// claude-origin roots — parity with allowedRoots() in
+		// discovery/claude-plugins.ts. Without this, #10666's root-level fix is
+		// re-dropped here for every user-level claude-plugins skill.
+		if (provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") return true;
 		if (level === "user") return isUserSourceEnabled(provider);
 		return true;
 	}

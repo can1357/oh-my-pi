@@ -154,6 +154,17 @@ describe("truncateTail", () => {
 		expect(result.truncatedBy).toBe("bytes");
 		expect(result.lastLinePartial).toBe(true);
 	});
+
+	test("fills the remaining byte budget from a giant line before smaller trailing lines", () => {
+		const result = truncateTail("abcdefghijk\n}\n```", { maxLines: 10, maxBytes: 10 });
+
+		expect(result.content).toBe("hijk\n}\n```");
+		expect(result.truncatedBy).toBe("bytes");
+		expect(result.outputLines).toBe(3);
+		expect(result.outputBytes).toBe(10);
+		expect(result.partialByteWindows).toBe(true);
+		expect(result.lastLinePartial).toBe(false);
+	});
 });
 
 describe("truncateLine", () => {
@@ -544,7 +555,7 @@ describe("truncation notice formatting", () => {
 		expect(formatTailTruncationNotice(truncation)).toBe("");
 	});
 
-	test("formatTailTruncationNotice supports partial-line and complete-line notices", () => {
+	test("formatTailTruncationNotice distinguishes partial leading and final lines", () => {
 		const partialLineTruncation = truncateTail("abcdefghij", { maxLines: 10, maxBytes: 4 });
 		const partialLineNotice = formatTailTruncationNotice(partialLineTruncation, {
 			fullOutputPath: "/tmp/full.log",
@@ -560,6 +571,11 @@ describe("truncation notice formatting", () => {
 
 		const byteTruncation = truncateTail("aaa\nbbbb\ncc", { maxLines: 10, maxBytes: 6 });
 		expect(formatTailTruncationNotice(byteTruncation)).toBe("\n\n[Showing lines 3-3 of 3]");
+
+		const leadingPartialTruncation = truncateTail("abcdefghijk\n}\n```", { maxLines: 10, maxBytes: 10 });
+		expect(formatTailTruncationNotice(leadingPartialTruncation)).toBe(
+			"\n\n[Showing last 10B across lines 1-3 of 3; line 1 is partial]",
+		);
 	});
 
 	test("formatHeadTruncationNotice returns empty string for non-truncated results", () => {
@@ -622,7 +638,9 @@ describe("truncateMiddle", () => {
 		expect(result.content).toContain("elided");
 		expect(result.elidedBytes).toBeGreaterThan(0);
 		expect(result.headLines).toBe(1);
-		expect(result.tailLines).toBe(2);
+		expect(result.tailLines).toBe(3);
+		expect(result.partialByteWindows).toBe(true);
+		expect(result.lastLinePartial).toBe(false);
 	});
 
 	test("does not duplicate overlapping fallback windows", () => {

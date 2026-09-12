@@ -1,0 +1,35 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "pi-edit",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob([
+        "prompts/*.md",
+        "grammars/*.lark",
+    ]),
+    crate_name = "pi_edit",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "18.1.5",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/pi-ast",
+        "//crates/pi-diff",
+        "//crates/pi-walker",
+    ],
+)
+
+rust_test(
+    name = "pi-edit_test",
+    compile_data = glob(["tests/fixtures/notebooks/*"]),
+    crate = ":pi-edit",
+    data = glob(["tests/fixtures/**"]),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

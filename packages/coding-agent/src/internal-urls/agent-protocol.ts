@@ -104,13 +104,26 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		// Extraction applies only when the URL did NOT resolve to a nested output
 		// (a slash that named a real child is a hierarchy hop, not a jq path).
 		const extract = hasQueryExtraction || (hasPathExtraction && scan.matchedId !== nestedId);
+		let extractedFrom = scan.foundPath;
 		if (extract) {
 			let jsonValue: unknown;
-			try {
-				jsonValue = JSON.parse(rawContent);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				throw new Error(`Output ${scan.matchedId} is not valid JSON: ${message}`);
+			let parsed = false;
+			if (scan.jsonPath) {
+				try {
+					jsonValue = JSON.parse(await Bun.file(scan.jsonPath).text());
+					extractedFrom = scan.jsonPath;
+					parsed = true;
+				} catch {
+					// Corrupt or partially written sidecar: fall back to <id>.md.
+				}
+			}
+			if (!parsed) {
+				try {
+					jsonValue = JSON.parse(rawContent);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					throw new Error(`Output ${scan.matchedId} is not valid JSON: ${message}`);
+				}
 			}
 
 			const query = hasQueryExtraction ? queryParam! : pathToQuery(urlPath);
@@ -133,6 +146,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				content = JSON.stringify(jsonValue, null, 2);
 				contentType = "application/json";
 			}
+			if (parsed) notes.push(`Source: ${path.basename(extractedFrom!)}`);
 		}
 
 		return {
@@ -140,7 +154,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			content,
 			contentType,
 			size: Buffer.byteLength(content, "utf-8"),
-			sourcePath: scan.foundPath,
+			sourcePath: extractedFrom,
 			notes,
 		};
 	}
@@ -154,11 +168,18 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async #findOutput(
 		dirs: string[],
 		candidateIds: string[],
-	): Promise<{ foundPath?: string; matchedId?: string; anyDirExists: boolean; availableIds: Set<string> }> {
+	): Promise<{
+		foundPath?: string;
+		matchedId?: string;
+		jsonPath?: string;
+		anyDirExists: boolean;
+		availableIds: Set<string>;
+	}> {
 		// Build a full id→path map across every registered dir before picking, so
 		// candidate priority is global: a nested id in a deeper dir must win over
 		// the base id even when the base id's dir is scanned first.
 		const byId = new Map<string, string>();
+		const jsonById = new Map<string, string>();
 		let anyDirExists = false;
 		for (const dir of dirs) {
 			let files: string[];
@@ -170,6 +191,11 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 			anyDirExists = true;
 			for (const f of files) {
+				if (f.endsWith(".json")) {
+					const jsonId = f.slice(0, -5);
+					if (!jsonById.has(jsonId)) jsonById.set(jsonId, path.join(dir, f));
+					continue;
+				}
 				if (!f.endsWith(".md")) continue;
 				const id = f.slice(0, -3);
 				if (!byId.has(id)) byId.set(id, path.join(dir, f));
@@ -178,7 +204,19 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		for (const id of candidateIds) {
 			const foundPath = byId.get(id);
 			if (foundPath) {
-				return { foundPath, matchedId: id, anyDirExists, availableIds: new Set(byId.keys()) };
+				// Pair the sidecar with the SAME dir as the matched `<id>.md`: two
+				// coexisting roots can both hold `Worker`, and a first-hit sidecar
+				// from the other root would answer with a foreign agent's payload
+				// (see the `preferredDir` comment above and caller-root-ab.test.ts).
+				const sidecar = jsonById.get(id);
+				const jsonPath = sidecar && path.dirname(sidecar) === path.dirname(foundPath) ? sidecar : undefined;
+				return {
+					foundPath,
+					matchedId: id,
+					jsonPath,
+					anyDirExists,
+					availableIds: new Set(byId.keys()),
+				};
 			}
 		}
 		return { anyDirExists, availableIds: new Set(byId.keys()) };

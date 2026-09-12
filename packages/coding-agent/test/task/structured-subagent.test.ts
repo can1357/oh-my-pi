@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
@@ -166,13 +167,30 @@ describe("structured subagent primitive", () => {
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+
+		const planSession = session({ planMode: true });
+		const customTools = createEvalCustomTools(planSession, [
+			{
+				name: "word_count",
+				description: "Count words",
+				parameters: { type: "object", properties: {} },
+				language: "python",
+			},
+		]);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: planSession, customTools }))).rejects.toThrow(
+			"Eval-defined tools are unavailable in plan mode.",
+		);
 		expect(discover).not.toHaveBeenCalled();
 	});
-	it("reloads model roles before resolving an agent added during the session", async () => {
+	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			"task:\n  enableEffort: true\nretry:\n  modelFallback: true\n",
+		);
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const liveSession = {
 			...session(),
@@ -181,16 +199,20 @@ describe("structured subagent primitive", () => {
 		} as ToolSession;
 
 		try {
-			await Bun.write(path.join(projectDir, ".omp", "config.yml"), "modelRoles:\n  hot_worker: kimi-code/k3:max\n");
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				"task:\n  agentModelOverrides:\n    hot-worker: xai-oauth/grok-4.6:medium\n  enableEffort: false\nretry:\n  modelFallback: false\n",
+			);
 			await Bun.write(
 				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
-				'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
+				"---\nname: hot-worker\ndescription: Newly added worker.\nmodel: openai/gpt-4o\n---\n\nInspect the assignment.\n",
 			);
 
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
-			expect(policy.modelRole).toBe("hot_worker");
-			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
+			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
+			expect(liveSettings.get("task.enableEffort")).toBe(false);
+			expect(liveSettings.get("retry.modelFallback")).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });
@@ -352,6 +374,30 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+
+	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
+		// Regression: a task can produce schema-valid data and then fail (or
+		// exceed its runtime limit). The async notice still advertises the
+		// full payload at `agent://<id>` for schema-valid output, so
+		// retention must not require `exitCode === 0` too — otherwise the
+		// directory is already gone by the time the model follows that URL
+		// (PR #10625 review).
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+			return {
+				...result(),
+				exitCode: 1,
+				error: "runtime limit exceeded",
+				structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+			};
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("valid");
+		await expect(fs.stat(settled.artifactsDir)).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
 	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
 		mockDiscovery();
 		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
@@ -422,6 +468,22 @@ describe("structured subagent primitive", () => {
 		expect(hint).toContain("Captured branch preserved as omp/task/Worker.");
 		expect(await fs.readFile(nestedPath, "utf8")).toBe("diff --git a/file b/file\n");
 		await fs.rm(artifactsDir, { recursive: true, force: true });
+	});
+
+	it("names the failure when nested patches cannot be written as a fallback", async () => {
+		// `Bun.write` creates missing parents, so a genuine failure needs a path
+		// that cannot become a directory: a regular file in its place.
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-subagent-unwritable-"));
+		const artifactsDir = path.join(parent, "artifacts");
+		await fs.writeFile(artifactsDir, "");
+		const completed = result();
+		completed.nestedPatches = [{ relativePath: "sub/nested", patch: "diff --git a/file b/file\n" }];
+
+		const hint = await buildStructuredSubagentRecoveryHint(completed, artifactsDir);
+
+		expect(hint).toMatch(/Nested patches could not be written: .*(ENOTDIR|EEXIST)/);
+		expect(hint).not.toContain("Captured nested patch preserved");
+		await fs.rm(parent, { recursive: true, force: true });
 	});
 
 	it("cleans ephemeral artifacts when isolation setup fails without recovery", async () => {
@@ -596,6 +658,28 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
 	});
 
+	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
+		// Regression: a detached (async) task job that fails with schema
+		// status "invalid" (not "valid") previously had its temp dir wiped
+		// immediately, breaking the "failed agent stays interrogable"
+		// invariant (task/index.ts) — the model could no longer read the
+		// failure via agent://<id> or history://<id> (PR #10625 review).
+		mockDiscovery();
+		let artifactsDir: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			artifactsDir = options.artifactsDir;
+			return { ...result(), exitCode: 1, error: "agent failed" };
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
+
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
+		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("retains isolated failure artifacts needed for recovery", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
@@ -611,6 +695,25 @@ describe("structured subagent primitive", () => {
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("names the preserved branch when nested persistence fails after a branch commit", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async () => ({
+			...result(),
+			branchName: "omp/task/Worker",
+			branchBaseSha: "base",
+			nestedPatches: [{ relativePath: "inner", patch: "diff --git a/b.txt b/b.txt\n" }],
+			error: "Nested patch capture failed: ENOSPC. Isolation workspace retained at /wt/abc.",
+		}));
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
+		);
+
+		expect(settled.mergeSummary).toContain("omp/task/Worker");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

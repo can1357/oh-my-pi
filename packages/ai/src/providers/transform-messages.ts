@@ -9,7 +9,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
-import { isDemotedThinking, kDemotedThinking } from "../utils/block-symbols";
+import { isDemotedThinking, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -948,12 +948,16 @@ export function transformMessages<TApi extends Api>(
 
 					let normalizedId: string | undefined;
 					if (isAnthropicTarget) {
-						normalizedId = normalizeAnthropicTargetToolCallId(
-							toolCall.id,
-							model,
-							assistantMsg,
-							normalizeToolCallId,
-						);
+						// Custom same-model endpoints own opaque correlation IDs; official
+						// endpoints and cross-model replays require Anthropic-valid IDs.
+						if (!isSameModel || model.compat.officialEndpoint) {
+							normalizedId = normalizeAnthropicTargetToolCallId(
+								toolCall.id,
+								model,
+								assistantMsg,
+								normalizeToolCallId,
+							);
+						}
 					} else if (!isSameModel && normalizeToolCallId) {
 						normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
 					}
@@ -1227,11 +1231,15 @@ export function transformMessages<TApi extends Api>(
 				}
 				if (textParts.length > 0) {
 					const errorAttr = msg.isError ? ' is-error="true"' : "";
-					result.push({
+					const note: UserMessage & SyntheticUserCarrier = {
 						role: "user",
 						content: `<stale-tool-result tool="${msg.toolName}" id="${msg.toolCallId}"${errorAttr}>\n${textParts.join("\n")}\n</stale-tool-result>`,
 						timestamp: messageTimestamp,
-					} as UserMessage);
+					} as UserMessage;
+					// Synthesized, not sent by the user: prompt-cache decimation counts
+					// conversational turns and must skip this note.
+					note[kSyntheticUser] = true;
+					result.push(note);
 				}
 			}
 

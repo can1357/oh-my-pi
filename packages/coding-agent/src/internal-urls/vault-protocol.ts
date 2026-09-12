@@ -405,6 +405,16 @@ function getCachedVaultRoot(ref: VaultReference): string | undefined {
 	return cached ? path.resolve(cached) : undefined;
 }
 
+/** Vault roots already resolved by the protocol handler, for native edit policy. */
+export function cachedVaultRoots(): Array<{ name: string; root: string }> {
+	const roots: Array<{ name: string; root: string }> = [];
+	if (cachedActiveVaultPath) roots.push({ name: "_", root: path.resolve(cachedActiveVaultPath) });
+	for (const [name, root] of cachedVaultDirectory ?? []) {
+		roots.push({ name, root: path.resolve(root) });
+	}
+	return roots;
+}
+
 function findExistingAncestorSync(targetPath: string, rootPath: string): string {
 	let current = targetPath;
 	while (true) {

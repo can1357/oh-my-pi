@@ -19,7 +19,7 @@ import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/m
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
-const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
+const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: true });
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 // Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
@@ -289,6 +289,7 @@ export async function generateTitleOnline(
 					},
 					{
 						apiKey: registry.resolver(model, sessionId),
+						sessionId,
 						maxTokens,
 						disableReasoning: true,
 						// Greedy decode: titling is extraction, not generation. Backends that

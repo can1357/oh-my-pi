@@ -147,8 +147,9 @@ export async function startCpuProfile(): Promise<ProfilerSession> {
 	};
 }
 
+/** Binary V8 heap snapshot content ready for archive serialization. */
 export interface HeapSnapshot {
-	data: string;
+	data: Uint8Array;
 }
 
 /**
@@ -159,8 +160,11 @@ export function generateHeapSnapshotData(): HeapSnapshot {
 	// Force GC before snapshot
 	Bun.gc(true);
 
-	// Use V8 format for Chrome DevTools compatibility
-	const snapshot = Bun.generateHeapSnapshot("v8");
+	// Use binary V8 output to avoid JavaScript's maximum string length.
+	const snapshot = new Uint8Array(Bun.generateHeapSnapshot("v8", "arraybuffer"));
+	if (snapshot.byteLength === 0) {
+		throw new Error("Bun generated an empty heap snapshot");
+	}
 
 	return {
 		data: snapshot,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Usage } from "@oh-my-pi/pi-ai/types";
-import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { calculateCost, getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 
 describe("calculateCost", () => {
 	it("keeps token-based calculation for GitHub Copilot models", () => {
@@ -179,8 +179,17 @@ describe("calculateCost", () => {
 	});
 
 	it("prices OpenAI Codex GPT models from the matching OpenAI catalog entry", () => {
-		const openAIModel = getBundledModel("openai", "gpt-5.4");
-		const codexModel = getBundledModel("openai-codex", "gpt-5.4");
+		const openAIModel = getBundledModels("openai")
+			.sort((a, b) => a.id.localeCompare(b.id))
+			.find(
+				model =>
+					model.id.startsWith("gpt-") &&
+					model.cost.input > 0 &&
+					model.cost.output > 0 &&
+					getBundledModel("openai-codex", model.id) !== undefined,
+			);
+		if (!openAIModel) throw new Error("Expected a shared, priced OpenAI/Codex GPT model");
+		const codexModel = getBundledModel("openai-codex", openAIModel.id);
 		const usage: Usage = {
 			input: 1000,
 			output: 500,
@@ -189,12 +198,15 @@ describe("calculateCost", () => {
 			totalTokens: 1700,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
+		const referenceUsage = structuredClone(usage);
+		calculateCost(openAIModel, referenceUsage);
 
 		expect(codexModel.cost).toEqual(openAIModel.cost);
 
 		calculateCost(codexModel, usage);
 
-		expect(usage.cost.total).toBeCloseTo(0.01005, 8);
+		expect(referenceUsage.cost.total).toBeGreaterThan(0);
+		expect(usage.cost).toEqual(referenceUsage.cost);
 	});
 
 	it("keeps Daybreak Blue at short-context rates through 272K prompt tokens", () => {

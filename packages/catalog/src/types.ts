@@ -460,6 +460,20 @@ export interface AnthropicCompat {
 	/** Whether thinking requests may include `context_management` and its beta header. Default: true. */
 	supportsContextManagement?: boolean;
 	/**
+	 * Whether the model lineage supports Anthropic server-side compaction
+	 * (`compact-2026-01-12`: the `compact_20260112` edit and replayed
+	 * `compaction` blocks). Rule-owned per model line; the beta covers the
+	 * adaptive-thinking generation onward and rejects older lines. Default: false.
+	 */
+	supportsServerCompaction?: boolean;
+	/**
+	 * Whether the model is served by the first-party Anthropic provider (its
+	 * default route is the official API). Rule-owned on the provider; the
+	 * compaction transport pairs it with a per-request effective-URL check
+	 * because reroutes leave it stale-true. Default: false.
+	 */
+	firstPartyProvider?: boolean;
+	/**
 	 * Whether requests may carry `output_config.effort` (and its effort beta
 	 * header). Vertex AI rejects the field/header. Default: true.
 	 */
@@ -709,6 +723,8 @@ export interface ResolvedOpenAISharedCompat {
 	isOpenRouterHost: boolean;
 	/** Whether this endpoint needs a max-token field even when caller did not set one. */
 	alwaysSendMaxTokens: boolean;
+	/** Clamp a requested output-token count to the model's advertised ceiling. */
+	clampOutputToModelMax: boolean;
 	openRouterRouting?: OpenAICompat["openRouterRouting"];
 	/** Provider-specific wire model-id transform applied to the base id. */
 	wireModelIdMode: "raw" | "cline-pass" | "firepass" | "fireworks" | "openrouter";
@@ -777,6 +793,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsStrictMode"
 			| "supportsLongPromptCacheRetention"
 			| "alwaysSendMaxTokens"
+			| "clampOutputToModelMax"
 			| "wireModelIdMode"
 			| "vercelGatewayRouting"
 			| "extraBody"
@@ -820,6 +837,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * transport; earlier ids reject the value.
 	 */
 	supportsAllTurnsReasoningContext: boolean;
+	/**
+	 * Whether a `configuration_update` input item may change `reasoning.effort`
+	 * mid-conversation while the request-level effort stays byte-stable for
+	 * prompt caching. Rule-owned: GPT-6 Astra only; every other model rejects
+	 * the item type with 400.
+	 */
+	supportsConfigurationUpdate: boolean;
 	/** Inject the `# Juice: 0 !important` developer item when reasoning is forced off (gpt-5.6+). */
 	requiresReasoningOffJuiceInstruction: boolean;
 	/**
@@ -869,6 +893,13 @@ export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdle
 	 * env headers, and cache-TTL shaping without per-request URL parsing.
 	 */
 	officialEndpoint: boolean;
+	/**
+	 * The model is served by the first-party Anthropic provider. Unlike
+	 * `officialEndpoint` (URL-derived per deployment), this is provider
+	 * identity for compaction gating, always paired with a per-request
+	 * effective-URL check.
+	 */
+	firstPartyProvider: boolean;
 };
 
 /**
@@ -1019,9 +1050,30 @@ export interface LongContextTokenCost extends TokenCost {
 	inputThresholdInclusive?: boolean;
 }
 
-/** Base token rates plus an optional long-context tier. */
+/** Recurring UTC peak interval; weekdays use Sunday = 0, and the end is exclusive. */
+export interface PeakPricingWindow {
+	weekdays: readonly number[];
+	startMinute: number;
+	endMinute: number;
+}
+
+/** Complete replacement rate card effective from a Unix-millisecond timestamp. */
+export interface EffectiveTokenCost extends TokenCost {
+	effectiveFrom: number;
+	longContext?: LongContextTokenCost;
+}
+
+/** Scheduled discounts applied after selecting the effective rate card and context tier. */
+export interface TimeBasedCost {
+	offPeakMultiplier: number;
+	peakWindows: readonly PeakPricingWindow[];
+	effectiveRates?: readonly EffectiveTokenCost[];
+}
+
+/** Base token rates plus optional long-context and time-based pricing. */
 export interface ModelCost extends TokenCost {
 	longContext?: LongContextTokenCost;
+	timeBased?: TimeBasedCost;
 }
 
 /**
@@ -1059,6 +1111,8 @@ export interface Model<TApi extends Api = Api> {
 	requiresGlyphTokenization?: boolean;
 	/** Whether this model requires Cursor's tool-schema combiner projection. */
 	requiresCursorToolSchemaProjection?: boolean;
+	/** Whether this model requires tool-result images hoisted into sibling user content blocks. */
+	requiresToolResultImageHoisting?: boolean;
 	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
@@ -1111,6 +1165,8 @@ export interface Model<TApi extends Api = Api> {
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;
+	/** Optional larger prompt window available when extended context is enabled. */
+	maxContextWindow?: number;
 	maxTokens: number | null;
 	/**
 	 * When `true`, providers MUST omit `max_output_tokens` (Responses) /
@@ -1173,6 +1229,10 @@ export interface Model<TApi extends Api = Api> {
 	isRecommended?: boolean;
 	/** Canonical thinking capability metadata for this model. */
 	thinking?: ThinkingConfig;
+	/** Intelligence score delivered by the model catalog. */
+	int?: number | null;
+	/** Catalog-estimated output speed in tokens per second. */
+	tps?: number | null;
 	/**
 	 * Fully-resolved compatibility record, materialized once by `buildModel`.
 	 * Protocol handlers read fields; they never detect, resolve, or allocate.
@@ -1188,6 +1248,13 @@ export interface Model<TApi extends Api = Api> {
 	 * - `"function"` or undefined: JSON function-tool with `{input: string}` (spec §1.2).
 	 */
 	applyPatchToolType?: "freeform" | "function";
+	/**
+	 * Edit-tool description density for this model. `"compact"` selects the
+	 * terse mode prompt (all operations and invariants preserved) for hosts
+	 * where per-request prompt bytes are the dominant cost. Generated catalog
+	 * policy sets it; the edit tool falls back to the full prompt when unset.
+	 */
+	editPromptVariant?: "full" | "compact";
 	/**
 	 * Force OAuth-style request shaping for providers whose API key prefix doesn't
 	 * match an OAuth token (e.g. routing Anthropic traffic through a proxy that
@@ -1207,6 +1274,12 @@ export interface Model<TApi extends Api = Api> {
 	guardrailVersion?: string;
 	/** Bedrock guardrail trace verbosity. */
 	guardrailTrace?: "enabled" | "disabled" | "enabled_full";
+	/**
+	 * Bedrock invocation-log tags attached to every Converse request for this
+	 * model. Set from `providers.<provider>.requestMetadata`; the Bedrock
+	 * transport reads it directly and validates it against AWS's limits.
+	 */
+	requestMetadata?: Record<string, string>;
 }
 
 /**
@@ -1221,6 +1294,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "compatConfig"
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
+	| "requiresToolResultImageHoisting"
 	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */

@@ -4,9 +4,10 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
+import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
@@ -50,7 +51,7 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -72,6 +73,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -454,6 +456,10 @@ export interface ExecutorOptions {
 	 * process-global MCP manager. Defaults to `true`.
 	 */
 	enableMCP?: boolean;
+	/** Kernel-defined tools explicitly exposed by the parent eval session. */
+	customTools?: CustomTool[];
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 	/**
 	 * Limit the child to its explicit host tool names and the required yield
 	 * tool, suppressing discovered and always-included capabilities.
@@ -683,6 +689,23 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
 			if (!assembled || assembled.missingData) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
+				if (includeStructuredOutput) {
+					structuredOutput = { source, mode, status: "invalid", error: SUBAGENT_WARNING_NULL_YIELD };
+				}
+				// Strict mode promises a schema violation fails the run, not a
+				// warning-decorated success (exitCode 0); build the same
+				// non-zero-exit outcome the validated-data path uses below so
+				// async job delivery marks the job failed instead of completed.
+				if (mode === "strict" && includeStructuredOutput) {
+					const { validator } = buildOutputValidator(outputSchema);
+					const outcome = buildSchemaViolationOutcome(
+						{ message: SUBAGENT_WARNING_NULL_YIELD, missingRequired: [...(validator?.requiredFields ?? [])] },
+						undefined,
+					);
+					rawOutput = outcome.rawOutput;
+					stderr = outcome.stderr;
+					exitCode = outcome.exitCode;
+				}
 			} else {
 				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
 				const completeData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
@@ -1440,9 +1463,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		existing.push(data);
 		progress.extractedToolData[toolName] = existing;
 		if (toolName === "yield") {
-			yieldCalled = true;
+			const item = isRecord(data) ? data : undefined;
+			const incremental = Array.isArray(item?.type) && item.type.length > 0;
+			yieldCalled = !incremental || item?.complete === true || item?.status === "aborted";
 			yieldCallPending = false;
-			yieldInvalidatedByAsync = false;
+			if (yieldCalled) yieldInvalidatedByAsync = false;
 		}
 	};
 
@@ -1744,6 +1769,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		scheduleProgress(flushProgress);
 	};
 
+	const publishAdvisorState = (session: AgentSession | null): void => {
+		// A runtime can attach after startup when model discovery finishes.
+		// Retain this run's advised state through teardown for settled badges.
+		if (!progress.advisor && session?.isAdvisorActive() === true) {
+			progress.advisor = true;
+			scheduleProgress(true);
+		}
+	};
+
 	const attach = (session: AgentSession): (() => void) => {
 		// The session owns attribution: it knows which model produced its output
 		// and withholds an armed-but-unproven fallback. Re-deriving that here from
@@ -1756,16 +1790,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			const isFallback = serving.isFallback;
 			if (
 				serving.selector === progress.resolvedModel &&
+				serving.modelIdentity === progress.resolvedModelIdentity &&
+				serving.thinkingLevel === progress.resolvedThinkingLevel &&
 				(progress.resolvedModelIsFallback ?? false) === isFallback
 			) {
 				return;
 			}
 			progress.resolvedModel = serving.selector;
+			progress.resolvedModelIdentity = serving.modelIdentity;
+			progress.resolvedThinkingLevel = serving.thinkingLevel;
 			progress.resolvedModelIsFallback = isFallback;
 			scheduleProgress(true);
 		};
 		return session.subscribe(event => {
 			emitSubagentEvent(event);
+			publishAdvisorState(session);
 			publishServingModel();
 			if (event.type === "auto_retry_start") {
 				progress.retryState = {
@@ -1881,6 +1920,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		resolveAbortReasonText,
 		setActiveSession: session => {
 			activeSession = session;
+			publishAdvisorState(session);
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
@@ -1927,6 +1967,10 @@ async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
+	// Invoked when the initial prompt loses a prompt race (AgentBusyError) before
+	// retrying. Lets the caller restore a safe contract and detach its monitor
+	// while backing off. Absent, the busy error keeps the old path.
+	onPromptBusy?: () => Promise<void>,
 ): Promise<DriveOutcome> {
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -1964,7 +2008,21 @@ async function driveSessionToYield(
 
 	try {
 		try {
-			await awaitAbortable(session.prompt(task, { attribution: "agent" }));
+			// An IRC wake may own the session when this turn dispatches. Its prompt
+			// wins the race and this prompt throws AgentBusyError; back off through
+			// the caller hook and retry. Bounded so a wedged worker still resolves
+			// instead of hanging the batch.
+			let promptAttempts = 0;
+			for (;;) {
+				try {
+					await awaitAbortable(session.prompt(task, { attribution: "agent" }));
+					break;
+				} catch (error) {
+					promptAttempts++;
+					if (!(error instanceof AgentBusyError) || promptAttempts >= 3 || !onPromptBusy) throw error;
+					await onPromptBusy();
+				}
+			}
 			await awaitAbortable(session.waitForIdle());
 		} catch (err) {
 			// A budget stop or a yield turn-stop (terminal yield parked behind
@@ -2281,6 +2339,51 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		const structured = finalized.structuredOutput;
+		const sidecarPath = path.join(args.artifactsDir, `${id}.json`);
+		if (outputPath && structured && Object.hasOwn(structured, "data")) {
+			try {
+				const serialized = JSON.stringify(structured.data, null, 2);
+				// `structured.data === undefined` (an own "data" key holding
+				// `undefined`) makes JSON.stringify return `undefined` too —
+				// neither a write nor a removal, which would leave a stale
+				// sidecar from an earlier turn answering agent://<id>/<field>
+				// with superseded data (PR #10625 review).
+				if (serialized !== undefined) await writeArtifact(sidecarPath, `${serialized}\n`);
+				else await fs.rm(sidecarPath, { force: true });
+			} catch (error) {
+				logger.warn("Failed to persist subagent structured output sidecar", {
+					agentId: id,
+					path: sidecarPath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				// A stale sidecar from an earlier turn must not outlive this
+				// turn's <id>.md just because the replacement write failed —
+				// agent://<id>/<field> would keep answering with superseded data.
+				try {
+					await fs.rm(sidecarPath, { force: true });
+				} catch (rmError) {
+					logger.warn("Failed to drop stale subagent structured output sidecar", {
+						agentId: id,
+						path: sidecarPath,
+						error: rmError instanceof Error ? rmError.message : String(rmError),
+					});
+				}
+			}
+		} else if (outputPath) {
+			// This turn republished <id>.md; a stale sidecar from an earlier
+			// turn would keep answering agent://<id>/<field> with the
+			// superseded payload, so it must not outlive its <id>.md.
+			try {
+				await fs.rm(sidecarPath, { force: true });
+			} catch (error) {
+				logger.warn("Failed to drop stale subagent structured output sidecar", {
+					agentId: id,
+					path: sidecarPath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 	}
 
 	// Update final progress. A wall-clock timeout always wins: if the runtime
@@ -2344,7 +2447,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelOverride,
 		modelRole,
 		resolvedModel: progress.resolvedModel,
+		resolvedModelIdentity: progress.resolvedModelIdentity,
+		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2384,12 +2490,16 @@ interface WakeSource {
 	messageId?: string;
 }
 
-function wakeSources(records: CustomMessage[], selfId: string): WakeSource[] {
+function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 	const sources: WakeSource[] = [];
 	for (const record of records) {
+		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
+		// Automated wake-turn relays are answers, not wake sources: relaying one
+		// back would ping-pong two idle peers forever.
+		if (details && Reflect.get(details, "wakeRelay") === true) continue;
 		const messageId = details ? Reflect.get(details, "id") : undefined;
 		sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
 	}
@@ -2407,7 +2517,7 @@ function wakeSources(records: CustomMessage[], selfId: string): WakeSource[] {
  */
 async function relayWakeTurnOutput(args: {
 	id: string;
-	records: CustomMessage[];
+	records: AgentMessage[];
 	turnStartTime: number;
 	yielded: boolean;
 	result: SingleResult;
@@ -2424,7 +2534,13 @@ async function relayWakeTurnOutput(args: {
 			: args.turnText.trim();
 	if (!body) return;
 	for (const source of pending) {
-		const receipt = await bus.send({ from: args.id, to: source.from, body, replyTo: source.messageId });
+		const receipt = await bus.send({
+			from: args.id,
+			to: source.from,
+			body,
+			replyTo: source.messageId,
+			wakeRelay: true,
+		});
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
 		}
@@ -2444,6 +2560,16 @@ async function relayWakeTurnOutput(args: {
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
  */
+/** Extracts display text from an IRC/aside record's content, shared by the custom-role and
+ *  user-role branches below (both fields share the same string | text-part-array shape). */
+function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	if (typeof content === "string") return content;
+	return content
+		.filter(part => part.type === "text")
+		.map(part => part.text ?? "")
+		.join("\n");
+}
+
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
@@ -2452,11 +2578,16 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const ircTask =
 			records
 				.map(record => {
-					const body =
-						record.details && typeof record.details === "object"
-							? Reflect.get(record.details, "message")
-							: undefined;
-					return typeof body === "string" ? body : record.content;
+					if (record.role === "custom") {
+						const body =
+							record.details && typeof record.details === "object"
+								? Reflect.get(record.details, "message")
+								: undefined;
+						if (typeof body === "string") return body;
+						return extractIrcRecordText(record.content);
+					}
+					if (record.role === "user") return extractIrcRecordText(record.content);
+					return "";
 				})
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
@@ -2712,6 +2843,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
 /**
@@ -2729,7 +2862,49 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(id);
+	let session = await AgentLifecycleManager.global().ensureLive(id);
+	// Acquire turn ownership before mutating the shared yield contract: installing
+	// pooled items under a running ordinary wake would reject its in-flight tool
+	// calls. The check-to-install section below has no await, so once idle is
+	// observed no wake dispatch can interleave before the synchronous mutation.
+	// Bounded: a worker that never settles fails its batch instead of installing
+	// under the active turn or hanging the pool.
+	let ownershipWaits = 0;
+	const acquireOwnership = async (): Promise<void> => {
+		while (session.isStreaming && ownershipWaits < 3) {
+			ownershipWaits++;
+			if (signal) {
+				await untilAborted(signal, () => session.waitForIdle());
+			} else {
+				await session.waitForIdle();
+			}
+		}
+		if (session.isStreaming) {
+			throw new Error(
+				`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
+			);
+		}
+	};
+	await acquireOwnership();
+	// Revalidate until the worker survives an install round-trip unchanged: the
+	// waits/rebuild above can outlast the idle TTL, letting park() detach this
+	// instance mid-install. Each observed replacement means another full park
+	// cycle, so reinstall on the fresh session (revivals start empty) and check
+	// again; genuine churn fails fast instead of driving a stale instance, and
+	// a released worker throws instead of driving a corpse. A replacement may
+	// already be streaming a wake, so ownership is reacquired every round.
+	for (let acquireAttempts = 0; ; acquireAttempts++) {
+		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+		const live = await AgentLifecycleManager.global().ensureLive(id);
+		if (live === session) break;
+		if (acquireAttempts >= 2) {
+			throw new Error(
+				`Subagent ${id} was replaced during every install attempt; refusing to drive a stale worker session`,
+			);
+		}
+		session = live;
+		await acquireOwnership();
+	}
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -2766,17 +2941,37 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 	monitor.setActiveSession(session);
-	const unsubscribe = monitor.attach(session);
+	// The batch monitor attaches per attempt; the hook below detaches before each
+	// backoff and reattaches for the retry, so the teardown always releases the
+	// current attempt — including when the drive rejects and no winning attempt
+	// was ever assigned.
 	let outcome: DriveOutcome;
+	// An IRC wake may own the session when this turn dispatches. drive retries the
+	// initial prompt through this hook: detach first so the wake turn's `yield`
+	// neither marks this batch yielded nor leaks into its result, restore the
+	// ordinary contract so the wake cannot consume pooled items, wait it out,
+	// then reinstall and reattach for the retry.
+	let attemptUnsubscribe = monitor.attach(session);
 	try {
-		outcome = await driveSessionToYield(session, monitor, message);
+		outcome = await driveSessionToYield(session, monitor, message, async () => {
+			attemptUnsubscribe();
+			logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
+			await session.setWorkPoolYieldItems([]);
+			if (signal) {
+				await untilAborted(signal, () => session.waitForIdle());
+			} else {
+				await session.waitForIdle();
+			}
+			await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+			attemptUnsubscribe = monitor.attach(session);
+		});
 	} finally {
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
 		} catch {
 			// Ignore abort cleanup timeouts; the session stays adopted either way.
 		}
-		unsubscribe();
+		attemptUnsubscribe();
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
@@ -2926,7 +3121,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
 		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
+		if (backends.python || backends.js) expanded.push("eval");
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
@@ -3122,10 +3317,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					: undefined;
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
+				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
 					displayLevel !== undefined
-						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
-						: formatModelStringWithRouting(model);
+						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
+						: progress.resolvedModelIdentity;
 			}
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
@@ -3181,6 +3378,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const sessionCustomTools = [...mcpProxyTools, ...(options.customTools ?? [])];
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -3228,6 +3426,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+				// Parked workers always revive with an empty runtime yield set; a
+				// pooled follow-up reinstalls its items explicitly before turning.
+				// Without this, the registry lookup below misses (session === null
+				// while the replacement builds) and the revived prompt resurrects
+				// the launch-time pooled instructions against an ordinary runtime.
+				forRevive = false,
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
@@ -3271,6 +3475,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+						// Read the live item set through the registry instead of capturing
+						// the session: this callback outlives the turn via the lifecycle
+						// reviver, and a captured session would pin its whole graph past
+						// TTL park disposal. Parked revivals build while the registry
+						// session is null, so render the cleared set rather than
+						// resurrecting the launch-time pooled instructions.
+						workPoolYieldItems:
+							AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
+							(forRevive ? [] : (options.workPoolYieldItems ?? [])),
 						ircPeers: ircRoster?.peers ?? [],
 						ircParkedCount: ircRoster?.parkedCount ?? 0,
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -3295,13 +3508,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentAgentId: options.parentAgentId,
 				agentId: id,
 				agentDisplayName: agent.name,
+				agentName: agent.name,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
 				skipPythonPreflight,
 				enableMCP,
 				mcpManager,
-				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
@@ -3364,7 +3578,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						);
 					}
 					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
+						buildSubagentSessionOptions(reopened, expectedAgentRef, true),
 					);
 					// Re-run the executor's extension wiring on the rebuilt session.
 					// Skipping it leaves the runner pre-init, so a `tool_call` handler
@@ -3405,6 +3619,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
+			if (options.workPoolYieldItems) {
+				await awaitAbortable(session.setWorkPoolYieldItems(options.workPoolYieldItems));
+			}
 			const enabledSubagentTools = session.getEnabledToolNames();
 			// The enabled set includes the synthetic write transport injected for
 			// explicit tool lists that omitted write. `session_init.tools` is later
@@ -3429,6 +3646,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				// Isolated runs are never revivable (worktree merged + cleaned):
+				// stamp the contract so cold revival leaves them transcript-only
+				// even when the workspace was retained for recovery.
+				isolated: worktree !== undefined || undefined,
 			});
 
 			abortSignal.addEventListener(

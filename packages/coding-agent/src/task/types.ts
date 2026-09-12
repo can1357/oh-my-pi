@@ -117,6 +117,7 @@ export const taskItemSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"tools?": "string[]",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -125,6 +126,7 @@ const taskItemSchemaIsolated = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"tools?": "string[]",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -143,6 +145,8 @@ export interface TaskItem {
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
+	/** Eval-defined tool names exposed to this child. */
+	tools?: string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
@@ -153,6 +157,7 @@ export const taskSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"tools?": "string[]",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -162,6 +167,7 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"tools?": "string[]",
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -197,9 +203,11 @@ function createTaskSchema(options: {
 	batchEnabled: boolean;
 	defaultAgent: string;
 	effortEnabled: boolean;
+	evalToolsEnabled: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
+	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -209,6 +217,7 @@ function createTaskSchema(options: {
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
+				...toolsField,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -225,6 +234,7 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			...toolsField,
 			"+": "delete",
 		});
 		return type.raw({
@@ -241,6 +251,7 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			...toolsField,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -252,6 +263,7 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		...toolsField,
 		"+": "delete",
 	});
 }
@@ -261,18 +273,21 @@ export function getTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	effortEnabled?: boolean;
+	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
+	evalToolsEnabled?: boolean;
 	defaultAgent?: string;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
-	if (defaultAgent === "task" && !effortEnabled) {
+	const evalToolsEnabled = options.evalToolsEnabled ?? true;
+	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
-	const schema = createTaskSchema({ ...options, effortEnabled, defaultAgent });
+	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, defaultAgent });
 	taskSchemaCache.set(key, schema);
 	return schema;
 }
@@ -296,6 +311,8 @@ export interface TaskParams {
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
+	/** Eval-defined tool names exposed to the flat-form child. */
+	tools?: string[];
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
@@ -386,6 +403,8 @@ export interface YieldItem {
 	type?: string | string[];
 	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
 	useLastTurn?: boolean;
+	/** True when an incremental workpool yield completed every item in its batch. */
+	complete?: boolean;
 	/**
 	 * Set by the in-tool yield validator when it exhausted its retry budget and
 	 * accepted schema-invalid data anyway. The executor preserves that override
@@ -432,8 +451,14 @@ export interface AgentProgress {
 	modelRole?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
 	resolvedModel?: string;
+	/** Provider/id including routing, with no added thinking suffix. */
+	resolvedModelIdentity?: string;
+	/** Explicit thinking metadata; never inferred from the model identity. */
+	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
+	advisor?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -503,8 +528,14 @@ export interface SingleResult {
 	modelRole?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Omitted from tool-result JSON when undefined to keep wire payloads small. */
 	resolvedModel?: string;
+	/** Retains the unambiguous identity from {@link AgentProgress.resolvedModelIdentity}. */
+	resolvedModelIdentity?: string;
+	/** Retains {@link AgentProgress.resolvedThinkingLevel} after settlement. */
+	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
+	advisor?: boolean;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
@@ -512,8 +543,20 @@ export interface SingleResult {
 	usage?: Usage;
 	/** Output path for the task result */
 	outputPath?: string;
+	/**
+	 * Ran inside an isolation worktree. Such agents are parked without a
+	 * reviver once the worktree is torn down, so they are never resumable or
+	 * messageable after the run — summaries must not suggest otherwise.
+	 */
+	isolated?: boolean;
 	/** Patch path for isolated worktree output */
 	patchPath?: string;
+	/**
+	 * Whether `patchPath` holds a non-empty root-repo diff. `false` when the
+	 * agent's changes all live in nested repos (see `nestedPatchPaths`), so
+	 * summaries do not claim the root patch captured anything.
+	 */
+	hasRootChanges?: boolean;
 	/** Branch name for isolated branch-mode output */
 	branchName?: string;
 	/**
@@ -524,6 +567,12 @@ export interface SingleResult {
 	branchBaseSha?: string;
 	/** Nested repo patches to apply after parent merge */
 	nestedPatches?: NestedRepoPatch[];
+	/**
+	 * On-disk copies of `nestedPatches`, one file per nested repo, written
+	 * before the isolation workspace is torn down. The workspace is the only
+	 * other copy of that work, so these paths are the durable record.
+	 */
+	nestedPatchPaths?: string[];
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

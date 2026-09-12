@@ -717,6 +717,24 @@ describe("rule inspector", () => {
 		expect(text).toContain("asynchronous coordination");
 		expect(text.indexOf("Applies")).toBeLessThan(text.indexOf("asynchronous coordination"));
 	});
+
+	test("does not show '(no apply conditions)' for a rule scoped only by agents", () => {
+		const panel = new InspectorPanel();
+		panel.setExtension({
+			...ruleExtension(),
+			trigger: "manual",
+			description: "Keep the implement subagent inside its plan.",
+			raw: {
+				name: "orchestration",
+				description: "Keep the implement subagent inside its plan.",
+				agents: ["implement"],
+				content: "stay on plan",
+			},
+		});
+		const text = render(panel);
+		expect(text).toContain("agents");
+		expect(text).not.toContain("no apply conditions");
+	});
 });
 
 describe("command inspector", () => {

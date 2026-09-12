@@ -30,6 +30,7 @@ export const changelogTool = {
 export interface ChangelogPromptInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
+	sessionId: string;
 	thinkingLevel?: ThinkingLevel;
 	changelogPath: string;
 	isPackageChangelog: boolean;
@@ -41,6 +42,7 @@ export interface ChangelogPromptInput {
 export async function generateChangelogEntries({
 	model,
 	apiKey,
+	sessionId,
 	thinkingLevel,
 	changelogPath,
 	isPackageChangelog,
@@ -63,7 +65,7 @@ export async function generateChangelogEntries({
 				messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
 				tools: [changelogTool],
 			},
-			{ apiKey, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
+			{ apiKey, sessionId, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
 		),
 	);
 

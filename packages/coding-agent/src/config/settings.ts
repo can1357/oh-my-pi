@@ -23,6 +23,7 @@ import {
 	getAgentDir,
 	getLastChangelogVersionPath,
 	getProjectDir,
+	getProjectAgentDir,
 	isEnoent,
 	logger,
 	MAIN_CONFIG_FILENAMES,
@@ -42,7 +43,6 @@ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-pro
 import { applyHyperlinkSetting } from "../tui/hyperlink";
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
-import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
 import {
@@ -490,6 +490,8 @@ export class Settings {
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
+	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
+	#projectSettingsWarningsSeen = new Set<string>();
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
@@ -498,6 +500,7 @@ export class Settings {
 	#merged: RawSettings = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	#effectiveChangeListeners = new Set<(path: SettingPath, value: unknown, previous: unknown) => void>();
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
 	/** Paths modified during this session (for partial save) */
@@ -725,6 +728,13 @@ export class Settings {
 
 	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {
 		if (Object.is(value, prev)) return;
+		for (const listener of Array.from(this.#effectiveChangeListeners)) {
+			try {
+				listener(path, value, prev);
+			} catch (error) {
+				logger.warn("Settings: effective-change listener failed", { path, error: String(error) });
+			}
+		}
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
@@ -734,6 +744,14 @@ export class Settings {
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
 		}
+	}
+
+	/** Observe effective changes on this settings instance. */
+	onEffectiveChange(listener: (path: SettingPath, value: unknown, previous: unknown) => void): () => void {
+		this.#effectiveChangeListeners.add(listener);
+		return () => {
+			this.#effectiveChangeListeners.delete(listener);
+		};
 	}
 
 	/** Set once this instance is discarded; background saves become no-ops. */
@@ -1794,10 +1812,36 @@ export class Settings {
 	}
 
 	async #readProjectSettings(quarantineInvalid: boolean): Promise<ProjectSettingsReadResult> {
+		// Resolve once: capability discovery, fs-cache invalidation, and the
+		// warning prefix below must all derive from the same absolute scope so
+		// relative cwds (e.g. ".") produce absolute provider paths that match.
+		const discoveryCwd = path.resolve(this.#cwd);
+		const projectConfigDir = getProjectAgentDir(this.#cwd);
+		const projectConfigPath = path.join(projectConfigDir, "config.yml");
+		invalidateCapabilityFsCache(projectConfigPath);
+		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
+		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
 		try {
-			const result = await loadCapability(settingsCapability.id, { cwd: this.#cwd });
+			const result = await loadCapability(settingsCapability.id, { cwd: discoveryCwd });
+			// `loadCapability` aggregates warnings across every level, but this
+			// method only merges project items — user-level parse failures belong
+			// to the global layer and would misattribute here. Warnings embed
+			// their source file's absolute path, so keep only warnings rooted at
+			// the discovery cwd (a bare substring would over-match relative
+			// scopes such as `cwd: "."` and sibling dir prefixes). Remember what
+			// was surfaced so reloads stay quiet while new failures still log.
+			// Level attribution below the path layer (e.g. a user-scoped dir
+			// mounted inside the project) needs warning metadata from the
+			// providers, which `LoadResult.warnings` does not carry.
+			const cwdRoot = discoveryCwd.endsWith(path.sep) ? discoveryCwd : discoveryCwd + path.sep;
+			const projectWarnings = (result.warnings ?? []).filter(warning => warning.includes(cwdRoot));
+			for (const warning of projectWarnings) {
+				if (this.#projectSettingsWarningsSeen.has(warning)) continue;
+				logger.warn(`Settings: ${warning}`);
+			}
+			this.#projectSettingsWarningsSeen = new Set(projectWarnings);
 			for (const item of result.items as SettingsCapabilityItem[]) {
 				if (item.level === "project") {
 					merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
@@ -1809,7 +1853,6 @@ export class Settings {
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		const nativeProject = quarantineInvalid
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
@@ -1985,39 +2028,24 @@ export class Settings {
 			}
 		}
 
-		// inspect_image.enabled (boolean) -> inspect_image.mode (enum). Explicit
-		// user choices are preserved: true -> "on", false -> "off". Configs with
-		// no legacy key get the new "auto" default, which hides the tool for
-		// models with native image input. Handles nested and quoted-dotted
-		// ("inspect_image.enabled") sources; the target is always the nested
-		// form, which is the only shape the resolver reads.
+		// Remove the retired image-tool mode settings and preserve its request
+		// timeout under the read image-question setting. Nested values win over
+		// quoted-dotted legacy values; an existing new setting wins over both.
 		const inspectImageObj = isRecord(raw.inspect_image) ? (raw.inspect_image as Record<string, unknown>) : undefined;
-		const legacyEnabled =
-			typeof inspectImageObj?.enabled === "boolean"
-				? inspectImageObj.enabled
-				: typeof raw["inspect_image.enabled"] === "boolean"
-					? (raw["inspect_image.enabled"] as boolean)
+		const legacyQuestionTimeoutMs =
+			typeof inspectImageObj?.timeoutMs === "number"
+				? inspectImageObj.timeoutMs
+				: typeof raw["inspect_image.timeoutMs"] === "number"
+					? (raw["inspect_image.timeoutMs"] as number)
 					: undefined;
-		if (legacyEnabled !== undefined) {
-			if (!inspectImageObj) {
-				raw.inspect_image = {};
-			}
-			const target = raw.inspect_image as Record<string, unknown>;
-			const flatMode = raw["inspect_image.mode"];
-			if (target.mode === undefined) {
-				// A quoted-dotted explicit mode wins over the legacy boolean but
-				// must be normalized into the nested form the resolver reads.
-				target.mode =
-					typeof flatMode === "string" && (INSPECT_IMAGE_MODES as readonly string[]).includes(flatMode)
-						? flatMode
-						: legacyEnabled
-							? "on"
-							: "off";
-			}
-			delete target.enabled;
-			delete raw["inspect_image.enabled"];
-			delete raw["inspect_image.mode"];
+		const imagesObj = isRecord(raw.images) ? (raw.images as Record<string, unknown>) : undefined;
+		if (legacyQuestionTimeoutMs !== undefined && imagesObj?.questionTimeoutMs === undefined) {
+			raw.images = { ...imagesObj, questionTimeoutMs: legacyQuestionTimeoutMs };
 		}
+		delete raw.inspect_image;
+		delete raw["inspect_image.enabled"];
+		delete raw["inspect_image.mode"];
+		delete raw["inspect_image.timeoutMs"];
 
 		const taskObj = raw.task as Record<string, unknown> | undefined;
 		const isolationObj = taskObj?.isolation as Record<string, unknown> | undefined;
@@ -2043,7 +2071,7 @@ export class Settings {
 		// `true` reproduced the previous small-model-classified behavior, which is
 		// now "smart"; `false` maps to "none" so explicitly disabled configs remain
 		// off rather than inheriting the new "mechanical" default.
-		// Handles nested and quoted-dotted sources, like inspect_image above.
+		// Handles nested and quoted-dotted sources, like the legacy image settings above.
 		const featuresObj = isRecord(raw.features) ? (raw.features as Record<string, unknown>) : undefined;
 		const legacyUnexpectedStop =
 			typeof featuresObj?.unexpectedStopDetection === "boolean"
@@ -2904,7 +2932,7 @@ export class Settings {
 	async #saveProjectNow(): Promise<void> {
 		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
 
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+		const projectConfigPath = path.join(getProjectAgentDir(this.#cwd), "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
 		this.#modifiedProjectModelRoles.clear();
 
@@ -3139,8 +3167,9 @@ const extendedContextSignal = new SettingSignal("extendedContext");
 
 /**
  * Subscribe to extended-context setting changes. Sessions re-derive their
- * model's effective context window (the registry clamps premium long-context
- * models to the standard-pricing threshold while the setting is off).
+ * model's effective context window (the registry restores default windows
+ * and caps premium long-context models at the standard-pricing threshold
+ * while the setting is off).
  * Returns an unsubscribe function.
  */
 export const onExtendedContextChanged = (cb: () => void) => extendedContextSignal.on(cb);

@@ -237,13 +237,15 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		};
 	}
 
-	async function triggerMaintenance(): Promise<void> {
+	async function triggerMaintenance(options: { appendAssistant?: boolean } = {}): Promise<void> {
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
 		session.subscribe(event => {
 			if (event.type === "auto_compaction_end") onCompactionDone();
 		});
 		const assistantMsg = highUsageAssistant();
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		// Resume maintenance without extending the archived branch. Appending an
+		// assistant would make the retained user turn legitimately compactable.
+		if (options.appendAssistant) session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 		await compactionDone;
 		await session.waitForIdle();
@@ -349,7 +351,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 		const notices = collectNotices();
 		const emitSpy = vi.spyOn(ExtensionRunner.prototype, "emit");
-		await triggerMaintenance();
+		await triggerMaintenance({ appendAssistant: true });
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		const compactions = sessionManager

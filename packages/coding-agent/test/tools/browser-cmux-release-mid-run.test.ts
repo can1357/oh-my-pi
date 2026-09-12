@@ -1,6 +1,6 @@
 /**
  * Regression test for issue #4499: closing a cmux-backend tab while a
- * `browser({ action: "run" })` call is in flight rejected an orphaned
+ * `tab.run(...)` helper call (internally a run action) is in flight rejected an orphaned
  * `Promise.withResolvers()` promise created in `runInTabWithSnapshot`. The
  * cmux branch originally awaited `runCmuxCode(...)` directly and never
  * awaited/`.catch`ed the local `promise`; only `pending.reject` was stashed

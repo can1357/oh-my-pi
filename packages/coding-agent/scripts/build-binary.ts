@@ -32,6 +32,9 @@ export function resolveCrossBuild(value: string | undefined): CrossBuild | null 
 		case "win32-x64":
 		case "windows-x64":
 			return { id: value, platform: "win32", arch: "x64", target: "bun-windows-x64-baseline" };
+		case "win32-arm64":
+		case "windows-arm64":
+			return { id: value, platform: "win32", arch: "arm64", target: "bun-windows-arm64" };
 		default:
 			throw new Error(`Unsupported CROSS_TARGET: ${value}`);
 	}
