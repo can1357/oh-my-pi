@@ -520,6 +520,20 @@ export interface Terminal {
 	 */
 	readonly pendingOutputBytes?: number;
 
+	/**
+	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
+	 * neither the cursor nor the painted rows survive a resize under the
+	 * application's own model. Measured on Windows conhost: resizing the
+	 * pseudoconsole makes it re-emit its whole viewport from `CSI H` with
+	 * absolute addressing while the application writes nothing, and it re-homes
+	 * the cursor, so a DSR reply after a resize reports column 1 instead of the
+	 * column the application parked. The renderer's resize anchor recovery needs
+	 * both properties, so it takes the rebuild path instead when this is set.
+	 * Optional so custom Terminals built against older pi-tui versions keep
+	 * working; absent means the terminal itself owns the grid.
+	 */
+	readonly hostOwnsGridOnResize?: boolean;
+
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
 
@@ -662,8 +676,9 @@ function isPrivateModeSupported(status: string): boolean {
 export interface ProcessTerminalOptions {
 	/**
 	 * Force ConPTY-hosted behavior on or off. Defaults to live detection via
-	 * {@link isConPTYHosted}. Tests set this so the kitty-flag and write-chunking
-	 * paths stay hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
+	 * {@link isConPTYHosted}. Tests set this so the kitty-flag, write-chunking
+	 * and resize-routing ({@link Terminal.hostOwnsGridOnResize}) paths stay
+	 * hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
 	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
 	 */
 	conpty?: boolean;
@@ -1993,6 +2008,14 @@ export class ProcessTerminal implements Terminal {
 		if (this.#outputPump) return this.#outputPump.pending();
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
+	}
+
+	get hostOwnsGridOnResize(): boolean {
+		// #conpty, not a fresh isConPTYHosted() call: the construction override
+		// must gate every ConPTY-dependent path uniformly, or an injected
+		// `conpty` value models one host for writes and kitty flags and the
+		// opposite host for resize routing.
+		return this.#conpty;
 	}
 
 	/**
