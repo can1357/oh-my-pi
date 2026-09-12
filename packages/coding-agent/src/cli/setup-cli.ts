@@ -6,10 +6,13 @@
 import * as path from "node:path";
 import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { discoverAuthStorage } from "../session/auth-broker-config";
 import { Settings, settings } from "../config/settings";
+import { ModelRegistry } from "../config/model-registry";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { theme } from "../modes/theme/theme";
 import { CLOUD_STT_MODEL_OPTIONS, isCloudSttModel, resolveCloudSttModel } from "../stt/cloud-models";
+import { resolveSttCloudCredential } from "../stt/stt-controller";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
@@ -152,7 +155,7 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
  * `pick` (optional) lets an interactive user choose + persist a model; `ensure`
  * performs the download, streaming a normalized progress event.
  */
-interface SpeechComponent {
+export interface SpeechComponent {
 	name: string;
 	isReady(): Promise<boolean>;
 	status(): Promise<string>;
@@ -160,17 +163,18 @@ interface SpeechComponent {
 	ensure(onProgress: (progress: { stage: string; percent?: number }) => void): Promise<void>;
 }
 
-function buildSpeechComponents(): SpeechComponent[] {
+export function buildSpeechComponents(hasCloudCredential: Promise<boolean>): SpeechComponent[] {
 	return [
 		{
 			name: "Speech-to-Text model",
 			isReady: async () =>
-				settings.get("stt.backend") === "cloud" || isSttModelCached(settings.get("stt.modelName")),
+				(settings.get("stt.backend") === "cloud" && (await hasCloudCredential)) ||
+				isSttModelCached(settings.get("stt.modelName")),
 			status: async () => {
-				if (settings.get("stt.backend") === "cloud")
-					return `cloud (${resolveCloudSttModel(settings.get("stt.modelName"))}, no download)`;
 				const key = settings.get("stt.modelName");
-				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
+				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential))
+					return `cloud (${resolveCloudSttModel(key)}, no download)`;
+				return (await isSttModelCached(key)) ? key : `${key} — local fallback not downloaded`;
 			},
 			pick: async () => {
 				const cloud = settings.get("stt.backend") === "cloud";
@@ -187,9 +191,9 @@ function buildSpeechComponents(): SpeechComponent[] {
 				}
 				return true;
 			},
-			ensure: onProgress => {
-				if (settings.get("stt.backend") === "cloud") return Promise.resolve();
-				return downloadSttModel(settings.get("stt.modelName"), progress =>
+			ensure: async onProgress => {
+				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential)) return;
+				await downloadSttModel(settings.get("stt.modelName"), progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
 				);
 			},
@@ -231,8 +235,17 @@ function buildSpeechComponents(): SpeechComponent[] {
  * values).
  */
 async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
-	await Settings.init({ cwd: getProjectDir() });
-	const components = buildSpeechComponents();
+	const settingsInstance = await Settings.init({ cwd: getProjectDir() });
+	const hasCloudCredential =
+		settings.get("stt.backend") === "cloud"
+			? discoverAuthStorage()
+					.then(authStorage => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }))
+					.then(registry =>
+						resolveSttCloudCredential(registry, undefined, undefined, settings.get("stt.cloudCredential")),
+					)
+					.then(Boolean)
+			: Promise.resolve(false);
+	const components = buildSpeechComponents(hasCloudCredential);
 
 	if (flags.json) {
 		const report: Record<string, { ready: boolean; status: string }> = {};
