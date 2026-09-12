@@ -31,6 +31,23 @@ export interface PreparedProviderRequest {
 }
 
 export type ProviderRequestPreparer = (model: Model<Api>, options: StreamOptions) => PreparedProviderRequest;
+/**
+ * Headers a provider wants carried by a forwarded `pi-native` request, or
+ * `undefined` when it adds none.
+ *
+ * A `pi-native` client does not execute the provider request: it hands the
+ * turn to an `omp auth-gateway` that owns the provider credential and
+ * re-resolves the model from its own catalog. Request policy that lives in the
+ * client's process — an environment-gated retention opt-in, for example — is
+ * invisible to the gateway, so the only way to honor it is to send it with the
+ * request. The returned headers merge *under* the caller's own, and the hook
+ * deliberately cannot touch the model or the credential: `options.apiKey` is
+ * the gateway bearer, not the provider key.
+ */
+export type ProviderPiNativeHeaderPreparer = (
+	model: Model<Api>,
+	options: SimpleStreamOptions,
+) => Record<string, string> | undefined;
 export type ProviderModelPreparer = (model: Model<Api>) => Model<Api>;
 export type ProviderSimpleOptionsMapper = (options: SimpleStreamOptions) => Readonly<Record<string, unknown>>;
 
@@ -73,6 +90,8 @@ export interface ProviderDefinition {
 	readonly prepareModel?: ProviderModelPreparer;
 	/** Provider-owned request shaping applied before generic API dispatch. */
 	readonly prepareRequest?: ProviderRequestPreparer;
+	/** Provider-owned headers forwarded with a `pi-native` request (see {@link ProviderPiNativeHeaderPreparer}). */
+	readonly preparePiNativeHeaders?: ProviderPiNativeHeaderPreparer;
 	/** Provider-owned projection from the generic simple-stream option bag. */
 	readonly mapSimpleOptions?: ProviderSimpleOptionsMapper;
 	/** Provider-owned authentication and endpoint setup for model discovery. */
