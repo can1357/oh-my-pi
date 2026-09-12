@@ -103,12 +103,15 @@ export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHa
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	void promise.catch(() => {});
 
+	// Detach from the caller's signal on every outcome, not only on abort: a
+	// long-lived signal shared across dictations would otherwise accumulate one
+	// listener (and this closure's buffered audio) per completed stream.
 	const finish = (apply: () => void): void => {
 		if (settled) return;
 		settled = true;
+		options.signal?.removeEventListener("abort", abort);
 		apply();
 	};
-
 	const abort = (): void => {
 		requestAbort.abort();
 		finish(() => resolve(""));

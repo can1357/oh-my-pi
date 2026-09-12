@@ -393,7 +393,7 @@ export class STTController {
 		// Only a genuine first-use download blocks, with explicit progress, so we
 		// never record silently against missing weights.
 		if (await isSttModelCached(modelKey)) {
-			this.#warmModel(modelKey);
+			this.#warmModel(modelKey, signal);
 		} else {
 			await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`), {
 				signal,
@@ -406,11 +406,14 @@ export class STTController {
 	/** Warm the speech model in the worker without blocking recording. The worker
 	 *  memoizes the load, so the stream/transcribe path reuses it and the model is
 	 *  hot by the time recording stops. Only called when the weights are already
-	 *  cached, so no network fetch happens. On load failure (corrupt cache, OOM,
-	 *  runtime install) invalidate the resolved key so the next toggle re-runs
-	 *  preflight and retries instead of skipping it forever. */
-	#warmModel(modelKey: string): void {
-		void downloadSttModel(modelKey).catch(err => {
+	 *  cached, so no network fetch happens. `signal` is the recording's abort:
+	 *  when the recording is cancelled the warmup must not keep the worker
+	 *  referenced (and process exit delayed) for a load nothing will consume. On
+	 *  load failure (corrupt cache, OOM, runtime install) or abort, invalidate the
+	 *  resolved key so the next toggle re-runs preflight and retries instead of
+	 *  skipping it forever. */
+	#warmModel(modelKey: string, signal?: AbortSignal): void {
+		void downloadSttModel(modelKey, undefined, { signal }).catch(err => {
 			// Guard against a concurrent model switch clobbering a newer resolution.
 			if (!this.#disposed && this.#resolvedModelKey === modelKey) this.#resolvedModelKey = null;
 			logger.debug("stt: background model warmup failed", {
