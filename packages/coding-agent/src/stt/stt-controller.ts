@@ -1,6 +1,7 @@
 import { type ApiKeyResolver, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { kNoAuth } from "../config/model-provider-discovery";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import { DEFAULT_STT_BACKEND, isSttBackend, type SttBackend } from "./cloud-models";
@@ -72,14 +73,17 @@ export async function resolveSttCloudCredential(
 	try {
 		const apiKey = await registry.getApiKeyForProvider("openai", sessionId);
 		if (!apiKey) return undefined;
+		const baseUrl = registry.getProviderBaseUrl?.("openai");
+		const headers = registry.getProviderHeaders?.("openai");
+		if (apiKey === kNoAuth) return { kind: "openai", keyless: true, baseUrl, headers };
 		const resolver = registry.resolver?.("openai", { sessionId });
 		return {
 			kind: "openai",
 			// Seeded so the first attempt reuses the key this preflight resolved;
 			// later attempts re-enter the registry for refresh/rotation.
 			apiKey: resolver ? seedApiKeyResolver(apiKey, resolver) : apiKey,
-			baseUrl: registry.getProviderBaseUrl?.("openai"),
-			headers: registry.getProviderHeaders?.("openai"),
+			baseUrl,
+			headers,
 		};
 	} catch {
 		return undefined;
