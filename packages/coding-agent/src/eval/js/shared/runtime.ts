@@ -195,6 +195,18 @@ export class JsRuntime {
 		activateGlobalOwner(this.#globalOwner, this.#ownedGlobalKeys, action);
 	}
 
+	/**
+	 * Capture the current values of every owned global back into this owner's
+	 * global stack. A cell may rebind a reserved injected global (e.g.
+	 * `var fs = await import("node:fs/promises")`); without this, the next
+	 * `activateGlobalOwner` would restore the install-time value and silently
+	 * clobber the reassignment. Called after each run so bindings persist across
+	 * cells like the eval persistence contract promises.
+	 */
+	#recordGlobals(): void {
+		for (const key of this.#ownedGlobalKeys) recordGlobalValue(key, this.#globalOwner);
+	}
+
 	readonly helpers: HelperBundle;
 	#cwd: string;
 	#session: { cwd: string; sessionId: string };
@@ -329,6 +341,7 @@ export class JsRuntime {
 		try {
 			return await this.#als.run(context, callback);
 		} finally {
+			this.#recordGlobals();
 			leaveRun();
 		}
 	}
@@ -365,6 +378,7 @@ export class JsRuntime {
 				return await awaitMaybePromise(value);
 			});
 		} finally {
+			this.#recordGlobals();
 			leaveRun();
 		}
 	}
