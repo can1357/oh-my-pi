@@ -388,6 +388,71 @@ describe("ExtensionAPI agents", () => {
 		expect(AgentRegistry.global().get("OldChild")).toBeUndefined();
 	});
 
+	it("refuses a rescan whose session transitioned WHILE it was in flight, not just one started against a stale transcript", async () => {
+		using tempDir = TempDir.createSync("@omp-extension-agents-midscan-transition-");
+		const cwd = tempDir.path();
+		const oldSessionFile = path.join(cwd, "before.jsonl");
+		const oldChildFile = path.join(cwd, "before", "OldChild.jsonl");
+		const newSessionFile = path.join(cwd, "after.jsonl");
+		await Bun.write(oldSessionFile, "");
+		await Bun.write(oldChildFile, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(newSessionFile, "");
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(async () => async () => sessionStub(), 0);
+
+		let currentSessionFile = oldSessionFile;
+		let agents: ExtensionAgentsApi | undefined;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			api => {
+				agents = api.agents;
+			},
+			cwd,
+			new EventBus(),
+			runtime,
+		);
+		const authStorage = await AuthStorage.create(":memory:");
+		const runner = new ExtensionRunner(
+			[extension],
+			runtime,
+			cwd,
+			SessionManager.inMemory(cwd),
+			new ModelRegistry(authStorage),
+		);
+		await initializeExtensions(
+			{
+				extensionRunner: runner,
+				discoverStartupSkillPaths: async () => {},
+				getAgentId: () => MAIN_AGENT_ID,
+				sessionManager: { getSessionFile: () => currentSessionFile },
+			} as unknown as AgentSession,
+			{
+				reportSendError: (_action, error) => {
+					throw error;
+				},
+				reportRuntimeError: error => {
+					throw error.error;
+				},
+			},
+		);
+		if (!agents) throw new Error("Extension factory did not receive api.agents");
+
+		// Unlike the transition test above (which calls `ensureLive` only AFTER
+		// the transcript has already moved), this starts the rescan while it is
+		// still the CURRENT transcript, then flips ownership before the scan's
+		// own (real, disk-backed) awaits resolve — the `/new` /
+		// `ctx.switchSession()` race the fix guards against. Synchronously
+		// advancing `currentSessionFile` right after issuing the call, before
+		// awaiting it, guarantees the flip lands before any of the scan's
+		// filesystem awaits settle.
+		const ensureLivePromise = agents.ensureLive("OldChild", { parentSessionFile: oldSessionFile });
+		currentSessionFile = newSessionFile;
+
+		await expect(ensureLivePromise).rejects.toThrow(/not visible to this session/);
+		// The scan must have been cut short, not merely refused after
+		// completing: it never got to register "OldChild" under this scope.
+		expect(AgentRegistry.global().get("OldChild")).toBeUndefined();
+	});
+
 	it("ensureLive rescans past a stale in-scope ref when the current transcript has a same-named child", async () => {
 		using tempDir = TempDir.createSync("@omp-extension-agents-stale-samename-");
 		const cwd = tempDir.path();
