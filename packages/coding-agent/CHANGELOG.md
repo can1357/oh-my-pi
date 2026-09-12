@@ -104,6 +104,10 @@
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
 - Fixed wrong-typed `compat.stripImageInput` in `models.yml` being silently accepted, so the documented vision opt-out is now validated like its neighbours ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
 
+### Fixed
+
+- An advisor turn that emitted one bad tool name alongside a valid `advise` call no longer loses the advice. Quarantine runs before the agent loop dispatches tools and replaces the whole message, so discarding the turn also destroyed the `advise` call and the note it would have enqueued — the advice was lost, not delayed. A turn that carries a dispatchable `advise` call is no longer quarantined on unavailable-tool grounds; the bad call still fails at dispatch on its own. Extends the same trade the exec-resolved carve-out already makes ([#5900](https://github.com/can1357/oh-my-pi/issues/5900)). Hazardous notes are still quarantined regardless ([#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
