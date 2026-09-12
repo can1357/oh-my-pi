@@ -114,4 +114,43 @@ describe("/force slash command", () => {
 
 		expect(buildNamedToolChoice("write", model)).toEqual({ type: "function", name: "write" });
 	});
+
+	it("builds a named function choice for OpenRouter models", () => {
+		// OpenRouter used to be modelled as openai-completions and got this choice; since
+		// it became its own api, /force refused every OpenRouter model.
+		const model = buildModel({
+			id: "openai/gpt-5",
+			name: "GPT-5 (OpenRouter)",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		}) satisfies Model<"openrouter">;
+
+		expect(buildNamedToolChoice("write", model)).toEqual({ type: "function", name: "write" });
+	});
+
+	it("does not report a forced choice for an OpenRouter model that drops it", () => {
+		// supportsToolChoice: false makes both OpenAI transports drop tool_choice, so a
+		// named choice here would let /force claim a force that never reaches the wire.
+		const model = buildModel({
+			id: "amazon/nova-lite-v1",
+			name: "Nova Lite (OpenRouter)",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 300_000,
+			maxTokens: 5_120,
+			compat: { supportsToolChoice: false },
+		}) satisfies Model<"openrouter">;
+
+		expect(buildNamedToolChoice("write", model)).toBeUndefined();
+	});
 });
