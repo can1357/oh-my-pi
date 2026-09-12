@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { ConcatSink, getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
@@ -13,6 +13,8 @@ import {
 	type SessionTitleUpdate,
 	titleUpdateFromSlot,
 } from "./session-title-slot";
+
+const LF = new Uint8Array([0x0a]);
 
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
@@ -103,12 +105,11 @@ export async function visitEntriesFromFileStream(
 	const yieldEveryBytes = Math.max(0, options.yieldEveryBytes ?? STREAM_YIELD_BYTES);
 	const yieldEveryEntries = Math.max(0, options.yieldEveryEntries ?? STREAM_YIELD_ENTRIES);
 	const maxBytes = Math.max(0, options.maxBytes ?? Number.POSITIVE_INFINITY);
-	// Byte buffer (NOT a decoded string): multibyte UTF-8 sequences that straddle
-	// a stream-chunk boundary stay intact, and Bun.JSONL.parseChunk accepts typed
-	// arrays directly. Only the unconsumed remainder is held (≤ one record + a
-	// chunk), so the ≥8MiB memory guard is preserved (the file is never fully
-	// loaded into memory).
-	let buffer: Uint8Array = new Uint8Array();
+	// Bytes, not text: a multibyte UTF-8 sequence straddling a chunk boundary
+	// stays intact, and Bun.JSONL.parseChunk takes typed arrays directly. Only
+	// the unconsumed remainder is held (≤ one record + a chunk), so the ≥8MiB
+	// memory guard holds — the file is never fully loaded.
+	const sink = new ConcatSink();
 	const decoder = new TextDecoder();
 
 	const yieldToMacrotask = async (): Promise<void> => {
@@ -124,6 +125,19 @@ export async function visitEntriesFromFileStream(
 	};
 
 	const drain = async (): Promise<void> => {
+		const view = sink.flush();
+		if (!view) return;
+		// Only newline-terminated bytes may reach the parser: a trailing fragment
+		// in the same call turns an end-of-input `done` into a syntax error at the
+		// preceding newline, which would then be miscounted as a malformed record.
+		const lastNewline = view.lastIndexOf(0x0a);
+		if (lastNewline === -1) return;
+		let buffer: Uint8Array = view.subarray(0, lastNewline + 1);
+		let consumed = 0;
+		const advance = (count: number): void => {
+			consumed += count;
+			buffer = buffer.subarray(count);
+		};
 		while (buffer.length > 0 && !stopped) {
 			if (recordsSeen >= maxRecords) {
 				stopped = true;
@@ -176,7 +190,7 @@ export async function visitEntriesFromFileStream(
 				}
 				if (nonWhitespace) options.onMalformedRecord?.();
 				recordsSeen++;
-				buffer = buffer.subarray(nextNewline + 1);
+				advance(nextNewline + 1);
 				if (recordsSeen >= maxRecords) {
 					stopped = true;
 					break;
@@ -184,12 +198,13 @@ export async function visitEntriesFromFileStream(
 				continue;
 			}
 			if (read === 0) break; // incomplete record awaiting more data
-			buffer = buffer.subarray(read);
+			advance(read);
 			if (done) {
-				buffer = new Uint8Array();
+				advance(buffer.length);
 				break;
 			}
 		}
+		sink.consume(consumed);
 	};
 
 	try {
@@ -198,33 +213,50 @@ export async function visitEntriesFromFileStream(
 		for await (const chunk of source.stream()) {
 			if (stopped) break;
 			bytesSinceYield += chunk.byteLength;
-			buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+			// Parsing before the chunk closes a line re-scans the unfinished record
+			// on every chunk, which is quadratic for large records.
+			if (chunk.lastIndexOf(0x0a) === -1) {
+				// Skipping drain() also skips the only enforcement of the record cap,
+				// so re-check it here: a delimiter-free file would otherwise be read
+				// and buffered in full despite an exhausted budget.
+				if (recordsSeen >= maxRecords) {
+					stopped = true;
+					break;
+				}
+				sink.append(chunk);
+				await yieldToMacrotask();
+				continue;
+			}
+			sink.append(chunk);
 			// The optional fixed-width title slot is a physical first line that is
 			// NOT JSON; peel it before the parser would (correctly) reject it. The
 			// first line ends at a '\n' byte, so it is a complete UTF-8 sequence and
 			// safe to decode. A non-slot first line is a real entry and is left for
 			// the parser; a blank first line is left for the parser to skip.
 			if (!sawFirstLine) {
-				const newline = buffer.indexOf(0x0a);
+				const buffered = sink.flush()!;
+				const newline = buffered.indexOf(0x0a);
 				if (newline !== -1) {
 					sawFirstLine = true;
-					const firstLine = decoder.decode(buffer.subarray(0, newline)).trim();
+					const firstLine = decoder.decode(buffered.subarray(0, newline)).trim();
 					if (firstLine) {
 						const slot = parseTitleSlotLine(firstLine);
 						if (slot) {
 							titleSlot = titleUpdateFromSlot(slot);
-							buffer = buffer.subarray(newline + 1);
+							sink.consume(newline + 1);
 						}
 					}
 				}
 			}
+			// parseChunk can leave a value unfinished even after a newline; the
+			// sink keeps that remainder for the next chunk.
 			await drain();
 			await yieldToMacrotask();
 		}
 		// A trailing record without a final newline: terminate it so the parser
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
-		if (!stopped && buffer.length > 0 && buffer[buffer.length - 1] !== 0x0a) {
-			buffer = Buffer.concat([buffer, new Uint8Array([0x0a])]);
+		if (!stopped && !sink.isEmpty) {
+			sink.append(LF);
 			await drain();
 		}
 	} catch (err) {
