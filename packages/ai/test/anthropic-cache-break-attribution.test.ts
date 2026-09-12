@@ -11,7 +11,7 @@
  * No network: a capturing `fetch` returns a minimal successful SSE stream.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { type AnthropicOptions, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -116,6 +116,7 @@ async function turn(
 	cacheRetention?: CacheRetention,
 	model: Model<"anthropic-messages"> = MODEL,
 	fetch: FetchImpl = successFetch,
+	options: Pick<AnthropicOptions, "onPayload" | "sessionId"> = {},
 ): Promise<AssistantMessage> {
 	return await streamAnthropic(model, context, {
 		apiKey: "sk-ant-api-test",
@@ -123,6 +124,7 @@ async function turn(
 		providerSessionState,
 		sessionId: SESSION_ID,
 		...(cacheRetention ? { cacheRetention } : {}),
+		...options,
 	}).result();
 }
 
@@ -283,15 +285,58 @@ describe("anthropic cache-break attribution", () => {
 		});
 	});
 
-	it("does not blame a main turn for a side request that reused the session and conversation", async () => {
+	it("does not blame a main turn for an isolated side request", async () => {
 		const states = createProviderSessionState();
 		const main = contextWithTools([tool("lookup", {})]);
 		await turn(states, main);
-		// Summarizers and classifiers reuse the session id and the conversation
-		// root with their own prompt; the main turn's prefix is untouched by them.
-		await turn(states, contextWithTools([tool("lookup", {})], "Summarize the conversation below."));
+		await turn(
+			states,
+			contextWithTools([tool("lookup", {})], "Summarize the conversation below."),
+			undefined,
+			MODEL,
+			successFetch,
+			{ sessionId: `${SESSION_ID}:side:1` },
+		);
 		const third = await turn(states, main);
 
 		expect(third.cacheBreakReason).toBeUndefined();
+	});
+
+	it("attributes a payload-hook system edit and compares the next turn to the sent prompt", async () => {
+		const states = createProviderSessionState();
+		const before = "You are a precise assistant.";
+		const after = "You are a precise assistant. Prefer short answers.";
+		const context = contextWithTools([tool("lookup", {})], before);
+		await turn(states, context);
+		const second = await turn(states, context, undefined, MODEL, successFetch, {
+			onPayload: payload => ({ ...(payload as Record<string, unknown>), system: [{ type: "text", text: after }] }),
+		});
+		const third = await turn(states, context);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "system_prompt", charDelta: after.length - before.length });
+		expect(third.cacheBreakReason).toEqual({ kind: "system_prompt", charDelta: before.length - after.length });
+	});
+
+	it("reports a change back to an earlier system prefix on the same session", async () => {
+		const states = createProviderSessionState();
+		const before = "You are a precise assistant.";
+		const after = "You are a precise assistant. Prefer short answers.";
+		const original = contextWithTools([tool("lookup", {})], before);
+		await turn(states, original);
+		await turn(states, contextWithTools([tool("lookup", {})], after));
+		const third = await turn(states, original);
+
+		expect(third.cacheBreakReason).toEqual({ kind: "system_prompt", charDelta: before.length - after.length });
+	});
+
+	it("reports omitted and restored tool arrays even with mid-conversation tool changes", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([tool("lookup", {})]);
+		await turn(states, context);
+		const second = await turn(states, { ...context, tools: undefined });
+		const third = await turn(states, context);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "tools" });
+		expect(third.cacheBreakReason).toEqual({ kind: "tools" });
 	});
 });
