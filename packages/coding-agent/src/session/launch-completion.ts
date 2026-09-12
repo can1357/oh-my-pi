@@ -1,7 +1,16 @@
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
+
+const MAX_EXIT_REASON_LENGTH = 1_024;
+
+function modelExitReason(reason: string | undefined): string | undefined {
+	if (reason === undefined) return undefined;
+	const sanitized = sanitizeText(reason).replace(/\s+/g, " ").trim();
+	if (!sanitized) return undefined;
+	return sanitized.length > MAX_EXIT_REASON_LENGTH ? `${sanitized.slice(0, MAX_EXIT_REASON_LENGTH - 1)}…` : sanitized;
+}
 
 /** Yield-queue kind for broker-owned supervised process completions. */
 export const LAUNCH_COMPLETION_MESSAGE_TYPE = "launch-completion";
@@ -26,6 +35,7 @@ export function buildLaunchCompletionBatchMessage(entries: LaunchCompletionEntry
 					state: daemon.state,
 					exitCode: daemon.exitCode,
 					hasExitCode: daemon.exitCode !== undefined,
+					exitReason: modelExitReason(daemon.exitReason),
 				}),
 			)
 			.join("\n"),

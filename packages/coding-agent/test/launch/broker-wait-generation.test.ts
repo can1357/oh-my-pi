@@ -96,6 +96,7 @@ describe("daemon wait generation binding", () => {
 			expect(restartObserved).toBe(true);
 			expect(error).toBeInstanceOf(DaemonBrokerRejectedError);
 			expect((error as Error).message).toContain("generation");
+			expect((error as Error).message).toContain("without a reported termination reason");
 			expect(elapsed).toBeLessThan(1_000);
 		} finally {
 			await shutdown(client, broker);

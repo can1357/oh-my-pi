@@ -87,6 +87,12 @@ function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" 
 	return truncateToWidth(normalized || fallback, TRUNCATE_LENGTHS.TITLE);
 }
 
+function formatBackgroundWorkReason(reason: string | undefined): string | undefined {
+	if (reason === undefined) return undefined;
+	const normalized = shortenEmbeddedPaths(sanitizeText(reason).replace(/\s+/g, " ")).trim();
+	return normalized ? truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE) : undefined;
+}
+
 /** Terminal-state row for one completed background job or supervised process. */
 function backgroundWorkCompletionRow(options: {
 	failed: boolean;
@@ -95,6 +101,7 @@ function backgroundWorkCompletionRow(options: {
 	exitCode?: number;
 	timedOut?: boolean;
 	durationMs?: number;
+	reason?: string;
 }): Text {
 	const duration = typeof options.durationMs === "number" ? formatDuration(options.durationMs) : undefined;
 	const line = [
@@ -105,6 +112,7 @@ function backgroundWorkCompletionRow(options: {
 		options.exitCode !== undefined ? theme.fg("dim", `(exit ${options.exitCode})`) : undefined,
 		options.timedOut === true && options.exitCode === undefined ? theme.fg("dim", "(timed out)") : undefined,
 		duration ? theme.fg("dim", `(${duration})`) : undefined,
+		options.reason ? theme.fg("dim", `reason: ${options.reason}`) : undefined,
 	]
 		.filter(Boolean)
 		.join(" ");
@@ -242,6 +250,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			noun: "Supervised process",
 			name: formatBackgroundWorkName(daemon.name, "unnamed"),
 			exitCode: daemon.exitCode,
+			reason: formatBackgroundWorkReason(daemon.exitReason),
 			durationMs:
 				daemon.exitedAt !== undefined && daemon.startedAt !== undefined
 					? daemon.exitedAt - daemon.startedAt

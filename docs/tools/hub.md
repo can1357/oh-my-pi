@@ -115,6 +115,13 @@ The broker writes each subscription's raw output directly to one stable artifact
 
 Wake progress starts a follow-up model turn when the agent is idle. Ambient progress is delivered only at an already-active step boundary and never wakes an idle agent. Process termination is a separate completion notification, ordered after any final progress batch.
 
+When a supervised process exits with a nonzero code without an explicit diagnostic,
+the broker records `exitReason` as `process exited with code <n> without a reported
+termination reason`. This neutral reason is included in `start`, `wait`, `ps`/`describe`,
+and owner completion output; it reports missing evidence rather than inferring whether
+the code came from the child or an external terminator. If the runtime provides a signal,
+the reason names that signal instead.
+
 Both modes use the same batching and rate limiter, and both keep complete raw output in the artifact. `wake` spends a real model request and its tokens for every wake-up; all wake-ups in a session — Hub monitors and background jobs alike — draw on one session-wide wake-turn budget (`WakeTurnBudget`, registered once per `AgentSession` on the shared wake queue), so wake monitors are not budgeted separately and a chatty one delays other wake-ups. `ambient` waits for a turn that would happen anyway, often combining several permitted progress events with process completion or a user message, and costs nothing extra. Use wake for readiness, failures, or other output that changes the next action. Use ambient for benchmark iterations and low-priority diagnostics where only the final state requires action. See [Choosing a Bash progress mode](bash.md#choosing-a-progress-mode) for the full comparison and examples; Hub uses the same delivery channel.
 
 For noisy output, lower the program's verbosity or filter the stream to actionable lines on the next safe relaunch. To keep the current process running, switch its monitor to `ambient` or `off`; this changes only the calling session's subscription. The `restart` operation reuses the existing launch specification, so changing arguments or environment requires `stop` followed by `start`. Suppression-bearing progress messages repeat this guidance in a `<system-reminder>` a few times with increasing spacing, then stop.

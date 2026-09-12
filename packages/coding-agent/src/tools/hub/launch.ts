@@ -1257,6 +1257,12 @@ function daemonLabel(daemon: DaemonSnapshot): string {
 	)} restarts=${daemon.restartCount}${daemon.detached ? " detached" : daemon.persist ? " persistent" : ""}`;
 }
 
+function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
+	if (!daemon.exitReason) return undefined;
+	const reason = truncateToWidth(sanitizeText(daemon.exitReason).replace(/\s+/g, " ").trim(), TRUNCATE_LENGTHS.LINE);
+	return reason ? `${indent}Reason: ${reason}` : undefined;
+}
+
 /**
  * Human sentences for the readiness conditions still unmet, e.g.
  * `port 5173 on 127.0.0.1 never accepted connections`. `ready` (from the start
@@ -1319,7 +1325,8 @@ function toolContent(
 		case "start": {
 			const daemon = result.daemon;
 			const lines = [`${daemon.state === "failed" ? "Failed to launch" : "Started"} ${daemonLabel(daemon)}`];
-			if (daemon.state === "failed" && daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
+			const reason = daemonReasonLine(daemon);
+			if (reason) lines.push(reason);
 			if (daemon.readyMatch) lines.push(`Ready log matched: ${daemon.readyMatch}`);
 			if (result.readyTimedOut) {
 				const pending = readyPendingSummary(daemon, params.ready);
@@ -1342,6 +1349,8 @@ function toolContent(
 			const lines: string[] = [];
 			for (const daemon of result.daemons) {
 				lines.push(`- ${daemonLabel(daemon)}`);
+				const reason = daemonReasonLine(daemon, "  ");
+				if (reason) lines.push(reason);
 				const watchers = result.monitors?.filter(watcher => watcher.name === daemon.name) ?? [];
 				if (watchers.length === 0) continue;
 				lines.push(
@@ -1356,6 +1365,8 @@ function toolContent(
 		}
 		case "wait": {
 			const lines = [daemonLabel(result.daemon)];
+			const reason = daemonReasonLine(result.daemon);
+			if (reason) lines.push(reason);
 			if (result.matched) lines.push(`Matched: ${result.matched}`);
 			if (result.timedOut) {
 				const pending = readyPendingSummary(result.daemon);
@@ -1374,8 +1385,10 @@ function toolContent(
 				if (params.progress !== "off") return `Monitoring ${daemonLabel(result.daemon)}`;
 				return `${detached ? "Stopped monitoring" : "No active monitor for"} ${daemonLabel(result.daemon)}`;
 			}
+			const reason = daemonReasonLine(result.daemon);
 			return [
 				daemonLabel(result.daemon),
+				...(reason ? [reason] : []),
 				`Command: ${[result.spec.application, ...result.spec.args].join(" ")}`,
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
@@ -1780,8 +1793,8 @@ export function launchRenderResult(
 				if (details?.monitoring === "off") meta.push(theme.fg("warning", "monitor stopped"));
 				else if (details?.monitoring) meta.push(theme.fg("accent", `monitor ${details.monitoring}`));
 				if (daemon?.readyMatch) body.push(theme.fg("dim", `log matched: ${replaceTabs(daemon.readyMatch)}`));
-				if (daemon?.state === "failed" && daemon.exitReason)
-					body.push(theme.fg("error", replaceTabs(daemon.exitReason)));
+				const reason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (reason) body.push(theme.fg("error", reason));
 				if (details?.timedOut) {
 					const pending = daemon ? readyPendingSummary(daemon, params.ready) : [];
 					body.push(
@@ -1811,6 +1824,8 @@ export function launchRenderResult(
 			case "wait": {
 				meta.push(...callMeta(params));
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				const reason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (reason) body.push(theme.fg("error", reason));
 				if (details?.matched) body.push(theme.fg("dim", `matched: ${replaceTabs(details.matched)}`));
 				if (details?.timedOut) {
 					const pending = daemon ? readyPendingSummary(daemon) : [];
@@ -1832,6 +1847,8 @@ export function launchRenderResult(
 					body.push(
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
 					);
+					const reason = daemonReasonLine(item);
+					if (reason) body.push(theme.fg("error", reason));
 					for (const watcher of details?.monitors ?? []) {
 						if (watcher.name === item.name) body.push(watcherRow(watcher, item, theme));
 					}
@@ -1862,10 +1879,14 @@ export function launchRenderResult(
 					meta.push(theme.fg("accent", `monitor ${mode}`));
 				}
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				const reason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (reason) body.push(theme.fg("error", reason));
 				break;
 			}
 			case "describe": {
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				const reason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (reason) body.push(theme.fg("error", reason));
 				const spec = details?.spec;
 				if (spec) {
 					body.push(theme.fg("toolOutput", replaceTabs([spec.application, ...spec.args].join(" "))));

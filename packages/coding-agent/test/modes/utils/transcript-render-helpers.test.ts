@@ -19,7 +19,10 @@ function usage(overrides: Partial<Usage> = {}): Usage {
 	};
 }
 
-function launchCompletionMessage(name: string): CustomMessage<{ daemons: DaemonSnapshot[] }> {
+function launchCompletionMessage(
+	name: string,
+	overrides: Partial<DaemonSnapshot> = {},
+): CustomMessage<{ daemons: DaemonSnapshot[] }> {
 	return {
 		role: "custom",
 		customType: "launch-completion",
@@ -38,6 +41,7 @@ function launchCompletionMessage(name: string): CustomMessage<{ daemons: DaemonS
 					outputBytes: 0,
 					persist: false,
 					detached: false,
+					...overrides,
 				},
 			],
 		},
@@ -99,5 +103,22 @@ describe("buildLaunchCompletionBlock", () => {
 		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(120).join("\n"));
 
 		expect(rendered).toContain("Supervised process completed unnamed (exit 0)");
+	});
+
+	it("sanitizes the runtime reason without changing persisted details", () => {
+		const rawReason = "\u001b[31mfirst\r\n\tsecond\u001b[0m";
+		const message = launchCompletionMessage("watcher", {
+			state: "failed",
+			exitCode: 58,
+			exitReason: rawReason,
+			exitedAt: 3,
+		});
+		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(120).join("\n"));
+
+		expect(rendered).toContain("reason: first second");
+		expect(rendered).not.toContain("\u001b");
+		expect(rendered).not.toContain("\r");
+		expect(rendered).not.toContain("\t");
+		expect(message.details?.daemons[0]?.exitReason).toBe(rawReason);
 	});
 });
