@@ -464,6 +464,7 @@ export class STTController {
 				stream.pushAudio(samples);
 			});
 		} catch (err) {
+			streamAbort.abort(err);
 			stream.cancel();
 			this.#cleanupStream();
 			const msg = err instanceof Error ? err.message : "Failed to start microphone capture";

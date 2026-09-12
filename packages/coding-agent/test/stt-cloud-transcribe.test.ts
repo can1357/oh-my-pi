@@ -626,6 +626,50 @@ describe("cloud backend in STTController", () => {
 		}
 	});
 
+	it("aborts cloud setup when microphone capture fails to start", async () => {
+		let credentialSignal: AbortSignal | undefined;
+		const captureError = new Error("Microphone permission denied");
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const warnings: string[] = [];
+		const options = {
+			showWarning(message: string): void {
+				warnings.push(message);
+			},
+			showStatus(_message: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			() => {
+				throw captureError;
+			},
+			{
+				resolveCloudCredential: signal => {
+					credentialSignal = signal;
+					const { promise, reject } = Promise.withResolvers<CloudSttCredential | undefined>();
+					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+					return promise;
+				},
+			},
+		);
+
+		try {
+			await controller.toggle(editor, options);
+			expect(credentialSignal?.aborted).toBe(true);
+			expect(credentialSignal?.reason).toBe(captureError);
+			expect(warnings).toEqual([captureError.message]);
+			expect(controller.state).toBe("idle");
+		} finally {
+			controller.dispose();
+		}
+	});
+
 	it("settles a pending stop and aborts credential resolution when disposed", async () => {
 		const credentialStarted = Promise.withResolvers<void>();
 		let credentialSignal: AbortSignal | undefined;
