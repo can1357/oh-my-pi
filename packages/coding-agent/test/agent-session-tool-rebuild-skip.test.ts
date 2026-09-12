@@ -9,6 +9,7 @@ import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	collectMountedMCPToolRoutes,
@@ -66,7 +67,7 @@ function createMcpCustomTool(name: string, serverName: string, mcpToolName: stri
 }
 
 /** Rendered xd:// mount notices within one provider call's messages. */
-function mountNoticesIn(messages: Message[]): string[] {
+function mountNoticesIn(messages: readonly (AgentMessage | Message)[]): string[] {
 	return messages.flatMap(message => {
 		const { content } = message;
 		const text =
@@ -972,9 +973,20 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		session.settings.set("tools.xdevDocs", "builtins");
 		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const maintenanceMessages: AgentMessage[][] = [];
+		const maintenanceSpy = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementation(async messages => {
+				maintenanceMessages.push([...messages]);
+			});
 
 		await session.refreshMCPTools([search]);
 		await session.prompt("hello");
+		expect(maintenanceSpy).toHaveBeenCalledTimes(1);
+		const estimatedNotices = mountNoticesIn(maintenanceMessages[0] ?? []);
+		expect(estimatedNotices).toHaveLength(1);
+		expect(estimatedNotices[0]).toContain("## mcp__nucleus_search");
+		expect(estimatedNotices[0]).toContain("## Schema");
 
 		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);

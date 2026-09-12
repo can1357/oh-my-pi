@@ -180,9 +180,19 @@ const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
  * (and re-splice a redundant developer message that busts the provider
  * prompt-cache prefix).
  */
+interface ToolRosterNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
 interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
+}
+
+interface XdevMountNoticeProjection {
+	notice: CustomMessage<XdevMountNoticeDetails> | undefined;
+	announcedMounts: Set<string>;
 }
 
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
@@ -1226,11 +1236,21 @@ export class SessionTools {
 		}
 	}
 
+	/** Previews the hidden provider-visible roster notice without consuming its pending delta. */
+	peekPendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
+		return this.#buildPendingToolRosterNotice();
+	}
+
 	/** Consumes the hidden notice for provider-visible tool-roster changes. */
-	takePendingToolRosterNotice(): CustomMessage<{ added: string[]; removed: string[] }> | undefined {
+	takePendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
+		const notice = this.#buildPendingToolRosterNotice();
+		if (notice) this.#pendingToolRosterDelta = undefined;
+		return notice;
+	}
+
+	#buildPendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
 		const pending = this.#pendingToolRosterDelta;
 		if (!pending) return undefined;
-		this.#pendingToolRosterDelta = undefined;
 		const added = [...pending.added];
 		const removed = [...pending.removed];
 		return {
@@ -1247,12 +1267,25 @@ export class SessionTools {
 		};
 	}
 
+	/** Previews the hidden `xd://` mount notice without consuming or announcing its pending delta. */
+	peekPendingXdevMountNotice(baseCatalogDelivered: boolean): CustomMessage<XdevMountNoticeDetails> | undefined {
+		return this.#projectPendingXdevMountNotice(baseCatalogDelivered)?.notice;
+	}
+
 	/** Consumes the hidden notice for unannounced `xd://` mount changes. */
 	takePendingXdevMountNotice(baseCatalogDelivered: boolean): CustomMessage<XdevMountNoticeDetails> | undefined {
+		const projection = this.#projectPendingXdevMountNotice(baseCatalogDelivered);
+		if (!projection) return undefined;
+		this.#pendingXdevMountDelta = undefined;
+		this.#announcedMounts = projection.announcedMounts;
+		return projection.notice;
+	}
+
+	#projectPendingXdevMountNotice(baseCatalogDelivered: boolean): XdevMountNoticeProjection | undefined {
 		const pending = this.#pendingXdevMountDelta;
 		if (!pending) return undefined;
-		this.#pendingXdevMountDelta = undefined;
 		this.#ensureAnnouncedMountsSeeded();
+		const announcedMounts = new Set(this.#announcedMounts);
 		// A pending add for a device the outgoing base prompt already lists in its
 		// catalog needs no notice line — but only when the final provider prompt
 		// still carries that base catalog. A `before_agent_start` replacement drops
@@ -1263,7 +1296,7 @@ export class SessionTools {
 		// any request is sent (issue #7139 reviews).
 		if (baseCatalogDelivered) {
 			for (const name of pending.added) {
-				if (this.#basePromptXdevNames.has(name)) this.#announcedMounts.add(name);
+				if (this.#basePromptXdevNames.has(name)) announcedMounts.add(name);
 			}
 		}
 		// Only announce a net change relative to what the model already knows (from
@@ -1271,9 +1304,13 @@ export class SessionTools {
 		// device — the common resume/reconnect case — and an unmount for a device
 		// it was never told about are both suppressed, keeping the provider prompt
 		// cache prefix byte-stable across resumes.
-		const addedNames = [...pending.added].filter(name => !this.#announcedMounts.has(name));
-		const removedNames = [...pending.removed].filter(name => this.#announcedMounts.has(name));
-		if (addedNames.length === 0 && removedNames.length === 0) return undefined;
+		const addedNames = [...pending.added].filter(name => !announcedMounts.has(name));
+		const removedNames = [...pending.removed].filter(name => announcedMounts.has(name));
+		for (const name of addedNames) announcedMounts.add(name);
+		for (const name of removedNames) announcedMounts.delete(name);
+		if (addedNames.length === 0 && removedNames.length === 0) {
+			return { notice: undefined, announcedMounts };
+		}
 		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
 		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = removedNames.map(name => ({ name }));
@@ -1285,16 +1322,17 @@ export class SessionTools {
 					this.#host.settings.get("tools.xdevInlineDevices"),
 				)
 			: "";
-		for (const name of addedNames) this.#announcedMounts.add(name);
-		for (const name of removedNames) this.#announcedMounts.delete(name);
 		return {
-			role: "custom",
-			customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
-			content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
-			details: { added: addedNames, removed: removedNames },
-			attribution: "agent",
-			display: false,
-			timestamp: Date.now(),
+			notice: {
+				role: "custom",
+				customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
+				content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+				details: { added: addedNames, removed: removedNames },
+				attribution: "agent",
+				display: false,
+				timestamp: Date.now(),
+			},
+			announcedMounts,
 		};
 	}
 

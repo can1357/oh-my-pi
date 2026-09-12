@@ -6479,12 +6479,10 @@ export class AgentSession {
 
 			// Pending tool-roster and xd:// deltas accompany the next user-authored
 			// prompt, never an agent-initiated continuation. Reserve their pre-user
-			// position now, but consume them only after before_agent_start and
-			// pre-prompt compaction run: both can rebuild the base prompt (an
-			// extension systemPrompt override, or a context-promotion/summary
-			// rebuild), and a rebuild renders the complete roster while clearing the
-			// queued roster delta. Consuming earlier would splice a notice the
-			// rebuilt prompt already subsumes, sending a contradictory pair.
+			// position now. Non-consuming previews count toward pre-prompt context
+			// maintenance, while the live deltas are consumed only after maintenance:
+			// promotion/summary can rebuild the base prompt and clear a roster delta
+			// it subsumes, avoiding a contradictory materialized notice.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
@@ -6582,12 +6580,30 @@ export class AgentSession {
 				}
 			}
 
-			await this.#maintenance.runPrePromptCompactionIfNeeded(messages);
+			// Deferred notices can carry substantial inline xd:// docs. Preview them
+			// in a copy so context maintenance sees the request's true size without
+			// consuming deltas that a maintenance-triggered rebuild may supersede.
+			const previewXdevMountNotice = isUserQueuedMessage(message)
+				? this.#tools.peekPendingXdevMountNotice(baseXdevCatalogDelivered)
+				: undefined;
+			const previewToolRosterNotice = isUserQueuedMessage(message)
+				? this.#tools.peekPendingToolRosterNotice()
+				: undefined;
+			const maintenanceMessages = previewXdevMountNotice || previewToolRosterNotice ? [...messages] : messages;
+			if (maintenanceMessages !== messages) {
+				maintenanceMessages.splice(
+					xdevMountNoticeIndex,
+					0,
+					...(previewXdevMountNotice ? [previewXdevMountNotice] : []),
+					...(previewToolRosterNotice ? [previewToolRosterNotice] : []),
+				);
+			}
+			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
-			// Consumed here — after pre-prompt compaction — so a promotion/summary
-			// rebuild has already cleared any queued roster delta it now reflects.
+			// Consume only after maintenance so a promotion/summary rebuild has
+			// already cleared any queued roster delta it now reflects.
 			const xdevMountNotice = isUserQueuedMessage(message)
 				? this.#tools.takePendingXdevMountNotice(baseXdevCatalogDelivered)
 				: undefined;
