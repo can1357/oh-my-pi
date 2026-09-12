@@ -96,7 +96,7 @@ interface MCPServerConfigBase {
 	/**
 	 * Per-server tool allowlist: only tools whose raw advertised name matches
 	 * one entry are contributed to the session. Entries are literal tool names
-	 * or picomatch glob patterns (`*`, `?`, `[...]`, `{a,b}`).
+	 * or glob patterns (`*`, `?`, `[...]`, `{a,b}`) matched over the raw name.
 	 * OMP-specific; only OMP-owned discovery providers parse it.
 	 */
 	enabledTools?: string[];

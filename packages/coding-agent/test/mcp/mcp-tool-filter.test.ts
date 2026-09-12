@@ -127,23 +127,25 @@ test("leading ! and extglob prefixes are literals (matcher surface pinned to doc
 	expect(run(NAMES, ["+(a|b)"]).unmatched).toEqual(["+(a|b)"]);
 });
 
-test("negated class with the encoded sentinel excludes the slash (documented picomatch behavior)", () => {
-	// `[^/]` encodes to `[^§]`, and picomatch excludes a class's own members:
-	// `admin[^/]delete` does NOT match `admin/delete`. A negated class WITHOUT
-	// the sentinel (`[^a]`) still matches slash-containing names. Documented
-	// in tool-filter.ts — the pattern stays routable, no guard.
+test("negated classes treat the slash as an ordinary member", () => {
+	// `[^/]` translates to `[^§]`, so `admin[^/]delete` does NOT match
+	// `admin/delete` while `[^a]` does — the slash is a member like any other.
+	// Picomatch's auto-injected `/` member is harmless here: no encoded name
+	// contains a raw `/`.
 	expect(run(["admin/delete", "adminXdelete"], ["admin[^/]*"]).allowed).toEqual(["adminXdelete"]);
 	expect(run(["admin/delete", "adminXdelete"], ["admin[^a]*"]).allowed).toEqual(["admin/delete", "adminXdelete"]);
 	expect(run(NAMES, ["[^/]*"]).allowed).toEqual(NAMES);
 });
 
-test("single-char wildcard crosses a slash but not a raw sentinel (cardinality caveat)", () => {
-	// `/` encodes to ONE char (`§`), so `?` spans a slash position:
+test("single-char wildcard matches exactly one RAW character, sentinel included", () => {
+	// `/` occupies one encoded character, so `?` spans a slash position:
 	expect(run(NAMES, ["a?min/delete"]).allowed).toEqual(["admin/delete"]);
-	// A raw `§` expands to two encoded chars, so `?` cannot match it —
-	// `admin??delete` is the two-encoded-char spelling:
-	expect(run(["admin§delete"], ["admin?delete"]).allowed).toEqual([]);
-	expect(run(["admin§delete"], ["admin??delete"]).allowed).toEqual(["admin§delete"]);
+	// The name encoding is injective and variable-width (`§` → `¤§`), so `?` is
+	// emitted as an alternation over the encoded domain: it still spans exactly
+	// one RAW character — a literal `§` included — and `??` spans two.
+	expect(run(["admin§delete"], ["admin?delete"]).allowed).toEqual(["admin§delete"]);
+	expect(run(["admin§delete"], ["admin??delete"]).allowed).toEqual([]);
+	expect(run(NAMES, ["admin??delete"]).allowed).toEqual([]);
 });
 
 test("positive classes with slash members match (admin[/]delete matches admin/delete)", () => {
@@ -152,6 +154,31 @@ test("positive classes with slash members match (admin[/]delete matches admin/de
 	expect(run(["admin/delete", "adminXdelete"], ["admin[/]delete"]).allowed).toEqual(["admin/delete"]);
 	expect(run(["xay", "x/y", "xby"], ["x[a/]y"]).allowed).toEqual(["xay", "x/y"]);
 	expect(run(["file_1", "file/1"], ["file[/_]1"]).allowed).toEqual(["file_1", "file/1"]);
+});
+
+test("class ranges that span the slash keep it as a member", () => {
+	// `/` (0x2F) lies between `.` (0x2E) and `0` (0x30), so a raw `[.-0]` admits
+	// it — the translator completes the range with the sentinel instead of
+	// silently dropping the slash from the member set.
+	expect(run(["admin/delete", "admin.delete", "admin0delete"], ["admin[.-0]delete"]).allowed).toEqual([
+		"admin/delete",
+		"admin.delete",
+		"admin0delete",
+	]);
+	expect(run(["adminXdelete"], ["admin[.-0]delete"]).allowed).toEqual([]);
+	// The negated form excludes exactly the spanned members.
+	expect(run(["admin/delete", "adminAdelete"], ["admin[^.-0]delete"]).allowed).toEqual(["adminAdelete"]);
+});
+
+test("grouping and extglob syntax stay literal beside a supported wildcard", () => {
+	// `noextglob` disables the `+()` operator, but picomatch would still compile
+	// `(a|b)` as grouping — so the translator escapes it. A denylist entry
+	// `["!(a)"]` must not become a negation, and `+(a|b)*` must address the
+	// literal tool name rather than admitting `+afoo`.
+	expect(run(["+(a|b)foo", "+afoo"], ["+(a|b)*"]).allowed).toEqual(["+(a|b)foo"]);
+	expect(run(["(a|b)foo", "afoo"], ["(a|b)*"]).allowed).toEqual(["(a|b)foo"]);
+	expect(run(["(a|b)foo", "afoo"], ["a(b)c*"]).allowed).toEqual([]);
+	expect(run(NAMES, ["!(search)"]).unmatched).toEqual(["!(search)"]);
 });
 
 test("slash encoding is injective (sentinel-carrying names cannot collide with slash names)", () => {

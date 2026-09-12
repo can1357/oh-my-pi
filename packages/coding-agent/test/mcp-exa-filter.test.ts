@@ -97,4 +97,22 @@ describe("Exa MCP filtering", () => {
 
 		expect(Object.keys(result.configs)).toEqual(["exa"]);
 	});
+
+	test("keeps an unrestricted exa server whose allowlist selects a non-native tool", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_fetch_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
+	test("filters an unrestricted exa server whose allowlist selects only native tools", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_search_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(result.configs).toEqual({});
+	});
 });

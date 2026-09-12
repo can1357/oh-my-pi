@@ -21,7 +21,7 @@ export interface MCPServer {
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
 	requestIdFormat?: MCPRequestIdFormat;
-	/** Per-server tool allowlist (picomatch globs over raw advertised names). */
+	/** Per-server tool allowlist (globs over raw advertised names). */
 	enabledTools?: string[];
 	/** Per-server tool denylist; wins over `enabledTools`. */
 	disabledTools?: string[];

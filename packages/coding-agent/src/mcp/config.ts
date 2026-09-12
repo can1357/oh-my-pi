@@ -300,7 +300,13 @@ export function filterExaMCPServers(
 				exaApiKeys.push(apiKey);
 			}
 			const requested = getRequestedExaMcpTools(config);
-			const hasExtraTools = requested?.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]) ?? false;
+			// The per-server allowlist selects an effective tool set too: an
+			// entry naming a tool the native integration does not provide (e.g.
+			// `web_fetch_exa`) must keep the server mounted, exactly as a
+			// `tools=` URL/argument restriction would.
+			const allowlist = config.enabledTools ?? [];
+			const selections = requested ? [...requested, ...allowlist] : allowlist;
+			const hasExtraTools = selections.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]);
 			if (!hasExtraTools) {
 				continue;
 			}

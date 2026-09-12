@@ -39,89 +39,216 @@ export interface MCPToolFilterResult {
 /**
  * Picomatch treats `/` as a path separator: `*` and `?` never cross it and
  * negated classes always exclude it (picomatch's compiler appends `/` to
- * negated-class output). MCP tool names are opaque strings — a denylist
- * entry `*` must match a tool named `admin/delete` — so both the pattern and
- * the name are matched in a slash-free domain: every `/` is transliterated
- * to `§` (an ordinary printable character that is not a glob metacharacter,
- * survives picomatch's class compilation, and is excluded from MCP tool-name
- * characters). Literal `§` in the input is escaped to `¤§` and literal `¤` to
- * `¤¤`; the units `§`, `¤§`, `¤¤` are prefix-free (verified exhaustively over
- * the {§, ¤, /} alphabet), so the encoding is injective — encoded strings
+ * negated-class output). MCP tool names are opaque strings — a denylist entry
+ * `*` must match a tool named `admin/delete` — so both sides are matched in a
+ * slash-free domain where every `/` is transliterated to `§` and the encoding
+ * characters themselves (`§`, `¤`) are escaped (`§ → ¤§`, `¤ → ¤¤`). The units
+ * `§`, `¤§`, `¤¤` are prefix-free, so the encoding is injective: encoded names
  * collide only when the originals do.
  *
- * Known limitations (documented, not guarded — the matching domain is
- * character-substituted, so picomatch sees encoded text):
- * - Wildcards and class ranges resolve against ENCODED text, so a raw `§` or
- *   `¤` in a tool name expands to two encoded characters: `admin?delete`
- *   matches one-char `admin§delete`? NO — `?` matches one ENCODED char, so
- *   `admin?delete` does NOT match a name with a raw `§` between (the name
- *   encodes to `admin¤§delete`), while `admin??delete` DOES. Slash positions
- *   are unaffected (`/` → single `§`, so `admin?delete` matches
- *   `admin/delete`) — the cardinality limitation applies only to raw
- *   sentinel characters. Use `*`/`**` to span them.
- * - A negated class containing the encoded sentinel excludes it: `[^/]`
- *   encodes to `[^§]`, so `admin[^/]delete` does NOT match
- *   `admin/delete` (and non-ASCII class members are reliably excluded).
- *   An explicit positive class member (`[/]`) is the supported spelling.
- * - Class ranges compare encoded code points: an implicit slash range
- *   (`[.-0]`, where `/` lies between `.` and `0`) does not span the encoded
- *   `§` (U+00A7) — spell the slash member explicitly.
- * The common patterns (`*`, `**`, explicit `/` class members, braces,
- * literals, `?` over slash-free names) are unaffected and match as
- * documented.
+ * The name side is encoded verbatim; the pattern side is translated node by
+ * node so that raw-character semantics survive the encoding:
  *
- * `nonegate`/`noextglob` pin the applied surface to the documented globs
- * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)
- * is treated as a literal by picomatch, keeping every entry's semantics
- * uniform regardless of whether it also contains `*`/`?`.
+ * - `?` matches ONE RAW CHARACTER. Escaping the sentinel makes an encoded name
+ *   variable-width (`§` occupies two encoded characters), so `?` is emitted as
+ *   an alternation over the encoded domain — an escaped pair (`¤§`/`¤¤`) or any
+ *   character that is not the escape marker. `admin?delete` therefore matches
+ *   both `admin/delete` and a name containing a literal `§`.
+ * - `*`/`**` span any number of characters, `/` included (no path separator
+ *   exists in the encoded domain).
+ * - Character classes translate their members; a range that spans `/`
+ *   (`[.-0]`, where `.` ≤ `/` ≤ `0`) gains the sentinel as an explicit member,
+ *   so the slash stays an ordinary member exactly as it is in the raw name. A
+ *   negated class needs no compensation: picomatch's injected `/` member never
+ *   matches, because no encoded name contains a raw `/`. Only `/` needs a
+ *   compensation — `§` and `¤` are outside every code range a user writes
+ *   (`§` is U+00A7), so a raw class range over them keeps its meaning.
+ * - `(`, `)` and `|` are escaped, so grouping and alternation stay literal even
+ *   beside a wildcard: `+(a|b)*` matches the literal `+(a|b)foo`, not `+afoo`.
+ *   A leading `!`, an extglob prefix and braces outside the supported surface
+ *   behave likewise: only `*`, `?`, `[...]` and `{a,b}` carry meaning.
  */
 const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true, windows: false } as const;
 
-/** The code character a transliterated `/` is replaced with (see rationale above). */
+/** Character a transliterated `/` is replaced with. */
 const SLASH_CODE = "§";
-/** The escape marker used for the two code characters above. */
-const ESCAPE = "¤";
+/** Escape marker for the two encoding characters (`§`, `¤`). */
+const ESCAPE_MARK = "¤";
+/** Slash code point, used to detect ranges that span it. */
+const SLASH_CODEPOINT = 0x2f;
+/**
+ * Matches exactly one RAW character of an encoded name: one of the two-char
+ * escape units, or any character that is not the escape marker.
+ */
+const RAW_CHAR = `{${ESCAPE_MARK}${SLASH_CODE},${ESCAPE_MARK}${ESCAPE_MARK},[^${ESCAPE_MARK}]}`;
+
+/** Translate one literal (non-glob) character into the encoded domain. */
+function translateLiteral(ch: string): string {
+	if (ch === "/") return SLASH_CODE;
+	if (ch === SLASH_CODE) return ESCAPE_MARK + SLASH_CODE;
+	if (ch === ESCAPE_MARK) return ESCAPE_MARK + ESCAPE_MARK;
+	return ch;
+}
 
 /**
- * Transliterate a pattern or name into the slash-free matching domain:
- * `/` → `§`, literal `§` → `¤§`, literal `¤` → `¤¤` (prefix-free, injective).
+ * Locate the `]` closing the class opened at `open`, following picomatch's own
+ * boundary rules: a `]` directly after `[` or `[^` is a literal member, an
+ * escaped `]` never closes, and `!` is an ordinary member.
  */
-function toSlashFreeDomain(text: string): string {
+function findClassEnd(pattern: string, open: number): number {
+	let i = open + 1;
+	if (pattern[i] === "^") i++;
+	if (pattern[i] === "]") i++;
+	for (; i < pattern.length; i++) {
+		if (pattern[i] === "\\") {
+			i++;
+			continue;
+		}
+		if (pattern[i] === "]") return i;
+	}
+	return -1;
+}
+
+/**
+ * Translate a class body (`[`…`]` contents), mapping `/` to the sentinel and
+ * completing any range that spans it.
+ */
+function translateClassBody(body: string): string {
 	let out = "";
-	for (const ch of text) {
-		if (ch === "/") out += SLASH_CODE;
-		else if (ch === SLASH_CODE) out += ESCAPE + SLASH_CODE;
-		else if (ch === ESCAPE) out += ESCAPE + ESCAPE;
-		else out += ch;
+	let spansSlash = false;
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+		if (ch === "\\") {
+			const next = body[i + 1];
+			if (next === undefined) {
+				out += "\\\\";
+				continue;
+			}
+			out += "\\" + translateClassMember(next);
+			i++;
+			continue;
+		}
+		if (ch === "/") {
+			out += SLASH_CODE;
+			continue;
+		}
+		const hi = body[i + 2];
+		if (body[i + 1] === "-" && hi !== undefined) {
+			// A trailing `-` (immediately before `]`) is a literal member, not a range.
+			out += ch + "-" + translateClassMember(hi);
+			if (ch.charCodeAt(0) <= SLASH_CODEPOINT && SLASH_CODEPOINT <= hi.charCodeAt(0)) spansSlash = true;
+			i += 2;
+			continue;
+		}
+		out += ch;
+	}
+	// A range spanning `/` gains it explicitly: the raw name's slash occupies a
+	// single encoded character, so it must remain an ordinary class member.
+	return spansSlash ? out + SLASH_CODE : out;
+}
+
+/** Translate one class member, keeping escapes that picomatch honours. */
+function translateClassMember(ch: string): string {
+	if (ch === "/") return SLASH_CODE;
+	if (ch === SLASH_CODE) return SLASH_CODE;
+	return ch;
+}
+
+/**
+ * Translate a glob pattern into the encoded domain, emitting raw-character
+ * semantics for `?` and keeping grouping characters literal.
+ */
+function translatePattern(pattern: string): string {
+	let out = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\") {
+			const next = pattern[i + 1];
+			if (next === undefined) {
+				out += "\\\\";
+				continue;
+			}
+			// `\/`, `\§` and `\¤` become the plain encoded literal; every other
+			// escape (`\*`, `\?`, `\\`, …) must survive as an escape.
+			if (next === "/" || next === SLASH_CODE || next === ESCAPE_MARK) out += translateLiteral(next);
+			else out += "\\" + next;
+			i++;
+			continue;
+		}
+		if (ch === "[") {
+			const end = findClassEnd(pattern, i);
+			if (end < 0) {
+				out += "\\[";
+				continue;
+			}
+			out += "[" + translateClassBody(pattern.slice(i + 1, end)) + "]";
+			i = end;
+			continue;
+		}
+		if (ch === "?") {
+			out += RAW_CHAR;
+			continue;
+		}
+		if (ch === "(" || ch === ")" || ch === "|") {
+			out += "\\" + ch;
+			continue;
+		}
+		out += translateLiteral(ch);
 	}
 	return out;
 }
 
-class CompiledPattern {
-	readonly #raw: string;
-	readonly #isMatch: ((name: string) => boolean) | undefined;
+/** Transliterate a raw tool name into the slash-free matching domain. */
+function encodeName(name: string): string {
+	if (!name.includes("/") && !name.includes(SLASH_CODE) && !name.includes(ESCAPE_MARK)) return name;
+	let out = "";
+	for (const ch of name)
+		out +=
+			ch === "/"
+				? SLASH_CODE
+				: ch === SLASH_CODE
+					? ESCAPE_MARK + SLASH_CODE
+					: ch === ESCAPE_MARK
+						? ESCAPE_MARK + ESCAPE_MARK
+						: ch;
+	return out;
+}
 
-	constructor(pattern: string) {
-		this.#raw = pattern;
-		if (/[*?[\]{}]/.test(pattern)) {
-			this.#isMatch = picomatch(toSlashFreeDomain(pattern), MATCH_OPTIONS);
+/** Per-pattern matcher over raw tool names; cached across filter calls. */
+type ToolMatcher = (name: string) => boolean;
+
+const compiledPatterns = new Map<string, ToolMatcher>();
+
+/** Compile one filter entry into a raw-name matcher. */
+function compilePattern(pattern: string): ToolMatcher {
+	const cached = compiledPatterns.get(pattern);
+	if (cached !== undefined) return cached;
+	let matcher: ToolMatcher;
+	if (/[*?[\]{}\\]/.test(pattern)) {
+		let compiled: ((name: string) => boolean) | null = null;
+		try {
+			compiled = picomatch(translatePattern(pattern), MATCH_OPTIONS);
+		} catch {
+			// A syntactically broken pattern never matches: it degrades to an
+			// unmatched entry instead of disabling the server.
+			compiled = null;
 		}
+		const globMatch = compiled;
+		matcher = globMatch ? (name: string) => globMatch(encodeName(name)) : () => false;
+	} else {
+		matcher = (name: string) => name === pattern;
 	}
-
-	matches(name: string): boolean {
-		if (this.#raw === name) return true;
-		if (!this.#isMatch) return false;
-		return this.#isMatch(toSlashFreeDomain(name));
-	}
+	compiledPatterns.set(pattern, matcher);
+	return matcher;
 }
 
 /**
  * Apply a per-server tool filter.
  *
  * Literal entries match exactly; entries containing glob metacharacters
- * (`*`, `?`, `[...]`, `{...}`) are matched with picomatch semantics (dotfiles
- * enabled, since MCP tool names are opaque strings, not paths). Denylist
- * entries subtract from the allowlist when both are set.
+ * (`*`, `?`, `[...]`, `{...}`) are matched with fnmatch semantics over the raw
+ * name — `/` is an ordinary character, and `*`/`?` cross it. Denylist entries
+ * subtract from the allowlist when both are set.
  */
 export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 	const { toolNames, enabledTools, disabledTools } = input;
@@ -130,29 +257,27 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 		return { allowed: [...toolNames], unmatched: [], filterEmpty: false };
 	}
 
-	// Compile each pattern once per call; matches(name, pattern) per pair
-	// would recompile the picomatch regex for every tool × pattern.
-	const enabled = enabledTools?.length ? enabledTools.map(pattern => new CompiledPattern(pattern)) : undefined;
-	const disabled = disabledTools?.length ? disabledTools.map(pattern => new CompiledPattern(pattern)) : undefined;
+	const enabled = enabledTools?.length ? enabledTools.map(compilePattern) : undefined;
+	const disabled = disabledTools?.length ? disabledTools.map(compilePattern) : undefined;
 
 	let allowed: string[];
 	let unmatched: string[];
 
 	if (enabled) {
-		allowed = toolNames.filter(name => enabled.some(matcher => matcher.matches(name)));
+		allowed = toolNames.filter(name => enabled.some(matcher => matcher(name)));
 		// Only unmatched allowlist entries warn: silence there means
 		// over-permission (the opposite of the allowlist intent). An unmatched
 		// denylist entry is harmless — deny subtracts, so a defensive entry
 		// kept across servers/versions legitimately matches nothing and must
 		// not produce recurring log noise.
-		unmatched = enabledTools!.filter((_, i) => !toolNames.some(name => enabled[i].matches(name)));
+		unmatched = enabledTools!.filter((_pattern, i) => !toolNames.some(name => enabled[i](name)));
 	} else {
 		allowed = [...toolNames];
 		unmatched = [];
 	}
 
 	if (disabled) {
-		allowed = allowed.filter(name => !disabled.some(matcher => matcher.matches(name)));
+		allowed = allowed.filter(name => !disabled.some(matcher => matcher(name)));
 	}
 
 	return { allowed, unmatched, filterEmpty: allowed.length === 0 && toolNames.length > 0 };
