@@ -1,12 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
-import { convertToLlm } from "../src/session/messages";
+import { convertToLlm, isUserInterruptAbort } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 
 function user(text: string): AgentMessage {
@@ -467,5 +468,33 @@ describe("native queued-message control", () => {
 		agent.clearAllQueues();
 		await session.abort();
 		await initial.catch(() => {});
+	});
+
+	test("send-now on an idle session leaves no user-interrupt marker for a later direct abort", async () => {
+		const { session, agent, started } = create();
+		agent.followUp(user("selected while idle"));
+		const before = session.getMessageQueue(session.sessionId);
+		// No turn is running: the send-now abort has nothing to interrupt, so its
+		// one-shot user-interrupt marker must not survive into the replacement run.
+		const after = await session.updateMessageQueue({
+			sessionId: session.sessionId,
+			expectedRevision: before.revision,
+			itemId: before.items[0]!.id,
+			action: "send-now",
+		});
+		expect(after.items).toEqual([]);
+		await started[0]!.promise;
+		expect(session.isStreaming).toBe(true);
+		// TTSR and streaming guards abort through agent-core directly, bypassing
+		// session.abort(). A leaked marker reaches the pending-ID classification
+		// branch first and persists this unrelated abort as a user interruption.
+		agent.abort("tool-supervisor rule");
+		await agent.waitForIdle();
+		const aborted = agent.state.messages.filter(
+			(message): message is AssistantMessage =>
+				message.role === "assistant" && message.stopReason === "aborted",
+		);
+		expect(aborted.length).toBeGreaterThan(0);
+		for (const message of aborted) expect(isUserInterruptAbort(message)).toBe(false);
 	});
 });

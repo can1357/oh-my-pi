@@ -7882,7 +7882,8 @@ export class AgentSession {
 		preserveQueuedMessages?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
-		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+		const armedAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+		this.#pendingAbortErrorId = armedAbortErrorId;
 		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
 		// Pull advisor concerns out of the steer/follow-up queues before any await so
 		// the post-abort stranded-message drain can't auto-resume the run on them.
@@ -7957,6 +7958,15 @@ export class AgentSession {
 				this.#preserveAdvisorCard(card);
 			}
 		} finally {
+			// The one-shot marker is consumed synchronously by the interrupted
+			// turn's aborted message_end, which the agent loop emits before
+			// waitForIdle resolves. If nothing consumed it (abort while already
+			// idle, or a turn that failed before its first stream), disarm it: a
+			// later direct agent.abort() (TTSR, streaming guard) reaches the
+			// pending-ID branch ahead of its own classification and would
+			// otherwise be persisted as a user interruption. Identity-compared so
+			// a concurrent abort's marker is never wiped.
+			if (this.#pendingAbortErrorId === armedAbortErrorId) this.#pendingAbortErrorId = undefined;
 			this.#abortInProgress = false;
 			this.#drainStrandedQueuedMessages();
 		}
