@@ -3960,7 +3960,7 @@ describe("ExtensionRunner", () => {
 				export default function(pi) {
 					const name = import.meta.path.endsWith("inject-a.ts") ? "a" : "b";
 					pi.on("context", async event => ({
-						messages: [...event.messages, {
+						messages: [...event.messages.map(message => ({ ...message })), {
 							role: "custom",
 							customType: "probe." + name,
 							content: "<probe-" + name + ">",

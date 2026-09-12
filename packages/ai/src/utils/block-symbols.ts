@@ -172,3 +172,29 @@ export function copyPerCallContextMessage(
 export function isPerCallContextMessage(message: PerCallContextMessageCarrier | null | undefined): boolean {
 	return message?.[kPerCallContextMessage] === true;
 }
+
+/**
+ * Original history position carried by a context message clone.
+ *
+ * Object-spread transforms retain this symbol, allowing the extension runner
+ * to distinguish byte-identical historical copies from inserted messages.
+ */
+export const kContextHistoryIndex = Symbol("agent.message.contextHistoryIndex");
+
+/** Carries a context message's original history position. */
+export type ContextHistoryIndexCarrier = object & { [kContextHistoryIndex]?: number };
+
+/** Reads a context message's original history position. */
+export function getContextHistoryIndex(message: ContextHistoryIndexCarrier | null | undefined): number | undefined {
+	return message?.[kContextHistoryIndex];
+}
+
+/** Records a context message's original history position. */
+export function setContextHistoryIndex(message: ContextHistoryIndexCarrier, index: number): void {
+	message[kContextHistoryIndex] = index;
+}
+
+/** Removes context-history tracking before provider conversion. */
+export function clearContextHistoryIndex(message: ContextHistoryIndexCarrier): void {
+	delete message[kContextHistoryIndex];
+}

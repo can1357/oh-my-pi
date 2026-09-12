@@ -10,7 +10,12 @@ import type {
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
-import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import {
+	clearContextHistoryIndex,
+	getContextHistoryIndex,
+	markPerCallContextMessage,
+	setContextHistoryIndex,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -1638,7 +1643,10 @@ export class ExtensionRunner {
 			// return new message arrays rather than mutating in place.
 			currentMessages = [...messages];
 		}
-		const persistedMessages = new Set(currentMessages);
+		for (let index = 0; index < currentMessages.length; index++) {
+			const message = currentMessages[index];
+			if (message) setContextHistoryIndex(message, index);
+		}
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
@@ -1655,14 +1663,32 @@ export class ExtensionRunner {
 				);
 
 				if (handlerResult && (handlerResult as ContextEventResult).messages) {
-					currentMessages = (handlerResult as ContextEventResult).messages!;
+					const nextMessages = (handlerResult as ContextEventResult).messages!;
+					for (let index = 0; index < nextMessages.length; index++) {
+						const message = nextMessages[index];
+						if (!message || getContextHistoryIndex(message) !== undefined) continue;
+						const previousMessage = currentMessages[index];
+						if (!previousMessage) continue;
+						const historyIndex = getContextHistoryIndex(previousMessage);
+						if (historyIndex === undefined) continue;
+						setContextHistoryIndex(message, historyIndex);
+						if (!Bun.deepEquals(message, previousMessage)) clearContextHistoryIndex(message);
+					}
+					currentMessages = nextMessages;
 				}
 			}
 		}
 
 		for (const message of currentMessages) {
-			if (!persistedMessages.has(message)) markPerCallContextMessage(message);
+			const historyIndex = getContextHistoryIndex(message);
+			const historyMessage = historyIndex === undefined ? undefined : messages[historyIndex];
+			if (historyMessage && historyIndex !== undefined) setContextHistoryIndex(historyMessage, historyIndex);
+			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
+			clearContextHistoryIndex(message);
+			if (historyMessage) clearContextHistoryIndex(historyMessage);
+			if (!unchanged) markPerCallContextMessage(message);
 		}
+		for (const message of messages) clearContextHistoryIndex(message);
 		return currentMessages;
 	}
 
