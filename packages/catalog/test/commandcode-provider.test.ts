@@ -3,6 +3,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { commandCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -391,6 +392,32 @@ describe("Command Code provider support", () => {
 		expect(models.find(model => model.id === "claude-haiku-4-5-20251001")).toMatchObject({
 			api: "anthropic-messages",
 		});
+	});
+	test("lets class lineage carry max on Command Code Muse Spark 1.3", async () => {
+		// Provider restating thinking-efforts ties classes/meta.kdl on the
+		// efforts axis. Keep only supports-reasoning-effort; class adds max.
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				data: [
+					{ id: "meta/muse-spark-1.3", name: "Muse Spark 1.3", context_length: 1_048_576 },
+					{
+						id: "meta/muse-spark-1.3-contributor",
+						name: "Muse Spark 1.3 Contributor",
+						context_length: 1_048_576,
+					},
+				],
+			}),
+		);
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const specs = await options.fetchDynamicModels?.();
+		const models = (specs ?? []).map(spec => buildModel(spec));
+		expect(models).toHaveLength(2);
+		for (const model of models) {
+			expect(model.thinking).toEqual({
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			});
+		}
 	});
 	test("keeps unknown context limits instead of copying another host", async () => {
 		// A catalog row that omits or misreports `context_length` retains a

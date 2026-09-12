@@ -2,6 +2,10 @@
 // ladders follow command-code@1.44.0: the thinking-efforts below reproduce the
 // bundle's 36-id effort registry 1:1 (verified against its effort map), plus
 // the 5 Muse Spark lineage ids whose ladder OMP's classes/meta.kdl carries.
+// 1.1/1.2 still list the five-tier ladder here because the class exact ids
+// are bare (`muse-spark-1.1`); 1.3 reseller ids omit thinking-efforts so the
+// class `meta/` rule (which adds max) wins. This host is openai-completions
+// effort dialect, not Vercel's Anthropic-budget route.
 // Every other served id exposes no effort dial upstream (`modelSupports-
 // ReasoningEffort` is false for them in the CLI), so a missing ladder here
 // is a deliberate absence, not a gap.
@@ -58,10 +62,16 @@ provider "commandcode" {
 		supports-reasoning-effort #true
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 	}
-	models "meta/muse-spark-1.1" "meta/muse-spark-1.2" "meta/muse-spark-1.2-contributor" \
-		"meta/muse-spark-1.3" "meta/muse-spark-1.3-contributor" {
+	models "meta/muse-spark-1.1" "meta/muse-spark-1.2" "meta/muse-spark-1.2-contributor" {
 		supports-reasoning-effort #true
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// Class lineage owns the 1.3 ladder (adds max). This block only opts the
+	// host into an effort dial — provider default is supports-reasoning-effort
+	// #false. Do not restate thinking-efforts: equal-specificity overlap with
+	// classes/meta.kdl is an AmbiguousOverlapError.
+	models "meta/muse-spark-1.3" "meta/muse-spark-1.3-contributor" {
+		supports-reasoning-effort #true
 	}
 	models "Qwen/Qwen3.8-27B" "Qwen/Qwen3.8-Flash" "Qwen/Qwen3.8-Max" "Qwen/Qwen3.8-Max-0902" {
 		supports-reasoning-effort #true

@@ -10,7 +10,10 @@ import type { Api, Model, ModelSpec } from "./types";
 // Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
 // the model manager rebuilds via `buildModel` on load. Request headers are
 // intentionally omitted: arbitrary provider-defined header names can carry
-// credentials. v12 invalidates Kimi Code rows carrying the blanket
+// credentials. v13 invalidates Muse Spark rows whose persisted built thinking
+// predates the KDL-owned 1.3 `max` ladder (cached `xhigh` overrode the new
+// tier for the 2h TTL even after a static fingerprint mismatch); v12
+// invalidates Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
 // kimi-for-coding[-highspeed] -> 32768, #6711); v11 invalidates rows that may
 // persist derived computer-use
@@ -23,7 +26,7 @@ import type { Api, Model, ModelSpec } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 12;
+const CACHE_SCHEMA_VERSION = 13;
 const HEADER_RESTORE_VERSION = 1;
 
 interface CacheRow {

@@ -5,6 +5,12 @@
 ### Added
 
 - Added Charm Hyper as a built-in provider with API-key login, live model discovery, and per-model pricing, effort ladders, and limits read straight from its catalog ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Added the `max` thinking-effort tier to Muse Spark 1.3 and its contributor variant on reseller hosts and Command Code, with the ladder owned by the class lineage.
+
+### Fixed
+
+- Existing model caches no longer hide Muse Spark 1.3's new `max` thinking effort after upgrading.
+- Vercel's Muse Spark Anthropic route retains its supported thinking ladder instead of offering a duplicate `max` budget.
 
 ## [18.1.18] - 2026-09-11
 
