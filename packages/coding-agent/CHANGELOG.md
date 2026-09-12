@@ -5,6 +5,7 @@
 ### Added
 
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Added `examples/extensions/command-provider.ts`, a command-backed provider that runs a local CLI (`muse exec --json`) as an OMP provider: the prompt travels through the command's prompt-file flag, a new child session is seeded with the retained context, each provider registers its own API id, and a stock Windows Muse install resolves to the versioned executable its shim selects ([#11838](https://github.com/can1357/oh-my-pi/pull/11838) by [@aminamos](https://github.com/aminamos)).
 
 ### Fixed
 
