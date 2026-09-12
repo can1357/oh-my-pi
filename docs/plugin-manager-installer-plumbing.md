@@ -78,6 +78,8 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 
 `PluginManager.install` also accepts git sources (validated by `validateGitSpec` instead of the npm regex): namespaced shorthands `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`, `codeberg:`, `sourcehut:`/`srht:`, and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, `ssh://…`, `git+https://…`). Git specs do not encode the package name, so install diffs `plugins/package.json#dependencies` before/after `bun install` to resolve it.
 
+Non-GitHub `https://`/`ssh://` specs are passed to bun with a `git+` prefix (bun only auto-detects git for GitHub-hosted URLs, so without it the spec is misread as an npm tarball). Inline userinfo credentials (`https://user:token@host/group/repo.git`) are stripped from the install spec: `bun install` persists the spec verbatim into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those user files. Private repositories authenticate via SSH, a git credential helper, or `.netrc` instead — bun honors all of them natively.
+
 `extractPackageName` strips version suffix for on-disk path lookup after install.
 
 ## Manifest source and required fields
