@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
+import type { ExtensionStatusOptions } from "../../../extensibility/extensions/types";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
@@ -28,7 +29,7 @@ import { GH_COMMAND_TIMEOUT_MS, github } from "../../../utils/github";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
-import { theme } from "../../theme/theme";
+import { isValidThemeColor, theme } from "../../theme/theme";
 import { type CompactionBoundaries, computeCompactionBoundaries } from "../../utils/context-usage";
 import {
 	type CodexResetFireworksEvent,
@@ -42,6 +43,7 @@ import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
+	HookStatusEntry,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSettings,
@@ -413,8 +415,8 @@ export class StatusLineComponent implements Component {
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
-	#hookStatuses: Map<string, string> = new Map();
-	#sortedHookStatuses: readonly string[] = [];
+	#hookStatuses: Map<string, HookStatusEntry> = new Map();
+	#sortedHookStatuses: readonly HookStatusEntry[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	/**
@@ -757,12 +759,17 @@ export class StatusLineComponent implements Component {
 		this.#onCodexResetFireworks = handler;
 	}
 
-	setHookStatus(key: string, text: string | undefined): void {
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
 		if (text === undefined) {
 			if (!this.#hookStatuses.delete(key)) return;
 		} else {
-			if (this.#hookStatuses.get(key) === text) return;
-			this.#hookStatuses.set(key, text);
+			// Extensions are untyped at runtime, so an unknown token must degrade to
+			// the default accent instead of reaching theme.fg (same posture as
+			// `model-roles.ts` takes for configured role colours).
+			const color = options?.color && isValidThemeColor(options.color) ? options.color : undefined;
+			const current = this.#hookStatuses.get(key);
+			if (current?.text === text && current.color === color) return;
+			this.#hookStatuses.set(key, color === undefined ? { text } : { text, color });
 		}
 		this.#sortedHookStatuses = Array.from(this.#hookStatuses.entries())
 			.sort(([a], [b]) => a.localeCompare(b))
@@ -2547,8 +2554,21 @@ export class StatusLineComponent implements Component {
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;
 		if (showHooks && this.#sortedHookStatuses.length > 0) {
-			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeStatusText(text), width)));
+			lines.push(...this.#sortedHookStatuses.map(status => renderHookStatusRow(status, width)));
 		}
 		return lines;
 	}
+}
+
+/**
+ * Renders one extension status as a standalone row: sanitize, colour with the
+ * requested theme token, then truncate. Truncation runs on the styled string so
+ * the SGR wrapper is not counted against the visible width.
+ */
+export function renderHookStatusRow(status: HookStatusEntry, width: number): string {
+	const sanitized = sanitizeStatusText(status.text);
+	// A token the active theme omits would make `theme.fg` throw, so the row
+	// falls back to plain text — its appearance before colours existed.
+	const color = status.color !== undefined && theme.hasFg(status.color) ? status.color : undefined;
+	return truncateToWidth(color ? theme.fg(color, sanitized) : sanitized, width);
 }

@@ -19,6 +19,7 @@ import type {
 	SubagentProgressPayload,
 } from "../../task";
 import type { TodoPhase } from "../../tools/todo";
+import type { ThemeColor } from "../theme/schema";
 import type { RpcMessagesPage } from "./rpc-messages";
 
 // ============================================================================
@@ -414,6 +415,7 @@ export type RpcExtensionUIRequest =
 			method: "setStatus";
 			statusKey: string;
 			statusText: string | undefined;
+			statusColor?: ThemeColor;
 	  }
 	| {
 			type: "extension_ui_request";
