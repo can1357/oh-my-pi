@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { CustomToolContext } from "../src/extensibility/custom-tools/types";
@@ -109,10 +109,10 @@ describe("Skill URI reader capability", () => {
 			{ createContext: () => ({}) } as unknown as ExtensionRunner,
 		);
 		const tools = projectSystemPromptToolMetadata(new Map([[definition.name, adapter]]), { mode: "full" });
-		const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-custom-reader-bridge-"));
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-reader-bridge-"));
 		try {
 			const skillDir = path.join(tempDir, "skills", "bridge-skill");
-			await fs.promises.mkdir(skillDir, { recursive: true });
+			await fs.mkdir(skillDir, { recursive: true });
 			const skillFile = path.join(skillDir, "SKILL.md");
 			await Bun.write(skillFile, "# Bridge Skill\n");
 			const { systemPrompt } = await buildSystemPrompt({
@@ -136,7 +136,7 @@ describe("Skill URI reader capability", () => {
 			expect(text).toContain("bridge-skill");
 			expect(text).toContain("`skill://<name>`");
 		} finally {
-			await fs.promises.rm(tempDir, { recursive: true, force: true });
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 });
