@@ -188,7 +188,13 @@ function sharedBank(configured: string | undefined): string {
  */
 function resolveProjectRoot(directory: string): string {
 	try {
-		return vcs.repo(directory)?.primaryRoot() ?? directory;
+		const root = vcs.repo(directory)?.primaryRoot() ?? directory;
+		// Canonicalize: the native discovery walk above is lexical, so a
+		// checkout reached through a symlinked alias and a linked worktree
+		// whose on-disk `commondir`/`gitdir` pointers were written against the
+		// real path (git resolves symlinks when it creates them) would
+		// otherwise hash two different strings for one repository.
+		return fs.realpathSync(root);
 	} catch (error) {
 		logger.debug("mnemopi: project root resolution failed, using cwd", { directory, error: String(error) });
 		return directory;
