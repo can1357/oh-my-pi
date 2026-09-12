@@ -445,7 +445,10 @@ export class CollabGuestLink {
 		if (switched === false) {
 			throw new Error("Collab replica activation was cancelled");
 		}
-		const orphanedLiveBlocks = [...this.#ctx.pendingTools.values()];
+		const orphanedLiveBlocks = [
+			...this.#ctx.pendingTools.values(),
+			...this.#ctx.eventController.takeDisplaceableComponents(),
+		];
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
 		this.state = pending.state;
@@ -464,15 +467,20 @@ export class CollabGuestLink {
 		try {
 			await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		} catch (err) {
-			// #clearTransientUi() above already dropped these blocks from
-			// pendingTools, and a failed renderInitialMessages() restores the
-			// untouched visible container without disposing its children (its own
-			// rollback only tears down the staged tree that never committed): with
-			// no remaining reference to these blocks, nothing would ever call
-			// dispose() on them again, leaking their shared-ticker registration for
-			// the rest of the process. Stop them in place — the caller's
-			// apply-chain catch preserves the rendered rows, only the ticker
-			// registration needs to go.
+			// #clearTransientUi() above already dropped the pendingTools blocks,
+			// and #handleToolExecutionEnd settles a displaceable hub/todo result out
+			// of pendingTools into EventController's own trackers instead (Codex
+			// review on #9377): orphanedLiveBlocks folds both in via
+			// takeDisplaceableComponents() above, or a still-animated "waiting" card
+			// would survive the resync with no remaining reference to stop it. A
+			// failed renderInitialMessages() restores the untouched visible
+			// container without disposing its children (its own rollback only
+			// tears down the staged tree that never committed): with no remaining
+			// reference to these blocks, nothing would ever call dispose() on them
+			// again, leaking their shared-ticker registration for the rest of the
+			// process. Stop them in place — the caller's apply-chain catch
+			// preserves the rendered rows, only the ticker registration needs to
+			// go.
 			for (const handle of orphanedLiveBlocks) {
 				handle.dispose?.();
 			}
