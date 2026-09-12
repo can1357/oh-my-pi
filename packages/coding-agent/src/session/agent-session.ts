@@ -2006,6 +2006,24 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	/**
+	 * Cancel one running background subagent job owned by this agent, routing
+	 * the job's run signal through the normal abort path so the subagent
+	 * finalizes as aborted (salvaged result + lifecycle event). Idempotent:
+	 * returns whether a running job was found and cancelled; an already-finished
+	 * or unknown subagent is a no-op returning false, so hosts can treat a
+	 * cancel of a vanished subagent as success.
+	 */
+	cancelSubagent(subagentId: string): boolean {
+		const manager = this.#asyncJobManager;
+		if (!manager || !this.#agentId) return false;
+		const job = manager
+			.getRunningJobs({ ownerId: this.#agentId })
+			.find(job => job.id === subagentId || job.agentId === subagentId);
+		if (!job) return false;
+		return manager.cancel(job.id, { ownerId: this.#agentId });
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {

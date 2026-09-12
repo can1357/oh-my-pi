@@ -1307,6 +1307,10 @@
 - Fixed external thinking being offered on xAI reasoning-only Responses models (grok-4 family) that reject `reasoning.effort`, where the private scratchpad ran alongside native reasoning instead of replacing it.
 - Fixed the extension tool-call handler timeout rendering outside a titled section in `/settings` by registering its Extensions group on the Tools tab.
 
+### Added
+
+- Added an RPC `cancel_subagent` command (and the `RpcClient.cancelSubagent()` client method) to stop a running background subagent ([#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

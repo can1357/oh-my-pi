@@ -1318,6 +1318,18 @@ export async function runRpcMode(
 				}
 			}
 
+			case "cancel_subagent": {
+				if (typeof command.subagentId !== "string" || command.subagentId.length === 0) {
+					return error(id, "cancel_subagent", "subagentId must be a non-empty string");
+				}
+				try {
+					const cancelled = session.cancelSubagent(command.subagentId);
+					return success(id, "cancel_subagent", { cancelled });
+				} catch (err) {
+					return error(id, "cancel_subagent", err instanceof Error ? err.message : String(err));
+				}
+			}
+
 			// =================================================================
 			// Model
 			// =================================================================

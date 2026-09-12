@@ -411,6 +411,10 @@ function handle(frame) {
 		write({ id: frame.id, type: "response", command: "get_subagent_messages", success: true, data: { sessionFile: frame.sessionFile || "/tmp/subagent.jsonl", fromByte: frame.fromByte || 0, nextByte: 0, reset: false, entries: [], messages: [] } });
 		return;
 	}
+	if (frame.type === "cancel_subagent") {
+		write({ id: frame.id, type: "response", command: "cancel_subagent", success: true, data: { cancelled: frame.subagentId === "SubagentA" } });
+		return;
+	}
 	if (frame.type === "prompt") {
 		write({ id: frame.id, type: "response", command: "prompt", success: true });
 		write({ type: "notice", level: "info", message: "subagent test" });
@@ -445,6 +449,11 @@ function handle(frame) {
 		expect(progressTasks).toEqual(["Do work"]);
 		expect(rawEventTypes).toEqual(["agent_start"]);
 		expect(sessionEventTypes).toContain("notice");
+
+		// Wire round trip for the cancel command: accepted for a known
+		// subagent, idempotent false for an unknown one.
+		await expect(client.cancelSubagent("SubagentA")).resolves.toBe(true);
+		await expect(client.cancelSubagent("ghost-agent")).resolves.toBe(false);
 	});
 
 	test("forwards nested subagent frames published on the shared observability bus", () => {
