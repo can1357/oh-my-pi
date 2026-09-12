@@ -121,11 +121,12 @@ async function loadImpl<T>(
 ): Promise<CapabilityResult<T>> {
 	const allItems: Array<T & { _source: SourceMeta; _shadowed?: boolean }> = [];
 	const suppressedItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
+	const disabledItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
 	const allWarnings: string[] = [];
 	const contributingProviders: string[] = [];
-	const disabledExtensionIds = options.includeDisabled
-		? new Set<string>()
-		: new Set<string>(options.disabledExtensions ?? settings?.get("disabledExtensions") ?? []);
+	const disabledExtensionIds = new Set<string>(
+		options.disabledExtensions ?? settings?.get("disabledExtensions") ?? [],
+	);
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -166,12 +167,17 @@ async function loadImpl<T>(
 			}
 
 			const extensionId = capability.toExtensionId?.(itemWithSource);
-			if (extensionId && disabledExtensionIds.has(extensionId)) {
+			const isDisabled = extensionId !== undefined && disabledExtensionIds.has(extensionId);
+			if (isDisabled && !options.includeDisabled) {
 				continue;
 			}
 
 			if (options.filter && !options.filter(itemWithSource)) {
 				continue;
+			}
+
+			if (isDisabled) {
+				disabledItems.add(itemWithSource);
 			}
 
 			if (options.suppress?.(itemWithSource)) {
@@ -203,6 +209,23 @@ async function loadImpl<T>(
 	for (const item of allItems) {
 		const key = capability.key(item);
 
+		if (disabledItems.has(item)) {
+			// Disabled rows never claim their key or equivalence class, so they
+			// can't shadow an enabled survivor (issue #11870). But when an
+			// earlier enabled item already owns the key or an equivalent
+			// identity, the disabled row is a lower-priority loser: mark it
+			// shadowed so the dashboard treats it as a shadowed no-op instead of
+			// an independently toggleable row.
+			const keySeen = key !== undefined && seen.has(key);
+			const aliasSeen =
+				!keySeen &&
+				equivalent !== undefined &&
+				deduped.some(existing => !disabledItems.has(existing) && equivalent(existing, item));
+			if (keySeen || aliasSeen) item._shadowed = true;
+			if (!suppressedItems.has(item)) deduped.push(item);
+			continue;
+		}
+
 		if (suppressedItems.has(item)) {
 			// Claim key ownership (same-name precedence, including disabled
 			// state) without surviving or equivalence-shadowing survivors.
@@ -217,7 +240,10 @@ async function loadImpl<T>(
 
 		const keySeen = seen.has(key);
 		seen.add(key);
-		const aliasSeen = !keySeen && equivalent !== undefined && deduped.some(existing => equivalent(existing, item));
+		const aliasSeen =
+			!keySeen &&
+			equivalent !== undefined &&
+			deduped.some(existing => !disabledItems.has(existing) && equivalent(existing, item));
 		if (keySeen || aliasSeen) {
 			item._shadowed = true;
 		} else {
