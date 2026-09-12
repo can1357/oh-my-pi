@@ -1610,10 +1610,18 @@ function streamSimpleRequest<TApi extends Api>(
 	if (model.transport === "pi-native") {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
 			withProviderInFlightLimit(model, opts, () => {
+				// Policy this process owns but the gateway cannot recompute — an
+				// environment-gated retention opt-in, say — has to travel with the
+				// forwarded request: the gateway re-resolves the model and runs the
+				// provider request in its own process, where this environment is gone.
+				const forwardHeaders = opts
+					? getProviderDefinition(model.provider)?.preparePiNativeHeaders?.(model, opts)
+					: undefined;
+				const forwardedOpts = forwardHeaders ? { ...opts, headers: { ...forwardHeaders, ...opts?.headers } } : opts;
 				const nativeOptions =
 					model.api === "bedrock-converse-stream"
 						? {
-								...opts,
+								...forwardedOpts,
 								guardrailIdentifier: model.guardrailIdentifier ?? opts?.guardrailIdentifier,
 								guardrailVersion: model.guardrailVersion ?? opts?.guardrailVersion,
 								guardrailTrace: model.guardrailTrace ?? opts?.guardrailTrace,
@@ -1626,9 +1634,9 @@ function streamSimpleRequest<TApi extends Api>(
 									model.requestMetadata || opts?.requestMetadata
 										? { ...model.requestMetadata, ...opts?.requestMetadata }
 										: undefined,
-								headers: forwardBedrockUserAgent(model.headers, opts?.headers),
+								headers: forwardBedrockUserAgent(model.headers, forwardedOpts?.headers),
 							}
-						: opts;
+						: forwardedOpts;
 				return streamPiNative(model, context, nativeOptions);
 			}),
 		);

@@ -5,6 +5,7 @@ import { amazonBedrockTransport } from "./amazon-bedrock";
 import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
 import { cloudflareAiGatewayTransport } from "./cloudflare-ai-gateway";
+import { commandCodeTransport } from "./commandcode";
 import { museCodeTransport } from "./muse-code";
 import type { ProviderDefinition } from "./types";
 
@@ -17,6 +18,7 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
 	"amazon-bedrock": amazonBedrockTransport,
 	"bedrock-mantle": bedrockMantleTransport,
 	"cloudflare-ai-gateway": cloudflareAiGatewayTransport,
+	commandcode: commandCodeTransport,
 	"muse-code": museCodeTransport,
 };
 

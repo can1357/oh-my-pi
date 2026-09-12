@@ -8,16 +8,76 @@ import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-c
 import { commandCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
-const originalPrimaryKey = Bun.env.COMMAND_CODE_API_KEY;
-const originalLegacyKey = Bun.env.COMMANDCODE_API_KEY;
+/** Every env var this suite mutates, restored verbatim after each test. */
+const savedEnv = {
+	COMMAND_CODE_API_KEY: Bun.env.COMMAND_CODE_API_KEY,
+	COMMANDCODE_API_KEY: Bun.env.COMMANDCODE_API_KEY,
+	CMD_ZDR: Bun.env.CMD_ZDR,
+} satisfies Record<string, string | undefined>;
 
 afterEach(() => {
-	if (originalPrimaryKey === undefined) delete Bun.env.COMMAND_CODE_API_KEY;
-	else Bun.env.COMMAND_CODE_API_KEY = originalPrimaryKey;
-	if (originalLegacyKey === undefined) delete Bun.env.COMMANDCODE_API_KEY;
-	else Bun.env.COMMANDCODE_API_KEY = originalLegacyKey;
+	for (const [name, value] of Object.entries(savedEnv)) {
+		if (value === undefined) delete Bun.env[name];
+		else Bun.env[name] = value;
+	}
 	vi.restoreAllMocks();
 });
+
+/** Minimal `chat/completions` and `messages` SSE bodies shared by the wire tests. */
+function chatCompletionsSse(): Response {
+	return new Response(
+		[
+			'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+			'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}',
+			"data: [DONE]",
+			"",
+		].join("\n\n"),
+		{ headers: { "content-type": "text/event-stream" } },
+	);
+}
+
+function anthropicMessagesSse(): Response {
+	return new Response(
+		[
+			'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}',
+			'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+			'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+			'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+			'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}',
+			'event: message_stop\ndata: {"type":"message_stop"}',
+			"",
+		].join("\n\n"),
+		{ headers: { "content-type": "text/event-stream" } },
+	);
+}
+
+/**
+ * A `pi-native` gateway response for one completed turn. The forwarded request
+ * body is what the pi-native wire assertions read; the events only need to
+ * terminate the stream so `streamSimple` resolves.
+ */
+function piNativeDoneSse(): Response {
+	const message = {
+		role: "assistant",
+		content: [{ type: "text", text: "ok" }],
+		api: "openai-completions",
+		provider: "commandcode",
+		model: "gpt-5.6-sol",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+	return new Response(`data: ${JSON.stringify({ type: "done", reason: "stop", message })}\n\ndata: [DONE]\n\n`, {
+		headers: { "content-type": "text/event-stream" },
+	});
+}
 
 describe("Command Code provider support", () => {
 	test("discovers mixed-protocol models with Command Code deployment policy", async () => {
@@ -114,31 +174,8 @@ describe("Command Code provider support", () => {
 
 		const fetchMock: FetchImpl = vi.fn(async input => {
 			const url = String(input);
-			if (url.endsWith("/chat/completions")) {
-				return new Response(
-					[
-						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
-						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}',
-						"data: [DONE]",
-						"",
-					].join("\n\n"),
-					{ headers: { "content-type": "text/event-stream" } },
-				);
-			}
-			if (url.endsWith("/messages")) {
-				return new Response(
-					[
-						'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}',
-						'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-						'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
-						'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
-						'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}',
-						'event: message_stop\ndata: {"type":"message_stop"}',
-						"",
-					].join("\n\n"),
-					{ headers: { "content-type": "text/event-stream" } },
-				);
-			}
+			if (url.endsWith("/chat/completions")) return chatCompletionsSse();
+			if (url.endsWith("/messages")) return anthropicMessagesSse();
 			return new Response("unexpected route", { status: 404 });
 		});
 		const context = { messages: [{ role: "user" as const, content: "Reply ok", timestamp: Date.now() }] };
@@ -165,6 +202,186 @@ describe("Command Code provider support", () => {
 			expect(result.ttft).toBeGreaterThan(0);
 			expect(result.ttft).toBeLessThanOrEqual(result.duration ?? 0);
 		}
+	});
+
+	test("sends the zero-data-retention header only when the environment opts in", async () => {
+		// Command Code retains a session unless the request carries the
+		// documented `x-cmd-zdr: 1` header, and both protocol routes must send
+		// it: a route that silently dropped it would retain a conversation the
+		// user asked not to.
+		const catalog = commandCodeModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 1_050_000 },
+						{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 1_000_000 },
+					],
+				}),
+		});
+		const models = ((await catalog.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+		const gpt = models.find(model => model.id === "gpt-5.6-sol");
+		const claude = models.find(model => model.id === "claude-sonnet-4-6");
+		if (!gpt || !claude) throw new Error("Expected Command Code transport fixtures");
+		const context = { messages: [{ role: "user" as const, content: "Reply ok", timestamp: Date.now() }] };
+		const sent: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			sent.push(new Headers(init?.headers).get("x-cmd-zdr"));
+			const url = String(input);
+			if (url.endsWith("/chat/completions")) return chatCompletionsSse();
+			if (url.endsWith("/messages")) return anthropicMessagesSse();
+			return new Response("unexpected route", { status: 404 });
+		};
+
+		// Explicitly clear the opt-in: an ambient `CMD_ZDR=1` in the parent
+		// environment must not decide what the "off" baseline asserts.
+		delete Bun.env.CMD_ZDR;
+		await streamSimple(gpt, context, { apiKey: "user_test", fetch: fetchMock }).result();
+		await streamSimple(claude, context, { apiKey: "user_test", fetch: fetchMock }).result();
+		expect(sent).toEqual([null, null]);
+
+		Bun.env.CMD_ZDR = "1";
+		await streamSimple(gpt, context, { apiKey: "user_test", fetch: fetchMock }).result();
+		await streamSimple(claude, context, { apiKey: "user_test", fetch: fetchMock }).result();
+		expect(sent).toEqual([null, null, "1", "1"]);
+
+		// `StreamOptions.headers` is documented to merge on top of the host's
+		// own headers, so a caller that asks for another retention mode must
+		// win. Header names are case-insensitive on the wire but not in a
+		// `Record`, so this also pins that a differently-cased override is not
+		// left beside ours for `Headers` to join into `1, 0`.
+		const override = { headers: { "X-Cmd-Zdr": "0" } };
+		await streamSimple(gpt, context, { apiKey: "user_test", fetch: fetchMock, ...override }).result();
+		await streamSimple(claude, context, { apiKey: "user_test", fetch: fetchMock, ...override }).result();
+		expect(sent).toEqual([null, null, "1", "1", "0", "0"]);
+
+		// A model-level entry is the second place an override can live, and the
+		// provider merges it with the same case-sensitive assignment — so ours
+		// must stay out of `options.headers` when the model already carries one,
+		// or the request goes out as `x-cmd-zdr: 0, 1`.
+		const modelOverride = { ...gpt, headers: { "X-Cmd-Zdr": "0" } };
+		await streamSimple(modelOverride, context, { apiKey: "user_test", fetch: fetchMock }).result();
+		expect(sent.at(-1)).toBe("0");
+		// Both layers at once, under different casings: the caller's entry is the
+		// top layer, so the model's copy must be removed before dispatch — the
+		// shared header build assigns case-sensitively, and a surviving twin is
+		// joined by `Headers` into `0, 1` instead of the single value the caller
+		// asked for. Sibling entries on both layers must survive the removal.
+		const zdrValues: (string | null)[] = [];
+		const rawHeaders: Record<string, string>[] = [];
+		const caseMock: FetchImpl = async (_input, init) => {
+			zdrValues.push(new Headers(init?.headers).get("x-cmd-zdr"));
+			rawHeaders.push({ ...(init?.headers as Record<string, string>) });
+			return chatCompletionsSse();
+		};
+		const callerVsModel = { ...gpt, headers: { "X-Cmd-Zdr": "0", "x-other": "keep" } };
+		await streamSimple(callerVsModel, context, {
+			apiKey: "user_test",
+			fetch: caseMock,
+			headers: { "x-cmd-zdr": "1", "x-other-2": "keep" },
+		}).result();
+		// A surviving twin would read back joined (`0, 1`); the record itself
+		// must hold exactly one entry for the name.
+		expect(zdrValues).toEqual(["1"]);
+		expect(Object.keys(rawHeaders[0] ?? {}).filter(name => name.toLowerCase() === "x-cmd-zdr")).toHaveLength(1);
+		expect(rawHeaders[0]?.["x-other"]).toBe("keep");
+		expect(rawHeaders[0]?.["x-other-2"]).toBe("keep");
+	});
+
+	test("carries the zero-data-retention opt-in across a pi-native gateway hop", async () => {
+		// Under `transport: pi-native` this process never sends the provider
+		// request — the gateway does, in its own environment — so an opt-in that
+		// stayed local would silently leave the conversation retained while the
+		// user believes it is not.
+		const catalog = commandCodeModelManagerOptions({
+			fetch: async () =>
+				Response.json({ data: [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 1_050_000 }] }),
+		});
+		const [gpt] = ((await catalog.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+		if (!gpt) throw new Error("Expected a Command Code transport fixture");
+		const model = { ...gpt, transport: "pi-native" as const, baseUrl: "http://llm-gateway.internal:4000" };
+		const context = { messages: [{ role: "user" as const, content: "Reply ok", timestamp: Date.now() }] };
+		let forwarded: Record<string, string> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { options: { headers?: Record<string, string> } };
+			forwarded = body.options.headers;
+			return piNativeDoneSse();
+		};
+
+		delete Bun.env.CMD_ZDR;
+		await streamSimple(model, context, { apiKey: "gw-bearer", fetch: fetchMock }).result();
+		expect(forwarded).toBeUndefined();
+
+		Bun.env.CMD_ZDR = "1";
+		await streamSimple(model, context, { apiKey: "gw-bearer", fetch: fetchMock }).result();
+		expect(forwarded).toEqual({ "x-omp-cmd-zdr": "1" });
+
+		// The caller's own header still wins on this hop, under any casing.
+		await streamSimple(model, context, {
+			apiKey: "gw-bearer",
+			fetch: fetchMock,
+			headers: { "X-Cmd-Zdr": "0" },
+		}).result();
+		expect(forwarded).toEqual({ "X-Cmd-Zdr": "0" });
+
+		// A model-authored value is the reason this hook exists. The gateway
+		// re-resolves the model from its own catalog and never sees the client's
+		// `model.headers`, so without carrying it an explicit `1` is lost and an
+		// explicit `0` is overwritten by the gateway's own CMD_ZDR=1 — either way
+		// the retention mode the user configured is not the one that gets used.
+		// It travels under an internal name rather than as the request header
+		// itself, because whether it survives is the receiving process's call.
+		const modelWith = { ...model, headers: { "X-Cmd-Zdr": "1" } };
+		await streamSimple(modelWith, context, { apiKey: "gw-bearer", fetch: fetchMock }).result();
+		expect(forwarded).toEqual({ "x-omp-cmd-zdr": "1" });
+
+		Bun.env.CMD_ZDR = "1";
+		const modelWithout = { ...model, headers: { "X-Cmd-Zdr": "0" } };
+		await streamSimple(modelWithout, context, { apiKey: "gw-bearer", fetch: fetchMock }).result();
+		expect(forwarded).toEqual({ "x-omp-cmd-zdr": "0" });
+	});
+
+	test("lets the resolved model outrank a value forwarded from the originating process", async () => {
+		// The receiving half of the hop: the process that actually performs the
+		// request resolves its own model, and that model's explicit choice must
+		// survive a value the client forwarded — including when the client only
+		// had the environment to go on. Anything else hands a default precedence
+		// over an explicit setting, or leaves the two beside each other for
+		// `Headers` to join into `0, 1`.
+		const catalog = commandCodeModelManagerOptions({
+			fetch: async () =>
+				Response.json({ data: [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 1_050_000 }] }),
+		});
+		const [gpt] = ((await catalog.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+		if (!gpt) throw new Error("Expected a Command Code transport fixture");
+		const context = { messages: [{ role: "user" as const, content: "Reply ok", timestamp: Date.now() }] };
+		const sent: Record<string, string | null>[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const headers = new Headers(init?.headers);
+			sent.push({ zdr: headers.get("x-cmd-zdr"), forwarded: headers.get("x-omp-cmd-zdr") });
+			return chatCompletionsSse();
+		};
+		const forwarded = { headers: { "x-omp-cmd-zdr": "1" } };
+
+		// Same casing: a wrongly-appended default would overwrite the model's value.
+		await streamSimple({ ...gpt, headers: { "x-cmd-zdr": "0" } }, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			...forwarded,
+		}).result();
+		// Differing casing: the same mistake would instead be joined with it.
+		await streamSimple({ ...gpt, headers: { "X-Cmd-Zdr": "0" } }, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			...forwarded,
+		}).result();
+		// No model choice to weigh it against: the forwarded value is what applies.
+		await streamSimple({ ...gpt }, context, { apiKey: "user_test", fetch: fetchMock, ...forwarded }).result();
+
+		expect(sent).toEqual([
+			{ zdr: "0", forwarded: null },
+			{ zdr: "0", forwarded: null },
+			{ zdr: "1", forwarded: null },
+		]);
 	});
 
 	test("registers discovery, defaults, and both API key environment names", () => {

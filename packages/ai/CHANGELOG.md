@@ -9,6 +9,7 @@
 ### Added
 
 - Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Command Code now honors the zero-data-retention opt-in: with `CMD_ZDR=1` every inference request carries the documented `x-cmd-zdr: 1` header through the Chat Completions and Messages routes, and across a `pi-native` gateway hop, so a session is served under Command Code's zero-retention policy instead of the account default. A caller- or model-authored `x-cmd-zdr` still wins, and a gateway applies a forwarded opt-in only when its own resolved model sets none ([#11877](https://github.com/can1357/oh-my-pi/pull/11877) by [@akshaylive](https://github.com/akshaylive)).
 
 ### Fixed
 
