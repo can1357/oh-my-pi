@@ -71,16 +71,16 @@ export interface InternalUrlExpansionOptions {
 }
 
 /**
- * Resolve a single skill:// URL to its absolute filesystem path.
- * Does NOT read file content or verify existence.
- * A bare URI addresses the skill's configured instruction file, or its base
- * directory when `forDirectory` is set (e.g. a bash working directory).
+ * Parse a skill:// URL into its structural pieces — validated skill match,
+ * bare-URI target, or traversal-validated relative path — shared by the sync
+ * and async resolvers so the security contract cannot diverge. Only the
+ * containment operation varies between the two entry points.
  */
-export function resolveSkillUrlToPath(
+function parseSkillUrlTarget(
 	url: string,
 	skills: readonly Skill[],
-	options: { forDirectory?: boolean } = {},
-): string {
+	forDirectory: boolean,
+): { skill: Skill; target: string } {
 	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
 	if (!parsed) {
 		throw new ToolError(`Invalid skill:// URL: ${url}`);
@@ -110,22 +110,10 @@ export function resolveSkillUrlToPath(
 	// Combine any colon suffix (line range like ":1-5") with the path segment
 	const rawPath = (parsed[2] ?? "") + (suffix ? `/${suffix}` : "");
 	const hasRelativePath = rawPath !== "" && rawPath !== "/";
-
 	if (!hasRelativePath) {
 		// A bare URI addresses the skill's configured instruction file, or its
 		// base directory for directory-oriented callers (bash cwd).
-		const bareTarget = path.resolve(options.forDirectory === true ? skill.baseDir : skill.filePath);
-		if (skill.containRoot) {
-			const contained = resolveContainedPathSync(skill.containRoot, bareTarget);
-			if (contained.status === "outside") {
-				throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
-			}
-			if (contained.status === "missing") {
-				throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
-			}
-			return contained.realPath;
-		}
-		return bareTarget;
+		return { skill, target: path.resolve(forDirectory ? skill.baseDir : skill.filePath) };
 	}
 	let relativePath: string;
 	try {
@@ -146,90 +134,10 @@ export function resolveSkillUrlToPath(
 	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
 		throw new ToolError("Path traversal is not allowed in skill:// URLs");
 	}
-	// Agent Plugin skills (§4.1): the resource must canonically resolve within
-	// the plugin root. Fail closed: a dangling or unresolvable path is rejected
-	// rather than handed to bash, where writing through it could create the
-	// outside target. Symlinks may target other files inside the same package.
-	if (skill.containRoot) {
-		const contained = resolveContainedPathSync(skill.containRoot, resolvedPath);
-		if (contained.status === "outside") {
-			throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
-		}
-		if (contained.status === "missing") {
-			throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
-		}
-		return contained.realPath;
-	}
-
-	return resolvedPath;
+	return { skill, target: resolvedPath };
 }
 
-/**
- * Async variant of {@link resolveSkillUrlToPath} for the production
- * `expandInternalUrls` path: both containment branches run the ASYNC resolver,
- * so a slow or stalled network/FUSE plugin filesystem cannot block the TUI/RPC
- * event loop and cancellation can interrupt the lookup. The synchronous
- * variant is reserved for the exclusively-synchronous callers.
- */
-export async function resolveSkillUrlToPathAsync(
-	url: string,
-	skills: readonly Skill[],
-	options: { forDirectory?: boolean } = {},
-): Promise<string> {
-	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
-	if (!parsed) {
-		throw new ToolError(`Invalid skill:// URL: ${url}`);
-	}
-
-	let rawSkillSegment = parsed[1];
-	if (!rawSkillSegment) {
-		throw new ToolError(`skill:// URL requires a skill name: ${url}`);
-	}
-	try {
-		rawSkillSegment = decodeURIComponent(rawSkillSegment);
-	} catch {
-		// Leave as-is if decoding fails
-	}
-	const { skill, suffix } = matchSkillName(rawSkillSegment, skills);
-	if (!skill) {
-		const available = skills.map(s => s.name);
-		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new ToolError(`Unknown skill: ${rawSkillSegment}. Available: ${availableStr}`);
-	}
-
-	const rawPath = (parsed[2] ?? "") + (suffix ? `/${suffix}` : "");
-	const hasRelativePath = rawPath !== "" && rawPath !== "/";
-	if (!hasRelativePath) {
-		const bareTarget = path.resolve(options.forDirectory === true ? skill.baseDir : skill.filePath);
-		if (skill.containRoot) {
-			return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, bareTarget));
-		}
-		return bareTarget;
-	}
-	let relativePath: string;
-	try {
-		relativePath = decodeURIComponent(rawPath.slice(1));
-	} catch {
-		throw new ToolError(`Invalid skill:// URL path encoding: ${url}`);
-	}
-	try {
-		validateRelativePath(relativePath);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new ToolError(message);
-	}
-	const targetPath = path.join(skill.baseDir, relativePath);
-	const resolvedPath = path.resolve(targetPath);
-	const resolvedBaseDir = path.resolve(skill.baseDir);
-	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
-		throw new ToolError("Path traversal is not allowed in skill:// URLs");
-	}
-	if (skill.containRoot) {
-		return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, resolvedPath));
-	}
-	return resolvedPath;
-}
-
+/** Throw the fail-closed SkillContainmentError unless the target is contained. */
 function skillContainOrThrow(url: string, contained: ContainedPathResolution): string {
 	if (contained.status === "outside") {
 		throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
@@ -238,6 +146,42 @@ function skillContainOrThrow(url: string, contained: ContainedPathResolution): s
 		throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
 	}
 	return contained.realPath;
+}
+
+/**
+ * Resolve a single skill:// URL to its absolute filesystem path.
+ * Does NOT read file content or verify existence.
+ * A bare URI addresses the skill's configured instruction file, or its base
+ * directory when `forDirectory` is set (e.g. a bash working directory).
+ *
+ * Synchronously contained variant: reserved for callers whose own boundary is
+ * synchronous (the non-async expansion API); production bash expansion routes
+ * through {@link resolveSkillUrlToPathAsync}.
+ */
+export function resolveSkillUrlToPath(
+	url: string,
+	skills: readonly Skill[],
+	options: { forDirectory?: boolean } = {},
+): string {
+	const { skill, target } = parseSkillUrlTarget(url, skills, options.forDirectory === true);
+	if (!skill.containRoot) return target;
+	return skillContainOrThrow(url, resolveContainedPathSync(skill.containRoot, target));
+}
+
+/**
+ * Async variant for the production `expandInternalUrls` path: containment runs
+ * the ASYNC resolver, so a slow or stalled network/FUSE plugin filesystem
+ * cannot block the TUI/RPC event loop and cancellation can interrupt the
+ * lookup.
+ */
+export async function resolveSkillUrlToPathAsync(
+	url: string,
+	skills: readonly Skill[],
+	options: { forDirectory?: boolean } = {},
+): Promise<string> {
+	const { skill, target } = parseSkillUrlTarget(url, skills, options.forDirectory === true);
+	if (!skill.containRoot) return target;
+	return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, target));
 }
 
 /**
