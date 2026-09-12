@@ -25,7 +25,7 @@ import {
 } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
-import { normalizeExitReason } from "./exit-reason";
+import { displayExitReason, normalizeExitReason } from "./exit-reason";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -1918,19 +1918,20 @@ class DaemonBroker {
 		}
 		await this.#flushOutputProgress(record);
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
+		const stopRequested = stopRequestedAtExit || record.stopRequested;
 		record.process = undefined;
 		record.input = undefined;
 		record.pty = undefined;
 		record.snapshot.pid = undefined;
 		record.snapshot.exitedAt = Date.now();
-		const exitReason = normalizeExitReason(error) ?? fallbackExitReason(exitCode, stopRequestedAtExit);
+		const exitReason = normalizeExitReason(error) ?? fallbackExitReason(exitCode, stopRequested);
 		record.snapshot.exitCode = exitCode;
 		record.snapshot.exitReason = exitReason;
 		this.#recordGenerationExit(record, generation, exitCode, exitReason);
 		record.snapshot.readyPending = undefined;
 		const failed = exitReason !== undefined || (exitCode !== undefined && exitCode !== 0);
 		const shouldRestart =
-			!stopRequestedAtExit && (record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
+			!stopRequested && (record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
 		if (shouldRestart && !this.#shuttingDown) {
 			const uptime = Date.now() - record.snapshot.startedAt;
 			record.consecutiveFailures = uptime >= 30_000 ? 0 : record.consecutiveFailures + 1;
@@ -1956,10 +1957,10 @@ class DaemonBroker {
 			return;
 		}
 		record.monitorSettlementPending = true;
-		record.snapshot.state = failed && !stopRequestedAtExit ? "failed" : "exited";
+		record.snapshot.state = failed && !stopRequested ? "failed" : "exited";
 		const completion =
 			record.snapshot.owner !== undefined &&
-			!stopRequestedAtExit &&
+			!stopRequested &&
 			this.#completionSubscriptions.has(record.snapshot.owner)
 				? ({
 						event: "daemon-completed",
@@ -2129,9 +2130,9 @@ class DaemonBroker {
 		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
 		if (generationEnded()) {
 			const exit = generationExit?.exitCode === undefined ? "" : ` with exit code ${generationExit.exitCode}`;
-			const reason = generationExit?.exitReason ? `; reason: ${generationExit.exitReason}` : "";
+			const reason = displayExitReason(generationExit?.exitReason);
 			throw new Error(
-				`Daemon ${operation.name} generation ${boundGeneration} exited${exit}${reason}; ` +
+				`Daemon ${operation.name} generation ${boundGeneration} exited${exit}${reason ? `; reason: ${reason}` : ""}; ` +
 					"the wait was rejected instead of continuing against a replacement generation",
 			);
 		}

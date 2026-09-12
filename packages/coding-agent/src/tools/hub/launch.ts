@@ -17,7 +17,7 @@ import {
 	type DaemonOutputUnregister,
 	daemonClientForProject,
 } from "../../launch/client";
-import { normalizeExitReason } from "../../launch/exit-reason";
+import { displayExitReason } from "../../launch/exit-reason";
 import type {
 	DaemonMonitorNotification,
 	DaemonMonitorWatcher,
@@ -46,7 +46,6 @@ import {
 	pluralize,
 	previewLine,
 	replaceTabs,
-	shortenEmbeddedPaths,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -74,6 +73,10 @@ interface CompletionRegistration {
 	daemonNames: Map<string, string>;
 	pendingBindings: Map<string, Set<CompletionEpochBinding>>;
 	cleanup: (preservePending?: boolean) => void;
+}
+
+interface DaemonListGroup {
+	collapsedRows: string[];
 }
 
 interface CompletionLease {
@@ -1260,8 +1263,7 @@ function daemonLabel(daemon: DaemonSnapshot): string {
 }
 
 function normalizedDaemonReason(daemon: DaemonSnapshot): string | undefined {
-	const reason = normalizeExitReason(daemon.exitReason);
-	return reason ? shortenEmbeddedPaths(reason) : undefined;
+	return displayExitReason(daemon.exitReason);
 }
 
 function daemonReasonText(daemon: DaemonSnapshot, indent = ""): string | undefined {
@@ -1792,7 +1794,7 @@ export function launchRenderResult(
 
 	const meta: string[] = [];
 	const body: string[] = [];
-	const listGroups: string[][] = [];
+	const listGroups: DaemonListGroup[] = [];
 	let description = params.name ?? daemon?.name;
 
 	if (isError) {
@@ -1856,15 +1858,22 @@ export function launchRenderResult(
 				const daemons = details?.daemons ?? [];
 				description = `${daemons.length || "no"} ${pluralize("process", daemons.length)}`;
 				for (const item of daemons) {
-					const rows = [
+					const baseRows = [
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
 					];
 					const reason = daemonReasonLine(item);
-					if (reason) rows.push(theme.fg("error", reason));
-					for (const watcher of details?.monitors ?? []) {
-						if (watcher.name === item.name) rows.push(watcherRow(watcher, item, theme));
+					if (reason) baseRows.push(theme.fg("error", reason));
+					const watcherRows = (details?.monitors ?? [])
+						.filter(watcher => watcher.name === item.name)
+						.map(watcher => watcherRow(watcher, item, theme));
+					const rows = [...baseRows, ...watcherRows];
+					const collapsedWatcherRows = watcherRows.slice(0, PREVIEW_LIMITS.COLLAPSED_LINES);
+					const omittedWatchers = watcherRows.length - collapsedWatcherRows.length;
+					const collapsedRows = [...baseRows, ...collapsedWatcherRows];
+					if (omittedWatchers > 0) {
+						collapsedRows.push(theme.fg("dim", `  ${formatMoreItems(omittedWatchers, "watcher")}`));
 					}
-					listGroups.push(rows);
+					listGroups.push({ collapsedRows });
 					body.push(...rows);
 				}
 				break;
@@ -1962,12 +1971,15 @@ export function launchRenderResult(
 		() => options.expanded,
 		(width, expanded) => {
 			let visible = body;
-			if (!expanded && op === "list" && listGroups.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
-				const remaining = listGroups.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
-				visible = [
-					...listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS).flat(),
-					theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
-				];
+			if (!expanded && op === "list") {
+				const visibleGroups = listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+				const remaining = listGroups.length - visibleGroups.length;
+				visible = visibleGroups.flatMap(group => group.collapsedRows);
+				if (remaining > 0) {
+					visible.push(
+						theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
+					);
+				}
 			}
 			return [header, ...visible].map(line => truncateToWidth(line, width));
 		},

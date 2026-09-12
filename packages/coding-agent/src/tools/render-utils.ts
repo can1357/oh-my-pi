@@ -19,9 +19,11 @@ import type { Theme } from "../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
+import { shortenEmbeddedPaths } from "../utils/paths";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+export { shortenEmbeddedPaths };
 
 /**
  * Normalize stray carriage returns in model-authored display text. Some models
@@ -854,52 +856,6 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten home-prefixed paths inside free text, preserving surrounding
- * punctuation so error strings with embedded paths stay readable. */
-export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
-	if (!homeDir) return text;
-	let shortened = text;
-	const isWindowsPath = homeDir.includes("\\") || /^(?:[A-Za-z]:\/|\/\/)/.test(homeDir);
-	const homePaths = isWindowsPath
-		? [...new Set([homeDir, homeDir.replaceAll("\\", "/"), homeDir.replaceAll("/", "\\")])]
-		: [homeDir];
-	const caseInsensitive = isWindowsPath;
-	const trailingBoundary =
-		"(?=$|[\\\\/]|\\s|\\x1b|&(?:quot|apos|gt);|[\"'`)\\]}>]|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
-	const uriPathContext = /[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s"'`<>()[\]{}]*$/u;
-	for (const homePath of homePaths) {
-		const hasLeadingSeparator = /^[\\/]/.test(homePath);
-		const leadingBoundary = hasLeadingSeparator ? "" : "(?<![\\p{L}\\p{N}_-])";
-		const homePrefix = new RegExp(
-			`${leadingBoundary}${RegExp.escape(homePath)}${trailingBoundary}`,
-			caseInsensitive ? "giu" : "gu",
-		);
-		shortened = shortened.replace(homePrefix, (matchedHome, offset: number) => {
-			const prefix = shortened.slice(0, offset);
-			const schemeConsumesUncHome = /^[A-Za-z][A-Za-z\d+.-]*:$/u.test(prefix) && /^[\\/]{2}/.test(matchedHome);
-			const uriPath = hasLeadingSeparator && (uriPathContext.test(prefix) || schemeConsumesUncHome);
-			if (!uriPath && /[\p{L}\p{N}_-]$/u.test(prefix)) return matchedHome;
-			if (!uriPath) return "~";
-			if (schemeConsumesUncHome) return `${/^file:$/iu.test(prefix) ? "/" : ""}//~`;
-			return `${matchedHome[0]}~`;
-		});
-	}
-	return shortened
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			const shortenedPath = shortenPath(segment.slice(leading.length, end), homeDir);
-			const normalized = shortenedPath.startsWith("~")
-				? shortenedPath.replaceAll(path.win32.sep, path.posix.sep)
-				: shortenedPath;
-			return `${leading}${normalized}${trailing}`;
-		})
-		.join(" ");
-}
-
 /** Sanitize warning text before showing it in TUI, including embedded home paths. */
 export function sanitizeDisplayWarning(text: string): string {
 	return shortenEmbeddedPaths(
@@ -918,7 +874,6 @@ export function sanitizeDisplayWarnings(warnings: readonly string[]): string[] {
 	if (hidden > 0) visible.push(`… ${hidden} more ${pluralize("warning", hidden)}`);
 	return visible;
 }
-
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;
 	const resolvedProjectDir = path.resolve(projectDir);

@@ -167,6 +167,35 @@ describe("hub launch rendering", () => {
 		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);
 	});
 
+	it("bounds watcher rows in a collapsed list and reports omitted watchers", async () => {
+		const uiTheme = await theme();
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						op: "list",
+						daemons: [daemon({ name: "web" })],
+						monitors: Array.from({ length: 20 }, (_, i) => ({
+							name: "web",
+							id: `monitor-${i}`,
+							owner: `session-${i}`,
+							delivery: "wake" as const,
+							connected: true,
+						})),
+					} satisfies LaunchToolDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+		const watcherLines = rendered.filter(line => line.includes("watched by"));
+
+		expect(watcherLines).toHaveLength(3);
+		expect(rendered.some(line => line.includes("17 more watchers"))).toBe(true);
+	});
+
 	it("marks a failed start with the daemon's exit reason even though the result is not an error", async () => {
 		const uiTheme = await theme();
 		const rendered = lines(
