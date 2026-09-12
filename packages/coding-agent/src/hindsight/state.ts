@@ -27,6 +27,12 @@ interface PendingRetainItem {
 	content: string;
 	context?: string;
 	timestamp: Date;
+	/** Bank routing captured at enqueue so a later primary rebuild cannot reroute this item. */
+	client: HindsightApi;
+	bankId: string;
+	retainTags?: string[];
+	banksSet: Set<string>;
+	config: HindsightConfig;
 }
 
 interface RecallOutcome {
@@ -85,8 +91,17 @@ export class HindsightRetainQueue {
 		if (this.#closed) {
 			throw new Error("Hindsight retain queue is closed.");
 		}
-		this.#items.push({ content, context, timestamp: new Date() });
-
+		const state = this.#state;
+		this.#items.push({
+			content,
+			context,
+			timestamp: new Date(),
+			client: state.client,
+			bankId: state.bankId,
+			retainTags: state.retainTags,
+			banksSet: state.banksSet,
+			config: state.config,
+		});
 		if (this.#items.length >= RETAIN_FLUSH_BATCH_SIZE) {
 			void this.flush();
 			return;
@@ -148,20 +163,36 @@ export class HindsightRetainQueue {
 			return;
 		}
 
+		let index = 0;
+		while (index < items.length) {
+			let end = index + 1;
+			while (end < items.length && sameRetainRoute(items[index]!, items[end]!)) {
+				end += 1;
+			}
+			await this.#flushRoute(sessionId, items.slice(index, end));
+			index = end;
+		}
+	}
+
+	async #flushRoute(sessionId: string, items: PendingRetainItem[]): Promise<void> {
+		const route = items[0];
+		if (!route) return;
+
 		try {
-			await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
+			await ensureBankExists(route.client, route.bankId, route.config, route.banksSet);
 			const batch: MemoryItemInput[] = items.map(item => ({
 				content: item.content,
-				context: item.context ?? state.config.retainContext,
+				context: item.context ?? item.config.retainContext,
 				metadata: { session_id: sessionId },
-				tags: state.retainTags,
+				tags: item.retainTags,
 				timestamp: item.timestamp,
+				strategy: item.config.retainStrategy || undefined,
 			}));
-			await state.client.retainBatch(state.bankId, batch, { async: true });
-			if (state.config.debug) {
+			await route.client.retainBatch(route.bankId, batch, { async: true });
+			if (route.config.debug) {
 				logger.debug("Hindsight retain queue: batch flushed", {
 					sessionId,
-					bankId: state.bankId,
+					bankId: route.bankId,
 					items: items.length,
 				});
 			}
@@ -169,7 +200,7 @@ export class HindsightRetainQueue {
 			const errorText = err instanceof Error ? err.message : String(err);
 			logger.warn("Hindsight retain queue: batch flush failed", {
 				sessionId,
-				bankId: state.bankId,
+				bankId: route.bankId,
 				items: items.length,
 				error: errorText,
 			});
@@ -187,6 +218,20 @@ export class HindsightRetainQueue {
 	}
 }
 
+function sameRetainRoute(a: PendingRetainItem, b: PendingRetainItem): boolean {
+	if (a.client !== b.client || a.bankId !== b.bankId || a.banksSet !== b.banksSet || a.config !== b.config) {
+		return false;
+	}
+	const aTags = a.retainTags;
+	const bTags = b.retainTags;
+	if (aTags === bTags) return true;
+	if (!aTags || !bTags || aTags.length !== bTags.length) return false;
+	for (let i = 0; i < aTags.length; i++) {
+		if (aTags[i] !== bTags[i]) return false;
+	}
+	return true;
+}
+
 /** Rolling hash of messages[0, count) for retention-cache validation (see #lastRetainedPrefixKey). */
 function retentionPrefixKey(messages: HindsightMessage[], count: number): string {
 	let key = "";
@@ -202,16 +247,16 @@ function retentionPrefixKey(messages: HindsightMessage[], count: number): string
 export class HindsightSessionState {
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
-	client: HindsightApi;
-	bankId: string;
+	#client: HindsightApi;
+	#bankId: string;
 	/** Tags applied to every retain — non-empty in per-project-tagged mode. */
-	retainTags?: string[];
+	#retainTags?: string[];
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
-	recallTags?: string[];
-	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
-	config: HindsightConfig;
+	#recallTags?: string[];
+	#recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	#config: HindsightConfig;
 	session: AgentSession;
-	banksSet: Set<string>;
+	#banksSet: Set<string>;
 	lastRetainedTurn: number;
 	#lastRetainedMessageIndex: number = 0;
 	#cachedTranscript: string = "";
@@ -243,27 +288,116 @@ export class HindsightSessionState {
 	 * Only set on primary states; aliases inherit the parent's subscription.
 	 */
 	unsubscribeScope?: () => void;
-	/** Alias states delegate persistence config to a primary parent state. */
-	aliasOf?: HindsightSessionState;
+	/**
+	 * When this primary is replaced by a live rebuild, aliases still holding
+	 * the disposed object follow `#successor` to the currently installed parent.
+	 */
+	#successor?: HindsightSessionState;
+	#aliasOf?: HindsightSessionState;
 	readonly retainQueue: HindsightRetainQueue;
 
 	constructor(options: HindsightSessionStateOptions) {
 		this.sessionId = options.sessionId;
-		this.client = options.client;
-		this.bankId = options.bankId;
-		this.retainTags = options.retainTags;
-		this.recallTags = options.recallTags;
-		this.recallTagsMatch = options.recallTagsMatch;
-		this.config = options.config;
+		this.#aliasOf = options.aliasOf;
+		this.#client = options.client;
+		this.#bankId = options.bankId;
+		this.#retainTags = options.retainTags;
+		this.#recallTags = options.recallTags;
+		this.#recallTagsMatch = options.recallTagsMatch;
+		this.#config = options.config;
 		this.session = options.session;
-		this.banksSet = options.banksSet;
+		this.#banksSet = options.banksSet;
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
 		this.#lastRetainedPrefixKey = "";
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
-		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
+	}
+
+	/** Alias states delegate persistence routing to the live primary parent. */
+	get aliasOf(): HindsightSessionState | undefined {
+		let primary = this.#aliasOf;
+		const seen = new Set<HindsightSessionState>();
+		while (primary && primary.#successor) {
+			if (seen.has(primary)) break;
+			seen.add(primary);
+			primary = primary.#successor;
+		}
+		return primary;
+	}
+
+	set aliasOf(value: HindsightSessionState | undefined) {
+		this.#aliasOf = value;
+	}
+
+	get client(): HindsightApi {
+		return this.aliasOf ? this.aliasOf.client : this.#client;
+	}
+
+	set client(value: HindsightApi) {
+		if (this.aliasOf) this.aliasOf.client = value;
+		else this.#client = value;
+	}
+
+	get bankId(): string {
+		return this.aliasOf ? this.aliasOf.bankId : this.#bankId;
+	}
+
+	set bankId(value: string) {
+		if (this.aliasOf) this.aliasOf.bankId = value;
+		else this.#bankId = value;
+	}
+
+	get retainTags(): string[] | undefined {
+		return this.aliasOf ? this.aliasOf.retainTags : this.#retainTags;
+	}
+
+	set retainTags(value: string[] | undefined) {
+		if (this.aliasOf) this.aliasOf.retainTags = value;
+		else this.#retainTags = value;
+	}
+
+	get recallTags(): string[] | undefined {
+		return this.aliasOf ? this.aliasOf.recallTags : this.#recallTags;
+	}
+
+	set recallTags(value: string[] | undefined) {
+		if (this.aliasOf) this.aliasOf.recallTags = value;
+		else this.#recallTags = value;
+	}
+
+	get recallTagsMatch(): "any" | "all" | "any_strict" | "all_strict" | undefined {
+		return this.aliasOf ? this.aliasOf.recallTagsMatch : this.#recallTagsMatch;
+	}
+
+	set recallTagsMatch(value: "any" | "all" | "any_strict" | "all_strict" | undefined) {
+		if (this.aliasOf) this.aliasOf.recallTagsMatch = value;
+		else this.#recallTagsMatch = value;
+	}
+
+	get banksSet(): Set<string> {
+		return this.aliasOf ? this.aliasOf.banksSet : this.#banksSet;
+	}
+
+	set banksSet(value: Set<string>) {
+		if (this.aliasOf) this.aliasOf.banksSet = value;
+		else this.#banksSet = value;
+	}
+
+	get config(): HindsightConfig {
+		return this.aliasOf ? this.aliasOf.config : this.#config;
+	}
+
+	set config(value: HindsightConfig) {
+		if (this.aliasOf) this.aliasOf.config = value;
+		else this.#config = value;
+	}
+
+	/** Point aliases still holding this object at the replacement primary. */
+	replaceWith(next: HindsightSessionState): void {
+		if (next === this) return;
+		this.#successor = next;
 	}
 
 	setSessionId(sessionId: string): void {
@@ -364,6 +498,7 @@ export class HindsightSessionState {
 			tags: this.retainTags,
 			timestamp: sourceTimestamp,
 			async: true,
+			strategy: this.config.retainStrategy || undefined,
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;

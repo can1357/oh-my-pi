@@ -107,6 +107,8 @@ export interface RetainOptions extends HindsightRequestOptions {
 	async?: boolean;
 	tags?: string[];
 	updateMode?: UpdateMode;
+	/** Per-item extraction strategy override. Omitted from the body when unset. */
+	strategy?: string;
 }
 
 export interface RetainBatchOptions extends HindsightRequestOptions {
@@ -268,6 +270,7 @@ export class HindsightApi {
 			documentId: options?.documentId,
 			tags: options?.tags,
 			updateMode: options?.updateMode,
+			strategy: options?.strategy,
 		});
 
 		return this.#request<RetainResponse>(

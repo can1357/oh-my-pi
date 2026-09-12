@@ -249,9 +249,12 @@ async function installPrimaryState(
 	const displaced = session.setHindsightSessionState(state);
 	if (displaced && displaced !== previous) {
 		await displaced.flushRetainQueue();
+		displaced.replaceWith(state);
 		displaced.dispose();
 	}
+	previous?.replaceWith(state);
 	previous?.dispose();
+
 	state.attachSessionListeners();
 
 	// Kick off mental-model bootstrap. Resolves asynchronously; the first
@@ -269,9 +272,10 @@ async function installPrimaryState(
 
 /**
  * `onHindsightScopeChanged` handler: re-evaluate the bank scope from current
- * settings and rebuild the primary state when it has actually drifted. No-op
- * when the scope is unchanged or the session is no longer hosting a primary
- * state (e.g. it was wiped to `undefined`, or this is a subagent alias).
+ * settings and rebuild the primary state when it has actually drifted. When
+ * only retainStrategy changed, copy that field onto a new config snapshot
+ * without resetting retain/recall tracking or adopting unrelated settings
+ * that never triggered a rebuild (apiUrl, tokens, timeouts).
  */
 async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<void> {
 	const current = session.getHindsightSessionState();
@@ -289,7 +293,15 @@ async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<
 	}
 
 	const next = computeBankScope(config, session.sessionManager.getCwd());
-	if (bankScopesEqual(next, current)) return;
+	if (bankScopesEqual(next, current)) {
+		if (current.config.retainStrategy !== config.retainStrategy) {
+			current.config = {
+				...current.config,
+				retainStrategy: config.retainStrategy,
+			};
+		}
+		return;
+	}
 
 	// Preserve the banksSet so we don't re-PUT banks we've already confirmed.
 	await installPrimaryState(session, settings, current.banksSet);
