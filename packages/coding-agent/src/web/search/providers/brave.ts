@@ -5,6 +5,7 @@
  * SearchResponse shape used by the web search tool.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { readBoundedText } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { QuerySyntax, StructuredQuery } from "../query";
@@ -96,38 +97,6 @@ function webResults(response: BraveSearchResponse): readonly unknown[] {
 	return Array.isArray(response.web.results) ? response.web.results : [];
 }
 
-async function readLimitedText(response: Response, maxBytes: number, truncate = false): Promise<string> {
-	if (!response.body) return "";
-	const reader = response.body.getReader();
-	let buffer = new Uint8Array(Math.min(maxBytes, 64 * 1024));
-	let bytes = 0;
-
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			const accepted = Math.min(value.byteLength, maxBytes - bytes);
-			const nextBytes = bytes + accepted;
-			if (nextBytes > buffer.byteLength) {
-				const grown = new Uint8Array(Math.min(maxBytes, Math.max(nextBytes, buffer.byteLength * 2)));
-				grown.set(buffer.subarray(0, bytes));
-				buffer = grown;
-			}
-			buffer.set(value.subarray(0, accepted), bytes);
-			bytes = nextBytes;
-			if (accepted < value.byteLength) {
-				await reader.cancel().catch(() => undefined);
-				if (!truncate) throw new SearchProviderError("brave", "Brave API response exceeded 2 MiB", 500);
-				break;
-			}
-		}
-	} finally {
-		reader.releaseLock();
-	}
-
-	return new TextDecoder().decode(buffer.subarray(0, bytes));
-}
-
 function buildSnippet(result: object): string | undefined {
 	const snippets = new Set<string>();
 	const description = normalizeText("description" in result ? result.description : undefined, 8_000);
@@ -180,13 +149,14 @@ async function callBraveSearch(
 	});
 
 	if (!response.ok) {
-		const errorText = await readLimitedText(response, MAX_ERROR_BYTES, true);
+		const { value: errorText } = await readBoundedText(response.body, MAX_ERROR_BYTES);
 		const classified = classifyProviderHttpError("brave", response.status, errorText);
 		if (classified) throw classified;
 		throw new SearchProviderError("brave", `Brave API error (${response.status}): ${errorText}`, response.status);
 	}
 
-	const raw = await readLimitedText(response, MAX_RESPONSE_BYTES);
+	const { value: raw, truncated } = await readBoundedText(response.body, MAX_RESPONSE_BYTES);
+	if (truncated) throw new SearchProviderError("brave", "Brave API response exceeded 2 MiB", 500);
 	let data: BraveSearchResponse;
 	try {
 		data = JSON.parse(raw) as BraveSearchResponse;

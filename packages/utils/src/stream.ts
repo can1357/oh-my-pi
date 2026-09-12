@@ -56,6 +56,65 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 	}
 }
 
+/** Result of {@link readBoundedBytes} / {@link readBoundedText}. */
+export interface BoundedRead<T> {
+	/** The first `maxBytes` of the source, in order. */
+	value: T;
+	/** True when the source held more than `maxBytes`; the remainder was cancelled, never buffered. */
+	truncated: boolean;
+}
+
+/**
+ * Read at most `maxBytes` from a byte stream and cancel the source once the
+ * cap is hit, so a runaway or endlessly streaming body stops consuming the
+ * connection instead of growing in memory. A missing stream (bodiless
+ * `Response`) reads as empty. Abort throws {@link AbortError}.
+ */
+export async function readBoundedBytes(
+	stream: ReadableStream<Uint8Array> | null | undefined,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<BoundedRead<Uint8Array>> {
+	if (!stream) return { value: new Uint8Array(0), truncated: false };
+	const chunks: Uint8Array[] = [];
+	let length = 0;
+	let truncated = false;
+	for await (const chunk of abortableSource(stream, signal)) {
+		const take = Math.min(chunk.byteLength, maxBytes - length);
+		if (take > 0) {
+			chunks.push(take === chunk.byteLength ? chunk : chunk.subarray(0, take));
+			length += take;
+		}
+		if (take < chunk.byteLength) {
+			// Early `break` cancels the source through `abortableSource`.
+			truncated = true;
+			break;
+		}
+	}
+	if (chunks.length === 1) return { value: chunks[0]!, truncated };
+	const value = new Uint8Array(length);
+	let offset = 0;
+	for (const chunk of chunks) {
+		value.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return { value, truncated };
+}
+
+/**
+ * {@link readBoundedBytes} decoded as UTF-8. Decoding the bounded buffer in
+ * one pass keeps multi-byte sequences intact across chunk boundaries; a
+ * sequence split by the byte cap itself decodes to U+FFFD.
+ */
+export async function readBoundedText(
+	stream: ReadableStream<Uint8Array> | null | undefined,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<BoundedRead<string>> {
+	const { value, truncated } = await readBoundedBytes(stream, maxBytes, signal);
+	return { value: new TextDecoder().decode(value), truncated };
+}
+
 // =============================================================================
 // SSE (Server-Sent Events)
 // =============================================================================

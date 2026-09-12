@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Codex speech-transcription wire route for cloud dictation ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

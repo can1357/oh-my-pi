@@ -1,10 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { checkPythonSetup } from "../src/cli/setup-cli";
-import { Settings } from "../src/config/settings";
-import { restoreEnvValue } from "./helpers/settings-test-state";
+import { buildSpeechComponents, checkPythonSetup } from "../src/cli/setup-cli";
+import { Settings, settings } from "../src/config/settings";
+import * as setupModelPicker from "../src/cli/setup-model-picker";
+import * as downloader from "../src/stt/downloader";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 
 const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -149,6 +156,63 @@ describe("omp setup python", () => {
 			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
 			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
 		}
+	});
+});
+
+describe("omp setup speech", () => {
+	let state: SettingsTestState | undefined;
+
+	beforeEach(async () => {
+		state = beginSettingsTest();
+		await Settings.init({ inMemory: true });
+		settings.set("stt.backend", "cloud");
+		settings.set("stt.modelName", "fast");
+	});
+
+	afterEach(() => {
+		restoreSettingsTestState(state);
+		vi.restoreAllMocks();
+	});
+
+	it("requires and prepares the local fallback when cloud credentials are unavailable", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const download = vi.spyOn(downloader, "downloadSttModel").mockResolvedValue();
+		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+
+		expect(await stt.isReady()).toBe(false);
+		expect(await stt.status()).toBe("fast — local fallback not downloaded");
+		await stt.ensure(() => {});
+		expect(download).toHaveBeenCalledWith("fast", expect.any(Function));
+	});
+
+	it("reports the local model actually probed when stt.modelName holds a cloud id", async () => {
+		// `--check`/`--json` never run the picker, so a cloud id lingers in
+		// `stt.modelName` after the credential goes away. The local path resolves
+		// it onto the default spec; the status must name that model, not the
+		// remote id it neither probed nor could download.
+		settings.set("stt.modelName", "gpt-4o-mini-transcribe");
+		const cached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+
+		expect(await stt.status()).toBe("parakeet");
+		expect(cached).toHaveBeenLastCalledWith("parakeet");
+
+		cached.mockResolvedValue(false);
+		expect(await stt.status()).toBe("parakeet — local fallback not downloaded");
+	});
+
+	it("offers local fallback models when cloud credentials are unavailable", async () => {
+		const picker = vi.spyOn(setupModelPicker, "selectSetupModel").mockResolvedValue("turbo");
+		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+
+		await stt.pick?.();
+
+		expect(picker.mock.calls[0]?.[1]).toEqual(
+			expect.arrayContaining([
+				{ value: "turbo", label: "Turbo (Whisper large-v3)", description: expect.any(String) },
+			]),
+		);
+		expect(settings.get("stt.modelName")).toBe("turbo");
 	});
 });
 

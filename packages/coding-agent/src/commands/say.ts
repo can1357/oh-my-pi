@@ -18,7 +18,7 @@ import { TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { SpeakableStream } from "../tts/speakable";
 import { StreamingAudioPlayer } from "../tts/streaming-player";
 import { shutdownTtsClient, ttsClient } from "../tts/tts-client";
-import { encodeWav } from "../tts/wav";
+import { concatenatePcm, encodeWav } from "../tts/wav";
 
 export default class Say extends Command {
 	static description = commandHelp.description;
@@ -90,12 +90,7 @@ export default class Say extends Command {
 					exitCode = 1;
 					return;
 				}
-				const pcm = new Float32Array(total);
-				let offset = 0;
-				for (const part of pcms) {
-					pcm.set(part, offset);
-					offset += part.length;
-				}
+				const pcm = concatenatePcm(pcms, total);
 				const wav = encodeWav(pcm, sampleRate);
 				await Bun.write(flags.out, wav);
 				const durationSec = total / sampleRate;
