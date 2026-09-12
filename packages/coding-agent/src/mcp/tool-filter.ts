@@ -241,10 +241,10 @@ function emitTokens(tokens: Token[]): string {
 /**
  * The brace tokens that really delimit a `{a,b}` alternation.
  *
- * Only a `{` whose matching `}` follows opens one; a pair without a comma at its
- * own level is already spelled escaped by the time tokens are visible, which is
- * what keeps `{a}` and `{1..3}` literal while `a{b` stays literal and a nested
- * alternation inside it still works.
+ * Only a `{` whose matching `}` follows opens one, so `a{b` stays literal while
+ * an alternation nested after it still alternates. A pair that closes without a
+ * comma at its own level never reaches here as a group — picomatch has already
+ * spelled it escaped.
  */
 function pairedBraceTokens(tokens: Token[]): Set<Token> {
 	const paired = new Set<Token>();
@@ -262,12 +262,11 @@ function pairedBraceTokens(tokens: Token[]): Set<Token> {
 }
 
 /**
- * Does this brace token delimit a real `{a,b}` alternation?
+ * Does this brace token carry an alternation expression's spelling?
  *
  * Picomatch commits to an expression as soon as it reads a `{`, so an unmatched
- * one still carries a group's spelling in `output`. A pair without a comma at
- * its own level is already spelled escaped by the time tokens are visible, which
- * is what makes `{a}` and `{1..3}` literal while `{a,b}` alternates.
+ * one still carries a group's spelling; pairing them is what tells the two
+ * apart.
  */
 function isAlternationDelimiter(token: Token): boolean {
 	return (token.value === "{" && token.output === "(") || (token.value === "}" && token.output === ")");
