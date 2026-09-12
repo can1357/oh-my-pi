@@ -606,8 +606,12 @@ function agentStateFilePath(): string | null {
  */
 let agentStateFileWork: Promise<void> = Promise.resolve();
 
-/** Set by a removal so an update already queued behind it cannot recreate the file. */
-let agentStateFileRemoved = false;
+/**
+ * Bumped by every removal, so an update that was already in flight can tell that the agent it
+ * describes is gone. A boolean is not enough: the update yields at each await, and a removal
+ * landing in one of those gaps must invalidate it even though it passed the check on entry.
+ */
+let agentStateFileGeneration = 0;
 
 /**
  * Offer the run state as a file beside this terminal's breadcrumb, so a program that is not the
@@ -626,16 +630,26 @@ function writeAgentStateFile(state: TerminalTitleState): void {
 	const file = agentStateFilePath();
 	if (!file) return;
 	const body = `${JSON.stringify({ state, pid: process.pid, at: new Date().toISOString() })}\n`;
-	agentStateFileRemoved = false;
 	const pending = `${file}.${process.pid}.tmp`;
+	const generation = agentStateFileGeneration;
+	const overtaken = (): boolean => generation !== agentStateFileGeneration;
 	agentStateFileWork = agentStateFileWork
 		.then(async () => {
-			// A removal overtook this update: the agent is gone and must not be resurrected.
-			if (agentStateFileRemoved) return;
+			// A removal overtook this update: the agent it describes is gone and must not be
+			// resurrected. Checked again after every await, because a removal is synchronous and
+			// lands in exactly those gaps.
+			if (overtaken()) return;
 			await fsPromises.mkdir(path.dirname(file), { recursive: true });
 			// Written then renamed: a reader polling this must never catch half a state.
 			await Bun.write(pending, body);
+			if (overtaken()) {
+				await fsPromises.rm(pending, { force: true });
+				return;
+			}
 			await fsPromises.rename(pending, file);
+			// The removal may have run while that rename was in flight, finding nothing to
+			// delete. Publishing then would leave a state file for a process that is gone.
+			if (overtaken()) await fsPromises.rm(file, { force: true });
 		})
 		.catch(err => {
 			logger.debug("Agent state file write failed", { err });
@@ -649,7 +663,7 @@ function writeAgentStateFile(state: TerminalTitleState): void {
  * may never get its turn. Anything still queued is cancelled by the flag rather than raced.
  */
 function removeAgentStateFile(): void {
-	agentStateFileRemoved = true;
+	agentStateFileGeneration += 1;
 	const file = agentStateFilePath();
 	if (!file) return;
 	try {

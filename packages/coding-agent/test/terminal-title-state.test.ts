@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -240,6 +241,29 @@ describe("agent state file", () => {
 
 		expect(fs.existsSync(stateFile())).toBe(true);
 		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
+	});
+
+	it("does not publish an update that a removal overtook mid-flight", async () => {
+		// The update yields at every await, and a removal is synchronous, so it can land between
+		// the last check and the rename completing - finding nothing to delete, because the file
+		// does not exist yet. The rename then publishes a state for a process that is gone.
+		//
+		// The stand-in mimics exactly that: the removal happens first, and the rename lands
+		// anyway. A mock that let the rename fail would pass without the guard and prove nothing.
+		setAgentStateFileEnabled(true);
+		const rename = spyOn(fsPromises, "rename");
+		rename.mockImplementationOnce(async (from, to) => {
+			const body = fs.readFileSync(from as string, "utf8");
+			setAgentStateFileEnabled(false);
+			fs.writeFileSync(to as string, body);
+		});
+
+		setTerminalTitleState("attention");
+		await agentStateFileSettled();
+
+		expect(rename).toHaveBeenCalledTimes(1);
+		expect(fs.existsSync(stateFile())).toBe(false);
+		expect(fs.existsSync(`${stateFile()}.${process.pid}.tmp`)).toBe(false);
 	});
 
 	it("leaves no file behind when the runtime is disposed", async () => {
