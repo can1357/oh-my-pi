@@ -12,6 +12,7 @@ import type { OAuthCredential } from "../../auth-storage";
 import * as AIError from "../../error";
 import { raceWithSignal } from "../../utils/abort";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
+import { decodeJwtPayload } from "../engine/common";
 import type { AfterExchangeHook } from "../hooks/types";
 import { oauthFetch, throwIfLoginCancelled } from "./google-oauth-shared";
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
@@ -448,13 +449,9 @@ export async function readLocalAntigravityCredential(
 		const rawCreds = await Bun.file(credsPath).text();
 		const credsData = JSON.parse(rawCreds) as { id_token?: string };
 		if (credsData.id_token) {
-			const parts = credsData.id_token.split(".");
-			if (parts.length >= 2) {
-				const payloadJson = Buffer.from(parts[1]!, "base64url").toString("utf-8");
-				const payload = JSON.parse(payloadJson);
-				if (typeof payload.email === "string" && payload.email.length > 0) {
-					email = payload.email;
-				}
+			const payload = decodeJwtPayload(credsData.id_token);
+			if (payload && typeof payload.email === "string" && payload.email.length > 0) {
+				email = payload.email;
 			}
 		}
 	} catch (error) {

@@ -515,6 +515,7 @@ describe("auth-broker import (--from-antigravity)", () => {
 
 	test("uploads to remote broker and clears only the uploaded account's blocks", async () => {
 		const importedEmail = "remote-agy@example.com";
+		const siblingEmail = "remote-sibling@example.com";
 		await writeLocalAntigravityTokens({ email: importedEmail });
 
 		const brokerAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ag-broker-"));
@@ -522,8 +523,8 @@ describe("auth-broker import (--from-antigravity)", () => {
 		const brokerStorage = new AuthStorage(brokerStore);
 		await brokerStorage.reload();
 
-		// Pre-populate broker with the account and a block
-		const existingRows = brokerStore.upsertAuthCredentialForProvider("google-antigravity", {
+		// Pre-populate broker with imported account AND sibling account, both blocked
+		const importedRows = brokerStore.upsertAuthCredentialForProvider("google-antigravity", {
 			type: "oauth",
 			access: "old-broker-access",
 			refresh: "old-broker-refresh",
@@ -531,14 +532,36 @@ describe("auth-broker import (--from-antigravity)", () => {
 			email: importedEmail,
 			projectId: "aicode-consumers",
 		});
-		const brokerRowId = existingRows[0]!.id;
+		const importedRowId = importedRows.find(
+			r => r.credential.type === "oauth" && r.credential.email === importedEmail,
+		)!.id;
+
+		const siblingRows = brokerStore.upsertAuthCredentialForProvider("google-antigravity", {
+			type: "oauth",
+			access: "sibling-broker-access",
+			refresh: "sibling-broker-refresh",
+			expires: Date.now() + 3600_000,
+			email: siblingEmail,
+			projectId: "aicode-consumers",
+		});
+		const siblingRowId = siblingRows.find(
+			r => r.credential.type === "oauth" && r.credential.email === siblingEmail,
+		)!.id;
+
 		brokerStore.upsertCredentialBlock({
-			credentialId: brokerRowId,
+			credentialId: importedRowId,
 			providerKey: "google-antigravity:oauth",
 			blockScope: "",
 			blockedUntilMs: Date.now() + 600_000,
 		});
-		expect(brokerStore.listCredentialBlocks([brokerRowId])).toHaveLength(1);
+		brokerStore.upsertCredentialBlock({
+			credentialId: siblingRowId,
+			providerKey: "google-antigravity:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 600_000,
+		});
+		expect(brokerStore.listCredentialBlocks([importedRowId])).toHaveLength(1);
+		expect(brokerStore.listCredentialBlocks([siblingRowId])).toHaveLength(1);
 
 		const token = "ag-broker-token";
 		const handle = startAuthBroker({
@@ -556,6 +579,12 @@ describe("auth-broker import (--from-antigravity)", () => {
 				action: "import",
 				flags: { fromAntigravity: true },
 			});
+
+			// Assert remote broker block state before teardown:
+			// Imported credential block was deleted
+			expect(brokerStore.listCredentialBlocks([importedRowId])).toHaveLength(0);
+			// Sibling credential block remains intact
+			expect(brokerStore.listCredentialBlocks([siblingRowId])).toHaveLength(1);
 		} finally {
 			restore();
 			await handle.close();
