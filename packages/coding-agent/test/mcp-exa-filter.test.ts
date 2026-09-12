@@ -116,6 +116,46 @@ describe("Exa MCP filtering", () => {
 		expect(result.configs).toEqual({});
 	});
 
+	test("classifies an allowlist by the names it denotes, not its own spelling", () => {
+		// An allowlist entry is a pattern, so a glob that can match only the
+		// native tool selects nothing the native integration lacks and the server
+		// must be dropped — otherwise the startup work this filter exists to
+		// avoid still happens. A glob that can reach a non-native name keeps it.
+		const configs: Record<string, MCPServerConfig> = {
+			nativeOnlyClass: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_ex[a]"],
+			},
+			nonNativeClass: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_ex[a]"],
+			},
+			// A class admitting either spelling may select the non-native tool.
+			ambiguousClass: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_ex[ab]"],
+			},
+			// An entry whose names cannot be enumerated may select anything, so it
+			// keeps the server rather than guessing.
+			unbounded: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_*"],
+			},
+		};
+		const result = filterExaMCPServers(configs, {
+			nativeOnlyClass: SOURCE,
+			nonNativeClass: SOURCE,
+			ambiguousClass: SOURCE,
+			unbounded: SOURCE,
+		});
+
+		expect(Object.keys(result.configs).sort()).toEqual(["ambiguousClass", "nonNativeClass", "unbounded"]);
+	});
+
 	test("drops an exa server whose restriction and filters leave no non-native tool", () => {
 		// `tools=` enumerates what the server advertises, so an allowlist selects
 		// FROM that set rather than adding to it: a native-only enumeration with

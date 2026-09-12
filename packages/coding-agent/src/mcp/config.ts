@@ -10,7 +10,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
-import { filterMCPTools } from "./tool-filter";
+import { enumeratePatternNames, filterMCPTools } from "./tool-filter";
 import type { MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -304,7 +304,13 @@ function deniesEveryName(entry: string): boolean {
  */
 function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	const requested = getRequestedExaMcpTools(config);
-	const allowlist = config.enabledTools ?? [];
+	// An allowlist entry is matched as a pattern, so the names it can select are
+	// the names it denotes — not its own spelling. `["web_search_ex[a]"]` selects
+	// exactly the native tool and must be classified as such, or the server is
+	// mounted for a selection the native integration already covers. An entry
+	// whose names cannot be enumerated (`web_*`) keeps its spelling: it may
+	// select anything, which errs toward keeping the server.
+	const allowlist = (config.enabledTools ?? []).flatMap(entry => enumeratePatternNames(entry) ?? [entry]);
 	// The names the config selects from: the URL/argv enumeration when present,
 	// otherwise the allowlist it names itself.
 	const pool = requested ?? allowlist;

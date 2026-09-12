@@ -339,6 +339,94 @@ function isClosedClass(token: Token): boolean {
 	}
 }
 
+/**
+ * Characters a class is probed against when its members must be enumerated.
+ *
+ * The printable ASCII range covers every tool name in practice; a class that
+ * admits nothing from it is declined rather than assumed empty.
+ */
+const CLASS_ALPHABET = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => String.fromCharCode(0x20 + i));
+
+/**
+ * Turn a prepared token spelling back into the characters it names.
+ *
+ * A text token carries the spelling `prepare` produced, where every escaped and
+ * structural character became a `\xNN`/`\uNNNN` escape of one character.
+ */
+function unescapePatternText(value: string): string {
+	return value.replaceAll(/\\x([0-9A-F]{2})|\\u([0-9A-F]{4})/g, (_match, byte: string, unit: string) =>
+		String.fromCharCode(Number.parseInt(byte ?? unit, 16)),
+	);
+}
+
+/**
+ * The characters a class token admits, or null when it reaches beyond
+ * enumeration.
+ *
+ * A negated member list admits nearly every character, and a range may include
+ * characters outside the probe alphabet, so both are declined: the caller then
+ * treats the pattern as selecting something it cannot name rather than
+ * concluding it selects nothing.
+ */
+function classMembers(token: Token): string[] | null {
+	if (token.value.startsWith("[^") || token.value.includes("-")) return null;
+	const regex = new RegExp(`^(?:${token.value})$`);
+	const members = CLASS_ALPHABET.filter(ch => regex.test(ch));
+	return members.length === 0 ? null : members;
+}
+
+/** What one token contributes to the names a pattern can match, or null if unbounded. */
+function enumerateToken(token: Token): string[] | null {
+	switch (token.type) {
+		case "bos":
+		case "eos":
+		case "maybe_slash":
+			return [];
+		// `*` spans any run and `?` any character, so neither has a nameable set.
+		case "star":
+		case "globstar":
+		case "qmark":
+			return null;
+		case "bracket":
+			return classMembers(token);
+		case "brace":
+			// An alternation selects among branches, which this flat walk does
+			// not model; a brace that does not alternate is a literal character.
+			if (isAlternationDelimiter(token)) return null;
+			return [token.value.endsWith("}") ? "}" : "{"];
+		default:
+			return [unescapePatternText(token.value)];
+	}
+}
+
+/**
+ * The concrete names a pattern can match, when it can match few enough to name.
+ *
+ * Returns null when the pattern reaches beyond enumeration: `*` and `?` match an
+ * unbounded set, an alternation picks among branches this walk does not model,
+ * and a class may admit characters the probe alphabet cannot show. A caller
+ * asking whether a filter selects something outside a known name set must read
+ * null as "it can" — that is the answer that keeps a server rather than
+ * dropping one whose tools were merely not enumerable.
+ */
+export function enumeratePatternNames(pattern: string, limit = 64): string[] | null {
+	let names = [""];
+	for (const token of parseTokens(prepare(pattern), PARSE_OPTIONS)) {
+		const parts = enumerateToken(token);
+		if (parts === null) return null;
+		if (parts.length === 0) continue;
+		const next: string[] = [];
+		for (const name of names) {
+			for (const part of parts) {
+				if (next.length >= limit) return null;
+				next.push(name + part);
+			}
+		}
+		names = next;
+	}
+	return names;
+}
+
 /** Per-pattern matcher over raw tool names; cached across filter calls. */
 type ToolMatcher = (name: string) => boolean;
 
