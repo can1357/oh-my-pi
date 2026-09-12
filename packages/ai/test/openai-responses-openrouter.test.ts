@@ -496,6 +496,66 @@ describe("OpenRouter Responses request shape", () => {
 
 		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
 	});
+
+	it("synthesizes the required reasoning item without a fabricated id for foreign tool-call history", async () => {
+		// Meta (via OpenRouter Responses) validates reasoning ids against its own
+		// store and rejects a minted `rs_…` with "Referenced reasoning item … was
+		// not found or has expired", failing every turn once a Claude/Bedrock or
+		// DeepSeek turn with a tool call sits in the history.
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const foreignTurn: AssistantMessage = {
+			role: "assistant",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			model: "global.anthropic.claude-fable-5-1",
+			stopReason: "toolUse",
+			usage,
+			content: [
+				{ type: "text", text: "<thinking>\nCheck the build.\n</thinking>\nRunning cargo check." },
+				{
+					type: "toolCall",
+					id: "tooluse_1PyTNHRXRnPxuFbunJ5ham",
+					name: "bash",
+					arguments: { command: "cargo check" },
+				},
+			],
+			timestamp: 1,
+		};
+		const history: Context = {
+			messages: [
+				{ role: "user", content: "check", timestamp: 0 },
+				foreignTurn,
+				{
+					role: "toolResult",
+					toolCallId: "tooluse_1PyTNHRXRnPxuFbunJ5ham",
+					toolName: "bash",
+					content: [{ type: "text", text: "Finished" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		};
+		const body = await capturePseudoResponsesRequest(
+			buildOpenRouterModel({ id: "meta/muse-spark-1.3", reasoning: true }),
+			{ reasoning: Effort.Medium },
+			history,
+		);
+		const input = body.input as Array<Record<string, unknown>>;
+		const reasoning = input.filter(item => item.type === "reasoning");
+		expect(reasoning).toHaveLength(1);
+		expect(reasoning[0]).not.toHaveProperty("id");
+		expect(input.findIndex(item => item.type === "reasoning")).toBeLessThan(
+			input.findIndex(item => item.type === "function_call"),
+		);
+	});
 });
 
 async function captureDirectResponsesRequest(
