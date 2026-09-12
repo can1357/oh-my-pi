@@ -1,12 +1,12 @@
 /**
- * Contract: the print-mode assistant-error/aborted exit path MUST run the
- * awaited `session.dispose()` (which contains the bounded browser reaper
- * `releaseTabsForOwner`) before terminating the process. It previously called
- * `process.exit(1)` ahead of the `dispose()` at the end of `runPrintMode`, so
- * an OMP-owned Chromium survived the exit (issue #5643).
+ * Contract: non-interactive shutdown MUST await `session.dispose()` before the
+ * process exits. This releases owned resources and lets an interrupted agent
+ * finalize its partial assistant message into the session journal.
  */
+import * as path from "node:path";
 import { describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 import { runPrintMode } from "../../src/modes/print-mode";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as telemetryExport from "../../src/telemetry-export";
@@ -18,7 +18,7 @@ class ProcessExit extends Error {
 	}
 }
 
-describe("print-mode error exit disposes the session before exit", () => {
+describe("print mode disposes the session before exit", () => {
 	it("disposes on the assistant-error path before process.exit(1)", async () => {
 		const order: string[] = [];
 		const errorMsg: AssistantMessage = {
@@ -70,5 +70,81 @@ describe("print-mode error exit disposes the session before exit", () => {
 		}
 
 		expect(order).toEqual(["catchup", "flush", "dispose", "exit"]);
+	});
+
+	it("disposes an active print session before SIGTERM exits", async () => {
+		using tempDir = TempDir.createSync("@omp-print-signal-");
+		const marker = tempDir.join("disposed");
+		const fixture = path.join(import.meta.dir, "..", "fixtures", "print-mode-signal.js");
+		const child = Bun.spawn([process.execPath, fixture, marker], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const exitCode = await child.exited;
+		const stderr = await new Response(child.stderr).text();
+		const markerFile = Bun.file(marker);
+
+		if (!(await markerFile.exists())) {
+			throw new Error(`Print session was not disposed before signal exit ${exitCode}: ${stderr}`);
+		}
+		expect(await markerFile.text()).toBe("sigterm");
+	});
+
+	it("defers to the signal exit code instead of process.exit(1) when a signal aborts the turn", async () => {
+		const abortedMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: {} as AssistantMessage["usage"],
+			stopReason: "aborted",
+			errorMessage: "Request aborted",
+			timestamp: 1,
+		};
+
+		let signalCallback: ((reason: postmortem.Reason) => void | Promise<void>) | undefined;
+		let disposeReason: postmortem.Reason | "dispose" | undefined;
+		const session = {
+			extensionRunner: undefined,
+			subscribe: () => {},
+			settings: { get: () => false },
+			sessionManager: { buildSessionContext: () => ({ messages: [] }), getEntries: () => [] },
+			getLastAssistantMessage: () => abortedMsg,
+			prepareForHeadlessAdvisorDrain: () => {},
+			setTextOutputCommitted: () => {},
+			waitForAdvisorCatchup: async () => true,
+			// Mimic a real mid-turn signal: the postmortem teardown fires (which
+			// disposes and aborts the agent), and only then does the awaited turn
+			// settle with an aborted assistant message.
+			prompt: async () => {
+				await signalCallback?.(postmortem.Reason.SIGTERM);
+			},
+			dispose: async (options: { reason?: postmortem.Reason } = {}) => {
+				disposeReason ??= options.reason ?? "dispose";
+			},
+		} as unknown as AgentSession;
+
+		const registerSpy = spyOn(postmortem, "register").mockImplementation(
+			(_id: string, cb: (reason: postmortem.Reason) => void | Promise<void>) => {
+				signalCallback = cb;
+				return () => {};
+			},
+		);
+		const exitSpy = spyOn(process, "exit").mockImplementation(((code: number) => {
+			throw new ProcessExit(code);
+		}) as never);
+		const stderrSpy = spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+
+		try {
+			await runPrintMode(session, { mode: "text", initialMessage: "go" });
+		} finally {
+			registerSpy.mockRestore();
+			exitSpy.mockRestore();
+			stderrSpy.mockRestore();
+		}
+
+		expect(exitSpy).not.toHaveBeenCalled();
+		expect(disposeReason).toBe(postmortem.Reason.SIGTERM);
 	});
 });
