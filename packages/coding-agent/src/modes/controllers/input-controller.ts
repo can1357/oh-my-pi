@@ -304,10 +304,13 @@ export class InputController {
 		if (!this.#btwCopyListenerInstalled) {
 			this.#btwCopyListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
-				if (!matchesKey(data, "c")) return undefined;
-				if (!this.ctx.canCopyBtw()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
+				if (matchesKey(data, "f") && this.ctx.canFollowUpBtw()) {
+					this.ctx.handleBtwFollowUpKey();
+					return { consume: true };
+				}
+				if (!matchesKey(data, "c") || !this.ctx.canCopyBtw()) return undefined;
 				void this.ctx.handleBtwCopyKey();
 				return { consume: true };
 			});
@@ -368,8 +371,8 @@ export class InputController {
 				return;
 			}
 
-			// Side-channel panels are the topmost view. Esc dismisses them before
-			// touching loop mode, maintenance, or the underlying main turn.
+			// Side-channel panels own Esc for cancellation or closing before
+			// loop mode, maintenance, or the underlying main turn.
 			// Active context maintenance owns Esc: auto/manual compaction,
 			// handoff generation, and auto-retry backoff all advertise
 			// "(esc to cancel)". Dispatch on live session state instead of
@@ -2291,7 +2294,8 @@ export class InputController {
 		this.ctx.chatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
 
 		if (this.ctx.hideToolActivity) this.ctx.ui.clearInlineImages();
-		this.ctx.ui.requestRender(true);
+		// A viewport-only repaint leaves tool rows already retired to terminal history unchanged.
+		this.ctx.ui.resetDisplay();
 		this.ctx.showStatus(`Tool activity: ${this.ctx.hideToolActivity ? "hidden" : "visible"}`);
 	}
 
