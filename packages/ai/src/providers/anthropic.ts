@@ -453,6 +453,12 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * `compat.replayUnsignedThinking: false`. Cleared on session close.
 	 */
 	replayUnsignedThinkingDisabled: boolean;
+	/**
+	 * Runtime-learned: this endpoint rejected `cache_control`, so prompt-cache
+	 * breakpoints are omitted from every later request for this (baseUrl,
+	 * modelId). Cleared on session close.
+	 */
+	cacheControlUnsupported: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
 	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
@@ -477,12 +483,14 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
 		replayUnsignedThinkingDisabled: false,
+		cacheControlUnsupported: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		controlStates: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
+			state.cacheControlUnsupported = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.controlStates.clear();
 		},
@@ -513,6 +521,7 @@ function getAnthropicProviderSessionState(
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
 		existing.controlStates ??= new Map();
+		existing.cacheControlUnsupported ??= false;
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -2295,6 +2304,9 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
+			// Seeded from the session so a `cache_control` rejection learned on an
+			// earlier turn is honored on this turn's first attempt.
+			let dropCacheControl = providerSessionState?.cacheControlUnsupported ?? false;
 			let dropAllThinking = false;
 			let prefixBindingRetryAttempted = false;
 			let prefixMismatchBehavior =
@@ -2400,9 +2412,15 @@ const streamAnthropicOnce = (
 				// `ttl: "1h"` on the OAuth path without it (verified against live
 				// traffic: writes land in the `ephemeral_1h` bucket), and utility
 				// requests must not deviate from CC's header fingerprint.
+				// `dropCacheControl` short-circuits it for the same reason the
+				// fast-mode beta is skipped above: a request that carries no
+				// breakpoint must not advertise a cache beta. Both this gate and
+				// buildParams resolve the breakpoint behind the same flag so the
+				// header and the body can never disagree.
 				const isOAuth = options?.isOAuth ?? isAnthropicOAuthToken(apiKey);
 				if (
 					!isOAuth &&
+					!dropCacheControl &&
 					getCacheControl(model, options?.cacheRetention, isOAuth).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {
@@ -2465,6 +2483,7 @@ const streamAnthropicOnce = (
 					supportsEagerToolInputStreaming,
 					prefixMismatchBehavior,
 					dropAllThinking,
+					dropCacheControl,
 					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
 					providerSessionState,
 					fallbacks,
@@ -3385,6 +3404,33 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
+					if (
+						!dropCacheControl &&
+						firstTokenTime === undefined &&
+						AIError.isCacheControlUnsupported(streamFailure)
+					) {
+						logger.warn("anthropic: endpoint rejected cache_control, retrying without prompt-cache breakpoints", {
+							provider: model.provider,
+							model: model.id,
+							baseUrl,
+							error: streamFailureMessage,
+						});
+						if (providerSessionState) {
+							providerSessionState.cacheControlUnsupported = true;
+						}
+						dropCacheControl = true;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);
 					const isLocalIdleTimeout =
@@ -3440,6 +3486,9 @@ const streamAnthropicOnce = (
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "unsigned-thinking-replay"];
+			}
+			if (dropCacheControl) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "prompt-cache"];
 			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
@@ -4304,6 +4353,12 @@ type AnthropicParamBuildOptions = {
 	supportsEagerToolInputStreaming: boolean;
 	prefixMismatchBehavior?: "drop_block" | "error";
 	dropAllThinking: boolean;
+	/**
+	 * Drop every prompt-cache breakpoint: the endpoint rejected `cache_control`
+	 * with a 400. `applyHeadCaching` / `applyPromptCaching` no-op on an
+	 * undefined breakpoint, so nothing else in the body changes.
+	 */
+	dropCacheControl?: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
 	providerSessionState?: AnthropicProviderSessionState;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
@@ -4336,6 +4391,7 @@ function buildParams(
 		supportsEagerToolInputStreaming,
 		prefixMismatchBehavior,
 		dropAllThinking,
+		dropCacheControl = false,
 		droppedThinkingBlocks,
 		providerSessionState,
 		fallbacks = options?.fallbacks,
@@ -4350,7 +4406,9 @@ function buildParams(
 		forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking
 			? { ...model, compat: { ...model.compat, replayUnsignedThinking: false } }
 			: model;
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention, isOAuthToken);
+	const cacheControl = dropCacheControl
+		? undefined
+		: getCacheControl(model, options?.cacheRetention, isOAuthToken).cacheControl;
 
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
