@@ -77,7 +77,7 @@ const PARSE_OPTIONS = {
  * normalize to the same spelling are addressed together.
  */
 function sanitizeToolName(name: string): string {
-	return sanitizeMCPToolNamePart(name, name);
+	return sanitizeMCPToolNamePart(name, name, true);
 }
 
 /** Per-pattern matcher over sanitized tool names; cached across filter calls. */

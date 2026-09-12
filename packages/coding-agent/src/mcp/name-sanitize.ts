@@ -1,15 +1,18 @@
 /**
- * One identifier spelling for a tool or server name: lowercase, everything
- * outside `[a-z]` collapsed to one `_`, runs collapsed, leading/trailing `_`
- * stripped, and a name that normalizes to nothing falling back. This is the
- * spelling every minted `mcp__server_tool` registry name is built from and the
- * spelling tool filters match against, so a pattern written for the
- * model-visible name keeps working.
+ * One identifier spelling for a tool or server name.
+ *
+ * Two alphabets, one function: the harness mint (`mcp__…` registry names) is
+ * validator-strict — lowercase, hyphen folded to `_`, everything outside
+ * `[a-z0-9_]` collapsed — while the filter domain additionally keeps the
+ * hyphen, because tool names are hyphen-bearing in practice (SEP-986 names
+ * `[a-zA-Z0-9_-]`) and a filter entry written for the hyphenated spelling
+ * would otherwise not reach its tool. Both collapse runs, strip
+ * leading/trailing `_`, and fall back when nothing survives.
  */
-export function sanitizeMCPToolNamePart(value: string, fallback: string): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(/[^a-z0-9_-]+/g, "_")
+export function sanitizeMCPToolNamePart(value: string, fallback: string, keepHyphen = false): string {
+	const folded = keepHyphen ? value.toLowerCase() : value.toLowerCase().replaceAll("-", "_");
+	const sanitized = folded
+		.replace(/[^a-z0-9_]+/g, "_")
 		.replace(/_+/g, "_")
 		.replace(/^_+|_+$/g, "");
 
