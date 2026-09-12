@@ -17,11 +17,10 @@ function limitExitReason(reason: string): string {
 /** Normalize a runtime exit diagnostic at the boundary where it becomes durable state. */
 export function normalizeExitReason(reason: string | undefined): string | undefined {
 	const normalized = cleanExitReason(reason);
-	return normalized ? limitExitReason(normalized) : undefined;
+	return normalized ? limitExitReason(shortenEmbeddedPaths(normalized)) : undefined;
 }
 
 /** Normalize an exit diagnostic for model and terminal display without exposing the home directory. */
 export function displayExitReason(reason: string | undefined): string | undefined {
-	const normalized = cleanExitReason(reason);
-	return normalized ? limitExitReason(shortenEmbeddedPaths(normalized)) : undefined;
+	return normalizeExitReason(reason);
 }
