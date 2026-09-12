@@ -191,23 +191,6 @@ describe("Google Gemini CLI alignment", () => {
 		expect(payload.request.contents).toEqual([{ role: "user", parts: [{ text: "implement token refresh" }] }]);
 	});
 
-	it("sanitizes system-conventions tags in systemInstruction to prevent Cloud Code Assist 429 WAF rejection", () => {
-		const model = createModel("google-gemini-cli");
-		const context: Context = {
-			systemPrompt: ["<system-conventions>\nRFC 2119 rules\n</system-conventions>"],
-			messages: [{ role: "user", content: "test", timestamp: Date.now() }],
-		};
-		const payload = buildRequest(model, context, "proj-123", {}, false) as {
-			request: {
-				systemInstruction?: { role?: string; parts: Array<{ text: string }> };
-			};
-		};
-
-		expect(payload.request.systemInstruction?.parts[0].text).toBe(
-			"<system_conventions>\nRFC 2119 rules\n</system_conventions>",
-		);
-	});
-
 	it("drops only unsigned thinking when replaying Antigravity Claude history", () => {
 		const signedThinking = "signed reasoning";
 		const unsignedThinking = "unsigned reasoning";

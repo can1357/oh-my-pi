@@ -1315,14 +1315,11 @@ export function buildRequest(
 	};
 
 	// System instruction is an object with parts, not a plain string. Antigravity
-	// tags it with role "user" to mirror the real client. Google Cloud Code Assist
-	// rejects literal `<system-conventions>` tags in systemInstruction with 429 RESOURCE_EXHAUSTED.
+	// tags it with role "user" to mirror the real client.
 	if (systemPrompts.length > 0) {
 		request.systemInstruction = {
 			...(isAntigravity ? { role: "user" } : {}),
-			parts: systemPrompts.map(text => ({
-				text: text.replace(/<(\/?)system-conventions>/g, "<$1system_conventions>"),
-			})),
+			parts: systemPrompts.map(text => ({ text })),
 		};
 	}
 

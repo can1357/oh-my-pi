@@ -3079,11 +3079,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Resolve the inline-descriptors setting against the session-start model.
 		// `auto` enforces the per-model policy (inline for Gemini, off otherwise);
 		// like the rest of the prune machinery this is fixed for the session, so a
-		const inlineToolDescriptors = shouldInlineToolDescriptors(
-			settings.get("inlineToolDescriptors"),
-			model?.id,
-			model?.provider,
-		);
+		// mid-session model switch keeps the start-time decision.
+		const inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;

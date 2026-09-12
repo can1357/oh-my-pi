@@ -31,6 +31,7 @@ import {
 	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
 	readLocalAntigravityCredential,
+	resolveCredentialIdentityKey,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
@@ -615,7 +616,17 @@ function describeImportEntry(entry: ImportPlanEntry): string {
 
 async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	if (flags.fromAntigravity) {
-		const targetProvider = flags.provider ?? "google-antigravity";
+		if (flags.provider && flags.provider !== "google-antigravity") {
+			const message = `--from-antigravity only supports provider "google-antigravity" (received "${flags.provider}")`;
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify({ error: message, provider: flags.provider })}\n`);
+			} else {
+				process.stdout.write(`${chalk.red("failed")} ${flags.provider}: ${message}\n`);
+			}
+			process.exitCode = 1;
+			return;
+		}
+		const targetProvider = "google-antigravity";
 		let cred: OAuthCredential;
 		try {
 			cred = await readLocalAntigravityCredential();
@@ -657,11 +668,21 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			return;
 		}
 
+		const targetIdentityKey = resolveCredentialIdentityKey(targetProvider, cred);
 		const brokerConfig = await resolveAuthBrokerConfig();
 		if (brokerConfig) {
 			const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 			try {
-				await client.uploadCredential(targetProvider, cred);
+				const uploadResult = await client.uploadCredential(targetProvider, cred);
+				for (const entry of uploadResult.entries) {
+					const matches =
+						targetIdentityKey !== null
+							? entry.identityKey === targetIdentityKey
+							: entry.credential.type === "oauth" && entry.credential.email === cred.email;
+					if (matches) {
+						await client.deleteCredentialBlocks(entry.id);
+					}
+				}
 				if (flags.json) {
 					process.stdout.write(
 						`${JSON.stringify({
@@ -689,7 +710,15 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		try {
 			const stored = store.upsertAuthCredentialForProvider(targetProvider, cred);
 			for (const row of stored) {
-				store.deleteCredentialBlocks(row.id);
+				const rowIdentityKey = resolveCredentialIdentityKey(targetProvider, row.credential);
+				const matches =
+					targetIdentityKey !== null
+						? rowIdentityKey === targetIdentityKey
+						: row.credential.type === "oauth" &&
+							(row.credential.email === cred.email || row.credential.access === cred.access);
+				if (matches) {
+					store.deleteCredentialBlocks(row.id);
+				}
 			}
 			if (flags.json) {
 				process.stdout.write(

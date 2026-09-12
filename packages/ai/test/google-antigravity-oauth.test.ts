@@ -311,4 +311,15 @@ describe("readLocalAntigravityCredential", () => {
 			"missing access_token or refresh_token",
 		);
 	});
+
+	it("preserves non-ENOENT errors (e.g. EISDIR) rather than masking as not found", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ag-oauth-test-"));
+		// Passing a directory path throws EISDIR
+		await expect(readLocalAntigravityCredential({ tokenPath: tempDir })).rejects.toThrow();
+		try {
+			await readLocalAntigravityCredential({ tokenPath: tempDir });
+		} catch (error) {
+			expect(error instanceof Error ? error.message : "").not.toContain("Antigravity OAuth token file not found");
+		}
+	});
 });

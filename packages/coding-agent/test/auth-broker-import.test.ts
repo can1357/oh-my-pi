@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -309,5 +309,267 @@ describe("auth-broker import (broker-routed)", () => {
 		}
 
 		expect(brokerStore!.listAuthCredentials()).toHaveLength(0);
+	});
+});
+
+describe("auth-broker import (--from-antigravity)", () => {
+	let agentDir = "";
+	let fakeHome = "";
+	let originalAgentDir: string | undefined;
+	const savedEnv: Record<string, string | undefined> = {};
+	let homedirSpy: { mockRestore(): void } | undefined;
+
+	beforeEach(async () => {
+		originalAgentDir = process.env.OMP_AGENT_DIR;
+		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
+		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
+		delete process.env.OMP_AUTH_BROKER_URL;
+		delete process.env.OMP_AUTH_BROKER_TOKEN;
+		process.exitCode = 0;
+
+		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ag-import-agent-"));
+		fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ag-fake-home-"));
+		setAgentDir(agentDir);
+		homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+	});
+
+	afterEach(async () => {
+		process.stdout.write = ORIGINAL_STDOUT_WRITE;
+		process.exitCode = 0;
+		homedirSpy?.mockRestore();
+		if (originalAgentDir === undefined) delete process.env.OMP_AGENT_DIR;
+		else process.env.OMP_AGENT_DIR = originalAgentDir;
+		await removeWithRetries(agentDir);
+		await removeWithRetries(fakeHome);
+		for (const key of ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"] as const) {
+			if (savedEnv[key] === undefined) delete process.env[key];
+			else process.env[key] = savedEnv[key];
+		}
+	});
+
+	async function writeLocalAntigravityTokens(options?: { email?: string; tokenFilename?: string }) {
+		const filename = options?.tokenFilename ?? "antigravity-oauth-token";
+		const agyDir = path.join(fakeHome, ".gemini", "antigravity-cli");
+		await fs.mkdir(agyDir, { recursive: true });
+		await Bun.write(
+			path.join(agyDir, filename),
+			JSON.stringify({
+				token: {
+					access_token: "ag-access-token",
+					refresh_token: "ag-refresh-token",
+					expiry: "2099-12-31T23:59:59Z",
+				},
+				auth_method: "consumer",
+			}),
+		);
+
+		if (options?.email) {
+			const header = Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url");
+			const payload = Buffer.from(JSON.stringify({ email: options.email })).toString("base64url");
+			await Bun.write(
+				path.join(fakeHome, ".gemini", "oauth_creds.json"),
+				JSON.stringify({
+					access_token: "ag-access-token",
+					refresh_token: "ag-refresh-token",
+					id_token: `${header}.${payload}.signature`,
+				}),
+			);
+		}
+	}
+
+	test("rejects conflicting --provider override", async () => {
+		await writeLocalAntigravityTokens();
+		const restore = silenceStdout();
+		try {
+			await runAuthBrokerCommand({
+				action: "import",
+				flags: { fromAntigravity: true, provider: "anthropic" },
+			});
+		} finally {
+			restore();
+		}
+		expect(process.exitCode).toBe(1);
+	});
+
+	test("dry-run outputs plan without writing to store", async () => {
+		await writeLocalAntigravityTokens({ email: "dryrun@example.com" });
+		const restore = silenceStdout();
+		let captured = "";
+		try {
+			captured = restore();
+			const restoreCapture = silenceStdout();
+			await runAuthBrokerCommand({
+				action: "import",
+				flags: { fromAntigravity: true, dryRun: true },
+			});
+			captured = restoreCapture();
+		} finally {
+			restore();
+		}
+
+		expect(captured).toContain("Dry run");
+		expect(captured).toContain("google-antigravity");
+		expect(captured).toContain("dryrun@example.com");
+
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			expect(store.listAuthCredentials("google-antigravity")).toHaveLength(0);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("local import clears only the imported account's blocks, preserving sibling blocks", async () => {
+		const importedEmail = "imported@example.com";
+		const siblingEmail = "sibling@example.com";
+		await writeLocalAntigravityTokens({ email: importedEmail });
+
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		let importedRowId: number;
+		let siblingRowId: number;
+		try {
+			// Pre-populate sibling credential
+			const siblingRows = store.upsertAuthCredentialForProvider("google-antigravity", {
+				type: "oauth",
+				access: "sibling-access",
+				refresh: "sibling-refresh",
+				expires: Date.now() + 3600_000,
+				email: siblingEmail,
+				projectId: "aicode-consumers",
+			});
+			siblingRowId = siblingRows.find(r => r.credential.type === "oauth" && r.credential.email === siblingEmail)!.id;
+
+			// Pre-populate existing imported credential
+			const existingRows = store.upsertAuthCredentialForProvider("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() + 3600_000,
+				email: importedEmail,
+				projectId: "aicode-consumers",
+			});
+			importedRowId = existingRows.find(
+				r => r.credential.type === "oauth" && r.credential.email === importedEmail,
+			)!.id;
+
+			// Block both credentials
+			store.upsertCredentialBlock({
+				credentialId: siblingRowId,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "",
+				blockedUntilMs: Date.now() + 600_000,
+			});
+			store.upsertCredentialBlock({
+				credentialId: importedRowId,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "",
+				blockedUntilMs: Date.now() + 600_000,
+			});
+
+			expect(store.listCredentialBlocks([siblingRowId])).toHaveLength(1);
+			expect(store.listCredentialBlocks([importedRowId])).toHaveLength(1);
+		} finally {
+			store.close();
+		}
+
+		const restore = silenceStdout();
+		try {
+			await runAuthBrokerCommand({
+				action: "import",
+				flags: { fromAntigravity: true },
+			});
+		} finally {
+			restore();
+		}
+
+		const verifyStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			const activeRows = verifyStore.listAuthCredentials("google-antigravity");
+			const importedRow = activeRows.find(
+				r => r.credential.type === "oauth" && r.credential.email === importedEmail,
+			);
+			expect(importedRow).toBeDefined();
+			expect(importedRow!.credential.type === "oauth" && importedRow!.credential.access).toBe("ag-access-token");
+
+			// The imported account's blocks are deleted
+			expect(verifyStore.listCredentialBlocks([importedRow!.id])).toHaveLength(0);
+			// The sibling account's blocks remain untouched!
+			expect(verifyStore.listCredentialBlocks([siblingRowId])).toHaveLength(1);
+		} finally {
+			verifyStore.close();
+		}
+	});
+
+	test("reports error and sets exitCode when token file is missing", async () => {
+		const restore = silenceStdout();
+		try {
+			await runAuthBrokerCommand({
+				action: "import",
+				flags: { fromAntigravity: true },
+			});
+		} finally {
+			restore();
+		}
+		expect(process.exitCode).toBe(1);
+	});
+
+	test("uploads to remote broker and clears only the uploaded account's blocks", async () => {
+		const importedEmail = "remote-agy@example.com";
+		await writeLocalAntigravityTokens({ email: importedEmail });
+
+		const brokerAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ag-broker-"));
+		const brokerStore = await SqliteAuthCredentialStore.open(path.join(brokerAgentDir, "agent.db"));
+		const brokerStorage = new AuthStorage(brokerStore);
+		await brokerStorage.reload();
+
+		// Pre-populate broker with the account and a block
+		const existingRows = brokerStore.upsertAuthCredentialForProvider("google-antigravity", {
+			type: "oauth",
+			access: "old-broker-access",
+			refresh: "old-broker-refresh",
+			expires: Date.now() + 3600_000,
+			email: importedEmail,
+			projectId: "aicode-consumers",
+		});
+		const brokerRowId = existingRows[0]!.id;
+		brokerStore.upsertCredentialBlock({
+			credentialId: brokerRowId,
+			providerKey: "google-antigravity:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 600_000,
+		});
+		expect(brokerStore.listCredentialBlocks([brokerRowId])).toHaveLength(1);
+
+		const token = "ag-broker-token";
+		const handle = startAuthBroker({
+			storage: brokerStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+		});
+		process.env.OMP_AUTH_BROKER_URL = handle.url;
+		process.env.OMP_AUTH_BROKER_TOKEN = token;
+
+		const restore = silenceStdout();
+		try {
+			await runAuthBrokerCommand({
+				action: "import",
+				flags: { fromAntigravity: true },
+			});
+		} finally {
+			restore();
+			await handle.close();
+			brokerStorage.close();
+			brokerStore.close();
+			await removeWithRetries(brokerAgentDir);
+		}
+
+		// Local store was NOT written
+		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			expect(localStore.listAuthCredentials()).toHaveLength(0);
+		} finally {
+			localStore.close();
+		}
 	});
 });

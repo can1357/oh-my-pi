@@ -2,18 +2,18 @@
  * Antigravity OAuth flow (Gemini 3, Claude, GPT-OSS via Google Cloud)
  * Uses different OAuth credentials than google-gemini-cli for access to additional models.
  */
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { OAuthCredential } from "../../auth-storage";
 import * as AIError from "../../error";
 import { raceWithSignal } from "../../utils/abort";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
 import type { AfterExchangeHook } from "../hooks/types";
 import { oauthFetch, throwIfLoginCancelled } from "./google-oauth-shared";
-
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const LOAD_CODE_ASSIST_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist`;
 const ONBOARD_USER_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:onboardUser`;
@@ -334,9 +334,25 @@ export const googleAntigravityProjectHook: AfterExchangeHook = async (credential
 	return { ...credentials, projectId };
 };
 
-/** Default path for official Google Antigravity OAuth tokens. */
+/** Default filename for official Google Antigravity OAuth tokens (`antigravity-oauth-token`). */
+export const DEFAULT_ANTIGRAVITY_TOKEN_FILENAME = "antigravity-oauth-token";
+
+/** Secondary candidate filename for Antigravity OAuth tokens (`antigravity-auth-token`). */
+export const LEGACY_ANTIGRAVITY_TOKEN_FILENAME = "antigravity-auth-token";
+
+/**
+ * Default path for official Google Antigravity OAuth tokens.
+ *
+ * Checks primary `antigravity-oauth-token` first, falling back to `antigravity-auth-token` if present.
+ */
 export function getDefaultAntigravityTokenPath(): string {
-	return path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token");
+	const dir = path.join(os.homedir(), ".gemini", "antigravity-cli");
+	const primary = path.join(dir, DEFAULT_ANTIGRAVITY_TOKEN_FILENAME);
+	const fallback = path.join(dir, LEGACY_ANTIGRAVITY_TOKEN_FILENAME);
+	if (fs.existsSync(fallback) && !fs.existsSync(primary)) {
+		return fallback;
+	}
+	return primary;
 }
 
 /** Default path for official Google OAuth client credentials (contains id_token with email). */
@@ -358,17 +374,38 @@ export interface ReadLocalAntigravityCredentialOptions {
 export async function readLocalAntigravityCredential(
 	options?: ReadLocalAntigravityCredentialOptions,
 ): Promise<OAuthCredential> {
-	const tokenPath = options?.tokenPath ?? getDefaultAntigravityTokenPath();
+	const explicitTokenPath = options?.tokenPath;
+	const tokenPath = explicitTokenPath ?? getDefaultAntigravityTokenPath();
 	const credsPath = options?.credsPath ?? getDefaultAntigravityCredsPath();
 
-	let rawTokenContent: string;
+	let rawTokenContent: string | undefined;
 	try {
-		rawTokenContent = await fs.readFile(tokenPath, "utf-8");
+		rawTokenContent = await Bun.file(tokenPath).text();
 	} catch (error) {
-		throw new AIError.OAuthError(
-			`Antigravity OAuth token file not found at ${tokenPath}. Please log in with the Google Antigravity CLI first.`,
-			{ kind: "validation", provider: PROVIDER, cause: error },
-		);
+		if (isEnoent(error)) {
+			if (!explicitTokenPath) {
+				const dir = path.join(os.homedir(), ".gemini", "antigravity-cli");
+				const altFilename =
+					path.basename(tokenPath) === DEFAULT_ANTIGRAVITY_TOKEN_FILENAME
+						? LEGACY_ANTIGRAVITY_TOKEN_FILENAME
+						: DEFAULT_ANTIGRAVITY_TOKEN_FILENAME;
+				const altPath = path.join(dir, altFilename);
+				try {
+					rawTokenContent = await Bun.file(altPath).text();
+				} catch (altError) {
+					if (!isEnoent(altError)) throw altError;
+				}
+			}
+		} else {
+			throw error;
+		}
+
+		if (rawTokenContent === undefined) {
+			throw new AIError.OAuthError(
+				`Antigravity OAuth token file not found at ${tokenPath}. Please log in with the Google Antigravity CLI first.`,
+				{ kind: "validation", provider: PROVIDER, cause: error },
+			);
+		}
 	}
 
 	let tokenData: {
@@ -408,7 +445,7 @@ export async function readLocalAntigravityCredential(
 
 	let email: string | undefined;
 	try {
-		const rawCreds = await fs.readFile(credsPath, "utf-8");
+		const rawCreds = await Bun.file(credsPath).text();
 		const credsData = JSON.parse(rawCreds) as { id_token?: string };
 		if (credsData.id_token) {
 			const parts = credsData.id_token.split(".");
@@ -420,8 +457,10 @@ export async function readLocalAntigravityCredential(
 				}
 			}
 		}
-	} catch {
-		// oauth_creds.json is optional; email can be omitted
+	} catch (error) {
+		if (!isEnoent(error) && !(error instanceof SyntaxError)) {
+			// oauth_creds.json is optional; email can be omitted
+		}
 	}
 
 	return {

@@ -10,25 +10,17 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
  * tool schemas. `on`/`off` are explicit user overrides.
  *
  * @param modelId Model id (e.g. `gemini-3-pro`) used to classify `auto`.
- * @param provider Optional provider id (e.g. `google-antigravity`).
  */
 export function shouldInlineToolDescriptors(
 	setting: "auto" | "on" | "off" | undefined,
 	modelId: string | undefined,
-	provider?: string,
 ): boolean {
 	switch (setting ?? "auto") {
 		case "on":
 			return true;
 		case "off":
 			return false;
-		default: {
-			if (!modelId) return false;
-			const effectiveProvider = provider ?? (modelId.includes("/") ? modelId.split("/")[0] : "");
-			if (effectiveProvider === "google-antigravity") {
-				return false;
-			}
-			return classifyModel(effectiveProvider, modelId, { lenient: true }).class === "gemini";
-		}
+		default:
+			return modelId !== undefined && classifyModel("", modelId, { lenient: true }).class === "gemini";
 	}
 }
