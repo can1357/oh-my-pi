@@ -33,6 +33,7 @@ const CODEX_STT_PROVIDER = "openai-codex";
 const OPENAI_STT_PROVIDER = "openai";
 const CLOUD_STT_PROCESSING_TIMEOUT_MS = 60_000;
 /** Conservative floor: keep the request alive long enough to upload at 1 Mibit/s. */
+const CLOUD_STT_ERROR_BODY_MAX_BYTES = 16 * 1024;
 const CLOUD_STT_MIN_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
@@ -286,6 +287,31 @@ function displayableErrorDetail(body: string): string {
 	return truncateToWidth(flattened, TRUNCATE_LENGTHS.CONTENT);
 }
 
+async function readBoundedResponseText(response: Response): Promise<string> {
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let remaining = CLOUD_STT_ERROR_BODY_MAX_BYTES;
+	let text = "";
+	try {
+		while (remaining > 0) {
+			const { done, value } = await reader.read();
+			if (done) return text + decoder.decode();
+			if (!value) continue;
+			const chunk = value.subarray(0, remaining);
+			text += decoder.decode(chunk, { stream: chunk.byteLength === value.byteLength });
+			remaining -= chunk.byteLength;
+			if (chunk.byteLength < value.byteLength) break;
+		}
+		await reader.cancel();
+		return text + decoder.decode();
+	} catch {
+		return text + decoder.decode();
+	} finally {
+		reader.releaseLock();
+	}
+}
+
 async function postTranscription(
 	fetchImpl: FetchImpl,
 	url: string,
@@ -303,7 +329,7 @@ async function postTranscription(
 		signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 	});
 	if (!response.ok) {
-		const detail = displayableErrorDetail(await response.text().catch(() => ""));
+		const detail = displayableErrorDetail(await readBoundedResponseText(response));
 		// Typed status so `withOAuthAccess` can classify 401 (refresh) and
 		// 403/usage-limit (rotate) instead of seeing an opaque Error.
 		throw new ProviderHttpError(`Cloud transcription failed (${response.status}): ${detail}`, response.status, {

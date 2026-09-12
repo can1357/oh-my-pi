@@ -407,6 +407,28 @@ describe("cloud STT stream", () => {
 		expect(message).toContain("denied   by proxy ");
 		expect(Bun.stringWidth(message)).toBeLessThanOrEqual("Cloud transcription failed (400): ".length + 80);
 	});
+
+	it("cancels an oversized provider error stream after a bounded prefix", async () => {
+		let pulls = 0;
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				controller.enqueue(new Uint8Array(1024).fill(120));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const fetchImpl = (async (_url: string, _init: RequestInit) =>
+			new Response(body, { status: 502 })) as typeof fetch;
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl });
+		handle.pushAudio(sine16kHz(160));
+
+		await expect(handle.stop()).rejects.toThrow("Cloud transcription failed (502)");
+		expect(cancelled).toBe(true);
+		expect(pulls).toBeLessThanOrEqual(17);
+	});
 });
 
 describe("dictation WAV payload", () => {
