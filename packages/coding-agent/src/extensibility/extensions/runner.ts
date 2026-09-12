@@ -10,6 +10,7 @@ import type {
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -1637,6 +1638,7 @@ export class ExtensionRunner {
 			// return new message arrays rather than mutating in place.
 			currentMessages = [...messages];
 		}
+		const persistedMessages = new Set(currentMessages);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
@@ -1658,6 +1660,9 @@ export class ExtensionRunner {
 			}
 		}
 
+		for (const message of currentMessages) {
+			if (!persistedMessages.has(message)) markPerCallContextMessage(message);
+		}
 		return currentMessages;
 	}
 

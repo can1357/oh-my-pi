@@ -141,3 +141,34 @@ export type SyntheticUserCarrier = object & { [kSyntheticUser]?: boolean };
 export function isSyntheticUser(message: SyntheticUserCarrier | null | undefined): boolean {
 	return message?.[kSyntheticUser] === true;
 }
+
+/**
+ * Marks a message synthesized by a per-call context transform rather than
+ * loaded from persisted conversation history.
+ *
+ * Prompt-cache boundaries must skip these messages: their content is rebuilt
+ * for each request and cannot anchor a prefix reused by the next turn.
+ * Symbol-keyed so the marker never persists or reaches the provider wire.
+ */
+export const kPerCallContextMessage = Symbol("agent.message.perCallContext");
+
+/** Carries per-call context provenance without exposing a string-keyed property. */
+export type PerCallContextMessageCarrier = object & { [kPerCallContextMessage]?: true };
+
+/** Marks a message as synthesized for the current provider call. */
+export function markPerCallContextMessage(message: PerCallContextMessageCarrier): void {
+	message[kPerCallContextMessage] = true;
+}
+
+/** Copies per-call context provenance to a converted or projected message. */
+export function copyPerCallContextMessage(
+	target: PerCallContextMessageCarrier,
+	source: PerCallContextMessageCarrier,
+): void {
+	if (source[kPerCallContextMessage] === true) target[kPerCallContextMessage] = true;
+}
+
+/** True when a message was synthesized for the current provider call. */
+export function isPerCallContextMessage(message: PerCallContextMessageCarrier | null | undefined): boolean {
+	return message?.[kPerCallContextMessage] === true;
+}

@@ -60,8 +60,10 @@ import {
 import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
+	copyPerCallContextMessage,
 	type ConversationalUserCarrier,
 	isConversationalUser,
+	isPerCallContextMessage,
 	isSyntheticUser,
 	kConversationalUser,
 	kStreamingBlockIndex,
@@ -3901,7 +3903,7 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	const trailingCandidates: number[] = [];
 	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
-		if (!message || message.clear_at === "next_user_message") continue;
+		if (!message || message.clear_at === "next_user_message" || isPerCallContextMessage(message)) continue;
 		trailingCandidates.push(index);
 	}
 
@@ -4764,7 +4766,12 @@ export function convertAnthropicMessages(
 			(msg.role === "user" || msg.role === "developer") &&
 			isReplayableAnthropicCompaction(msg.providerPayload, model)
 		) {
-			params.push({ role: "assistant", content: [compactionBlockParam(msg.providerPayload)] });
+			const compactionParam: AnthropicMessageParam = {
+				role: "assistant",
+				content: [compactionBlockParam(msg.providerPayload)],
+			};
+			copyPerCallContextMessage(compactionParam, msg);
+			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
 			// Queue the file metadata for after the block: it sits past the
@@ -4835,6 +4842,7 @@ export function convertAnthropicMessages(
 			if (msg.role === "user" && !agentAuthored && !isSyntheticUser(msg)) {
 				param[kConversationalUser] = true;
 			}
+			copyPerCallContextMessage(param, msg);
 			params.push(param);
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -4972,10 +4980,12 @@ export function convertAnthropicMessages(
 				blocks.push(...nonToolUse, ...toolUse);
 			}
 			if (blocks.length === 0) continue;
-			params.push({
+			const assistantParam: AnthropicMessageParam = {
 				role: "assistant",
 				content: blocks,
-			});
+			};
+			copyPerCallContextMessage(assistantParam, msg);
+			params.push(assistantParam);
 			// Flush queued file metadata unless this turn left tool calls open:
 			// their results must follow the turn contiguously, so the metadata
 			// waits for the merged result message (or the end of the list).
@@ -4987,15 +4997,21 @@ export function convertAnthropicMessages(
 			const toolResults: ContentBlockParam[] = [];
 			// Images stripped out of error tool results, re-attached after the run.
 			const hoistedImages: ContentBlockParam[] = [];
+			const toolResultParam: AnthropicMessageParam = {
+				role: "user",
+				content: toolResults,
+			};
 
 			// Add the current tool result
 			toolResults.push(buildToolResultBlock(model, msg, hoistedImages));
+			copyPerCallContextMessage(toolResultParam, msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
 				toolResults.push(buildToolResultBlock(model, nextMsg, hoistedImages));
+				copyPerCallContextMessage(toolResultParam, nextMsg);
 				j++;
 			}
 
@@ -5010,10 +5026,7 @@ export function convertAnthropicMessages(
 			}
 
 			// Add a single user message with all tool results
-			params.push({
-				role: "user",
-				content: toolResults,
-			});
+			params.push(toolResultParam);
 			// An open tool_use turn's results are whole again; queued file
 			// metadata can follow without splitting the pairing.
 			flushCompactionFiles();
@@ -5050,20 +5063,24 @@ export function convertAnthropicMessages(
 				const controlContent = content.filter(block => block.type !== "text");
 				if (scopedContent.length > 0) {
 					params[idx] = {
+						...params[idx],
 						role: "system",
 						content: scopedContent,
 						clear_at: "next_user_message",
 					};
-					params.splice(idx + 1, 0, {
+					const controlParam: AnthropicMessageParam = {
 						role: "system",
 						content: controlContent,
 						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
-					});
+					};
+					copyPerCallContextMessage(controlParam, params[idx]);
+					params.splice(idx + 1, 0, controlParam);
 					continue;
 				}
 			}
 
 			params[idx] = {
+				...params[idx],
 				role: "system",
 				content,
 				...(turnScoped && !hasEffort && !hasToolChanges ? { clear_at: "next_user_message" } : {}),
