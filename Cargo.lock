@@ -5104,9 +5104,9 @@ dependencies = [
 
 [[package]]
 name = "napi"
-version = "3.12.3"
+version = "3.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2862d9586f6afe036f7f7fd03d017d3c11d948a4e34702c212dd9ef62ed98b58"
+checksum = "3d2c1d080c842ec1347ebf3cfb9347c15f8c2262f143cc30eea41ddf1c7da720"
 dependencies = [
  "bitflags 2.13.2",
  "ctor",
@@ -5127,9 +5127,9 @@ checksum = "860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7"
 
 [[package]]
 name = "napi-derive"
-version = "3.6.4"
+version = "3.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be5cc49fdef0239132348d2a2991d4e24b643ff6976ada349b20823b161ab28"
+checksum = "350057056a30368aa76c11a0d406b0aa61321710be2c36656ab4f6efe0b785a2"
 dependencies = [
  "convert_case 0.12.0",
  "ctor",
@@ -6135,7 +6135,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6205,7 +6205,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6290,11 +6290,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.1.17"
+version = "18.1.18"
 
 [[package]]
 name = "pi-edit"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6313,7 +6313,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "async-trait",
  "libc",
@@ -6325,7 +6325,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6408,7 +6408,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6436,7 +6436,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6451,7 +6451,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6466,7 +6466,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.17"
+version = "18.1.18"
 dependencies = [
  "dashmap",
  "globset",
@@ -7669,9 +7669,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.0"
+version = "1.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
+checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 dependencies = [
  "serde",
 ]
@@ -8205,9 +8205,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.5+spec-1.1.0"
+version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -8229,9 +8229,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.13+spec-1.1.0"
+version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
+checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
 dependencies = [
  "indexmap",
  "serde_core",

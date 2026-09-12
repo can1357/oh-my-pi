@@ -39,6 +39,7 @@ import {
 	buildBrowserItems,
 	ModelBrowser,
 	type ModelBrowserItem,
+	modelSearchText,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
@@ -655,7 +656,7 @@ export class ModelHubComponent implements Component {
 			this.#composeEntries();
 			return;
 		}
-		const matches = fuzzyFilter(this.#availableItems, query, ({ provider, id }) => `${provider}/${id}`);
+		const matches = fuzzyFilter(this.#availableItems, query, modelSearchText);
 		const counts = new Map<string, number>();
 		for (const item of matches) {
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);

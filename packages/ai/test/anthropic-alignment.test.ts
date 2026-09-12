@@ -24,6 +24,7 @@ import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerp
 import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
+	CacheRetention,
 	Context,
 	Model,
 	ModelSpec,
@@ -75,6 +76,7 @@ function createAbortedSignal(): AbortSignal {
 
 type CaptureAnthropicOptions = {
 	isOAuth?: boolean;
+	cacheRetention?: CacheRetention;
 	metadata?: { user_id?: string; account_uuid?: string; accountId?: string; account_id?: string };
 	thinkingEnabled?: boolean;
 	reasoning?: Effort;
@@ -97,8 +99,9 @@ function captureAnthropicPayload(
 	streamAnthropic(model, context, {
 		apiKey: "sk-ant-oat-test",
 		isOAuth: options?.isOAuth ?? true,
-		signal: createAbortedSignal(),
+		cacheRetention: options?.cacheRetention,
 		metadata: options?.metadata,
+		signal: createAbortedSignal(),
 		thinkingEnabled: options?.thinkingEnabled,
 		reasoning: options?.reasoning,
 		temperature: options?.temperature,
@@ -277,7 +280,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});
 
-	it("places a short breakpoint only on the trailing message in a one-message OAuth request", async () => {
+	it("places a 1h breakpoint on the trailing message in a one-message OAuth request by default", async () => {
 		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
 			systemPrompt: ["Stay concise."],
 			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
@@ -290,10 +293,31 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(claudeCodeSystemInstruction).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		expect(payload.system?.[2]?.cache_control).toBeUndefined();
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content)).toBe(true);
+		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
+			type: "ephemeral",
+			ttl: "1h",
+		});
+	});
+
+	it("honors explicit short retention on OAuth requests", async () => {
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{ cacheRetention: "short" },
+		)) as {
+			system?: Array<{ text?: string; cache_control?: unknown }>;
+			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
+		};
+
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
 		});
@@ -311,10 +335,11 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[0]?.text).toStartWith("x-anthropic-billing-header:");
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
+			ttl: "1h",
 		});
 	});
 
@@ -362,11 +387,13 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(Array.isArray(assistantContent) ? assistantContent.at(-1)?.type : undefined).toBe("tool_use");
 		expect(Array.isArray(assistantContent) ? assistantContent.at(-1)?.cache_control : undefined).toEqual({
 			type: "ephemeral",
+			ttl: "1h",
 		});
 		const lastContent = messages.at(-1)?.content;
 		expect(Array.isArray(lastContent) ? lastContent.at(-1)?.type : undefined).toBe("tool_result");
 		expect(Array.isArray(lastContent) ? lastContent.at(-1)?.cache_control : undefined).toEqual({
 			type: "ephemeral",
+			ttl: "1h",
 		});
 	});
 
@@ -649,6 +676,15 @@ describe("Anthropic request fingerprint alignment", () => {
 			fetch: long.fetchMock,
 		}).result();
 		expect(long.beta()).toContain("extended-cache-ttl-2025-04-11");
+
+		// OAuth defaults to 1h retention, but the beta stays off that path: Anthropic honors
+		// `ttl: "1h"` for OAuth without it, and the header must match CC's fingerprint.
+		const oauthDefault = captureBeta();
+		await streamAnthropic(ANTHROPIC_MODEL, cacheContext, {
+			apiKey: "sk-ant-oat-test",
+			fetch: oauthDefault.fetchMock,
+		}).result();
+		expect(oauthDefault.beta()).not.toContain("extended-cache-ttl-2025-04-11");
 
 		const proxy = captureBeta();
 		await streamAnthropic(UMANS_ANTHROPIC_MODEL, cacheContext, {
@@ -1641,7 +1677,54 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.tools?.[0]?.name).toBe(`${claudeToolPrefix}bash`);
 		expect(payload.tools?.[0]?.strict).toBe(true);
 		expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
+		// Sole tool is also the last tool, so it carries the head breakpoint.
+		expect(payload.tools?.[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+	});
+
+	it("breakpoints the last tool definition so the stable head gets its own cache entry", async () => {
+		const tools: Tool[] = ["search", "fetch", "run"].map(name => ({
+			name,
+			description: `${name} tool`,
+			parameters: {
+				type: "object",
+				properties: { value: { type: "string" } },
+				required: ["value"],
+			} as TJsonSchema,
+		}));
+
+		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			systemPrompt: ["Stay concise."],
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			tools,
+		})) as {
+			tools?: Array<{ cache_control?: unknown }>;
+			system?: Array<{ cache_control?: unknown }>;
+			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
+		};
+
+		// Only the last tool is marked: it caches every definition before it as a
+		// single prefix, so earlier markers would spend breakpoints for nothing.
 		expect(payload.tools?.[0]?.cache_control).toBeUndefined();
+		expect(payload.tools?.[1]?.cache_control).toBeUndefined();
+		expect(payload.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+
+		// The trailing message window is untouched; the OAuth identity block carries its
+		// own breakpoint, while caller system blocks stay uncached.
+		const content = payload.messages?.at(-1)?.content;
+		expect(Array.isArray(content) ? content.at(-1)?.cache_control : undefined).toEqual({
+			type: "ephemeral",
+			ttl: "1h",
+		});
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+		expect(payload.system?.[2]?.cache_control).toBeUndefined();
+		// Anthropic rejects a fifth breakpoint, so the total must stay in budget.
+		const marked = (blocks: Array<{ cache_control?: unknown }> | undefined) =>
+			(blocks ?? []).filter(block => block.cache_control != null).length;
+		const messageBreakpoints = (payload.messages ?? []).reduce(
+			(total, message) => total + (Array.isArray(message.content) ? marked(message.content) : 0),
+			0,
+		);
+		expect(marked(payload.tools) + marked(payload.system) + messageBreakpoints).toBeLessThanOrEqual(4);
 	});
 
 	it("marks only the Anthropic strict allowlist strict", async () => {

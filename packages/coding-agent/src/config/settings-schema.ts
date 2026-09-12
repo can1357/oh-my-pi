@@ -1277,6 +1277,17 @@ export const SETTINGS_SCHEMA = {
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
+	"tui.mouse": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Mouse Click-to-Focus",
+			description:
+				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		},
+	},
 	"tui.tight": {
 		type: "boolean",
 		default: false,
@@ -1301,6 +1312,23 @@ export const SETTINGS_SCHEMA = {
 				{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 				{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
 				{ value: "disabled", label: "Disabled", description: "No animation; static muted text" },
+			],
+		},
+	},
+	"display.pinnedAgents": {
+		type: "enum",
+		values: ["off", "collapsed", "full"] as const,
+		default: "collapsed",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Pinned Agents",
+			description:
+				"Pinned live-agent jump list above the editor (off hides it; collapsed shows a few rows with an expander; full lists all)",
+			options: [
+				{ value: "off", label: "Off", description: "Hide the pinned jump list" },
+				{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
+				{ value: "full", label: "Full", description: "Always list every live agent" },
 			],
 		},
 	},
@@ -5860,7 +5888,7 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",
