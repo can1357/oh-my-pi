@@ -208,6 +208,122 @@ describe("read speculation assessment", () => {
 		expect(String(metaOf(committed)?.source?.value ?? "")).toContain("link.txt");
 		expect(metaOf(committed)?.source).toEqual(metaOf(ordinary)?.source);
 	});
+	it("classifies speculative symlink reads by the requested extension", async () => {
+		fs.writeFileSync(path.join(testDir, "prose-target.txt"), "plain prose");
+		try {
+			fs.symlinkSync(path.join(testDir, "prose-target.txt"), path.join(testDir, "guide.md"), "file");
+		} catch {
+			// Windows without symlink privilege: nothing to verify.
+			return;
+		}
+		const settings = Settings.isolated({ "images.autoResize": false, "read.renderMarkdown": true });
+		const session = { ...createSession(testDir), settings } as ToolSession;
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const args = { path: "guide.md" };
+		const assessment = await policy.assess({ args });
+		if (!assessment?.eligible) throw new Error("expected speculative read admission");
+		const context = {
+			toolCall: { type: "toolCall" as const, id: "md-link-read", name: "read", arguments: args },
+			args,
+			effect: assessment.effect,
+		};
+		const outcome = await policy.execute(context, new AbortController().signal);
+		if (!outcome) throw new Error("expected speculative read outcome");
+		const committed = await policy.commit?.({ ...context, physicalOutcome: outcome }, outcome);
+		const ordinary = await new ReadTool({ ...createSession(testDir), settings } as ToolSession).execute(
+			"ordinary-md-link-read",
+			args,
+		);
+		const textOf = (result: unknown) =>
+			(result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content?.find(
+				(entry): entry is { type: "text"; text: string } => entry.type === "text",
+			)?.text ?? "";
+		expect(textOf(committed)).toBe(textOf(ordinary));
+		const typeOf = (result: unknown) =>
+			(result as { details?: { contentType?: unknown } } | undefined)?.details?.contentType;
+		// Markdown rendering follows the requested extension in both paths.
+		expect(typeOf(ordinary)).toBe("text/markdown");
+		expect(typeOf(committed)).toBe(typeOf(ordinary));
+	});
+
+	it("skips summaries for speculative symlink reads by the requested extension", async () => {
+		const bodies = Array.from({ length: 25 }, (_, index) => {
+			const work = Array.from({ length: 5 }, (_, line) => `	const step${line} = ${index} * ${line};`).join("\n");
+			return `function run${index}() {\n${work}\n	return step0;\n}`;
+		});
+		fs.writeFileSync(path.join(testDir, "long.ts"), `${bodies.join("\n\n")}\n`);
+		try {
+			fs.symlinkSync(path.join(testDir, "long.ts"), path.join(testDir, "summary.md"), "file");
+		} catch {
+			// Windows without symlink privilege: nothing to verify.
+			return;
+		}
+		const session = createSession(testDir);
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const args = { path: "summary.md" };
+		const assessment = await policy.assess({ args });
+		if (!assessment?.eligible) throw new Error("expected speculative read admission");
+		const context = {
+			toolCall: { type: "toolCall" as const, id: "summary-link-read", name: "read", arguments: args },
+			args,
+			effect: assessment.effect,
+		};
+		const outcome = await policy.execute(context, new AbortController().signal);
+		if (!outcome) throw new Error("expected speculative read outcome");
+		const committed = await policy.commit?.({ ...context, physicalOutcome: outcome }, outcome);
+		const ordinary = await new ReadTool(createSession(testDir)).execute("ordinary-summary-link-read", args);
+		const textOf = (result: unknown) =>
+			(result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content?.find(
+				(entry): entry is { type: "text"; text: string } => entry.type === "text",
+			)?.text ?? "";
+		// Prose requests skip structural summaries in both paths; classifying
+		// by the resolved TypeScript target would summarize here instead.
+		expect(textOf(ordinary)).toContain("summary.md");
+		expect(textOf(committed)).toBe(textOf(ordinary));
+	});
+	it("summarizes speculative symlink reads by the requested language", async () => {
+		const bodies = Array.from({ length: 25 }, (_, index) => {
+			const work = Array.from({ length: 5 }, (_, line) => `    step${line} = ${index} * ${line}`).join("\n");
+			return `def run${index}():\n${work}\n    return step0`;
+		});
+		const raw = `${bodies.join("\n\n")}\n`;
+		fs.writeFileSync(path.join(testDir, "api.py"), raw);
+		try {
+			fs.symlinkSync(path.join(testDir, "api.py"), path.join(testDir, "api.ts"), "file");
+		} catch {
+			// Windows without symlink privilege: nothing to verify.
+			return;
+		}
+		const session = createSession(testDir);
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const args = { path: "api.ts" };
+		const assessment = await policy.assess({ args });
+		if (!assessment?.eligible) throw new Error("expected speculative read admission");
+		const context = {
+			toolCall: { type: "toolCall" as const, id: "lang-link-read", name: "read", arguments: args },
+			args,
+			effect: assessment.effect,
+		};
+		const outcome = await policy.execute(context, new AbortController().signal);
+		if (!outcome) throw new Error("expected speculative read outcome");
+		const committed = await policy.commit?.({ ...context, physicalOutcome: outcome }, outcome);
+		// Requested TypeScript cannot parse `def` bodies, so the ordinary
+		// read returns them verbatim; classifying by the resolved Python
+		// target would summarize instead.
+		const ordinary = await new ReadTool(createSession(testDir)).execute("ordinary-lang-link-read", args);
+		const textOf = (result: unknown) =>
+			(result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content?.find(
+				(entry): entry is { type: "text"; text: string } => entry.type === "text",
+			)?.text ?? "";
+		expect(textOf(ordinary)).toContain("step4 = 24 * 4");
+		expect(textOf(committed)).toBe(textOf(ordinary));
+	});
 
 	it("defers conflict-aware reads without mutating live conflict history", async () => {
 		const conflictPath = path.join(testDir, "conflict.txt");
@@ -370,5 +486,41 @@ describe("read speculation assessment", () => {
 		const plainContext = authorizeContext("content-plain", "plain.txt", plain.effect);
 		await expect(host.authorize(plainContext)).resolves.toEqual({ allowed: true, deferBeforeToolCall: true });
 		await expect(host.captureEvidence(plainContext)).resolves.toBe(true);
+	});
+	it("denies video extensions on either side of a symlink at authorization", async () => {
+		fs.writeFileSync(path.join(testDir, "clip.txt"), "not actually video");
+		try {
+			fs.symlinkSync(path.join(testDir, "clip.txt"), path.join(testDir, "clip.mp4"), "file");
+		} catch {
+			// Windows without symlink privilege: nothing to verify.
+			return;
+		}
+		const session = {
+			...createSession(testDir),
+			settings: Settings.isolated({
+				"images.autoResize": false,
+				"tools.approvalMode": "yolo",
+				"tools.speculativeExecution.enabled": true,
+			}),
+		} as ToolSession;
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
+		// The resolved target is plain text, but the requested path routes
+		// through the viewer pipeline, which has no lexical render path.
+		const assessment = await policy.assess({ args: { path: "clip.mp4" } });
+		if (!assessment.eligible) throw new Error("expected provisional admission for clip.mp4");
+		await expect(
+			host.authorize({
+				candidateId: "video-link",
+				source: "direct",
+				dependencies: [],
+				tool,
+				toolCall: { type: "toolCall", id: "video-link", name: "read", arguments: { path: "clip.mp4" } },
+				args: { path: "clip.mp4" },
+				effect: assessment.effect,
+			}),
+		).resolves.toEqual({ allowed: false, reason: "local read target is unsafe" });
 	});
 });

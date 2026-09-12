@@ -658,7 +658,10 @@ export class JsRuntime {
 					},
 				});
 				const tableConsole = new Console({ stdout: stream, colorMode: false });
-				(tableConsole.table as (...a: unknown[]) => void)(...args);
+				// `table` is missing from some @types/node Console shapes, but the
+				// Node runtime always provides it.
+				const tableCapable = tableConsole as unknown as { table: (...args: unknown[]) => void };
+				tableCapable.table(...args);
 				hooks.onText(buffer.endsWith("\n") ? buffer : `${buffer}\n`);
 			},
 			__omp_display__: (value: unknown) => this.displayValue(value),
