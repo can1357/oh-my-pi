@@ -639,8 +639,8 @@ function writeAgentStateFile(state: TerminalTitleState): void {
 			// resurrected. Checked again after every await, because a removal is synchronous and
 			// lands in exactly those gaps.
 			if (overtaken()) return;
-			await fsPromises.mkdir(path.dirname(file), { recursive: true });
 			// Written then renamed: a reader polling this must never catch half a state.
+			// Bun.write creates the directory, so no mkdir before it.
 			await Bun.write(pending, body);
 			if (overtaken()) {
 				await fsPromises.rm(pending, { force: true });
