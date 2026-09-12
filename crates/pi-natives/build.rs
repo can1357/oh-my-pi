@@ -103,11 +103,19 @@ fn build_darwin_oauth_callback_helper() {
 		Err(error) => panic!("CARGO_CFG_TARGET_ARCH should be set: {error}"),
 	};
 	println!("cargo:rerun-if-changed={}", source.display());
+	println!("cargo:rerun-if-env-changed=CC");
 
-	let result = Command::new("/usr/bin/xcrun")
+	let mut command = match env::var_os("CC") {
+		Some(cc) => Command::new(cc),
+		None => {
+			let mut cmd = Command::new("/usr/bin/xcrun");
+			cmd.arg("clang");
+			cmd
+		},
+	};
+	let result = command
 		.current_dir(&manifest_dir)
 		.args([
-			"clang",
 			"-x",
 			"objective-c",
 			"-fobjc-arc",
