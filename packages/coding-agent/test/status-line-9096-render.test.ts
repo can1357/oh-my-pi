@@ -455,6 +455,74 @@ test("reserves the compact total width in startup placeholders", () => {
 	expect(rendered).not.toContain("status demo");
 });
 
+test("masks boundary ticks across the reserved compact placeholder width", () => {
+	const component = new StatusLineComponent({
+		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+		messages: [],
+		model: { name: "M", contextWindow: 100000 },
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		settings: {
+			get: () => false,
+			getGroup: (group: string) =>
+				group === "compaction"
+					? {
+							enabled: true,
+							strategy: "summarize",
+							asyncEnabled: true,
+							thresholdPercent: 80,
+							methodOrder: ["soft"],
+						}
+					: {},
+		},
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getSessionName: () => "status demo",
+			getUsageStatistics: () => ({
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+		},
+		getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	component.setAutoCompactEnabled(true);
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["context_pct"],
+		rightSegments: [],
+		separator: "none",
+		sessionAccent: false,
+		transparent: true,
+		contextLine: "embedded",
+		segmentOptions: { context_pct: { compact: true } },
+	});
+
+	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(24, "box"));
+	const rendered = stripVTControlCharacters(component.getTopBorder(24).content);
+	const startupLabelStart = startup.indexOf("ctx:…");
+	const liveLabelStart = rendered.indexOf("ctx:9.1%");
+	expect(startupLabelStart).toBe(liveLabelStart);
+	const reservedTail = startup.slice(startupLabelStart + "ctx:…".length, startupLabelStart + "ctx:9.1%".length);
+	expect(reservedTail).not.toContain("╎");
+	expect(reservedTail).not.toContain("┃");
+});
+
 test("startup gauge omits the window label when live labels cannot fit the gap", () => {
 	const component = new StatusLineComponent({
 		state: { messages: [], model: { name: "MMM", contextWindow: 100000 } },

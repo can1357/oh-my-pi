@@ -2500,9 +2500,10 @@ export class StatusLineComponent implements Component {
 		for (let i = 0; i < gapWidth; i++) {
 			let color = i < usedCount ? usedColor : unusedColor;
 			let glyph = horizontal;
-			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) {
+			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentPlacementWidth) {
 				color = percentOverflow ? overflowColor : usedColor;
-				glyph = percentLabel.charAt(i - percentStart);
+				const labelGlyph = percentLabel.charAt(i - percentStart);
+				if (labelGlyph) glyph = labelGlyph;
 			} else if (i === thresholdIdx) {
 				color = thresholdColor;
 				glyph = thresholdGlyph;
