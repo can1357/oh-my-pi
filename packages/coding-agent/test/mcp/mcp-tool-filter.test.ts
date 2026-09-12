@@ -194,6 +194,20 @@ test("classes treat the encoding's reserved characters as ordinary raw character
 	expect(run(["x¤y"], ["x[¤]y"]).allowed).toEqual(["x¤y"]);
 });
 
+test("an unclosed class bracket is a literal, and the rest keeps its glob meaning", () => {
+	// `[]?` has no closing bracket under the class rules (a leading `]` after `[`
+	// is a member, and no second `]` follows), so the `[` is a literal and `?`
+	// remains a one-character wildcard: the entry addresses `[]` followed by any
+	// single character. picomatch instead compiles this as a quantifier on a
+	// class, which is the `quantifier` corner `noextglob` does not cover; the
+	// literal reading follows the documented surface.
+	expect(run(["[]a", "[]", "[", "]"], ["[]?"]).allowed).toEqual(["[]a"]);
+	expect(run(["[^]", "[^]?", "x"], ["[^]*"]).allowed).toEqual(["[^]", "[^]?"]);
+	// A well-formed class still behaves normally next to the same characters.
+	expect(run(["]a", "]b"], ["[]]a"]).allowed).toEqual(["]a"]);
+	expect(run(["[", "x"], ["\\["]).allowed).toEqual(["["]);
+});
+
 test("grouping and extglob syntax stay literal beside a supported wildcard", () => {
 	// `noextglob` disables the `+()` operator, but picomatch would still compile
 	// `(a|b)` as grouping — so the translator escapes it. A denylist entry
@@ -203,6 +217,14 @@ test("grouping and extglob syntax stay literal beside a supported wildcard", () 
 	expect(run(["(a|b)foo", "afoo"], ["(a|b)*"]).allowed).toEqual(["(a|b)foo"]);
 	expect(run(["(a|b)foo", "afoo"], ["a(b)c*"]).allowed).toEqual([]);
 	expect(run(NAMES, ["!(search)"]).unmatched).toEqual(["!(search)"]);
+});
+
+test("a trailing backslash addresses one literal backslash", () => {
+	// picomatch compiles a trailing `\` through its matcher-factory fast path, so
+	// the translated form must spell it out: a bare `\` compiles to `$^` (never
+	// matching) when the RegExp is driven directly.
+	expect(run(["\\", "a"], ["\\"]).allowed).toEqual(["\\"]);
+	expect(run(["a\\", "a"], ["a\\"]).allowed).toEqual(["a\\"]);
 });
 
 test("a wildcard never splits an encoded unit", () => {

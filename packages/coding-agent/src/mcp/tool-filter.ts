@@ -202,10 +202,10 @@ function translatePattern(pattern: string): string {
 		if (ch === "\\") {
 			const next = pattern[i + 1];
 			if (next === undefined) {
-				// A lone trailing backslash escapes nothing and addresses a literal
-				// backslash; pass it through so picomatch decides, exactly as it does
-				// for the untranslated pattern.
-				out += ch;
+				// A lone trailing backslash addresses exactly one literal backslash.
+				// `makeRe` has no matcher-factory fallback for it (it compiles `$^`,
+				// which never matches), so it is spelled as an escaped backslash.
+				out += "\\\\";
 				continue;
 			}
 			// `\/`, `\§` and `\¤` become the plain encoded literal; every other
