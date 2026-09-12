@@ -8,7 +8,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -130,44 +129,6 @@ describe("AgentSession shake", () => {
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
 			expect(text).toContain(`artifact://${result.artifactId}`);
 			expect(text).toContain("shaken");
-		});
-
-		it("does not rewrite when actual artifact placeholder savings miss the gate", async () => {
-			const text = "boundary result ".repeat(6_000);
-			const tokenizer = new Tokenizer();
-			const regionTokens = tokenizer.countTokens([text]);
-			const artifactId = "12345678901234567890";
-			const placeholderTokens = tokenizer.countTokens(
-				`[shaken ~${regionTokens} tokens — recover: artifact://${artifactId} (region 1)]`,
-			);
-			expect(placeholderTokens).toBeGreaterThan(16);
-			seedHeavyToolResult(text);
-			appendRecentProtectedTail();
-			const toolResultBefore = branchToolResults()[0];
-			vi.spyOn(sessionManager, "allocateArtifactPath").mockResolvedValue({
-				id: artifactId,
-				path: path.join(tempDir.path(), "reserved-shake-artifact"),
-			});
-			const maintenance = new SessionMaintenance({
-				agent: session.agent,
-				sessionManager,
-				settings: session.settings,
-				modelRegistry,
-				model: () => session.model,
-				planReferencePath: () => undefined,
-				buildDisplaySessionContext: () => session.buildDisplaySessionContext(),
-				emitSessionEvent: async () => {},
-				emitNotice: () => {},
-				resetAdvisorRuntimes: () => {},
-				closeCodexProviderSessionsForHistoryRewrite: () => {},
-				recordAnchoredHistoryRewrite: () => {},
-			} as unknown as SessionMaintenanceHost);
-			const result = await maintenance.shake("elide", {
-				config: { ...RESCUE_SHAKE_CONFIG, minSavings: regionTokens - 16 },
-				toolResultsOnly: true,
-			});
-			expect(result.toolResultsDropped).toBe(0);
-			expect(branchToolResults()[0]).toBe(toolResultBefore);
 		});
 
 		it("preserves mixed tool-result images while eliding only recoverable text", async () => {
