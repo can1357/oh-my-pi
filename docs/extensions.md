@@ -315,6 +315,10 @@ For queued batches, `prompt` contains the already-transformed text of every sele
 
 Handlers chain from the current base system prompt. Their final override governs the next provider request and its continuations until another prompt or user-containing batch prepares policy. Returned custom messages are appended once after the original batch; originals retain their order, identity, attribution, and metadata. Host application of results is cancelled if the turn is aborted or the session or queue ownership changes while handlers are pending. Handlers should not assume that their own external side effects can be rolled back; a cancelled delivery may be prepared again when resumed.
 
+If a later queue drain fails, earlier originals that have not reached the
+transcript are restored ahead of newer enqueues. Generated preparation context
+is not requeued, and explicitly cleared or replaced queues are not resurrected.
+
 ### Tool lifecycle
 
 - `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)

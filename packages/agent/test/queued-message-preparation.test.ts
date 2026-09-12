@@ -105,6 +105,69 @@ describe("queued message preparation", () => {
 		]);
 	});
 
+	it.each(["abort", "throw", "replace"] as const)(
+		"restores only owned earlier batches when later preparation ends with %s",
+		async failure => {
+			const mock = createMockModel({ handler: { content: ["done"] } });
+			const agent = new Agent({
+				streamFn: mock.stream,
+				initialState: { model: mock.model },
+				steeringMode: "all",
+				followUpMode: "all",
+			});
+			const steering = createUserMessage("late steering");
+			const followUp = createUserMessage("following batch");
+			const laterSteering = createUserMessage("newer steering");
+			const laterFollowUp = createUserMessage("newer follow-up");
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			agent.setOnBeforeYield(() => {
+				agent.setOnBeforeYield(undefined);
+				agent.steer(steering);
+				agent.steer(steering);
+				agent.followUp(followUp);
+			});
+			agent.prepareQueuedMessages = async messages => {
+				if (messages.includes(steering))
+					return { commit: () => [createUserMessage("undelivered generated context")] };
+				started.resolve();
+				await release.promise;
+				if (failure === "throw") throw new Error("later preparation failed");
+				return { commit: () => [] };
+			};
+			const running = agent.prompt("ordinary");
+			await started.promise;
+			agent.steer(laterSteering);
+			agent.followUp(laterFollowUp);
+			if (failure === "replace") agent.replaceQueues([laterSteering], [laterFollowUp]);
+			if (failure !== "throw") agent.abort();
+			release.resolve();
+			await running;
+
+			expect(userTexts(agent.state.messages)).toEqual(["ordinary"]);
+			expect(agent.peekSteeringQueue()).toEqual(
+				failure === "replace" ? [laterSteering] : [steering, steering, laterSteering],
+			);
+			expect(agent.peekFollowUpQueue()).toEqual(failure === "replace" ? [laterFollowUp] : [followUp, laterFollowUp]);
+			agent.prepareQueuedMessages = undefined;
+			await agent.continue();
+			expect(userTexts(mock.calls.at(-1)!.context.messages)).toEqual([
+				"ordinary",
+				...(failure === "replace" ? [] : ["late steering", "late steering"]),
+				"newer steering",
+				...(failure === "replace" ? [] : ["following batch"]),
+				"newer follow-up",
+			]);
+			expect(agent.state.messages.filter(message => message === steering)).toHaveLength(
+				failure === "replace" ? 0 : 2,
+			);
+			expect(agent.state.messages.filter(message => message === followUp)).toHaveLength(
+				failure === "replace" ? 0 : 1,
+			);
+			expect(agent.hasQueuedMessages()).toBe(false);
+		},
+	);
+
 	it("restores an aborted idle claim ahead of new enqueues without committing stale context", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
 		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model }, followUpMode: "all" });

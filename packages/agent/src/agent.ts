@@ -382,6 +382,13 @@ export class Agent {
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
+	/** Dequeued originals remain recoverable until their transcript events arrive. */
+	#queuedMessageDeliveries = new Set<{
+		queue: QueuedMessageQueue;
+		controller: AbortController | undefined;
+		messages: AgentMessage[];
+		next: number;
+	}>();
 	#steeringWaiters = new Set<() => void>();
 
 	#steeringMode: "all" | "one-at-a-time";
@@ -856,10 +863,14 @@ export class Agent {
 		if (this.#queuedMessageClaims[queue]) return [];
 		const messages = queue === "steering" ? this.#dequeueSteeringMessages() : this.#dequeueFollowUpMessages();
 		const prepare = this.prepareQueuedMessages;
-		if (!prepare || messages.length === 0) return messages;
+		if (messages.length === 0) return messages;
+		const runController = this.#abortController;
+		if (!prepare) {
+			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			return messages;
+		}
 
 		const claim: QueuedMessageClaim = { messages, controller: new AbortController() };
-		const runController = this.#abortController;
 		this.#queuedMessageClaims[queue] = claim;
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
 		try {
@@ -874,6 +885,7 @@ export class Agent {
 				throw new DOMException("Queued message preparation cancelled", "AbortError");
 			}
 			delete this.#queuedMessageClaims[queue];
+			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
@@ -885,6 +897,11 @@ export class Agent {
 	}
 
 	#cancelQueuedMessagePreparation(queue: QueuedMessageQueue, restore = false): void {
+		if (!restore) {
+			for (const delivery of this.#queuedMessageDeliveries) {
+				if (delivery.queue === queue) this.#queuedMessageDeliveries.delete(delivery);
+			}
+		}
 		const claim = this.#queuedMessageClaims[queue];
 		if (!claim) return;
 		delete this.#queuedMessageClaims[queue];
@@ -897,6 +914,23 @@ export class Agent {
 			}
 		}
 		claim.controller.abort();
+	}
+
+	#restoreUndeliveredQueuedMessages(controller: AbortController): void {
+		if (this.#queuedMessageDeliveries.size === 0) return;
+		const restored: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.controller !== controller) continue;
+			this.#queuedMessageDeliveries.delete(delivery);
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				restored[delivery.queue].push(delivery.messages[i]);
+			}
+		}
+		if (restored.steering.length > 0) {
+			this.#steeringQueue = [...restored.steering, ...this.#steeringQueue];
+			this.#notifySteeringWaiters();
+		}
+		if (restored.followUp.length > 0) this.#followUpQueue = [...restored.followUp, ...this.#followUpQueue];
 	}
 
 	setProviderResponseInterceptor(fn: SimpleStreamOptions["onResponse"] | undefined): void {
@@ -1038,6 +1072,11 @@ export class Agent {
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.messages[delivery.next] !== m) continue;
+			if (++delivery.next === delivery.messages.length) this.#queuedMessageDeliveries.delete(delivery);
+			break;
+		}
 	}
 
 	popMessage(): AgentMessage | undefined {
@@ -1358,6 +1397,7 @@ export class Agent {
 
 			await this.#runLoop(undefined, undefined, signal, true);
 		} finally {
+			this.#restoreUndeliveredQueuedMessages(continuationAbortController);
 			resolve();
 			if (this.#abortController === continuationAbortController) {
 				this.#state.isStreaming = false;
@@ -1788,6 +1828,7 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;
