@@ -79,10 +79,31 @@ describe("killProcessGroup", () => {
 });
 
 describe("BaseKernel shutdown", () => {
+	test.skipIf(!POSIX)("confirms a graceful zero-code exit on shutdown and repeated cleanup", async () => {
+		const proc = Bun.spawn(["sh", "-c", 'read request; [ "$request" = exit ]'], {
+			detached: true,
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const kernel = new TestKernel();
+		kernel.setProcess(proc);
+		try {
+			expect(await kernel.shutdown({ timeoutMs: 1_000 })).toEqual({ confirmed: true });
+			expect(await proc.exited).toBe(0);
+			expect(kernel.isAlive()).toBe(false);
+			expect(await kernel.shutdown()).toEqual({ confirmed: true });
+		} finally {
+			killProcessGroup(proc.pid, "SIGKILL");
+			proc.kill("SIGKILL");
+			await proc.exited;
+		}
+	});
+
 	test.skipIf(!POSIX)("kills TERM-resistant descendants after the group leader exits", async () => {
 		const pidFile = `/tmp/omp-kernel-process-group-${process.pid}-${Date.now()}`;
 		const proc = Bun.spawn(
-			["sh", "-c", `trap 'exit 7' TERM; sh -c 'trap "" TERM; sleep 30' & echo $! > '${pidFile}'; wait`],
+			["sh", "-c", `trap 'exit 0' TERM; sh -c 'trap "" TERM; sleep 30' & echo $! > '${pidFile}'; wait`],
 			{ detached: true, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
 		);
 		try {
@@ -100,6 +121,7 @@ describe("BaseKernel shutdown", () => {
 			const kernel = new TestKernel();
 			kernel.setProcess(proc);
 			expect(await kernel.shutdown()).toEqual({ confirmed: true });
+			expect(await proc.exited).toBe(0);
 
 			await Promise.race([
 				(async () => {
