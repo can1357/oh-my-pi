@@ -37,9 +37,11 @@ import {
 	updateViaShimTakeover,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
+
+const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 
 const tempDirs: string[] = [];
 
@@ -507,9 +509,71 @@ describe("update-cli package manager commands", () => {
 		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
 	});
 
-	it("targets the mise GitHub backend tool and force-reinstalls the checked version when requested", () => {
-		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump"]);
+	it("targets the mise GitHub backend and overrides release-age settings for attended updates", () => {
+		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump", "--before", "0s"]);
 		expect(buildMiseForceInstallArgs("15.10.5")).toEqual(["install", "--force", "github:can1357/oh-my-pi@15.10.5"]);
+	});
+
+	it.skipIf(!miseBinary)("overrides per-tool release age during actual mise upgrade resolution", async () => {
+		if (!miseBinary) throw new Error("mise binary unavailable");
+		const root = await makeTempDir();
+		const releases = [
+			{ tag_name: "v2.0.0", draft: false, prerelease: false, created_at: "2026-09-09T00:00:00Z", assets: [] },
+			{ tag_name: "v1.0.0", draft: false, prerelease: false, created_at: "2020-01-01T00:00:00Z", assets: [] },
+		];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				const pathname = new URL(request.url).pathname;
+				if (pathname.endsWith("/releases/latest")) return Response.json(releases[0]);
+				if (pathname.endsWith("/releases")) return Response.json(releases);
+				return new Response("not found", { status: 404 });
+			},
+		});
+		try {
+			await Bun.write(
+				path.join(root, "mise.toml"),
+				`[tools]
+"github:can1357/oh-my-pi" = { version = "1", minimum_release_age = "999y", api_url = "${server.url}" }
+`,
+			);
+			const env = {
+				...process.env,
+				HOME: path.join(root, "home"),
+				MISE_CACHE_DIR: path.join(root, "cache"),
+				MISE_CONFIG_DIR: path.join(root, "config"),
+				MISE_DATA_DIR: path.join(root, "data"),
+				MISE_STATE_DIR: path.join(root, "state"),
+				HTTP_PROXY: "http://127.0.0.1:9",
+				HTTPS_PROXY: "http://127.0.0.1:9",
+				ALL_PROXY: "http://127.0.0.1:9",
+				NO_PROXY: "127.0.0.1,localhost",
+			};
+			const run = async (args: string[]): Promise<string> => {
+				const process = Bun.spawn([miseBinary, "-C", root, ...args], {
+					env,
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(process.stdout).text(),
+					new Response(process.stderr).text(),
+					process.exited,
+				]);
+				if (exitCode !== 0) throw new Error(`mise upgrade failed: ${stdout}${stderr}`);
+				return stdout + stderr;
+			};
+
+			const blocked = await run(["upgrade", "github:can1357/oh-my-pi", "--bump", "--dry-run"]);
+			expect(blocked).not.toContain("Would install github:can1357/oh-my-pi@2.0.0");
+
+			const allowed = await run([...buildMiseUpgradeArgs(), "--dry-run"]);
+			expect(allowed).toContain("Would install github:can1357/oh-my-pi@2.0.0");
+		} finally {
+			server.stop(true);
+		}
 	});
 
 	it("pins npm package installs to the official registry and the checked native package versions", () => {

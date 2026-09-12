@@ -1425,8 +1425,17 @@ export function buildHomebrewUpdateArgs(force: boolean): string[] {
 	return [force ? "reinstall" : "upgrade", HOMEBREW_FORMULA];
 }
 
+/**
+ * Build the attended mise update command.
+ *
+ * `--before 0s` overrides global and per-tool release-age settings for this
+ * invocation. Unlike `MISE_MINIMUM_RELEASE_AGE`, the command option has the
+ * precedence required when the tool entry itself sets `minimum_release_age`.
+ * `--before` is accepted by both older mise releases and current versions,
+ * where it is the hidden compatibility name for `--minimum-release-age`.
+ */
 export function buildMiseUpgradeArgs(): string[] {
-	return ["upgrade", MISE_TOOL, "--bump"];
+	return ["upgrade", MISE_TOOL, "--bump", "--before", "0s"];
 }
 
 export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
