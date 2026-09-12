@@ -1267,7 +1267,19 @@ export async function buildSessionOptions(
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		let resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		// A hand-off target served by a discovery-backed provider (models.yml
+		// `discovery:`, runtime managers) is absent from the pre-discovery catalog
+		// snapshot resolved above — the same reason the main `--model` path defers
+		// to post-discovery resolution. Run one cache-aware discovery pass and
+		// retry, mirroring resolveScopedModels, so prewalk arms for ids `omp
+		// models` lists instead of silently disabling itself (issue #11820). Only
+		// pays for the fetch when the target is otherwise unresolvable and a
+		// discoverable provider could supply it; a warm cache resolves offline.
+		if ((resolved.error || !resolved.model) && modelRegistry.getDiscoverableProviders().length > 0) {
+			await modelRegistry.refresh("online-if-uncached");
+			resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		}
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Prewalk now arms for a hand-off target served by a `models.yml` `discovery:` provider (e.g. `openai-models-list`): `buildSessionOptions` runs a cache-aware discovery pass and retries when the target is unresolved and discoverable providers exist, instead of disabling prewalk with a `Model "…" not found` warning for ids `omp models` lists ([#11820](https://github.com/can1357/oh-my-pi/issues/11820)).
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
 - `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
 
