@@ -128,6 +128,7 @@ async function createSessionHarness(options: SessionHarnessOptions = {}): Promis
 	});
 	const tempDir = TempDir.createSync("@pi-responses-body-read-");
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+	authStorage.setRuntimeApiKey("openai", "local-test-key");
 	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 	const activeModel = model(server.url.toString().replace(/\/$/, ""));
 	const messages = options.messages ?? defaultMessages();
