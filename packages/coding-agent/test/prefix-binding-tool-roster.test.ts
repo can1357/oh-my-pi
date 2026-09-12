@@ -176,4 +176,27 @@ describe("prefix-bound tool roster changes", () => {
 		expect(harness.rebuild).toHaveBeenCalledTimes(rebuildsBeforeRosterChange + 1);
 		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash"]);
 	});
+
+	it("drops a pending roster notice once the base prompt is rebuilt afterward", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+		// A later full rebuild (e.g. the model-cycle round trip's syncAfterModelChange)
+		// re-renders the complete roster, subsuming the queued delta.
+		await harness.session.refreshBaseSystemPrompt();
+
+		await harness.session.prompt("second");
+
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(0);
+		const secondRequest = providerText(harness.contexts[1]);
+		expect(secondRequest).not.toContain("Tool availability changed.");
+		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash"]);
+	});
 });
