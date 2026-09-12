@@ -133,17 +133,22 @@ export function computeMnemopiBankScope(
 	cwd: string,
 	scoping: MnemopiScoping,
 ): MnemopiBankScope {
-	const project = projectBank(configured, cwd);
 	const globalBank = sharedBank(configured);
+	if (scoping === "global") {
+		return {
+			baseBank: globalBank,
+			bank: globalBank,
+			globalBank,
+			retainBank: globalBank,
+			recallBanks: [globalBank],
+		};
+	}
+	// Only the per-project modes below need the project root: `global` never
+	// reads `project`, but `projectBank` still walks the filesystem for a
+	// git/jj repository on every call, so computing it unconditionally made
+	// `global` scoping pay for — and fail on — VCS resolution it never uses.
+	const project = projectBank(configured, cwd);
 	switch (scoping) {
-		case "global":
-			return {
-				baseBank: globalBank,
-				bank: globalBank,
-				globalBank,
-				retainBank: globalBank,
-				recallBanks: [globalBank],
-			};
 		case "per-project":
 			return {
 				baseBank: globalBank,
