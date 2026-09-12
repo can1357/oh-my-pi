@@ -5,6 +5,9 @@
 ### Added
 
 - Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+### Fixed
+
+- Fixed OpenRouter multi-turn tool-call sessions wedging with `400 Referenced reasoning item ... was not found or has expired` on Meta Muse Spark models by suppressing synthetic reasoning replay when reasoning history is filtered ([#10966](https://github.com/can1357/oh-my-pi/issues/10966)).
 
 ## [18.1.18] - 2026-09-11
 
@@ -25,7 +28,6 @@
 - GitHub Copilot streams remember the working `Copilot-Integration-Id` per credential after a denied chat identity retries as the Copilot CLI, so later streams start at the working shape instead of replaying the denial ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 - Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).
 - Fixed Amazon Bedrock OpenAI models rejecting image-bearing tool results by sending each image as a sibling user content block ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
-- Fixed OpenRouter multi-turn tool-call sessions wedging with `400 Referenced reasoning item ... was not found or has expired` on Meta Muse Spark models by suppressing synthetic reasoning replay when reasoning history is filtered ([#10966](https://github.com/can1357/oh-my-pi/issues/10966)).
 
 ## [18.1.17] - 2026-09-10
 
