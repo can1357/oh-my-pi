@@ -1,10 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { checkPythonSetup } from "../src/cli/setup-cli";
-import { Settings } from "../src/config/settings";
-import { restoreEnvValue } from "./helpers/settings-test-state";
+import { buildSpeechComponents, checkPythonSetup } from "../src/cli/setup-cli";
+import { Settings, settings } from "../src/config/settings";
+import * as downloader from "../src/stt/downloader";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 
 const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -149,6 +155,33 @@ describe("omp setup python", () => {
 			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
 			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
 		}
+	});
+});
+
+describe("omp setup speech", () => {
+	let state: SettingsTestState | undefined;
+
+	beforeEach(async () => {
+		state = beginSettingsTest();
+		await Settings.init({ inMemory: true });
+		settings.set("stt.backend", "cloud");
+		settings.set("stt.modelName", "fast");
+	});
+
+	afterEach(() => {
+		restoreSettingsTestState(state);
+		vi.restoreAllMocks();
+	});
+
+	it("requires and prepares the local fallback when cloud credentials are unavailable", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const download = vi.spyOn(downloader, "downloadSttModel").mockResolvedValue();
+		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+
+		expect(await stt.isReady()).toBe(false);
+		expect(await stt.status()).toBe("fast — local fallback not downloaded");
+		await stt.ensure(() => {});
+		expect(download).toHaveBeenCalledWith("fast", expect.any(Function));
 	});
 });
 
