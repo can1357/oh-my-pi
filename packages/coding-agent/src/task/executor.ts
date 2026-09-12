@@ -2971,6 +2971,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			} else {
 				await session.waitForIdle();
 			}
+			resetYieldTurnState(session.getToolByName("yield"));
 			await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 			attemptUnsubscribe = monitor.attach(session);
 		});

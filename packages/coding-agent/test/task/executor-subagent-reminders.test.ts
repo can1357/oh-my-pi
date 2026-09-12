@@ -16,6 +16,7 @@ import {
 	SUBAGENT_WARNING_MISSING_YIELD,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -241,10 +242,18 @@ describe("runSubprocess yield reminders", () => {
 		expect(systemPrompt?.[3]).toBe("now");
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
-	it("does not let an intervening wake yield satisfy the batch after a lost prompt race", async () => {
+	it("resets yield state after an intervening wake wins the follow-up prompt race", async () => {
 		let prompts = 0;
 		let wakeEmitted = false;
 		let emitWake: ((event: AgentSessionEvent) => void) | undefined;
+		const yieldTool = new YieldTool({
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			getLastAssistantText: () => undefined,
+		});
 		const session = createMockSession(({ emit }) => {
 			emitWake ??= emit;
 			prompts++;
@@ -261,29 +270,29 @@ describe("runSubprocess yield reminders", () => {
 				isError: false,
 			});
 		});
-		const mutable = session as unknown as {
-			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
-			waitForIdle: () => Promise<void>;
-		};
-		mutable.setWorkPoolYieldItems = async () => {};
-		mutable.waitForIdle = async () => {
-			// The wake turn yields while the batch backs off. The batch monitor
-			// must be detached, so this yield neither marks the batch yielded
-			// nor leaks wake output into the batch result.
-			if (!wakeEmitted) {
-				wakeEmitted = true;
-				emitWake?.({
-					type: "tool_execution_end",
-					toolCallId: "tool-wake",
-					toolName: "yield",
-					result: {
-						content: [{ type: "text", text: "Wake done." }],
-						details: { status: "success", data: { intruder: true } },
-					},
-					isError: false,
-				});
-			}
-		};
+		Object.assign(session, {
+			getToolByName: (name: string) => (name === "yield" ? yieldTool : undefined),
+			setWorkPoolYieldItems: async () => {},
+			waitForIdle: async () => {
+				// The wake turn yields while the batch backs off. The batch monitor
+				// must be detached, so this yield neither marks the batch yielded
+				// nor leaks wake output into the batch result.
+				if (!wakeEmitted) {
+					wakeEmitted = true;
+					emitWake?.({
+						type: "tool_execution_end",
+						toolCallId: "tool-wake",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Wake done." }],
+							details: { status: "success", data: { intruder: true } },
+						},
+						isError: false,
+					});
+					await yieldTool.execute("wake-section", { type: ["findings"], data: "wake section" });
+				}
+			},
+		});
 		AgentRegistry.global().register({
 			id: "subagent-race",
 			displayName: "subagent-race",
@@ -297,6 +306,9 @@ describe("runSubprocess yield reminders", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain('"batch": true');
 			expect(result.output).not.toContain("intruder");
+			await expect(yieldTool.execute("empty-after-race", { type: "result" })).rejects.toThrow(
+				/no text \(thinking only\)/,
+			);
 		} finally {
 			AgentRegistry.global().unregister("subagent-race");
 		}
