@@ -685,6 +685,34 @@ export interface BuildSystemPromptResult {
 	xdevCatalogNames?: readonly string[];
 }
 
+/**
+ * Heading that separates the user's append prompt (`APPEND_SYSTEM.md`,
+ * `--append-system-prompt`) from the generated blocks that precede it.
+ */
+export const USER_APPEND_HEADING =
+	"## User Instructions\n\nThe following instructions are user-authored (session configuration or CLI). They are authoritative and supersede conflicting guidance above.";
+
+/**
+ * Join generated append blocks (memory, auto-learn, `xd://` routes, MCP server
+ * instructions) with the user's append prompt.
+ *
+ * The generated blocks end with `## MCP Server Instructions`, whose text tells
+ * the model it is server-controlled and may not be verified. Concatenating the
+ * user's append text directly behind it, with no heading of its own, rendered
+ * user-authored instructions as a trailing paragraph of that section, so the
+ * user's text gets a boundary heading whenever generated blocks precede it.
+ */
+export function composeAppendPrompt(appendParts: readonly string[], appendSystemPrompt?: string): string | undefined {
+	const generated = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
+	if (!appendSystemPrompt || appendSystemPrompt.trim().length === 0) {
+		return generated;
+	}
+	if (!generated) {
+		return appendSystemPrompt;
+	}
+	return `${generated}\n\n${USER_APPEND_HEADING}\n\n${appendSystemPrompt}`;
+}
+
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {

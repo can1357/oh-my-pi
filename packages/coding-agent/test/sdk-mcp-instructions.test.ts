@@ -8,6 +8,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { USER_APPEND_HEADING } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -29,6 +30,8 @@ const MCP_TOOL_NAME = "mcp__instr_do_thing";
 const MCP_ROUTE_SECTION = "## MCP Tool Routes";
 const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_execute`';
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
+/** Sentinel proving the user's append prompt stays a block of its own. */
+const USER_APPEND_MARKER = "USER_APPEND_SENTINEL_7d13f2: prefer Bun APIs over Node APIs.";
 
 describe("createAgentSession MCP server instructions (deferred UI)", () => {
 	let tempDir: string;
@@ -126,6 +129,42 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// normalized name actually mounted in the live xd:// registry.
 			expect(prompt).toContain("MCP Server Instructions");
 			expect(prompt).toContain('- "do\\u0060thing" → `xd://mcp__instr_do_thing`');
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("keeps the user append prompt out of the MCP instructions section", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+			appendSystemPrompt: USER_APPEND_MARKER,
+		});
+		try {
+			// Without `hasUI`, MCP discovery is not deferred: the fixture connects during
+			// session creation, so the first prompt already carries both the server
+			// instructions and the user's append prompt — nothing to wait for.
+			const prompt = session.systemPrompt.join("\n");
+
+			expect(prompt).toContain(SERVER_INSTRUCTIONS);
+			// The user's append prompt is its own block, never the trailing
+			// paragraph of the server-controlled section above it.
+			const boundary = prompt.indexOf(USER_APPEND_HEADING);
+			expect(boundary).toBeGreaterThan(prompt.indexOf(SERVER_INSTRUCTIONS));
+			expect(prompt.slice(prompt.indexOf("## MCP Server Instructions"), boundary)).not.toContain(USER_APPEND_MARKER);
+			expect(prompt.slice(boundary)).toContain(USER_APPEND_MARKER);
 		} finally {
 			await session.dispose();
 		}
