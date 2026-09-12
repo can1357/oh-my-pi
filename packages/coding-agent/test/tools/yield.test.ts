@@ -205,6 +205,16 @@ describe("YieldTool", () => {
 		);
 	});
 
+	it("rejects an empty incremental last-turn yield before it can mask an empty finalize", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		await expect(tool.execute("call-empty-section", { type: ["notes"] } as never)).rejects.toThrow(
+			/no text \(thinking only\)/,
+		);
+		await expect(tool.execute("call-empty-finalize", { type: "result" } as never)).rejects.toThrow(
+			/no text \(thinking only\)/,
+		);
+	});
+
 	it("accepts a data-less useLastTurn finalize when the last turn has text", async () => {
 		const tool = new YieldTool(createSession({ getLastAssistantText: () => "the actual answer" }));
 		const result = await tool.execute("call-text-last-turn", { type: "result" } as never);

@@ -471,19 +471,18 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 					`Submit the full object: {"data":<object matching the schema>}.`,
 			);
 		}
-		// Free-form analog of the schema guard above: a data-less `useLastTurn`
-		// finalize resolves to the last assistant turn's text, but a thinking-only
-		// turn carries none. Finalization would then assemble an empty result and
-		// fail the whole run post-mortem with SUBAGENT_WARNING_NULL_YIELD, even
-		// though this call was accepted as success — with no chance for the child
-		// to correct it. Reject at the boundary so the reminder ladder re-prompts
-		// for `data`. Schema-bound sessions never reach here (rejected above);
-		// incremental sections carry their own data and finalize legitimately.
+		// A data-less `useLastTurn` yield resolves to the last assistant turn's
+		// text. A thinking-only turn carries none, so accepting an incremental
+		// call records an empty section and accepting a terminal call with no
+		// accumulated sections records an empty result. Finalization would fail
+		// either run post-mortem with SUBAGENT_WARNING_NULL_YIELD, after the child
+		// can no longer correct it. Reject at the boundary so the reminder ladder
+		// re-prompts for `data`. A terminal data-less yield after valid incremental
+		// sections still closes that flow without reading last-turn text.
 		if (
 			status === "success" &&
 			useLastTurn &&
-			!isIncremental &&
-			!this.#hasIncrementalSections &&
+			(isIncremental || !this.#hasIncrementalSections) &&
 			this.#session.getLastAssistantText !== undefined
 		) {
 			const lastTurnText = this.#session.getLastAssistantText();
