@@ -8,7 +8,8 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { discoverCustomToolPaths, loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/loader";
-import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "../helpers/settings-test-state";
 
 function toolSource(name: string): string {
 	return `export default api => ({
@@ -26,7 +27,8 @@ describe("native executable custom tool discovery", () => {
 	let userTools: string;
 	let originalHome: string | undefined;
 	let originalAgentDirEnv: string | undefined;
-	let originalAgentDir: string;
+	let originalOmpProfileEnv: string | undefined;
+	let originalPiProfileEnv: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -34,7 +36,8 @@ describe("native executable custom tool discovery", () => {
 		clearFsCache();
 		originalHome = process.env.HOME;
 		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
-		originalAgentDir = getAgentDir();
+		originalOmpProfileEnv = process.env.OMP_PROFILE;
+		originalPiProfileEnv = process.env.PI_PROFILE;
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-builtin-tools-"));
 		const home = path.join(root, "home");
 		project = path.join(root, "project");
@@ -56,11 +59,11 @@ describe("native executable custom tool discovery", () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		vi.restoreAllMocks();
-		setAgentDir(originalAgentDir);
-		if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
-		if (originalHome === undefined) delete process.env.HOME;
-		else process.env.HOME = originalHome;
+		restoreEnvValue("HOME", originalHome);
+		restoreEnvValue("OMP_PROFILE", originalOmpProfileEnv);
+		restoreEnvValue("PI_PROFILE", originalPiProfileEnv);
+		restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDirEnv);
+		__resetDirsFromEnvForTests();
 		await removeWithRetries(root);
 	});
 
