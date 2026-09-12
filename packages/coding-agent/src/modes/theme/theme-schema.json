@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required except thinkingMax)",
+			"description": "Theme color definitions (all required except thinkingMax and the statusLineVim* keys)",
 			"required": [
 				"accent",
 				"border",
@@ -370,6 +370,22 @@
 				"statusLineSubagents": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Status line subagents segment"
+				},
+				"statusLineVimNormal": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line Vim indicator, Normal mode (defaults to accent)"
+				},
+				"statusLineVimInsert": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line Vim indicator, Insert mode (defaults to success)"
+				},
+				"statusLineVimVisual": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line Vim indicator, Visual mode (defaults to warning)"
+				},
+				"statusLineVimVisualLine": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line Vim indicator, Visual Line mode (defaults to warning)"
 				}
 			},
 			"additionalProperties": false

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `statusLineVimNormal`, `statusLineVimInsert`, `statusLineVimVisual`, and `statusLineVimVisualLine` theme colors, so the Vim-mode status segment and the composer border follow the active theme like the mode icons already do; a theme that omits them keeps today's `accent`/`success`/`warning` rendering.
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

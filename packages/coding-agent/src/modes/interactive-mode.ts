@@ -190,6 +190,7 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
 import { SessionInfoOverlay } from "./components/session-info-overlay";
 import { StatusLineComponent } from "./components/status-line";
+import { VIM_MODE_COLORS } from "./components/status-line/segments";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
@@ -2537,15 +2538,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
-		} else if (vimMode === "visual" || vimMode === "visual-line") {
-			this.editor.borderColor = (str: string) => theme.fg("warning", str);
-		} else if (vimMode === "normal") {
-			this.editor.borderColor = (str: string) => theme.fg("accent", str);
-		} else if (vimMode === "insert") {
-			// Insert gets its own colour rather than falling through to the session accent: with Normal
-			// and Visual both coloured, an uncoloured Insert made the border unreadable as a mode.
-			// Matches the `vim` status-line segment, which uses the same three colours.
-			this.editor.borderColor = (str: string) => theme.fg("success", str);
+		} else if (vimMode !== undefined) {
+			// Same map as the `vim` status-line segment, so border and label cannot disagree.
+			this.editor.borderColor = (str: string) => theme.fg(VIM_MODE_COLORS[vimMode], str);
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
