@@ -13,7 +13,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { AgentSession } from "../session/agent-session";
 
-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
+export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "mnemon" | "sharpshooter";
 
 export interface MemoryBackendStatus {
 	backend: MemoryBackendId;
@@ -60,6 +60,8 @@ export interface MemoryBackendSaveInput {
 	context?: string;
 	source?: string;
 	importance?: number;
+	category?: string;
+	entities?: string;
 }
 
 export interface MemoryBackendSaveResult {
@@ -67,6 +69,64 @@ export interface MemoryBackendSaveResult {
 	stored: number;
 	ids?: string[];
 	queued?: boolean;
+	message?: string;
+	/** Native-graph candidates for the caller to evaluate and `link`. */
+	candidates?: MemoryBackendLinkCandidate[];
+}
+
+export type MemoryBackendLinkType = "causal" | "semantic" | "temporal" | "entity" | "supersedes";
+
+export interface MemoryBackendLinkInput {
+	id1: string;
+	id2: string;
+	type: MemoryBackendLinkType;
+	weight: number;
+}
+
+export interface MemoryBackendLinkResult {
+	backend: MemoryBackendId;
+	status: "linked" | "rejected";
+	id1?: string;
+	id2?: string;
+	type?: MemoryBackendLinkType;
+	weight?: number;
+	message?: string;
+}
+
+export interface MemoryBackendLinkCandidate {
+	id: string;
+	content?: string;
+	kind: "causal" | "semantic";
+	score?: number;
+}
+
+export interface MemoryBackendRelatedInput {
+	id: string;
+	type?: MemoryBackendLinkType;
+	depth?: number;
+}
+
+export interface MemoryBackendRelatedItem {
+	id: string;
+	content: string;
+	category?: string;
+	importance?: number;
+	depth?: number;
+	via?: string;
+}
+
+export interface MemoryBackendRelatedResult {
+	backend: MemoryBackendId;
+	id: string;
+	count: number;
+	items: MemoryBackendRelatedItem[];
+	message?: string;
+}
+
+export interface MemoryBackendForgetResult {
+	backend: MemoryBackendId;
+	status: "deleted" | "rejected";
+	id?: string;
 	message?: string;
 }
 
@@ -132,6 +192,18 @@ export interface MemoryBackend {
 
 	/** Explicit user-facing save operation. */
 	save?(context: MemoryBackendOperationContext, input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
+
+	/** Typed graph edge. Mnemon-only; other backends omit this. */
+	link?(context: MemoryBackendOperationContext, input: MemoryBackendLinkInput): Promise<MemoryBackendLinkResult>;
+
+	/** Graph neighbors of one insight. Mnemon-only. */
+	related?(
+		context: MemoryBackendOperationContext,
+		input: MemoryBackendRelatedInput,
+	): Promise<MemoryBackendRelatedResult>;
+
+	/** Soft-delete one insight. Mnemon-only. */
+	forget?(context: MemoryBackendOperationContext, id: string): Promise<MemoryBackendForgetResult>;
 
 	/** Render backend-specific memory statistics as markdown (`/memory stats`). */
 	stats?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;

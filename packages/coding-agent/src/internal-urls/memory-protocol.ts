@@ -392,6 +392,11 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
+			if (backend === "mnemon") {
+				throw new Error(
+					"Native Mnemon memories are not addressable via memory://. Use `recall` for ids, then `related` / `forget`. The CLI is an alternative. `read memory://<id>` is only available with memory.backend=mnemopi.",
+				);
+			}
 			if (!caller.legacy) {
 				if (backend === "hindsight") throw new Error(HINDSIGHT_UNADDRESSABLE);
 				if (backend === "mnemopi") {

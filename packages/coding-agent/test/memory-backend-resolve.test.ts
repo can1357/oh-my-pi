@@ -18,6 +18,11 @@ describe("resolveMemoryBackend", () => {
 		expect((await resolveMemoryBackend(b)).id).toBe("hindsight");
 	});
 
+	it("returns the mnemon backend when memory.backend is mnemon", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemon" });
+		expect((await resolveMemoryBackend(settings)).id).toBe("mnemon");
+	});
+
 	it("exposes inactive status when no session is available", async () => {
 		const memory = createMemoryRuntimeContext({ agentDir: "/tmp/agent", cwd: "/tmp/project" });
 
