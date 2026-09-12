@@ -17,8 +17,15 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/mode
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
-import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { setAgentStateFileEnabled, setTerminalTitleState } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { getTerminalId, setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
+import {
+	getConfigRootDir,
+	getTerminalSessionsDir,
+	removeSyncWithRetries,
+	setAgentDir,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 let settingsState: SettingsTestState | undefined;
@@ -1861,6 +1868,36 @@ describe("selector setting side effects", () => {
 			expect(setModel).not.toHaveBeenCalled();
 		} finally {
 			hub.dispose();
+		}
+	});
+	it("applies tui.stateFile at once, rather than at the next start", () => {
+		// The setting is read once during init as well, so without this path turning it on writes
+		// nothing until a restart and turning it off keeps writing and leaves the file behind.
+		const originalPane = process.env.TMUX_PANE;
+		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-state-file-setting-"));
+		process.env.TMUX_PANE = "%omp-state-file-setting-test";
+		setAgentDir(path.join(agentRoot, "agent"));
+
+		const stateFile = (): string => path.join(getTerminalSessionsDir(), `${getTerminalId()}.state.json`);
+
+		try {
+			const controller = new SelectorController({} as unknown as InteractiveModeContext);
+			setTerminalTitleState("attention");
+
+			controller.handleSettingChange("tui.stateFile", true);
+			expect(fs.existsSync(stateFile())).toBe(true);
+			expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
+
+			controller.handleSettingChange("tui.stateFile", false);
+			expect(fs.existsSync(stateFile())).toBe(false);
+		} finally {
+			setAgentStateFileEnabled(false);
+			if (originalPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalPane;
+			if (originalAgentDir) setAgentDir(originalAgentDir);
+			else setAgentDir(path.join(getConfigRootDir(), "agent"));
+			fs.rmSync(agentRoot, { recursive: true, force: true });
 		}
 	});
 });

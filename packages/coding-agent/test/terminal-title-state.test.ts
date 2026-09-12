@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	buildTerminalTitleWithState,
@@ -9,7 +10,13 @@ import {
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { getTerminalId, isConPTYHosted } from "@oh-my-pi/pi-tui";
-import { getTerminalSessionsDir, postmortem, setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	getTerminalSessionsDir,
+	postmortem,
+	setAgentDir,
+	setTerminalHeadless,
+} from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
 const LABEL = "my-project";
@@ -161,16 +168,34 @@ describe("agent state file", () => {
 
 	// A test runner has no controlling terminal, so `getTerminalId()` would find nothing and the
 	// feature would correctly write nothing. Standing in as a multiplexer pane gives the same
-	// stable identity a real session has.
-	const PANE = "%pi-state-file-test";
+	// stable identity a real session has - but the runner may itself be inside tmux, so the
+	// caller's value is put back afterwards rather than deleted.
+	const PANE = "%omp-state-file-test";
+	let originalPane: string | undefined;
+	let originalAgentDir: string | undefined;
+	let agentRoot: string | undefined;
 
 	beforeEach(() => {
+		originalPane = process.env.TMUX_PANE;
 		process.env.TMUX_PANE = PANE;
+		// Its own agent directory, so this never writes into the caller's real
+		// terminal-sessions directory and two suites cannot race for one filename.
+		originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-state-file-test-"));
+		setAgentDir(path.join(agentRoot, "agent"));
 	});
 
 	afterEach(() => {
 		setAgentStateFileEnabled(false);
-		delete process.env.TMUX_PANE;
+
+		if (originalPane === undefined) delete process.env.TMUX_PANE;
+		else process.env.TMUX_PANE = originalPane;
+
+		if (originalAgentDir) setAgentDir(originalAgentDir);
+		else setAgentDir(path.join(getConfigRootDir(), "agent"));
+
+		if (agentRoot) fs.rmSync(agentRoot, { recursive: true, force: true });
+		agentRoot = undefined;
 	});
 
 	it("writes nothing while the setting is off", () => {

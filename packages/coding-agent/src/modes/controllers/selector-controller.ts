@@ -84,7 +84,7 @@ import { ToolAbortError } from "../../tools/tool-errors";
 import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
-import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { setAgentStateFileEnabled, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
@@ -525,6 +525,11 @@ export class SelectorController {
 				break;
 			case "composer.shape":
 				this.ctx.syncComposerShape();
+				break;
+			case "tui.stateFile":
+				// Applied here as well as at startup: without this, turning it on writes nothing
+				// until the next run, and turning it off keeps writing and leaves the file behind.
+				setAgentStateFileEnabled(value as boolean);
 				break;
 			case "advisor.enabled":
 				this.ctx.session.setAdvisorEnabled(value as boolean);

@@ -590,12 +590,6 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer.unref?.();
 }
 
-/**
- * Reflect the agent run state in the terminal title's separator: `working`
- * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
- * turn), and `attention` shows `!` (agent blocked on you). Gated off by
- * `tui.titleState`.
- */
 /** Whether the run state is also offered as a file, driven by the `tui.stateFile` setting. */
 let agentStateFileEnabled = false;
 
@@ -642,6 +636,12 @@ function removeAgentStateFile(): void {
 	}
 }
 
+/**
+ * Reflect the agent run state in the terminal title's separator: `working`
+ * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
+ * turn), and `attention` shows `!` (agent blocked on you). Gated off by
+ * `tui.titleState`.
+ */
 export function setTerminalTitleState(state: TerminalTitleState): void {
 	terminalTitleRuntime.state = state;
 	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
