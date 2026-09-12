@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { resetActiveRulesForTests, setActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import type { InternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { RuleProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/rule-protocol";
+import type { InternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 
 function makeRule(name: string, content: string): Rule {
 	return {
@@ -46,6 +47,13 @@ describe("RuleProtocolHandler", () => {
 
 		const resource = await new RuleProtocolHandler().resolve(ruleUrl("legacy"));
 		expect(resource.content.trim()).toBe("legacy body");
+	});
+
+	it("resolves a nested rule name from its host plus path", async () => {
+		setActiveRules([makeRule("frontend/style", "nested body")]);
+
+		const resource = await new RuleProtocolHandler().resolve(parseInternalUrl("rule://frontend/style"));
+		expect(resource.content.trim()).toBe("nested body");
 	});
 
 	it("completes against the caller's scoped rule set instead of the global snapshot", async () => {

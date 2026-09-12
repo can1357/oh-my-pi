@@ -184,6 +184,19 @@ describe("github discovery — Copilot user-global surface", () => {
 		expect(all?.globs).toBeUndefined();
 	});
 
+	test("splits comma-separated applyTo values inside a YAML array (#2731)", async () => {
+		write(
+			path.join(cwd, ".github", "instructions", "multi.instructions.md"),
+			"---\napplyTo: ['**/*.ts,**/*.tsx', '**/*.md']\n---\nMulti body\n",
+		);
+
+		const result = await loadCapability<Rule>("rules", { cwd, providers: ["github"] });
+
+		const multi = result.items.find(rule => rule.name === "multi");
+		expect(multi?.alwaysApply).toBe(false);
+		expect(multi?.globs).toEqual(["**/*.ts", "**/*.tsx", "**/*.md"]);
+	});
+
 	test("disabled github provider suppresses copilot instructions and instruction-file rules (#2731)", async () => {
 		write(path.join(cwd, ".github", "copilot-instructions.md"), "project guidance");
 		write(

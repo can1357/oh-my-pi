@@ -204,6 +204,46 @@ export function parseArrayOrCSV(value: unknown): string[] | undefined {
 	return undefined;
 }
 
+/**
+ * Parse a rule-scoping glob list that differs by provider.
+ *
+ * With `splitCommas: true` (GitHub `applyTo`), a scalar is comma-split and so
+ * is each array element — the historical `applyTo` contract is a
+ * comma-separated string, with a YAML array merely tolerated.
+ *
+ * With `splitCommas: false` (default, Claude `paths`), every value is an
+ * atomic glob: array elements are trimmed and preserved verbatim, and a scalar
+ * is a single glob, so a comma inside an element (a brace pattern or a
+ * filename) is never treated as a separator.
+ */
+export function parseGlobList(
+	value: unknown,
+	options: { splitCommas?: boolean } = {},
+): string[] | undefined {
+	if (Array.isArray(value)) {
+		const strings = value.filter((item): item is string => typeof item === "string");
+		const globs = options.splitCommas
+			? strings.flatMap(item => parseCSV(item))
+			: strings.map(item => item.trim()).filter(Boolean);
+		return globs.length > 0 ? globs : undefined;
+	}
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (!trimmed) return undefined;
+		return options.splitCommas ? parseCSV(trimmed) : [trimmed];
+	}
+	return undefined;
+}
+
+/**
+ * Whether a rule glob matches every path (the catch-all `*`, `**`, and
+ * double-star-slash-star globs), so the rule is always-apply rather than
+ * conditionally scoped.
+ */
+export function isAlwaysApplyGlob(glob: string): boolean {
+	return glob === "*" || glob === "**" || glob === "**/*";
+}
+
 interface RuleMarkdownOptions {
 	ruleName?: string;
 	stripNamePattern?: RegExp;
