@@ -750,10 +750,14 @@ describe("imageGenTool", () => {
 
 	it("falls back to xAI after an earlier provider HTTP failure", async () => {
 		const requestUrls: string[] = [];
-		const fetchMock = (async (input: string | URL | Request) => {
+		let antigravityRequestBody: Record<string, unknown> | undefined;
+		const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
 			const url = input.toString();
 			requestUrls.push(url);
 			if (url.includes("streamGenerateContent")) {
+				antigravityRequestBody = init?.body
+					? (JSON.parse(init.body as string) as Record<string, unknown>)
+					: undefined;
 				return new Response(JSON.stringify({ error: { message: "image endpoint unavailable" } }), {
 					status: 404,
 					headers: { "content-type": "application/json" },
@@ -773,6 +777,9 @@ describe("imageGenTool", () => {
 			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
 			"https://api.x.ai/v1/images/generations",
 		]);
+		expect(antigravityRequestBody).toBeDefined();
+		expect(antigravityRequestBody?.requestType).toBeUndefined();
+		expect(antigravityRequestBody?.userAgent).toBe("antigravity");
 		expect(result.details?.provider).toBe("xai");
 	});
 	it("skips active providers that do not support the requested aspect ratio", async () => {

@@ -434,7 +434,6 @@ interface CloudCodeAssistRequest {
 		};
 		labels?: Record<string, string>;
 	};
-	requestType?: string;
 	userAgent?: string;
 	requestId?: string;
 }
@@ -1395,7 +1394,6 @@ export function buildRequest(
 			request,
 			model: wireModelId,
 			userAgent: "antigravity",
-			requestType: "agent",
 		};
 	}
 
