@@ -503,21 +503,24 @@ function classifyText(
 		}
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
-		// A stream truncation or forwarded Codex HTTP body-read failure may not
-		// match TRANSIENT_TRANSPORT_PATTERN. Flag it explicitly so AIError.retriable and
-		// the turn-recovery layer treat it as retryable, matching the provider
-		// retry path (isProviderRetryableError). Separate `if` (not chained onto
-		// the else-if) so a timeout whose text also reads as a truncation keeps
-		// Flag.Timeout alongside Flag.Transient. The string arm applies the strict
-		// STREAM_PARSE_DIAGNOSTIC_PATTERN, per the rationale on isTransientStreamParseError.
-		// Skip a truncation phrase that rides on a terminal 4xx (e.g. a malformed
-		// request rejected as "400 unexpected EOF"): that is a deterministic client
-		// error that replays identically, so keep it terminal. classify() carries
-		// the outer terminal status down the cause chain so a wrapped truncation
-		// (ProviderHttpError 400 → cause "unexpected EOF") is caught here too.
+		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
+		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
+		// explicitly so AIError.retriable and the turn-recovery layer treat it as
+		// retryable, matching the provider retry path (isProviderRetryableError).
+		// Separate `if` (not chained onto the else-if) so a timeout whose text also
+		// reads as a truncation keeps Flag.Timeout alongside Flag.Transient. The
+		// string arm applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the
+		// rationale on isTransientStreamParseError. Skip a phrase that rides on a
+		// terminal 4xx (e.g. a malformed request rejected as "400 unexpected EOF"):
+		// that is a deterministic client error that replays identically, so keep it
+		// terminal. classify() carries the outer terminal status down the cause
+		// chain so a wrapped truncation (ProviderHttpError 400 → cause "unexpected
+		// EOF") is caught here too.
 		if (
 			!isTerminalClientErrorStatus(statusClean) &&
-			(isTransientStreamParseError(errorMessage) || CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
+			(isTransientStreamParseError(errorMessage) ||
+				isTransientStreamDropError(errorMessage) ||
+				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
 		) {
 			kinds |= Flag.Transient;
 		}
@@ -869,6 +872,31 @@ const STREAM_EVENT_ORDER_PATTERN = /stream event order|before message_start/i;
 export function isTransientStreamParseError(error: unknown): boolean {
 	if (typeof error === "string") return STREAM_PARSE_DIAGNOSTIC_PATTERN.test(error);
 	return error instanceof Error && STREAM_PARSE_TRUNCATION_PATTERN.test(error.message);
+}
+
+/**
+ * Transport-level stream drops: the connection or upstream stream ended before a
+ * terminal event, with no JSON-parse signal and no retryable status attached.
+ *
+ * Distinct from {@link STREAM_PARSE_TRUNCATION_PATTERN} (mid-body JSON
+ * truncation) — these name the transport itself dropping (proxy/gateway closing
+ * the SSE stream, socket dying before the TLS handshake completes). The wording
+ * is the statusless twin of a `408 stream disconnected`, which the status path
+ * already retries; an identical replay recovers it, so callers under a
+ * non-terminal status treat it as transient (#11805).
+ */
+const STREAM_DROP_PATTERN =
+	/stream disconnected before completion|stream closed before response\.completed|stream was interrupted|stream ended before terminal (?:chunk|completion event)|socket disconnected before secure tls connection/i;
+
+/**
+ * Transport stream-drop diagnostic (see {@link STREAM_DROP_PATTERN}). Unlike
+ * {@link isTransientStreamParseError}, one pattern serves both the live `Error`
+ * and the persisted-string forms: the phrasings are high-signal enough to trust
+ * detached from a transport `Error`.
+ */
+export function isTransientStreamDropError(error: unknown): boolean {
+	if (typeof error === "string") return STREAM_DROP_PATTERN.test(error);
+	return error instanceof Error && STREAM_DROP_PATTERN.test(error.message);
 }
 
 /** Any malformed stream-envelope error (prefix-tagged or out-of-order events). */

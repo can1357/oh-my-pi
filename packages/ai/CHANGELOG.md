@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed statusless stream-drop diagnostics (stream disconnected/closed before `response.completed`, upstream stream interrupted or ended before its terminal chunk, socket disconnected before the secure TLS handshake) classifying as terminal errors, so they now retry like their status-tagged twins instead of settling the turn ([#11805](https://github.com/can1357/oh-my-pi/issues/11805)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added
