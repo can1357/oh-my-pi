@@ -1,10 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	resolveContainedPath,
-	resolveContainedPathSync,
-	type ContainedPathResolution,
-} from "../discovery/contained-path";
+import { resolveContainedPath, type ContainedPathResolution } from "../discovery/contained-path";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
@@ -146,26 +142,6 @@ function skillContainOrThrow(url: string, contained: ContainedPathResolution): s
 		throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
 	}
 	return contained.realPath;
-}
-
-/**
- * Resolve a single skill:// URL to its absolute filesystem path.
- * Does NOT read file content or verify existence.
- * A bare URI addresses the skill's configured instruction file, or its base
- * directory when `forDirectory` is set (e.g. a bash working directory).
- *
- * Synchronously contained variant: reserved for callers whose own boundary is
- * synchronous (the non-async expansion API); production bash expansion routes
- * through {@link resolveSkillUrlToPathAsync}.
- */
-export function resolveSkillUrlToPath(
-	url: string,
-	skills: readonly Skill[],
-	options: { forDirectory?: boolean } = {},
-): string {
-	const { skill, target } = parseSkillUrlTarget(url, skills, options.forDirectory === true);
-	if (!skill.containRoot) return target;
-	return skillContainOrThrow(url, resolveContainedPathSync(skill.containRoot, target));
 }
 
 /**
@@ -385,23 +361,6 @@ async function resolveInternalUrlToPath(
 	}
 
 	return path.resolve(resource.sourcePath);
-}
-
-/**
- * Expand all skill:// URIs in a bash command string.
- * Returns the command with URIs replaced by shell-escaped absolute paths.
- * Throws ToolError if any URI cannot be resolved.
- */
-export function expandSkillUrls(command: string, skills: readonly Skill[]): string {
-	if (skills.length === 0 || !command.includes("skill://")) {
-		return command;
-	}
-
-	return command.replace(SKILL_URL_PATTERN, token => {
-		const url = unquoteToken(token);
-		const resolvedPath = resolveSkillUrlToPath(url, skills);
-		return shellEscape(resolvedPath);
-	});
 }
 
 /**
