@@ -197,6 +197,10 @@
 - LiteLLM discovery no longer caches an empty catalog after a timed-out run: a rich-metadata timeout now falls back to `/v1/models`, and a discovery failure with no prior catalog leaves the cache untouched so the next launch retries immediately instead of hiding discovery-only models ([#10964](https://github.com/can1357/oh-my-pi/issues/10964)).
 - Searching `free` in the model picker now finds every zero-cost model, not just the ones with `free` in their id.
 
+### Fixed
+
+- Extension provider reloads no longer remove cached models from unrelated credential-scoped providers ([#10973](https://github.com/can1357/oh-my-pi/issues/10973)).
+
 ## [18.1.11] - 2026-09-05
 
 ### Added
