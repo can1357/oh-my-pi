@@ -9,8 +9,8 @@
  * later. The main `--model` path already defers to post-discovery resolution,
  * but the prewalk block gave up synchronously and printed
  * `prewalk disabled — Model "…" not found` for ids `omp models` lists. It now
- * runs a cache-aware discovery pass and retries when the target is unresolved
- * and discoverable providers exist, matching the main model resolution.
+ * refreshes only the provider named by the selector, then retries after that
+ * provider's cache-aware discovery completes.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -29,10 +29,12 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 describe("issue #11820 prewalk into a models.yml discovery provider target", () => {
 	let tempDir: string;
 	const authStoragesToClose: AuthStorage[] = [];
+	let requestedUrls: string[];
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-prewalk-discovery-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
+		requestedUrls = [];
 	});
 
 	afterEach(() => {
@@ -42,13 +44,18 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 	});
 
 	const baseUrl = "https://example.com/v1";
+	const unrelatedBaseUrl = "https://unrelated.example.com/v1";
 
 	/** Custom provider `/v1/models` (openai-models-list discovery). */
 	function mockDiscovery(models: string[]): FetchImpl {
 		return async input => {
 			const url = String(input);
+			requestedUrls.push(url);
 			if (url === `${baseUrl}/models`) {
 				return Response.json({ data: models.map(id => ({ id })) });
+			}
+			if (url === `${unrelatedBaseUrl}/models`) {
+				return Response.json({ data: [{ id: "unrelated-model" }] });
 			}
 			return new Response("not found", { status: 404 });
 		};
@@ -64,6 +71,12 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 				`    baseUrl: ${baseUrl}`,
 				"    api: openai-completions",
 				"    apiKey: MY_API_KEY",
+				"    discovery:",
+				"      type: openai-models-list",
+				"  unrelated-provider:",
+				`    baseUrl: ${unrelatedBaseUrl}`,
+				"    api: openai-completions",
+				"    auth: none",
 				"    discovery:",
 				"      type: openai-models-list",
 				"",
@@ -91,6 +104,7 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 
 		expect(options.prewalk?.target.provider).toBe("my-provider");
 		expect(options.prewalk?.target.id).toBe("some-model");
+		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
 	});
 
 	test("arms prewalk for an explicit --prewalk-into discovery selector", async () => {
@@ -107,5 +121,22 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 
 		expect(options.prewalk?.target.provider).toBe("my-provider");
 		expect(options.prewalk?.target.id).toBe("some-model");
+		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
+	});
+
+	test("does not probe discovery providers for an unqualified missing target", async () => {
+		const modelRegistry = registry();
+		const settings = Settings.isolated();
+
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", "definitely-missing-prewalk-target"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.prewalk).toBeUndefined();
+		expect(requestedUrls).toEqual([]);
 	});
 });
