@@ -628,6 +628,19 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(400, "invalid_request_error: model unsupported")).toBe(false);
 	});
 
+	it("classifies Kimi access_terminated_error as QUOTA_EXHAUSTED and rotates on 403", () => {
+		const fullError =
+			'{"error":{"message":"You\'ve reached your monthly usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/membership/subscription?tab=quota","type":"access_terminated_error"}}';
+		expect(parseRateLimitReason(fullError)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(403, fullError)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(fullError, 403))).toBe(true);
+
+		const bareError = '{"error":{"type":"access_terminated_error"}}';
+		expect(parseRateLimitReason(bareError)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(403, bareError)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(bareError, 403))).toBe(true);
+	});
+
 	// Vertex returns "Online prediction concurrent requests quota exceeded" for a
 	// concurrent-request cap. The generic USAGE_LIMIT_PATTERN matches
 	// `quota.?exceeded`, but this is a concurrency cap (5s backoff, no rotation),

@@ -59,6 +59,10 @@ regex!(OUTER_FENCE_RE, r"(?iu)^```(?:text|xml|html|typescript|ts|tsx|javascript|
 regex!(GLUED_CONTROL_RE, r"^[ \t]*(«\*?|»)([ \t]+\S.*)$");
 regex!(SHOWING_LINES_RE, r"(?iu)^\[(?:Showing lines\b|(?:…|\.\.\.)\d+ln elided\b).*\]$");
 regex!(ELIDED_LINE_RE, r"^\d+(?:-\d+)?:\s*(?:…|\.\.\.)\s*$");
+regex!(
+	READ_MORE_NOTICE_RE,
+	r"(?iu)^\[\s*(?:\d+\s+)?more\s+lines?\s+in\s+.+\.\s+use\s+.+\s+to\s+continue\]$"
+);
 regex!(NUMBERED_LINE_RE, r"^\s*\d+\s*[:|]");
 regex!(NUMBERED_LITERAL_RE, r#"^\s*\d+\s*[:|]\s*(?:\d|[\"'`])"#);
 regex!(SELECTION_ONLY_RE, r"^\x{27EA}([^\x{27EA}\x{27EB}]*)\x{27EB}$");
@@ -489,7 +493,9 @@ fn normalize_block(lines: &[String], rewrite: bool) -> String {
 		.iter()
 		.filter(|line| {
 			let trimmed = line.trim();
-			!SHOWING_LINES_RE.is_match(trimmed) && !ELIDED_LINE_RE.is_match(trimmed)
+			!SHOWING_LINES_RE.is_match(trimmed)
+				&& !READ_MORE_NOTICE_RE.is_match(trimmed)
+				&& !ELIDED_LINE_RE.is_match(trimmed)
 		})
 		.cloned()
 		.collect();
