@@ -143,6 +143,26 @@ describe("error-id classification", () => {
 		}
 	});
 
+	it.each([
+		"stream error: stream disconnected before completion: stream closed before response.completed",
+		"Upstream response stream was interrupted",
+		"Upstream stream ended before terminal chunk",
+		"Client network socket disconnected before secure TLS connection was established",
+	])("classifies statusless stream-drop families as transient + retryable on both paths: %s", errorMessage => {
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
+	});
+
+	it("keeps a stream-drop phrase riding on a terminal 4xx terminal", () => {
+		const errorMessage = "stream closed before response.completed";
+		const id = AIError.classifyMessage(message({ errorStatus: 400, errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
+	});
+
 	it("keeps Flag.Timeout when a timeout message also reads as a truncation", () => {
 		const id = AIError.classifyMessage(message({ errorMessage: "read timed out: unexpected EOF" }));
 		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
