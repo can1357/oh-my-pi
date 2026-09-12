@@ -565,6 +565,42 @@ describe("cloud backend in STTController", () => {
 		}
 	});
 
+	it("settles a pending stop and aborts credential resolution when disposed", async () => {
+		const credentialStarted = Promise.withResolvers<void>();
+		let credentialSignal: AbortSignal | undefined;
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const options = {
+			showWarning(_msg: string): void {},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(() => ({ stop(): void {} }), {
+			resolveCloudCredential: signal => {
+				credentialSignal = signal;
+				credentialStarted.resolve();
+				const { promise, reject } = Promise.withResolvers<CloudSttCredential | undefined>();
+				signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+				return promise;
+			},
+		});
+
+		await controller.toggle(editor, options);
+		await credentialStarted.promise;
+		const stopping = controller.toggle(editor, options);
+		expect(controller.state).toBe("transcribing");
+		controller.dispose();
+		await stopping;
+		expect(credentialSignal?.aborted).toBe(true);
+		expect(controller.state).toBe("idle");
+	});
+
 	it("strips control sequences from the transcript it commits to the editor", async () => {
 		const stub = stubFetch("\u001b[2Jhello\u0007 \u001b[31mworld\u001b[0m");
 		let onAudio!: (error: Error | null, samples: Float32Array) => void;
