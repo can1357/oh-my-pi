@@ -5,6 +5,7 @@
 ### Added
 
 - Added Charm Hyper as a built-in provider with API-key login, live model discovery, and per-model pricing, effort ladders, and limits read straight from its catalog ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Added the Meta/Muse Image hosted image operation to the compat policy: a `meta-image` default of `muse-image-1.0` for the model-less `generate_image` tool.
 
 ## [18.1.18] - 2026-09-11
 

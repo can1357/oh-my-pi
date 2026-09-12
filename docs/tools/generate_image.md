@@ -24,7 +24,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 | `aspect_ratio` | `"1:1" \| "3:4" \| "4:3" \| "9:16" \| "16:9" \| "3:2" \| "2:3"` | No | Requested output aspect ratio. |
 | `image_size` | `"1024x1024" \| "1536x1024" \| "1024x1536"` | No | Requested output size where the selected provider supports it. |
 | `input` | `Array<{ path?: string; data?: string; mime_type?: string }>` | No | Input images by local path or inline base64 data. |
-| `provider` | `"auto" \| "openai" \| "openai-codex" \| "antigravity" \| "xai" \| "openrouter" \| "gemini" \| "deepinfra"` | No | Per-request provider preference. A concrete value is tried first; `auto` or omission uses configured/session ordering. |
+| `provider` | `"auto" \| "openai" \| "openai-codex" \| "antigravity" \| "xai" \| "openrouter" \| "gemini" \| "deepinfra" \| "meta"` | No | Per-request provider preference. A concrete value is tried first; `auto` or omission uses configured/session ordering. |
 
 ## Outputs
 - Success with image data:
@@ -35,7 +35,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 
 ## Flow
 1. The SDK injects `generate_image` as a custom tool via `getImageGenTools()` only when the feature gate and tool filter allow it.
-2. Provider order is: concrete per-request `provider`, entries in `providers.imageOrder`, the active session model's corresponding image provider, then the built-in order `openai`, `openai-codex`, `antigravity`, `xai`, `openrouter`, `gemini`, `deepinfra`; duplicates are removed. `provider: "auto"` does not add a provider.
+2. Provider order is: concrete per-request `provider`, entries in `providers.imageOrder`, the active session model's corresponding image provider, then the built-in order `openai`, `openai-codex`, `antigravity`, `xai`, `openrouter`, `gemini`, `deepinfra`, `meta`; duplicates are removed. `provider: "auto"` does not add a provider.
 3. The tool skips providers without usable credentials. Credentialed provider HTTP failures are collected and the next provider is tried; validation, parsing, local I/O, cancellation, and timeout failures are not fallback conditions.
 4. Input images are resolved once, after the first usable provider is found. A `path` is resolved relative to session cwd and content-sniffed. Inline `data` may be raw base64 (requiring `mime_type`) or a `data:<mime>;base64,...` URL.
 5. Provider-specific aspect-ratio support is checked after provider selection.
@@ -47,6 +47,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
    - xAI: Grok Imagine generation or edit endpoint.
    - Gemini: Gemini `generateContent` with `responseModalities: ["IMAGE"]`.
    - DeepInfra: OpenAI-compatible `images/generations` endpoint (default model `black-forest-labs/FLUX-2-pro`, `DEEPINFRA_API_KEY` accepted). Text-to-image only — edit requests fall through to a later edit-capable provider.
+   - Meta: OpenAI-compatible `images/generations` and `images/edits` endpoints (default model `muse-image-1.0`, `MODEL_API_KEY` or `META_API_KEY` accepted). Supports text-to-image and reference-image editing. Base URL precedence: `providers.meta.baseUrl` when set to a non-default value, then `META_BASE_URL`, then the bundled default (`https://api.meta.ai/v1`). Configured `providers.meta` headers are forwarded with the request.
 7. Inline images in a successful provider response are saved to temporary files; paths and base64/MIME image metadata are returned. A response with no image data returns a normal zero-image result rather than `isError`.
 
 ## Modes / Variants
@@ -72,7 +73,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - xAI edit requests accept at most 3 input images.
 
 ## Errors
-- No usable provider credentials: `No image API credentials found...`; the message lists supported login/API-key routes.
+- No usable provider credentials: `No image API credentials found...`; the message lists supported login/API-key routes (OpenAI, Codex, Antigravity, xAI, OpenRouter, Gemini, DeepInfra, Meta).
 - Invalid input: file not found, file over 35 MiB, unsupported content-sniffed image type, missing `path`/`data`, empty image data, or raw base64 without `mime_type`.
 - OpenAI path without a compatible GPT model: `Missing active GPT model for OpenAI image generation`.
 - Antigravity credentials without `projectId`: `Missing projectId in antigravity credentials`.

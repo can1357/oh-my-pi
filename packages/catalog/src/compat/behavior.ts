@@ -3,7 +3,7 @@
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
  * or outside exact bundled-model lookup — responses routing, API routing,
  * quota tiers, plan requirements, model limits, roster exclusions, hosted
- * defaults, and pricing peers.
+ * defaults, pricing peers, and image-provider backends.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
@@ -111,6 +111,14 @@ export function hasQuotaTierPolicy(provider: string): boolean {
 /** The provider-default wire model for a model-less hosted operation. */
 export function hostedDefaultModel(provider: string): string | undefined {
 	return behavior.hostedDefaults.find(entry => entry.provider === provider)?.model;
+}
+
+/**
+ * The generate_image backend for an active chat provider, if declared.
+ * Unlisted providers do not bias auto order.
+ */
+export function imageProviderFor(provider: string): string | undefined {
+	return behavior.imageProviders.find(entry => entry.provider === provider)?.backend;
 }
 
 /** One resolved API route for a provider model id. */

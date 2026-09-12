@@ -23,6 +23,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// including its tariff and effort ladder, comes from the live /v1/models
 	// snapshot, so no bundled rows are frozen into models.json.
 	"charm-hyper",
+	// Hosted image-generation default for Meta Model API (packages/coding-agent/src/tools/image-gen.ts)
+	"meta-image",
+	// Hosted image-generation default for Gemini (packages/coding-agent/src/tools/image-gen.ts)
+	"gemini-image",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {
@@ -54,6 +58,7 @@ function collectReferencedProviders(): Map<string, string> {
 		behavior.modelOperations,
 		behavior.quotaTiers,
 		behavior.hostedDefaults,
+		behavior.imageProviders,
 		behavior.apiRoutes,
 		behavior.modelLimits,
 		behavior.excludeModels,
