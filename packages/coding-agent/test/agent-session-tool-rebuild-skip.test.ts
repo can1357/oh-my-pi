@@ -67,7 +67,7 @@ function createMcpCustomTool(name: string, serverName: string, mcpToolName: stri
 }
 
 /** Rendered xd:// mount notices within one provider call's messages. */
-function mountNoticesIn(messages: readonly (AgentMessage | Message)[]): string[] {
+function mountNoticesIn(messages: readonly Message[]): string[] {
 	return messages.flatMap(message => {
 		const { content } = message;
 		const text =
@@ -983,10 +983,16 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([search]);
 		await session.prompt("hello");
 		expect(maintenanceSpy).toHaveBeenCalledTimes(1);
-		const estimatedNotices = mountNoticesIn(maintenanceMessages[0] ?? []);
-		expect(estimatedNotices).toHaveLength(1);
-		expect(estimatedNotices[0]).toContain("## mcp__nucleus_search");
-		expect(estimatedNotices[0]).toContain("## Schema");
+		const estimatedNotice = (maintenanceMessages[0] ?? []).find(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "xdev-mount-notice",
+		);
+		expect(estimatedNotice).toBeDefined();
+		const estimatedText =
+			typeof estimatedNotice?.content === "string"
+				? estimatedNotice.content
+				: (estimatedNotice?.content ?? []).flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
+		expect(estimatedText).toContain("## mcp__nucleus_search");
+		expect(estimatedText).toContain("## Schema");
 
 		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);
