@@ -116,6 +116,54 @@ describe("Exa MCP filtering", () => {
 		expect(result.configs).toEqual({});
 	});
 
+	test("drops an exa server whose restriction and filters leave no non-native tool", () => {
+		// `tools=` enumerates what the server advertises, so an allowlist selects
+		// FROM that set rather than adding to it: a native-only enumeration with
+		// an allowlist naming a tool the server does not serve contributes
+		// nothing beyond the native integration.
+		const cases: Record<string, MCPServerConfig> = {
+			nativeEnumAllowNonNative: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa",
+				enabledTools: ["web_fetch_exa"],
+			},
+			extraEnumAllowNative: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_fetch_exa",
+				enabledTools: ["web_search_exa"],
+			},
+			denyAll: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools: ["*"] },
+			denyTheExtraTool: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa",
+				disabledTools: ["web_fetch_exa"],
+			},
+		};
+		const result = filterExaMCPServers(cases, {
+			nativeEnumAllowNonNative: SOURCE,
+			extraEnumAllowNative: SOURCE,
+			denyAll: SOURCE,
+			denyTheExtraTool: SOURCE,
+		});
+
+		expect(result.configs).toEqual({});
+	});
+
+	test("keeps an exa server whose denylist leaves its non-native tool reachable", () => {
+		// The denylist subtracts from what the server advertises; denying only the
+		// native tool leaves the extra one, which is why the server stays mounted.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa",
+				disabledTools: ["web_search_exa"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
 	test("keeps an exa server restricted only by a denylist", () => {
 		// A denylist selects the complement of what it names, so it always leaves
 		// the server's non-native tools reachable; dropping the server would take

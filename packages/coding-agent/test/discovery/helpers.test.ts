@@ -205,8 +205,15 @@ describe("loadFilesFromDir recursion", () => {
 });
 
 describe("parseMCPToolFilterEntry", () => {
-	test("accepts arrays of non-empty strings", () => {
-		expect(parseMCPToolFilterEntry("srv", ["read", "write_*"])).toEqual(["read", "write_*"]);
+	test("drops non-string and empty members from an otherwise valid array", () => {
+		// The dropped members are what a consumer observes: a numeric entry in a
+		// list of tool names must never reach the matcher, where it would be
+		// compiled as a pattern, and an empty string would match nothing while
+		// still counting as a configured entry.
+		expect(parseMCPToolFilterEntry("srv", ["read", "", 7, "write_*", null])).toEqual(["read", "write_*"]);
+	});
+
+	test("an empty or absent array leaves the filter off", () => {
 		expect(parseMCPToolFilterEntry("srv", [])).toBeUndefined();
 		expect(parseMCPToolFilterEntry("srv", undefined)).toBeUndefined();
 	});

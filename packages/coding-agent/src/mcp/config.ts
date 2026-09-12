@@ -10,6 +10,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
+import { filterMCPTools } from "./tool-filter";
 import type { MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -267,6 +268,45 @@ function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 	return tools.length > 0 ? tools : null;
 }
 
+/**
+ * A name no real denylist entry targets, used to ask whether a denylist leaves
+ * any tool at all: an entry that also denies this probe denies every name.
+ */
+const DENYLIST_PROBE = "\u0000exa-probe";
+
+/**
+ * Does this Exa server still contribute a tool the native integration lacks?
+ *
+ * The server is mounted for the tools native Exa does not provide, so it is
+ * kept exactly when the configured filters leave at least one of them
+ * reachable. `tools=` in the URL/argv enumerates what the server advertises, so
+ * an allowlist selects from within that set — the two intersect rather than
+ * union — and a denylist then subtracts from the result. A configuration that
+ * explicitly selects only native tools contributes nothing new and is dropped.
+ *
+ * With no explicit selection the server is unrestricted: a denylist leaves the
+ * complement of what it denies, which includes the non-native tools, so the
+ * server stays mounted — unless the denylist denies every name, in which case
+ * nothing is left to contribute.
+ */
+function keepsExaMCPServer(config: MCPServerConfig): boolean {
+	const requested = getRequestedExaMcpTools(config);
+	const allowlist = config.enabledTools ?? [];
+	// The names the config selects from: the URL/argv enumeration when present,
+	// otherwise the allowlist it names itself.
+	const pool = requested ?? allowlist;
+	if (pool.length === 0) {
+		if (!config.disabledTools?.length) return false;
+		return filterMCPTools({ toolNames: [DENYLIST_PROBE], disabledTools: config.disabledTools }).allowed.length > 0;
+	}
+	const effective = filterMCPTools({
+		toolNames: pool,
+		enabledTools: requested ? allowlist : undefined,
+		disabledTools: config.disabledTools,
+	}).allowed;
+	return effective.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]);
+}
+
 /** Result of filtering Exa MCP servers */
 export interface ExaFilterResult {
 	/** Configs with Exa servers removed */
@@ -294,25 +334,13 @@ export function filterExaMCPServers(
 	for (const [name, config] of Object.entries(configs)) {
 		let keep = true;
 		if (isExaMCPServer(name, config)) {
-			// Extract API key for the native Exa integration even when the MCP
-			// server is dropped below.
+			// Extract the API key for the native Exa integration even when the
+			// MCP server is dropped below.
 			const apiKey = extractExaApiKey(config);
 			if (apiKey) {
 				exaApiKeys.push(apiKey);
 			}
-			// A deny-only filter selects the complement of its denylist, so it
-			// always leaves the server's non-native tools reachable and the
-			// server must stay mounted.
-			if (!config.disabledTools?.length) {
-				// The per-server allowlist selects an effective tool set too: an
-				// entry naming a tool the native integration does not provide (e.g.
-				// `web_fetch_exa`) must keep the server mounted, exactly as a
-				// `tools=` URL/argument restriction would.
-				const requested = getRequestedExaMcpTools(config);
-				const allowlist = config.enabledTools ?? [];
-				const selections = requested ? [...requested, ...allowlist] : allowlist;
-				keep = selections.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]);
-			}
+			keep = keepsExaMCPServer(config);
 		}
 		if (!keep) continue;
 		filtered[name] = config;
