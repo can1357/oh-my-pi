@@ -18,6 +18,7 @@ import {
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
+	charmHyperModelManagerOptions,
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	commandCodeModelManagerOptions,
@@ -149,6 +150,26 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CEREBRAS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cerebrasModelManagerOptions(config),
 		catalogDiscovery: { label: "Cerebras" },
+	},
+	{
+		id: "charm-hyper",
+		defaultModel: "glm-5.3",
+		envVars: ["CHARM_HYPER_API_KEY", "HYPER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => charmHyperModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
+		// The gateway row is the whole truth for a Hyper deployment. Same-id rows
+		// on other hosts disagree with it in both directions (it serves
+		// non-thinking Kimi K2.5/K2.7-Code and a text-only Gemma 4 that their
+		// upstream homes list as reasoning/vision), so foreign backfills would
+		// advertise capabilities this deployment does not have.
+		skipCrossProviderReferenceFills: true,
+		// Deliberately NO `catalogDiscovery`: that field is what enrolls a provider
+		// in generate-models.ts. This gateway's catalog is live deployment truth,
+		// so generating would freeze one hyper.charm.land snapshot into
+		// models.json — and since discovery here needs no credentials, it would
+		// happen on every regen, contradicting the runtime-only contract
+		// compat-conformance.test.ts pins for this provider.
 	},
 	{
 		id: "cloudflare-ai-gateway",

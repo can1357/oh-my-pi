@@ -4,9 +4,25 @@
 
 ### Added
 
+- Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+
+## [18.1.18] - 2026-09-11
+
+### Added
+
+- Anthropic server-side compaction (`compact-2026-01-12` beta): `anthropicCompaction` on `StreamOptions` sends the `compact_20260112` context-management edit, the streamed `compaction` block is surfaced as an `anthropicCompaction` provider payload, the `compaction` stop reason is a normal stop tagged in `stopDetails` (exempt from the empty-completion retry), and usage sums `usage.iterations` whenever a compaction iteration ran. A user-role compaction summary carrying that payload replays as a leading assistant `compaction` block — folded into the retained assistant turn when one follows — with the beta and a never-firing strategy attached automatically; other providers keep reading the summary text. Everything compaction-related is gated on the model line (`compat.supportsServerCompaction`, rule-owned in the catalog) and on the endpoint the request actually reaches (`supportsAnthropicCompaction`: the official API for the first-party provider, resolved through Foundry / `ANTHROPIC_BASE_URL` reroutes, or an explicit `remoteCompaction.enabled` opt-in), so a rerouted session or an older model line falls back to the text summary instead of sending a block the API rejects. Caller-owned clients are gated on their own endpoint (the client's `baseURL`, or an explicit `remoteCompaction.enabled` opt-in when it exposes none) and receive the compaction beta per request, like the effort and control betas. A block held by its originating assistant message — a caller that appends the compacting response itself — replays at the head of that turn. The block's opaque `encrypted_content` is captured from the stream, kept on the payload as `encryptedContent`, and replayed verbatim. A compacting turn is priced per sampling iteration (like a server-side fallback turn), so a long-context tier applies only to an iteration whose own prompt crosses the threshold, never to the summed totals.
 - Added historical decimation prompt-cache breakpoints every 15 user turns on Anthropic requests, so long conversations retain stable cached prefixes during branching, rewinds, and session resume ([#11665](https://github.com/can1357/oh-my-pi/pull/11665) by [@camjac251](https://github.com/camjac251)).
+
+### Changed
+
+- Defaulted Anthropic OAuth requests to 1h prompt-cache retention where supported, matching Claude Code subscriber behavior and preventing cache expiry during idle intervals ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
+
 ### Fixed
 
+- Fixed Codex HTTP response-body transport failures forwarded through Anthropic-compatible proxies being treated as terminal errors; replay-safe turns now use the existing transient recovery without re-executing completed tools.
+- GitHub Copilot Enterprise requests keep the Copilot CLI identity accepted by private Enterprise endpoints, and Business requests denied with HTTP 400 `model_not_supported` now retry once as the Copilot CLI (matching the existing 403 fallback), restoring models that 18.1.17 rejected as unsupported ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
+- Fixed provider stream truncations reported as a bare `unexpected EOF` (and other stream-parse diagnostics) classifying as terminal errors, so they now retry like every other transient transport failure ([#11745](https://github.com/can1357/oh-my-pi/issues/11745)).
+- GitHub Copilot streams remember the working `Copilot-Integration-Id` per credential after a denied chat identity retries as the Copilot CLI, so later streams start at the working shape instead of replaying the denial ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 - Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).
 - Fixed Amazon Bedrock OpenAI models rejecting image-bearing tool results by sending each image as a sibling user content block ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
 
@@ -23,7 +39,9 @@
 
 ### Fixed
 
+- Anthropic `credits_required` responses now rotate to another account instead of retrying the same one: the entitlement wall is a quota outcome, so a session no longer repeats the request against an account that cannot serve the model ([#11333](https://github.com/can1357/oh-my-pi/pull/11333) by [@AshishKumar4](https://github.com/AshishKumar4)).
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
+- Anthropic subscription usage now falls back to the canonical `api.anthropic.com` OAuth usage endpoint when a custom provider `baseUrl` does not serve it, instead of leaving the report to rate-limit headers — those carry the model-scoped weekly window only on responses for that model family, so `/usage` could report a scoped window far below its real utilization.
 
 ## [18.1.15] - 2026-09-08
 

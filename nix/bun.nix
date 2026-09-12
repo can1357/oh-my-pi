@@ -1117,9 +1117,9 @@
     url = "https://registry.npmjs.org/@types/d3-time/-/d3-time-3.0.4.tgz";
     hash = "sha512-yuzZug1nkAAaBlBBikKZTgzCeA+k1uy4ZFwWANOfKw5z5LRhV0gNA7gNkKm7HoK+HRN0wX3EkxGk0fpbWhmB7g==";
   };
-  "@types/node@26.4.1" = fetchurl {
-    url = "https://registry.npmjs.org/@types/node/-/node-26.4.1.tgz";
-    hash = "sha512-k97ENvZWtvA6yqz5/FS6a7duDgOPEeOQOc2iKS/nY6mX6qJUKtLnWzQS+Xj6tXweyj6ZcTAK2Qecetnvi9nCLA==";
+  "@types/node@26.5.0" = fetchurl {
+    url = "https://registry.npmjs.org/@types/node/-/node-26.5.0.tgz";
+    hash = "sha512-dVSGpriSoCgz8WnDNTuSSuSv1PC/ALXihO4ulRZt7Md8k9mlbdin3lGOcDE8SnWOgf513ByWlXd7BK4azmyg/A==";
   };
   "@types/react-dom@19.2.7" = fetchurl {
     url = "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.7.tgz";
@@ -1789,9 +1789,9 @@
     url = "https://registry.npmjs.org/lru-cache/-/lru-cache-5.1.1.tgz";
     hash = "sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==";
   };
-  "lucide-react@1.42.0" = fetchurl {
-    url = "https://registry.npmjs.org/lucide-react/-/lucide-react-1.42.0.tgz";
-    hash = "sha512-b3jprplnoLS8n5etw1z8xODe3hF/yjKATrTitsrKrnjUhCef5BdDct6Ppv3zVvzFwmtfWgLO6XNM3C9fAD93ug==";
+  "lucide-react@1.43.0" = fetchurl {
+    url = "https://registry.npmjs.org/lucide-react/-/lucide-react-1.43.0.tgz";
+    hash = "sha512-ubtnda1fVK5ky0PNEpOmB0wiwhpZUyJiol4K14KCm+QKvuCkfUu54Et/rIjyupJpwiJ5Hg+BLQE86/GEsS+IgQ==";
   };
   "magic-string@0.30.21" = fetchurl {
     url = "https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz";
@@ -2218,9 +2218,9 @@
     url = "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz";
     hash = "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==";
   };
-  "undici-types@8.3.0" = fetchurl {
-    url = "https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz";
-    hash = "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==";
+  "undici-types@8.9.0" = fetchurl {
+    url = "https://registry.npmjs.org/undici-types/-/undici-types-8.9.0.tgz";
+    hash = "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==";
   };
   "universal-user-agent@7.0.3" = fetchurl {
     url = "https://registry.npmjs.org/universal-user-agent/-/universal-user-agent-7.0.3.tgz";

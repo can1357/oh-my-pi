@@ -28,7 +28,7 @@ function footerLine(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines[lines.length - 2] ?? "");
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000): Model {
+function makeModel(provider: string, id: string, contextWindow = 128_000, cost?: Model["cost"]): Model {
 	return buildModel({
 		id,
 		name: id,
@@ -37,7 +37,7 @@ function makeModel(provider: string, id: string, contextWindow = 128_000): Model
 		baseUrl: "https://example.com",
 		reasoning: false,
 		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens: 1024,
 	});
@@ -285,6 +285,32 @@ describe("ModelHub", () => {
 			hub.handleInput(UP); // skips Roles → wraps to prov-a
 			expect(normalize(hub.render(220))).toContain("prov-a ·");
 			expect(footerLine(hub.render(220))).not.toContain("→ roles");
+		});
+
+		test("provider sidebar counts agree with the free keyword", () => {
+			// Regression: the sidebar counts come from the hub's own filter, so
+			// if only the browser learned the cost keyword a free provider would
+			// render 0, gray out, and drop out of the scope hop while its rows
+			// were still listed.
+			const { hub } = createHub({
+				models: [
+					makeModel("nvidia", "nemotron-3-nano"),
+					makeModel("anthropic", "claude-sonnet-4-5", 128_000, {
+						input: 3,
+						output: 15,
+						cacheRead: 0.3,
+						cacheWrite: 3.75,
+					}),
+				],
+			});
+			installTestTheme();
+
+			for (const ch of "free") hub.handleInput(ch);
+
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("All models 1");
+			expect(rendered).toContain("nvidia 1");
+			expect(rendered).toContain("anthropic 0");
 		});
 	});
 

@@ -110,6 +110,11 @@ export type RpcSessionChangeCommand = Extract<
 	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" }
 >;
 
+export type RpcQueueModeCommand = Extract<
+	RpcCommand,
+	{ type: "set_steering_mode" } | { type: "set_follow_up_mode" } | { type: "set_interrupt_mode" }
+>;
+
 export type RpcSessionChangeResult =
 	| { type: "new_session"; data: { cancelled: boolean } }
 	| { type: "switch_session"; data: { cancelled: boolean } }
@@ -767,6 +772,25 @@ export function requestRpcDialog<T>(
 	return promise;
 }
 /**
+ * Applies a queue-mode RPC command to the calling session only. Owns the
+ * `persist: false` contract (#11555) in one place so no dispatcher arm can
+ * silently restore machine-global writes.
+ */
+export function applyRpcQueueModeCommand(session: AgentSession, command: RpcQueueModeCommand): void {
+	switch (command.type) {
+		case "set_steering_mode":
+			session.setSteeringMode(command.mode, false);
+			break;
+		case "set_follow_up_mode":
+			session.setFollowUpMode(command.mode, false);
+			break;
+		case "set_interrupt_mode":
+			session.setInterruptMode(command.mode, false);
+			break;
+	}
+}
+
+/**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
@@ -1356,17 +1380,17 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "set_steering_mode": {
-				session.setSteeringMode(command.mode);
+				applyRpcQueueModeCommand(session, command);
 				return success(id, "set_steering_mode");
 			}
 
 			case "set_follow_up_mode": {
-				session.setFollowUpMode(command.mode);
+				applyRpcQueueModeCommand(session, command);
 				return success(id, "set_follow_up_mode");
 			}
 
 			case "set_interrupt_mode": {
-				session.setInterruptMode(command.mode);
+				applyRpcQueueModeCommand(session, command);
 				return success(id, "set_interrupt_mode");
 			}
 

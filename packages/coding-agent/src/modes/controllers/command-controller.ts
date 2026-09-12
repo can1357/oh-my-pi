@@ -66,6 +66,7 @@ import {
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../usage-amounts";
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -1885,19 +1886,6 @@ function padColumn(text: string, width: number): string {
 
 type AggregateDisplayStatus = NonNullable<UsageLimit["status"]> | "neutral";
 
-function isUsedOnlyAbsoluteAmount(limit: UsageLimit): boolean {
-	const amount = limit.amount;
-	return (
-		amount.unit !== "percent" &&
-		amount.unit !== "unknown" &&
-		amount.used !== undefined &&
-		Number.isFinite(amount.used) &&
-		amount.limit === undefined &&
-		amount.remaining === undefined &&
-		resolveUsedFraction(limit) === undefined
-	);
-}
-
 function resolveAggregateStatus(limits: UsageLimit[]): AggregateDisplayStatus {
 	const hasOk = limits.some(limit => limit.status === "ok");
 	const hasWarning = limits.some(limit => limit.status === "warning");
@@ -1933,6 +1921,12 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 	}
 
 	if (limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount)) return "";
+
+	// Prepaid balances have no total to divide by. `totalRemainingOnly`
+	// collapses account-wide pools seen once per stored key and sums only
+	// genuinely distinct ones, so a multi-key provider is never double-counted.
+	const remaining = formatRemainingOnlyTotal(limits);
+	if (remaining !== undefined) return remaining;
 
 	// Count unique accounts from limit scopes — not limits.length.
 	const uniqueAccountIds = new Set(

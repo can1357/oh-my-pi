@@ -538,13 +538,13 @@ export class SelectorController {
 				}
 				break;
 			case "steeringMode":
-				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time", true);
 				break;
 			case "followUpMode":
-				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time", true);
 				break;
 			case "interruptMode":
-				this.ctx.session.setInterruptMode(value as "immediate" | "wait");
+				this.ctx.session.setInterruptMode(value as "immediate" | "wait", true);
 				break;
 			case "thinkingLevel":
 			case "defaultThinkingLevel":
@@ -592,6 +592,9 @@ export class SelectorController {
 			case "tui.vimModeDisplay":
 				this.ctx.applyVimModeSetting();
 				break;
+			case "display.pinnedAgents":
+				this.ctx.applyPinnedAgentsSetting();
+				break;
 
 			// Settings with UI side effects
 			case "display.hideToolActivity": {
@@ -607,7 +610,8 @@ export class SelectorController {
 				}
 				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
-				this.ctx.ui.requestRender(true);
+				// Match the shortcut path: visibility changes must rebuild retired terminal history.
+				this.ctx.ui.resetDisplay();
 				break;
 			}
 			case "terminal.showImages":
@@ -1824,6 +1828,9 @@ export class SelectorController {
 				historyMatcher,
 				loadAllSessions: () => SessionManager.listAll(),
 				pinnedIds,
+				// Live getter so detach/newSession stays accurate; tolerant of partial
+				// contexts and in-memory sessions (undefined file means no marker).
+				currentSessionPath: () => this.ctx.sessionManager.getSessionFile?.() ?? undefined,
 			};
 		}
 

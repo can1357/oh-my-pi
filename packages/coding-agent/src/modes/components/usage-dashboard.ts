@@ -20,6 +20,7 @@ import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh
 import { formatProviderName } from "../../slash-commands/helpers/format";
 import { colorToAnsi } from "../theme/color";
 import { theme } from "../theme/theme";
+import { formatAbsoluteOnlyAmount } from "../usage-amounts";
 import {
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -44,7 +45,7 @@ export interface CardWindowRow {
 	status: UsageLimit["status"];
 	/** Reset countdown of the worst account, ms from now, when in the future. */
 	resetMs?: number;
-	/** Absolute used amount (e.g. `$12.34 used`) for limits without a fraction. */
+	/** Absolute one-sided amount (e.g. `$12.34 used`, `100 credits left`) for limits without a fraction. */
 	usedText?: string;
 }
 
@@ -68,26 +69,6 @@ function formatLimitTitle(limit: UsageLimit): string {
 		return `${limit.label} (${tier})`;
 	}
 	return limit.label;
-}
-
-function isUsedOnlyAbsoluteAmount(limit: UsageLimit): boolean {
-	const amount = limit.amount;
-	return (
-		amount.unit !== "percent" &&
-		amount.unit !== "unknown" &&
-		amount.used !== undefined &&
-		Number.isFinite(amount.used) &&
-		amount.limit === undefined &&
-		amount.remaining === undefined &&
-		resolveUsedFraction(limit) === undefined
-	);
-}
-
-function formatUsedOnlyAmount(limit: UsageLimit): string {
-	const used = limit.amount.used ?? 0;
-	if (limit.amount.unit === "usd") return `$${used.toFixed(2)} used`;
-	const formatted = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(used);
-	return `${formatted} ${limit.amount.unit} used`;
 }
 
 /**
@@ -178,8 +159,7 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 				fraction,
 				status: aggregateStatus(bucket.limits),
 				resetMs: resetsAt !== undefined && resetsAt > nowMs ? resetsAt - nowMs : undefined,
-				usedText:
-					fraction === undefined && isUsedOnlyAbsoluteAmount(worst) ? formatUsedOnlyAmount(worst) : undefined,
+				usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
 			};
 		});
 		windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
