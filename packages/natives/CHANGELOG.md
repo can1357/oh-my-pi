@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native Darwin OAuth helper compilation under sandboxed and custom build environments by respecting `$CC` ([#11869](https://github.com/can1357/oh-my-pi/pull/11869) by [@Malix-Labs](https://github.com/Malix-Labs)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

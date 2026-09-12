@@ -6385,6 +6385,7 @@ dependencies = [
  "resvg",
  "serde",
  "serde_json",
+ "shlex 2.0.1",
  "smallvec",
  "syntect",
  "tempfile",

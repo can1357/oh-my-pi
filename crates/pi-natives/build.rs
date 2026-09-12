@@ -90,6 +90,9 @@ fn build_oauth_callback_relay(target_os: &str) {
 	println!("cargo:rustc-env=OMP_OAUTH_RELAY_BINARY={}", output.display());
 }
 
+#[path = "src/oauth_callback/darwin_compiler.rs"]
+mod darwin_compiler;
+
 fn build_darwin_oauth_callback_helper() {
 	let manifest_dir =
 		PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"));
@@ -103,11 +106,12 @@ fn build_darwin_oauth_callback_helper() {
 		Err(error) => panic!("CARGO_CFG_TARGET_ARCH should be set: {error}"),
 	};
 	println!("cargo:rerun-if-changed={}", source.display());
+	println!("cargo:rerun-if-env-changed=CC");
 
-	let result = Command::new("/usr/bin/xcrun")
+	let mut command = darwin_compiler::darwin_compiler_command(env::var_os("CC").as_deref());
+	let result = command
 		.current_dir(&manifest_dir)
 		.args([
-			"clang",
 			"-x",
 			"objective-c",
 			"-fobjc-arc",
