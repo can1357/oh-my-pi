@@ -310,18 +310,17 @@ fn warns_when_literal_payload_is_an_op() {
 
 #[test]
 fn rejects_contaminated_patch_syntax() {
-	assert!(
-		parse_patch("*** Update File: a.ts\nPUT 2:\n+X")
-			.unwrap_err()
-			.to_string()
-			.contains("apply_patch sentinel")
-	);
-	assert!(
-		parse_patch("@@ -1,3 +1,3 @@\nPUT 2:\n+X")
-			.unwrap_err()
-			.to_string()
-			.contains("unified-diff hunk header")
-	);
+	for (input, dialect) in [
+		("*** Update File: a.ts\nPUT 2:\n+X", "apply_patch file directive"),
+		("@@ -1,3 +1,3 @@\nPUT 2:\n+X", "unified-diff hunk header"),
+		("<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE", "SEARCH/REPLACE marker"),
+	] {
+		let error = parse_patch(input).unwrap_err().to_string();
+		assert!(error.contains(dialect), "{error}");
+		assert!(error.contains("Expected hashline shape"), "{error}");
+		assert!(error.contains("latest `read`/`search`"), "{error}");
+		assert!(error.contains("PUT N.=M:"), "{error}");
+	}
 	assert!(
 		parse_patch("2\n+B")
 			.unwrap_err()
@@ -598,7 +597,38 @@ fn input_rejects_multi_group_headers_instead_of_inventing_a_path() {
 }
 
 #[test]
-fn input_rejects_malformed_tags_and_missing_headers() {
+fn missing_header_explains_hashline_contract_on_first_failure() {
+	for (dialect, input) in [
+		(
+			"apply_patch",
+			"*** Begin Patch\n*** Update File: a.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n*** End Patch",
+		),
+		("unified diff", "--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new"),
+		("SEARCH/REPLACE", "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE"),
+	] {
+		let error = Patch::parse(input, &options()).unwrap_err().to_string();
+		assert!(error.contains("Expected hashline shape"), "{dialect}: {error}");
+		assert!(error.contains("[PATH#HASH]"), "{dialect}: {error}");
+		assert!(error.contains("latest `read`/`search`"), "{dialect}: {error}");
+		assert!(error.contains("PUT N.=M:"), "{dialect}: {error}");
+		assert!(error.contains("+TEXT"), "{dialect}: {error}");
+		assert!(
+			error.contains("inclusive original start and end line numbers"),
+			"{dialect}: {error}"
+		);
+		assert!(error.contains("not a line count"), "{dialect}: {error}");
+		assert!(error.contains("one line is `N.=N`"), "{dialect}: {error}");
+		assert!(error.contains("replaces that range"), "{dialect}: {error}");
+		assert!(error.contains("CUT N.=M"), "{dialect}: {error}");
+		assert!(error.contains("with no body"), "{dialect}: {error}");
+		assert!(error.contains("PUT <N:"), "{dialect}: {error}");
+		assert!(error.contains("PUT >N:"), "{dialect}: {error}");
+		assert!(error.contains("inserts before/after"), "{dialect}: {error}");
+	}
+}
+
+#[test]
+fn input_rejects_malformed_tags() {
 	for header in ["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#1A2B copied]"] {
 		assert!(
 			Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options())
@@ -608,13 +638,6 @@ fn input_rejects_malformed_tags_and_missing_headers() {
 			"{header}"
 		);
 	}
-	let error = Patch::parse("CUT 38.=40", &options())
-		.unwrap_err()
-		.to_string();
-	assert!(
-		error.contains("input must begin with \"[PATH#HASH]\"")
-			&& error.contains("[src/foo.ts#1A2B]")
-	);
 }
 
 #[test]
