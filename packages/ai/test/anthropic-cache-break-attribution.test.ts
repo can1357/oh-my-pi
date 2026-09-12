@@ -95,6 +95,13 @@ const successFetch: FetchImpl = async () => {
 	});
 };
 
+/** Rejects before any response body exists, the way a malformed request does. */
+const rejectedFetch: FetchImpl = async () =>
+	new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "rejected" } }), {
+		status: 400,
+		headers: { "Content-Type": "application/json" },
+	});
+
 const stateMaps: Array<Map<string, ProviderSessionState>> = [];
 
 function createProviderSessionState(): Map<string, ProviderSessionState> {
@@ -108,10 +115,11 @@ async function turn(
 	context: Context,
 	cacheRetention?: CacheRetention,
 	model: Model<"anthropic-messages"> = MODEL,
+	fetch: FetchImpl = successFetch,
 ): Promise<AssistantMessage> {
 	return await streamAnthropic(model, context, {
 		apiKey: "sk-ant-api-test",
-		fetch: successFetch,
+		fetch,
 		providerSessionState,
 		sessionId: SESSION_ID,
 		...(cacheRetention ? { cacheRetention } : {}),
@@ -199,6 +207,67 @@ describe("anthropic cache-break attribution", () => {
 		});
 
 		expect(third.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("reports a rewritten history when compaction replaced the conversation root", async () => {
+		const states = createProviderSessionState();
+		const tools = [tool("lookup", {}), tool("compute", {}), tool("search", {})];
+		const history: Context = {
+			...contextWithTools(tools.slice(0, 2)),
+			messages: [
+				{ role: "user", content: "Use the tools", timestamp: 1 },
+				{ role: "user", content: "keep going", timestamp: 2 },
+			],
+		};
+		await turn(states, history);
+		// A tool change pins a control transition to the tail…
+		await turn(states, { ...history, tools });
+		// …then compaction collapses the whole history into one summary message,
+		// so nothing the transition was anchored to survives.
+		const third = await turn(states, {
+			...history,
+			tools,
+			messages: [{ role: "user", content: "Summary: the user wanted the tools exercised.", timestamp: 3 }],
+		});
+
+		expect(third.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("blames the tool array when only a description changed and there is no tool plane", async () => {
+		const states = createProviderSessionState();
+		await turn(states, contextWithTools([tool("lookup", {})]), undefined, NO_TOOL_PLANE_MODEL);
+		// The plane's comparison key ignores descriptions because a control cannot
+		// express one; without a plane the description is prefix like any other byte.
+		const second = await turn(
+			states,
+			contextWithTools([{ ...tool("lookup", {}), description: "lookup tool, now with caveats" }]),
+			undefined,
+			NO_TOOL_PLANE_MODEL,
+		);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "tools" });
+	});
+
+	it("does not report a retention switch when caching was merely switched on", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([tool("lookup", {})]);
+		await turn(states, context, "none");
+		const second = await turn(states, context, "long");
+
+		expect(second.cacheBreakReason).toBeUndefined();
+	});
+
+	it("keeps the cause for a retry of a turn that was rejected before any response", async () => {
+		const states = createProviderSessionState();
+		const grown = contextWithTools([tool("lookup", {}), tool("search", {})]);
+		await turn(states, contextWithTools([tool("lookup", {})]), undefined, NO_TOOL_PLANE_MODEL);
+		const rejected = await turn(states, grown, undefined, NO_TOOL_PLANE_MODEL, rejectedFetch);
+		// The rejected attempt never reached Anthropic, so its prefix was never
+		// written and the retry is the turn that really pays for the change.
+		const retried = await turn(states, grown, undefined, NO_TOOL_PLANE_MODEL);
+
+		expect(rejected.stopReason).toBe("error");
+		expect(retried.cacheBreakReason).toEqual({ kind: "tools" });
 	});
 
 	it("reports a system-prompt edit with the signed character delta", async () => {
