@@ -22,6 +22,7 @@ import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
+import { sanitizeMCPToolNamePart } from "./name-sanitize";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
 import type {
@@ -404,15 +405,6 @@ async function reconnectWithAbort(
  * "puppeteer_screenshot"), strips the redundant prefix to produce
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
-export function sanitizeMCPToolNamePart(value: string, fallback: string): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(/[^a-z_]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
-
-	return sanitized.length > 0 ? sanitized : fallback;
-}
 
 /**
  * Longest tool name strict validators accept. OpenAI Responses/Completions and

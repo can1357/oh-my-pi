@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import picomatch from "picomatch";
-import { sanitizeMCPToolNamePart } from "./tool-bridge";
+import { sanitizeMCPToolNamePart } from "./name-sanitize";
 import type { MCPToolDefinition } from "./types";
 
 /** A tool filter rule set for one server, with the raw advertised tool names. */
