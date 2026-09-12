@@ -90,6 +90,7 @@ type SerializedCredentialRecord = {
 
 const AUTH_SCHEMA_VERSION = 7;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
+const DISABLED_CREDENTIAL_RETENTION_SEC = 30 * 24 * 60 * 60;
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
@@ -461,6 +462,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	constructor(db: Database) {
 		this.#db = db;
 		this.#initializeSchema();
+		try {
+			this.#purgeExpiredDisabledRows();
+		} catch {
+			// Best-effort cleanup; don't let it break store initialization
+		}
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
@@ -1412,18 +1418,23 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result;
 	}
 
+	#purgeExpiredDisabledRows(): void {
+		this.#db.run(
+			`DELETE FROM auth_credentials WHERE disabled_cause IS NOT NULL AND updated_at < (${SQLITE_NOW_EPOCH} - ?)`,
+			[DISABLED_CREDENTIAL_RETENTION_SEC],
+		);
+	}
+
 	/**
-	 * Hard-deletes disabled rows for a provider when an active replacement exists.
-	 * OAuth credentials use the replacement identity matcher, including token
-	 * claims and alternate same-org identities; API keys match by provider and type.
-	 * An OAuth tombstone that carries no identity at all can never be matched
-	 * more precisely, so any active OAuth credential of the provider retires it
-	 * (the same rule `isActionableCredentialDisable` applies when deciding
-	 * whether it still needs the user). Disabled rows without an active
-	 * same-type replacement remain recoverable.
+	 * Expires old tombstones and hard-deletes superseded API-key and hygiene rows.
+	 * OAuth credentials use the shared identity matcher, including token claims
+	 * and alternate same-org identities; API keys match by provider and type.
+	 * Identity-less hygiene tombstones are superseded by any OAuth login.
+	 * Automatic OAuth tombstones survive recovery for forensics until retention expires.
 	 */
 	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[]): void {
 		try {
+			this.#purgeExpiredDisabledRows();
 			let hasActiveApiKey = false;
 			const activeIdentities: ResolvedOAuthCredentialIdentity[] = [];
 			for (const row of activeRows) {
@@ -1434,6 +1445,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 			for (const row of disabledRows) {
+				if (row.credential_type === "oauth" && isAutomaticDisableCause(row.disabled_cause ?? "disabled")) continue;
 				if (row.credential_type === "api_key") {
 					if (hasActiveApiKey) this.#hardDeleteStmt.run(row.id);
 					continue;
@@ -1515,7 +1527,27 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	deleteAuthCredential(id: number, disabledCause: string): void {
 		try {
-			this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id);
+			const cause = normalizeDisabledCause(disabledCause);
+			if (isAutomaticDisableCause(cause)) {
+				this.#deleteStmt.run(cause, id);
+				return;
+			}
+			this.#db.transaction(() => {
+				const stmt = this.#db.prepare("SELECT provider, identity_key FROM auth_credentials WHERE id = ?");
+				let row: Pick<AuthRow, "provider" | "identity_key"> | null;
+				try {
+					row = stmt.get(id) as Pick<AuthRow, "provider" | "identity_key"> | null;
+				} finally {
+					stmt.finalize();
+				}
+				this.#deleteStmt.run(cause, id);
+				if (row?.identity_key != null) {
+					this.#db.run(
+						"DELETE FROM auth_credentials WHERE provider = ? AND identity_key = ? AND disabled_cause IS NOT NULL AND id != ?",
+						[row.provider, row.identity_key, id],
+					);
+				}
+			})();
 		} catch {
 			// Ignore delete failures
 		}
@@ -1549,7 +1581,27 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
 		try {
-			this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
+			const cause = normalizeDisabledCause(disabledCause);
+			if (isAutomaticDisableCause(cause)) {
+				this.#deleteByProviderStmt.run(cause, provider);
+				return;
+			}
+			this.#db.transaction(() => {
+				const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
+				this.#deleteByProviderStmt.run(cause, provider);
+				if (rows.length === 0) return;
+				const ids = rows.map(row => row.id);
+				const stmt = this.#db.prepare(
+					`DELETE FROM auth_credentials WHERE provider = ? AND identity_key = ? AND disabled_cause IS NOT NULL AND id NOT IN (${ids.map(() => "?").join(", ")})`,
+				);
+				try {
+					for (const row of rows) {
+						if (row.identity_key !== null) stmt.run(row.provider, row.identity_key, ...ids);
+					}
+				} finally {
+					stmt.finalize();
+				}
+			})();
 		} catch {
 			// Ignore delete failures
 		}
