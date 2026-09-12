@@ -7,6 +7,7 @@ import {
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -14,11 +15,13 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolContext,
+	SpeculativePhysicalOutcome,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
-import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core/types";
+import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -5438,5 +5441,890 @@ describe("agentLoop kCursorExecResolved (issue #4348)", () => {
 		if (executionStarts[0]?.type !== "tool_execution_start") throw new Error("expected tool_execution_start");
 		expect(executionStarts[0].toolCallId).toBe("runnable-1");
 		expect(executionStarts[0].toolName).toBe("echo");
+	});
+});
+
+describe("speculative tool execution", () => {
+	it("opens, updates, and finalizes a stream policy before final call admission", async () => {
+		const schema = type({ value: "string" });
+		const calls: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "streamed",
+			label: "Streamed",
+			description: "Records speculative stream lifecycle",
+			parameters: schema,
+			speculation: {
+				stream: {
+					open: ({ parentToolCallId }) => {
+						calls.push(`open:${parentToolCallId}`);
+						return {
+							update: (toolCall, partialJson) => {
+								calls.push(`update:${toolCall.id}:${partialJson}`);
+							},
+							finalize: ({ toolCall }) => {
+								calls.push(`finalize:${toolCall.id}`);
+							},
+							commit: () => {
+								calls.push("commit");
+							},
+							discard: reason => {
+								calls.push(`discard:${reason}`);
+							},
+						};
+					},
+				},
+			},
+			async execute(_toolCallId, _args, _signal, _onUpdate, context) {
+				calls.push("execute");
+				await context?.[SPECULATIVE_STREAM_SESSION]?.commit();
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		let turn = 0;
+		const streamFn = () => {
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (turn++ === 0) {
+					const streamingToolCall = {
+						type: "toolCall" as const,
+						id: "stream-1",
+						name: "streamed",
+						arguments: {},
+					};
+					setStreamingPartialJson(streamingToolCall, '{"value":"ok"}');
+					const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "stream-1",
+						name: "streamed",
+						arguments: { value: "ok" },
+					};
+					const finalPartial = createAssistantMessage([toolCall], "toolUse");
+					response.push({ type: "start", partial: streamingPartial });
+					response.push({ type: "toolcall_start", contentIndex: 0, partial: streamingPartial });
+					response.push({ type: "toolcall_delta", contentIndex: 0, delta: '"ok"}', partial: streamingPartial });
+					response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalPartial });
+					response.push({ type: "done", reason: "toolUse", message: finalPartial });
+					return;
+				}
+				const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
+				response.push({ type: "start", partial });
+				response.push({ type: "done", reason: "stop", message: partial });
+			});
+			return response;
+		};
+
+		await agentLoop(
+			[createUserMessage("stream")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: createMockModel({ responses: [] }).model,
+				convertToLlm: identityConverter,
+				getToolContext: () => ({}),
+				speculativeToolExecution: { enabled: true },
+			},
+			undefined,
+			streamFn,
+		).result();
+
+		expect(calls).toEqual([
+			"open:stream-1",
+			'update:stream-1:{"value":"ok"}',
+			"finalize:stream-1",
+			"execute",
+			"commit",
+		]);
+	});
+
+	it("skips stream speculation sessions when a message transformer is configured", async () => {
+		const schema = type({ value: "string" });
+		const calls: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "streamed",
+			label: "Streamed",
+			description: "Records stream session opens",
+			parameters: schema,
+			speculation: {
+				stream: {
+					open: ({ parentToolCallId }) => {
+						calls.push(`open:${parentToolCallId}`);
+						return {
+							update() {},
+							finalize() {},
+							commit() {},
+							discard() {},
+						};
+					},
+				},
+			},
+			async execute() {
+				calls.push("execute");
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		let turn = 0;
+		const streamFn = () => {
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (turn++ === 0) {
+					const streamingToolCall = {
+						type: "toolCall" as const,
+						id: "stream-1",
+						name: "streamed",
+						arguments: {},
+					};
+					setStreamingPartialJson(streamingToolCall, '{"value":"ok"}');
+					const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "stream-1",
+						name: "streamed",
+						arguments: { value: "ok" },
+					};
+					const finalPartial = createAssistantMessage([toolCall], "toolUse");
+					response.push({ type: "start", partial: streamingPartial });
+					response.push({ type: "toolcall_start", contentIndex: 0, partial: streamingPartial });
+					response.push({ type: "toolcall_delta", contentIndex: 0, delta: '"ok"}', partial: streamingPartial });
+					response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalPartial });
+					response.push({ type: "done", reason: "toolUse", message: finalPartial });
+					return;
+				}
+				const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
+				response.push({ type: "start", partial });
+				response.push({ type: "done", reason: "stop", message: partial });
+			});
+			return response;
+		};
+
+		// Even an identity transformer can rewrite or remove the call before
+		// dispatch, so stream sessions planning from pre-transform arguments
+		// must never open — matching the direct-admission guard.
+		await agentLoop(
+			[createUserMessage("stream")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: createMockModel({ responses: [] }).model,
+				convertToLlm: identityConverter,
+				getToolContext: () => ({}),
+				transformAssistantMessage: async () => {},
+				speculativeToolExecution: { enabled: true },
+			},
+			undefined,
+			streamFn,
+		).result();
+
+		expect(calls).toEqual(["execute"]);
+	});
+
+	it("reconciles streamed calls when the provider iterator ends without a final event", async () => {
+		const schema = type({ value: "string" });
+		const discarded: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "streamed",
+			label: "Streamed",
+			description: "Records speculative stream cleanup",
+			parameters: schema,
+			speculation: {
+				stream: {
+					open: () => ({
+						update() {},
+						finalize() {},
+						commit() {},
+						discard: reason => {
+							discarded.push(reason);
+						},
+					}),
+				},
+			},
+			async execute() {
+				throw new Error("the trailing response removed this tool call");
+			},
+		};
+		const streamingToolCall = {
+			type: "toolCall" as const,
+			id: "removed-stream",
+			name: "streamed",
+			arguments: {},
+		};
+		setStreamingPartialJson(streamingToolCall, '{"value":"discard"}');
+		const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
+		const finalizedToolCall = { ...streamingToolCall, arguments: { value: "discard" } };
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: streamingPartial },
+			{ type: "toolcall_start", contentIndex: 0, partial: streamingPartial },
+			{ type: "toolcall_delta", contentIndex: 0, delta: '"discard"}', partial: streamingPartial },
+			{ type: "toolcall_end", contentIndex: 0, toolCall: finalizedToolCall, partial: streamingPartial },
+		];
+		const cursorResolvedToolCall = { ...finalizedToolCall, [kCursorExecResolved]: true as const };
+		const trailingMessages = [
+			createAssistantMessage([{ type: "text", text: "finished without the call" }], "stop"),
+			createAssistantMessage([cursorResolvedToolCall], "stop"),
+		];
+		for (const trailing of trailingMessages) {
+			const previousDiscardCount = discarded.length;
+			const streamFn = () => {
+				let index = 0;
+				return {
+					result: async () => trailing,
+					[Symbol.asyncIterator]: () => ({
+						next: async (): Promise<IteratorResult<AssistantMessageEvent>> =>
+							index < events.length ? { done: false, value: events[index++] } : { done: true, value: undefined },
+					}),
+				} as AssistantMessageEventStream;
+			};
+
+			await agentLoop(
+				[createUserMessage("stream")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+					getToolContext: () => ({}),
+					speculativeToolExecution: { enabled: true },
+				},
+				undefined,
+				streamFn,
+			).result();
+
+			expect(discarded).toHaveLength(previousDiscardCount + 1);
+		}
+
+		const previousDiscardCount = discarded.length;
+		const failingStream = () => {
+			let index = 0;
+			return {
+				result: async (): Promise<AssistantMessage> => {
+					throw new Error("trailing response failed");
+				},
+				[Symbol.asyncIterator]: () => ({
+					next: async (): Promise<IteratorResult<AssistantMessageEvent>> =>
+						index < events.length ? { done: false, value: events[index++] } : { done: true, value: undefined },
+				}),
+			} as AssistantMessageEventStream;
+		};
+
+		await expect(
+			agentLoop(
+				[createUserMessage("stream")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+					getToolContext: () => ({}),
+					speculativeToolExecution: { enabled: true },
+				},
+				undefined,
+				failingStream,
+			).result(),
+		).rejects.toThrow("trailing response failed");
+		expect(discarded.slice(previousDiscardCount)).toEqual(["provider stream finalization failed"]);
+	});
+
+	it("invalidates failed descendants without discarding independent siblings", async () => {
+		const schema = type({ name: "string" });
+		const executions: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "shadow",
+			label: "Shadow",
+			description: "Exercises dependency scheduling",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute({ args }) {
+						const name = args.name as string;
+						executions.push(name);
+						if (name === "parent") throw new Error("parent failed");
+						return { kind: "result", result: { content: [{ type: "text", text: name }] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, maxInFlight: 2 },
+			{ context, loopConfig },
+		);
+		const makeCall = (id: string, name: string) => ({
+			type: "toolCall" as const,
+			id,
+			name: "shadow",
+			arguments: { name },
+		});
+		const parent = await coordinator.admit({
+			candidateId: "parent",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: makeCall("parent-call", "parent"),
+			tool,
+			source: "eval_shadow",
+		});
+		const child = await coordinator.admit({
+			candidateId: "child",
+			parentToolCallId: "eval-1",
+			dependencies: ["parent"],
+			toolCall: makeCall("child-call", "child"),
+			tool,
+			source: "eval_shadow",
+		});
+		const sibling = await coordinator.admit({
+			candidateId: "sibling",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: makeCall("sibling-call", "sibling"),
+			tool,
+			source: "eval_shadow",
+		});
+		await coordinator.finalizeAdmissions();
+
+		await expect(parent?.outcome).rejects.toThrow("parent failed");
+		await expect(child?.outcome).rejects.toThrow("dependency parent did not settle successfully");
+		await expect(sibling?.outcome).resolves.toEqual({
+			kind: "result",
+			result: { content: [{ type: "text", text: "sibling" }] },
+			isError: false,
+		});
+		expect(executions).toEqual(["parent", "sibling"]);
+		await coordinator.close("test complete");
+	});
+
+	it("shares maxInFlight across dependency-aware child operations", async () => {
+		const schema = type({ index: "number" });
+		let running = 0;
+		let peak = 0;
+		const gate = Promise.withResolvers<void>();
+		const tool: AgentTool<typeof schema> = {
+			name: "bounded",
+			label: "Bounded",
+			description: "Measures speculative concurrency",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						running++;
+						peak = Math.max(peak, running);
+						await gate.promise;
+						running--;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, maxInFlight: 2 },
+			{ context, loopConfig },
+		);
+		const handles = await Promise.all(
+			Array.from({ length: 5 }, (_, index) =>
+				coordinator.admit({
+					candidateId: `candidate-${index}`,
+					parentToolCallId: "eval-1",
+					dependencies: [],
+					toolCall: {
+						type: "toolCall",
+						id: `call-${index}`,
+						name: "bounded",
+						arguments: { index },
+					},
+					tool,
+					source: "eval_shadow",
+				}),
+			),
+		);
+		await coordinator.finalizeAdmissions();
+		expect(running).toBe(2);
+		gate.resolve();
+		await Promise.all(handles.map(handle => handle?.outcome));
+		expect(peak).toBe(2);
+		await coordinator.close("test complete");
+	});
+
+	it("normalizes non-positive maxInFlight values so admitted work cannot deadlock", async () => {
+		const schema = type({});
+		const tool: AgentTool<typeof schema> = {
+			name: "bounded",
+			label: "Bounded",
+			description: "Runs one bounded candidate",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						return { kind: "result", result: { content: [{ type: "text", text: "done" }] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, maxInFlight: 0 },
+			{
+				context,
+				loopConfig: {
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+				},
+			},
+		);
+		const handle = await coordinator.admit({
+			candidateId: "bounded-1",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: { type: "toolCall", id: "bounded-1", name: "bounded", arguments: {} },
+			tool,
+			source: "eval_shadow",
+		});
+		await coordinator.finalizeAdmissions();
+
+		expect(
+			await Promise.race([handle?.outcome.then(() => "completed"), Bun.sleep(100).then(() => "timed-out")]),
+		).toBe("completed");
+		await coordinator.close("test complete");
+	});
+
+	it("keeps the session-scoped host open when a turn coordinator closes", async () => {
+		let closeCalls = 0;
+		const coordinator = new SpeculativeOperationCoordinator(
+			{
+				enabled: true,
+				host: {
+					authorize: () => ({ allowed: true }),
+					close: () => {
+						closeCalls++;
+					},
+				},
+			},
+			{
+				context: { systemPrompt: [""], messages: [], tools: [] },
+				loopConfig: {
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+				},
+			},
+		);
+
+		await coordinator.close("turn complete");
+
+		expect(closeCalls).toBe(0);
+	});
+	it("does not invoke beforeToolCall for a truncated tool turn", async () => {
+		const schema = type({ value: "string" });
+		let hookCalls = 0;
+		let speculativeExecutions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "truncated",
+			label: "Truncated",
+			description: "Records dispatch preparation",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						speculativeExecutions++;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("truncated calls must not execute");
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "truncated-1", name: "truncated", arguments: { value: "skip" } }],
+					stopReason: "length",
+				},
+				{ content: ["done"] },
+			],
+		});
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				beforeToolCall: async () => {
+					hookCalls++;
+				},
+				speculativeToolExecution: {
+					enabled: true,
+					host: { authorize: () => ({ allowed: true, deferBeforeToolCall: true }) },
+				},
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(hookCalls).toBe(0);
+		expect(speculativeExecutions).toBe(0);
+	});
+
+	it("discards blocked and preparation-failed calls before releasing host-deferred work", async () => {
+		for (const preparation of ["blocked", "failed"] as const) {
+			const schema = type({ value: "string" });
+			let speculativeExecutions = 0;
+			let ordinaryExecutions = 0;
+			const tool: AgentTool<typeof schema> = {
+				name: "deferred",
+				label: "Deferred",
+				description: "Exercises pre-dispatch speculation gating",
+				parameters: schema,
+				speculation: {
+					finalized: {
+						assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+						async execute() {
+							speculativeExecutions++;
+							return { kind: "result", result: { content: [] }, isError: false };
+						},
+					},
+				},
+				async execute() {
+					ordinaryExecutions++;
+					return { content: [] };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: `deferred-${preparation}`,
+								name: "deferred",
+								arguments: { value: "run" },
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+
+			await agentLoop(
+				[createUserMessage("run")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: mock.model,
+					convertToLlm: identityConverter,
+					beforeToolCall: async () => {
+						if (preparation === "failed") throw new Error("policy failed");
+						return { block: true, reason: "policy denied execution" };
+					},
+					speculativeToolExecution: {
+						enabled: true,
+						host: { authorize: () => ({ allowed: true, deferBeforeToolCall: true }) },
+					},
+				},
+				undefined,
+				mock.stream,
+			).result();
+
+			expect(speculativeExecutions).toBe(0);
+			expect(ordinaryExecutions).toBe(0);
+		}
+	});
+
+	it("normalizes malformed speculative results before persisting them", async () => {
+		const schema = type({ value: "string" });
+		const tool: AgentTool<typeof schema> = {
+			name: "malformed",
+			label: "Malformed",
+			description: "Returns a malformed speculative result",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						// Deliberately malformed at runtime (still typechecks via cast):
+						// content must be an array but arrives as a string.
+						const malformed = { content: "not-an-array" } as unknown as SpeculativePhysicalOutcome["result"];
+						return { kind: "result", result: malformed, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution must not run for a claimed speculation");
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "malformed-1", name: "malformed", arguments: { value: "run" } }],
+				},
+				{ content: ["done"] },
+			],
+		});
+		let observed: { content: unknown; isError: unknown } | undefined;
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				afterToolCall: async ({ result, isError }) => {
+					observed = { content: result.content, isError };
+				},
+				speculativeToolExecution: { enabled: true },
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		if (!observed) throw new Error("expected the tool turn to complete");
+		expect(Array.isArray(observed.content)).toBe(true);
+		expect(observed.isError).toBe(true);
+	});
+
+	it("discards host-deferred work when beforeToolCall mutates validated arguments in place", async () => {
+		const schema = type({ value: "string" });
+		let speculativeExecutions = 0;
+		const ordinaryArguments: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "rewritten",
+			label: "Rewritten",
+			description: "Exercises final-argument reconciliation",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: ({ args }) =>
+						typeof args.value === "string"
+							? {
+									eligible: true,
+									effect: {
+										kind: "local_read",
+										resources: [{ scheme: "file", path: args.value, access: "read" }],
+									},
+								}
+							: { eligible: false, reason: "value must be a string" },
+					async execute() {
+						speculativeExecutions++;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute(_toolCallId, args) {
+				ordinaryArguments.push(args.value);
+				return { content: [] };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "rewritten-1", name: "rewritten", arguments: { value: "before" } }] },
+				{ content: ["done"] },
+			],
+		});
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				beforeToolCall: async ({ args }) => {
+					args.value = "after";
+				},
+				speculativeToolExecution: {
+					enabled: true,
+					host: { authorize: () => ({ allowed: true, deferBeforeToolCall: true }) },
+				},
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(speculativeExecutions).toBe(0);
+		expect(ordinaryArguments).toEqual(["after"]);
+	});
+
+	it("reconciles host-deferred candidates with the transformed execution arguments", async () => {
+		const schema = type({ value: "string" });
+		const speculativeArguments: string[] = [];
+		const ordinaryArguments: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "transformed",
+			label: "Transformed",
+			description: "Uses transformed arguments for speculative reconciliation",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: ({ args }) =>
+						args.value === "after"
+							? { eligible: true, effect: { kind: "pure" } }
+							: { eligible: false, reason: "expected transformed arguments" },
+					async execute({ args }) {
+						speculativeArguments.push(String(args.value));
+						return {
+							kind: "result",
+							result: { content: [{ type: "text", text: "speculative result" }] },
+							isError: false,
+						};
+					},
+				},
+			},
+			async execute(_toolCallId, args) {
+				ordinaryArguments.push(args.value);
+				return { content: [{ type: "text", text: "ordinary result" }] };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "transformed-1", name: "transformed", arguments: { value: "before" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				transformToolCallArguments: args => ({ ...args, value: "after" }),
+				speculativeToolExecution: {
+					enabled: true,
+					host: { authorize: () => ({ allowed: true, deferBeforeToolCall: true }) },
+				},
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(speculativeArguments).toEqual(["after"]);
+		expect(ordinaryArguments).toEqual([]);
+	});
+
+	it("falls back from a structured error returned by direct speculative execution", async () => {
+		const schema = type({ value: "string" });
+		let speculativeExecutions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "transient",
+			label: "Transient",
+			description: "Returns one speculative error",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						speculativeExecutions++;
+						return {
+							kind: "result",
+							result: { content: [{ type: "text", text: "temporary failure" }], isError: true },
+							isError: true,
+						};
+					},
+				},
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "recovered" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true }, { context, loopConfig });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "transient-1",
+			name: "transient",
+			arguments: { value: "run" },
+		};
+
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+		await coordinator.finalizeAdmissions();
+
+		await expect(coordinator.claim(tool, toolCall, { value: "run" })).resolves.toBeUndefined();
+		expect(speculativeExecutions).toBe(1);
+		await coordinator.close("test complete");
+	});
+
+	it("does not attach a coordinator whose final calls were discarded", async () => {
+		const schema = type({ value: "string" });
+		const tool: AgentTool<typeof schema> = {
+			name: "discarded",
+			label: "Discarded",
+			description: "Returns a value",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true }, { context, loopConfig });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "discarded-1",
+			name: "discarded",
+			arguments: { value: "run" },
+		};
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+
+		await coordinator.reconcileFinalCalls(new Map());
+		const message = createAssistantMessage([]);
+		coordinator.attach(message);
+
+		expect(coordinator.size).toBe(0);
+		expect(SpeculativeOperationCoordinator.take(message)).toBeUndefined();
+		await coordinator.close("test complete");
+	});
+
+	it("does not attach a coordinator after its close begins", async () => {
+		const cleanup = Promise.withResolvers<void>();
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true });
+		expect(
+			coordinator.registerStreamSession("late-stream", {
+				update() {},
+				finalize() {},
+				commit() {},
+				async discard() {
+					await cleanup.promise;
+				},
+			}),
+		).toBe(true);
+		const closing = coordinator.close("turn aborted", "aborted");
+		const message = createAssistantMessage([]);
+
+		coordinator.attach(message);
+
+		expect(SpeculativeOperationCoordinator.take(message)).toBeUndefined();
+		cleanup.resolve();
+		await closing;
 	});
 });
