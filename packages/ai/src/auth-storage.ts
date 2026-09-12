@@ -107,7 +107,7 @@ const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 
 /** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
-function fingerprintOAuthBearer(bearer: string): string {
+export function fingerprintOAuthBearer(bearer: string): string {
 	return createHash("sha256").update(bearer).digest("base64url");
 }
 const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
@@ -637,8 +637,10 @@ export interface AuthCredentialStore {
 	/**
 	 * Optional async write hook for disabling one stored credential. Remote stores
 	 * use it to await broker persistence before AuthStorage updates its snapshot.
+	 * A provided bearer fingerprint makes the disable conditional; `false` means
+	 * the broker reported that a peer rotated the bearer (or the row is missing).
 	 */
-	deleteAuthCredentialRemote?(id: number, disabledCause: string): Promise<boolean>;
+	deleteAuthCredentialRemote?(id: number, disabledCause: string, expectedAccessFingerprint?: string): Promise<boolean>;
 	/**
 	 * Optional async write hook for clearing every credential for a provider
 	 * (logout). When present, `AuthStorage.remove` routes through this instead
@@ -2534,25 +2536,33 @@ export class AuthStorage {
 
 	/**
 	 * CAS-style disable used when OAuth refresh definitively fails: only disables
-	 * persisted `data` still matches the credential we attempted to refresh.
+	 * when persisted `data` (or the broker-held bearer) still matches the credential
+	 * we attempted to refresh.
 	 * Returns `false` when a peer rotated the row between our pre-check and the
 	 * disable, so the caller can reload and retry instead of clobbering the
 	 * freshly-rotated credential.
 	 */
-	#tryDisableCredentialAtIfMatches(
+	async #tryDisableCredentialAtIfMatches(
 		provider: string,
 		index: number,
 		expectedCredential: AuthCredential,
 		disabledCause: string,
-	): boolean {
+	): Promise<boolean> {
 		const entries = this.#getStoredCredentials(provider);
 		if (index < 0 || index >= entries.length) return false;
 		const target = entries[index];
-		const serialized = serializeCredential(provider, expectedCredential);
-		if (!serialized) return false;
-		const disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
+		let disabled: boolean;
+		if (this.#store.deleteAuthCredentialRemote) {
+			const expectedAccessFingerprint =
+				expectedCredential.type === "oauth" ? fingerprintOAuthBearer(expectedCredential.access) : undefined;
+			disabled = await this.#store.deleteAuthCredentialRemote(target.id, disabledCause, expectedAccessFingerprint);
+		} else {
+			const serialized = serializeCredential(provider, expectedCredential);
+			if (!serialized) return false;
+			disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
+		}
 		if (!disabled) return false;
-		const updated = entries.filter((_value, idx) => idx !== index);
+		const updated = this.#getStoredCredentials(provider).filter(entry => entry.id !== target.id);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
 		this.#emitCredentialDisabled(credentialDisabledEvent(provider, target.id, expectedCredential, disabledCause));
@@ -2598,16 +2608,16 @@ export class AuthStorage {
 	 * Addresses the row by id (re-resolved here, then matched on `data` in the
 	 * store) so a concurrent reorder can't tear down the wrong credential.
 	 */
-	#disableCredentialByIdIfMatches(
+	async #disableCredentialByIdIfMatches(
 		provider: string,
 		id: number,
 		expected: AuthCredential,
 		disabledCause: string,
-	): boolean {
+	): Promise<boolean> {
 		const entries = this.#getStoredCredentials(provider);
 		const index = entries.findIndex(entry => entry.id === id);
 		if (index === -1) return false;
-		return this.#tryDisableCredentialAtIfMatches(provider, index, expected, disabledCause);
+		return await this.#tryDisableCredentialAtIfMatches(provider, index, expected, disabledCause);
 	}
 
 	#emitCredentialDisabled(event: CredentialDisabledEvent): void {
@@ -2862,12 +2872,18 @@ export class AuthStorage {
 				} catch (error) {
 					if (options.isDefinitiveFailure?.(error)) {
 						const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
-						const disabled = this.#store.tryDisableAuthCredentialIfMatches(
-							row.id,
-							serialized.data,
-							disabledCause,
-							leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
-						);
+						const disabled = this.#store.deleteAuthCredentialRemote
+							? await this.#store.deleteAuthCredentialRemote(
+									row.id,
+									disabledCause,
+									fingerprintOAuthBearer(current.access),
+								)
+							: this.#store.tryDisableAuthCredentialIfMatches(
+									row.id,
+									serialized.data,
+									disabledCause,
+									leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
+								);
 						if (disabled) {
 							this.#setStoredCredentials(
 								provider,
@@ -5591,13 +5607,13 @@ export class AuthStorage {
 		// this disable doesn't soft-delete the freshly-rotated row.
 		const disabled =
 			credentialId !== undefined
-				? this.#disableCredentialByIdIfMatches(
+				? await this.#disableCredentialByIdIfMatches(
 						provider,
 						credentialId,
 						attemptedCredential,
 						`oauth refresh failed: ${errorMsg}`,
 					)
-				: this.#tryDisableCredentialAtIfMatches(
+				: await this.#tryDisableCredentialAtIfMatches(
 						provider,
 						index,
 						attemptedCredential,
@@ -7079,21 +7095,18 @@ export class AuthStorage {
 				: "upstream reported invalidated OAuth token";
 			// The broker persists (and logs) a remote disable on its own host; this
 			// session still observed the invalidation and must announce it here.
-			const deleted = this.#store.deleteAuthCredentialRemote
-				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause)
-				: this.disableCredentialById(target.id, disabledCause);
-			if (deleted) {
-				const latestRows = this.#store.listAuthCredentials(provider);
-				this.#setStoredCredentials(
-					provider,
-					latestRows.map(row => ({ id: row.id, credential: row.credential })),
-				);
-				if (this.#store.deleteAuthCredentialRemote) {
-					this.#emitCredentialDisabled(
-						credentialDisabledEvent(provider, target.id, target.credential, disabledCause),
-					);
-				}
-			}
+			const deleted = await this.#disableCredentialByIdIfMatches(
+				provider,
+				target.id,
+				target.credential,
+				disabledCause,
+			);
+			if (!deleted) await this.reload();
+			const latestRows = this.#store.listAuthCredentials(provider);
+			this.#setStoredCredentials(
+				provider,
+				latestRows.map(row => ({ id: row.id, credential: row.credential })),
+			);
 			return deleted && hasSibling;
 		}
 
@@ -7341,12 +7354,12 @@ export class AuthStorage {
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.
 					if (
-						!this.#disableCredentialByIdIfMatches(
+						!(await this.#disableCredentialByIdIfMatches(
 							provider,
 							id,
 							attempted,
 							`oauth refresh failed: ${String(error)}`,
-						)
+						))
 					) {
 						await this.reload();
 					}
@@ -7382,6 +7395,29 @@ export class AuthStorage {
 			};
 		}
 		throw new AIError.ValidationError(`No credential with id=${id}`);
+	}
+
+	/**
+	 * Disable an OAuth credential only while its bearer still matches. Used by
+	 * the auth-broker server to honour `If-Match` on `POST /v1/credential/:id/disable`.
+	 */
+	async disableCredentialIfBearerMatches(
+		id: number,
+		expectedAccessFingerprint: string,
+		disabledCause: string,
+	): Promise<"disabled" | "stale" | "missing"> {
+		for (const [provider, entries] of this.#data) {
+			const target = entries.find(entry => entry.id === id);
+			if (!target) continue;
+			const credential = target.credential;
+			if (credential.type !== "oauth" || fingerprintOAuthBearer(credential.access) !== expectedAccessFingerprint) {
+				return "stale";
+			}
+			if (await this.#disableCredentialByIdIfMatches(provider, id, credential, disabledCause)) return "disabled";
+			await this.reload();
+			return "stale";
+		}
+		return "missing";
 	}
 
 	/**

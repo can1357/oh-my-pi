@@ -9,12 +9,13 @@
  */
 import * as os from "node:os";
 import { getAppName, getInstallId, logger, redactSecrets } from "@oh-my-pi/pi-utils";
-import { resolveOAuthCredentialIdentity } from "../auth/sqlite-credential-store";
+import { resolveOAuthCredentialIdentity, serializeCredential } from "../auth/sqlite-credential-store";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
 	type AuthCredentialStore,
 	type DisabledCredentialSummary,
+	fingerprintOAuthBearer,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
@@ -735,21 +736,54 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		});
 	}
 
-	async deleteAuthCredentialRemote(id: number, disabledCause: string): Promise<boolean> {
+	/**
+	 * Await the broker disable, conditional on the bearer when a fingerprint is
+	 * supplied. A peer rotation returns false without removing the local entry.
+	 */
+	async deleteAuthCredentialRemote(
+		id: number,
+		disabledCause: string,
+		expectedAccessFingerprint?: string,
+	): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
 		if (!found) return false;
-		await this.#client.disableCredential(id, disabledCause);
+		try {
+			await this.#client.disableCredential(id, disabledCause, { expectedAccessFingerprint });
+		} catch (error) {
+			if (error instanceof AuthBrokerError && error.status === 412) {
+				this.#maybeRefreshSnapshot("disable rejected");
+				logger.debug("auth-broker disable rejected: bearer rotated", { id });
+				return false;
+			}
+			throw error;
+		}
 		this.#removeCredentialById(id);
 		this.#maybeRefreshSnapshot("delete credential");
 		return true;
 	}
 
-	tryDisableAuthCredentialIfMatches(id: number, _expectedData: string, disabledCause: string): boolean {
+	/**
+	 * Compare the local serialized credential before optimistically removing it.
+	 * The broker also guards the bearer via If-Match; a rejection restores the
+	 * authoritative snapshot asynchronously. Use deleteAuthCredentialRemote to
+	 * await the broker's CAS outcome.
+	 */
+	tryDisableAuthCredentialIfMatches(id: number, expectedData: string, disabledCause: string): boolean {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.find(entry => entry.id === id);
-		if (!found) return false;
-		this.deleteAuthCredential(id, disabledCause);
+		if (!found || serializeCredential(found.provider, found.credential)?.data !== expectedData) return false;
+		const expectedAccessFingerprint =
+			found.credential.type === "oauth" ? fingerprintOAuthBearer(found.credential.access) : undefined;
+		this.#removeCredentialById(id);
+		this.#client.disableCredential(id, disabledCause, { expectedAccessFingerprint }).catch(error => {
+			if (error instanceof AuthBrokerError && error.status === 412) {
+				logger.debug("auth-broker disable rejected: bearer rotated", { id });
+				this.#maybeRefreshSnapshot("disable rejected");
+				return;
+			}
+			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+		});
 		return true;
 	}
 

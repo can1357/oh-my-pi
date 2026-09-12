@@ -333,12 +333,20 @@ export class AuthBrokerClient {
 		});
 	}
 
-	async disableCredential(id: number, cause: string, signal?: AbortSignal): Promise<CredentialDisableResponse> {
+	async disableCredential(
+		id: number,
+		cause: string,
+		opts: { signal?: AbortSignal; expectedAccessFingerprint?: string } = {},
+	): Promise<CredentialDisableResponse> {
 		const body: CredentialDisableRequest = { cause };
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: "credentialDisableResponseSchema",
-			signal,
+			headers:
+				opts.expectedAccessFingerprint !== undefined
+					? { "If-Match": `"${opts.expectedAccessFingerprint}"` }
+					: undefined,
+			signal: opts.signal,
 		});
 	}
 
@@ -404,6 +412,7 @@ export class AuthBrokerClient {
 			auth?: boolean;
 			body?: unknown;
 			signal?: AbortSignal;
+			headers?: Record<string, string>;
 			timeoutMs?: number;
 		},
 	): Promise<t> {

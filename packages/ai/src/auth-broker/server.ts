@@ -801,10 +801,26 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const cause =
 						parsed.data.cause && parsed.data.cause.length > 0 ? parsed.data.cause : "disabled via auth-broker";
-					const ok = opts.storage.disableCredentialById(id, cause);
-					if (!ok) {
+					const ifMatch = req.headers.get("if-match");
+					let outcome: "disabled" | "stale" | "missing";
+					if (ifMatch !== null) {
+						let fingerprint = ifMatch.trim();
+						if (fingerprint.startsWith('"') && fingerprint.endsWith('"') && fingerprint.length >= 2) {
+							fingerprint = fingerprint.slice(1, -1);
+						}
+						outcome = await opts.storage.disableCredentialIfBearerMatches(id, fingerprint, cause);
+					} else {
+						// Old clients stay unconditional. Old brokers ignore If-Match, so a
+						// new client against an old broker retains the old unconditional behavior.
+						outcome = opts.storage.disableCredentialById(id, cause) ? "disabled" : "missing";
+					}
+					if (outcome === "missing") {
 						logger.info("auth-broker disable miss", { id, peer, cause: redactSecrets(cause) });
 						return json(404, { error: `No credential with id=${id}` });
+					}
+					if (outcome === "stale") {
+						logger.info("auth-broker disable rejected: bearer rotated", { id, peer });
+						return json(412, { error: "credential bearer no longer matches; a peer rotated it" });
 					}
 					logger.info("auth-broker credential disabled", { id, peer, cause: redactSecrets(cause) });
 					const response: CredentialDisableResponse = { ok: true };
