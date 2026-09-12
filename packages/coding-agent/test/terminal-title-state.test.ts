@@ -5,18 +5,19 @@ import * as path from "node:path";
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
+	agentStateFileSettled,
 	setAgentStateFileEnabled,
 	setSessionTerminalTitle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { getTerminalId, isConPTYHosted } from "@oh-my-pi/pi-tui";
 import {
-	getConfigRootDir,
+	__resetDirsFromEnvForTests,
 	getTerminalSessionsDir,
 	postmortem,
-	setAgentDir,
 	setTerminalHeadless,
 } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
 const LABEL = "my-project";
@@ -171,47 +172,53 @@ describe("agent state file", () => {
 	// stable identity a real session has - but the runner may itself be inside tmux, so the
 	// caller's value is put back afterwards rather than deleted.
 	const PANE = "%omp-state-file-test";
-	let originalPane: string | undefined;
-	let originalAgentDir: string | undefined;
+	// Everything setAgentDir would touch, captured by name: it rewrites the directory resolver
+	// and clears the profile variables process-wide, so putting one value back is not enough.
+	const ENV_KEYS = ["TMUX_PANE", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+	let originalEnv: Record<string, string | undefined> = {};
 	let agentRoot: string | undefined;
 
 	beforeEach(() => {
-		originalPane = process.env.TMUX_PANE;
-		process.env.TMUX_PANE = PANE;
-		// Its own agent directory, so this never writes into the caller's real
-		// terminal-sessions directory and two suites cannot race for one filename.
-		originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+		// Its own agent directory, so this never writes into the caller's real terminal-sessions
+		// directory and two suites cannot race for one filename. Through the environment rather
+		// than setAgentDir(), because that is what the resolver reads back.
 		agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-state-file-test-"));
-		setAgentDir(path.join(agentRoot, "agent"));
+		process.env.TMUX_PANE = PANE;
+		process.env.PI_CODING_AGENT_DIR = path.join(agentRoot, "agent");
+		restoreEnvValue("OMP_PROFILE", undefined);
+		restoreEnvValue("PI_PROFILE", undefined);
+		__resetDirsFromEnvForTests();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		setAgentStateFileEnabled(false);
+		await agentStateFileSettled();
 
-		if (originalPane === undefined) delete process.env.TMUX_PANE;
-		else process.env.TMUX_PANE = originalPane;
-
-		if (originalAgentDir) setAgentDir(originalAgentDir);
-		else setAgentDir(path.join(getConfigRootDir(), "agent"));
+		for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
+		__resetDirsFromEnvForTests();
 
 		if (agentRoot) fs.rmSync(agentRoot, { recursive: true, force: true });
 		agentRoot = undefined;
 	});
 
-	it("writes nothing while the setting is off", () => {
+	it("writes nothing while the setting is off", async () => {
 		setAgentStateFileEnabled(false);
 		setTerminalTitleState("attention");
+		await agentStateFileSettled();
 		expect(fs.existsSync(stateFile())).toBe(false);
 	});
 
-	it("records the state the title shows, and removes the file when switched off", () => {
+	it("records the state the title shows, and removes the file when switched off", async () => {
 		setAgentStateFileEnabled(true);
 
 		setTerminalTitleState("working");
+		await agentStateFileSettled();
 		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("working");
 
 		// The one that matters: nothing else can distinguish this from a long think.
 		setTerminalTitleState("attention");
+		await agentStateFileSettled();
 		const written = JSON.parse(fs.readFileSync(stateFile(), "utf8"));
 		expect(written.state).toBe("attention");
 		expect(written.pid).toBe(process.pid);
@@ -227,6 +234,7 @@ describe("agent state file", () => {
 		// blind a reader in the middle of a session.
 		setAgentStateFileEnabled(true);
 		setTerminalTitleState("attention");
+		await agentStateFileSettled();
 
 		await postmortem.cleanup();
 
@@ -234,9 +242,10 @@ describe("agent state file", () => {
 		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
 	});
 
-	it("leaves no file behind when the runtime is disposed", () => {
+	it("leaves no file behind when the runtime is disposed", async () => {
 		setAgentStateFileEnabled(true);
 		setTerminalTitleState("attention");
+		await agentStateFileSettled();
 		expect(fs.existsSync(stateFile())).toBe(true);
 
 		// A state file outliving its process would report "waiting on you" for ever.

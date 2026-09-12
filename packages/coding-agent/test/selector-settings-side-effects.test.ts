@@ -17,16 +17,24 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/mode
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
-import { setAgentStateFileEnabled, setTerminalTitleState } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import {
+	agentStateFileSettled,
+	setAgentStateFileEnabled,
+	setTerminalTitleState,
+} from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { getTerminalId, setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import {
-	getConfigRootDir,
+	__resetDirsFromEnvForTests,
 	getTerminalSessionsDir,
 	removeSyncWithRetries,
-	setAgentDir,
 	Snowflake,
 } from "@oh-my-pi/pi-utils";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 
 let settingsState: SettingsTestState | undefined;
 
@@ -1870,14 +1878,17 @@ describe("selector setting side effects", () => {
 			hub.dispose();
 		}
 	});
-	it("applies tui.stateFile at once, rather than at the next start", () => {
+	it("applies tui.stateFile at once, rather than at the next start", async () => {
 		// The setting is read once during init as well, so without this path turning it on writes
 		// nothing until a restart and turning it off keeps writing and leaves the file behind.
-		const originalPane = process.env.TMUX_PANE;
-		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const ENV_KEYS = ["TMUX_PANE", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+		const originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 		const agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-state-file-setting-"));
 		process.env.TMUX_PANE = "%omp-state-file-setting-test";
-		setAgentDir(path.join(agentRoot, "agent"));
+		process.env.PI_CODING_AGENT_DIR = path.join(agentRoot, "agent");
+		restoreEnvValue("OMP_PROFILE", undefined);
+		restoreEnvValue("PI_PROFILE", undefined);
+		__resetDirsFromEnvForTests();
 
 		const stateFile = (): string => path.join(getTerminalSessionsDir(), `${getTerminalId()}.state.json`);
 
@@ -1886,17 +1897,18 @@ describe("selector setting side effects", () => {
 			setTerminalTitleState("attention");
 
 			controller.handleSettingChange("tui.stateFile", true);
+			await agentStateFileSettled();
 			expect(fs.existsSync(stateFile())).toBe(true);
 			expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
 
 			controller.handleSettingChange("tui.stateFile", false);
+			await agentStateFileSettled();
 			expect(fs.existsSync(stateFile())).toBe(false);
 		} finally {
 			setAgentStateFileEnabled(false);
-			if (originalPane === undefined) delete process.env.TMUX_PANE;
-			else process.env.TMUX_PANE = originalPane;
-			if (originalAgentDir) setAgentDir(originalAgentDir);
-			else setAgentDir(path.join(getConfigRootDir(), "agent"));
+			await agentStateFileSettled();
+			for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
+			__resetDirsFromEnvForTests();
 			fs.rmSync(agentRoot, { recursive: true, force: true });
 		}
 	});

@@ -3,6 +3,7 @@
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
@@ -600,6 +601,15 @@ function agentStateFilePath(): string | null {
 }
 
 /**
+ * Serializes state-file work so two updates cannot land out of order, and so a caller never waits
+ * on the disk. Every update chains onto this; nothing awaits it except a test.
+ */
+let agentStateFileWork: Promise<void> = Promise.resolve();
+
+/** Set by a removal so an update already queued behind it cannot recreate the file. */
+let agentStateFileRemoved = false;
+
+/**
  * Offer the run state as a file beside this terminal's breadcrumb, so a program that is not the
  * terminal can read it.
  *
@@ -607,33 +617,52 @@ function agentStateFilePath(): string | null {
  * else driving omp - a supervisor, a status bar, a multiplexer script - has to guess from whether
  * output is still moving, and that cannot tell a long think from a question nobody answered.
  *
- * Best effort and synchronous: it runs on state changes only, not on spinner frames.
+ * Asynchronous and queued: a state directory on a slow filesystem must not stall rendering, and
+ * on an NFS home a synchronous write would do exactly that on every turn. Ordering is kept by the
+ * chain rather than by the event loop, so the last state written is the last state that happened.
  */
 function writeAgentStateFile(state: TerminalTitleState): void {
 	if (!agentStateFileEnabled) return;
 	const file = agentStateFilePath();
 	if (!file) return;
 	const body = `${JSON.stringify({ state, pid: process.pid, at: new Date().toISOString() })}\n`;
-	try {
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		// Written then renamed: a reader polling this must never catch half a state.
-		const pending = `${file}.${process.pid}.tmp`;
-		fs.writeFileSync(pending, body);
-		fs.renameSync(pending, file);
-	} catch (err) {
-		logger.debug("Agent state file write failed", { err });
-	}
+	agentStateFileRemoved = false;
+	const pending = `${file}.${process.pid}.tmp`;
+	agentStateFileWork = agentStateFileWork
+		.then(async () => {
+			// A removal overtook this update: the agent is gone and must not be resurrected.
+			if (agentStateFileRemoved) return;
+			await fsPromises.mkdir(path.dirname(file), { recursive: true });
+			// Written then renamed: a reader polling this must never catch half a state.
+			await Bun.write(pending, body);
+			await fsPromises.rename(pending, file);
+		})
+		.catch(err => {
+			logger.debug("Agent state file write failed", { err });
+		});
 }
 
-/** Remove this terminal's state file, so nothing reads a state from a process that is gone. */
+/**
+ * Remove this terminal's state file, so nothing reads a state from a process that is gone.
+ *
+ * Synchronous on purpose: this runs at teardown and from a signal path, where an awaited unlink
+ * may never get its turn. Anything still queued is cancelled by the flag rather than raced.
+ */
 function removeAgentStateFile(): void {
+	agentStateFileRemoved = true;
 	const file = agentStateFilePath();
 	if (!file) return;
 	try {
 		fs.rmSync(file, { force: true });
+		fs.rmSync(`${file}.${process.pid}.tmp`, { force: true });
 	} catch (err) {
 		logger.debug("Agent state file removal failed", { err });
 	}
+}
+
+/** Resolves once every queued state-file update has landed. For tests. */
+export function agentStateFileSettled(): Promise<void> {
+	return agentStateFileWork;
 }
 
 /**
