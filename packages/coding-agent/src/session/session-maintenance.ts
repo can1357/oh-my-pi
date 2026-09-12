@@ -800,6 +800,11 @@ export class SessionMaintenance {
 		let selectedMethodIndex = -1;
 		let compactionCommitted = false;
 		let methodAttempted = false;
+		// Set when this manual pass aborted a live turn: the turn is resumed once the
+		// summary lands (see the `finally`). Generation is captured after the abort
+		// bump so a reset/new-session in between skips the resume as stale.
+		let resumeInterruptedTurn = false;
+		let interruptedTurnGeneration = 0;
 		const compactionAbortController = retryController ?? new AbortController();
 		const manualCompactionCleanup = ownsCompactionController ? Promise.withResolvers<void>() : undefined;
 		if (ownsCompactionController) {
@@ -812,8 +817,17 @@ export class SessionMaintenance {
 
 		try {
 			if (ownsCompactionController) {
+				// A manual compaction aborts the live turn, tool loop included. Without a
+				// resume the agent sits idle on a half-finished loop (an autoresearch run,
+				// a pending tool result) until the user types "continue" by hand.
+				const interruptedActiveTurn = this.#host.isStreaming();
 				this.#host.disconnectFromAgent();
 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
+				resumeInterruptedTurn =
+					interruptedActiveTurn &&
+					options?.suppressContinuation !== true &&
+					this.#host.settings.get("compaction.autoContinue") !== false;
+				interruptedTurnGeneration = this.#host.promptGeneration();
 			}
 			const activeModel = this.#model;
 			if (!activeModel) {
@@ -826,6 +840,7 @@ export class SessionMaintenance {
 				!options?.internalGuidance
 			) {
 				const result = await this.#compactExperimentalContext(activeModel, compactionAbortController);
+				compactionCommitted = true;
 				options?.onComplete?.(result);
 				return result;
 			}
@@ -1170,7 +1185,14 @@ export class SessionMaintenance {
 					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
 					"compaction",
 				);
-				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
+				const retried = await this.compact(
+					customInstructions,
+					options,
+					selectedMethodIndex + 1,
+					compactionAbortController,
+				);
+				compactionCommitted = true;
+				return retried;
 			}
 			options?.onError?.(err);
 			throw error;
@@ -1191,6 +1213,18 @@ export class SessionMaintenance {
 					this.#manualCompactionCleanup = undefined;
 				}
 				manualCompactionCleanup?.resolve();
+				if (compactionCommitted && resumeInterruptedTurn) {
+					// Same continuation the context-full path uses: a queued steer/follow-up
+					// (drained above) drives the resume, otherwise the auto-continue nudge
+					// does. `terminalTextAnswer` is false by construction — the turn was
+					// cut mid-run, so there is no finished answer to preserve.
+					this.#host.scheduleCompactionContinuation({
+						generation: interruptedTurnGeneration,
+						autoContinue: true,
+						terminalTextAnswer: false,
+						suppressContinuation: false,
+					});
+				}
 			}
 		}
 	}

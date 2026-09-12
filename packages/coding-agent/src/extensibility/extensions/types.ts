@@ -413,6 +413,14 @@ export interface CompactOptions {
 	 * `customInstructions`.
 	 */
 	internalGuidance?: string;
+	/**
+	 * A manual compaction aborts any turn in flight and, once the summary is
+	 * committed, resumes it (queued steer/follow-up first, else the auto-continue
+	 * nudge). Set this when the caller dispatches its own follow-up turn after
+	 * compaction — plan-mode "Approve and compact context" — so the two don't
+	 * double-prompt. Compactions that interrupt nothing never continue.
+	 */
+	suppressContinuation?: boolean;
 }
 
 /**
