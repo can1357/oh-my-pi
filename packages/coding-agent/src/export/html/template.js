@@ -1589,7 +1589,8 @@
           },
           // Text content: escape HTML tags
           text(token) {
-            return token.tokens ? this.parser.parseInline(token.tokens) : escapeHtmlTags(escapeHtml(token.text));
+            if (token.tokens) return this.parser.parseInline(token.tokens);
+            return token.escaped ? token.text : escapeHtmlTags(escapeHtml(token.text));
           },
           // Inline code: escape HTML
           codespan(token) {
