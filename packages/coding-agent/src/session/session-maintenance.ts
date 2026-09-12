@@ -820,7 +820,11 @@ export class SessionMaintenance {
 				// A manual compaction aborts the live turn, tool loop included. Without a
 				// resume the agent sits idle on a half-finished loop (an autoresearch run,
 				// a pending tool result) until the user types "continue" by hand.
-				const interruptedActiveTurn = this.#host.isStreaming();
+				// Only a turn the agent actually owns counts: the session-level busy flag
+				// is also true while a prompt is still in async setup (before its message
+				// reaches the agent). The abort bump drops that prompt, so resuming on
+				// its behalf would nudge the model on the previous transcript instead.
+				const interruptedActiveTurn = this.#host.agent.state.isStreaming;
 				this.#host.disconnectFromAgent();
 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
 				resumeInterruptedTurn =

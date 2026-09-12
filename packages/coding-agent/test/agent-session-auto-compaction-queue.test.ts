@@ -26,6 +26,9 @@ function getRuntimeSignals(): string[] {
 	return globalWithSignals[runtimeSignalStoreKey];
 }
 
+/** Parks a prompt inside its awaited `before_agent_start` hook. */
+type AgentStartGate = { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> };
+
 /**
  * Regression test: auto-compaction completion should resume the agent loop when
  * there are queued agent-level messages (follow-up/steering/custom).
@@ -65,6 +68,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 							details: {},
 						},
 					};
+				});
+				pi.on("before_agent_start", async () => {
+					const gate = (globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate })
+						.__ompAgentStartGate;
+					if (!gate) return;
+					gate.entered.resolve();
+					await gate.release.promise;
 				});
 				pi.on("auto_compaction_start", event => {
 					getRuntimeSignals().push(`compaction:start:${event.reason}`);
@@ -135,6 +145,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 			} finally {
 				getRuntimeSignals().length = 0;
 				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+					undefined;
+				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
 					undefined;
 				vi.restoreAllMocks();
 			}
@@ -397,6 +409,58 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await session.compact();
 		await session.waitForIdle();
 
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not resume when compaction lands while a prompt is still in setup", async () => {
+		// Between `session.prompt()` and the message reaching `agent.prompt()` the
+		// session reports busy (in-flight count) while the agent owns no turn. The
+		// compaction abort bumps the generation and drops that prompt; nudging the
+		// model to "resume" would run it on the previous transcript with the user's
+		// input never sent.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+		const dropped: string[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt.text));
+
+		// Park the prompt inside its awaited before_agent_start hook: in-flight, but
+		// the message has not reached the agent.
+		const gate: AgentStartGate = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = gate;
+		const pending = session.prompt("new request");
+		await gate.entered.promise;
+		expect(session.isStreaming).toBe(true);
+		expect(session.agent.state.isStreaming).toBe(false);
+
+		const compacted = session.compact();
+		gate.release.resolve();
+		await compacted;
+		await pending;
+		// The abort bumped the generation, so the parked prompt is handed back unsent…
+		expect(dropped).toEqual(["new request"]);
+		await session.waitForIdle();
+
+		// …and nothing "resumes" a turn the agent never owned.
 		expect(promptSpy).not.toHaveBeenCalled();
 	});
 
