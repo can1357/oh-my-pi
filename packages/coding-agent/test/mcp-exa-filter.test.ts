@@ -176,12 +176,21 @@ describe("Exa MCP filtering", () => {
 			);
 			expect(Object.keys(keep.configs)).toEqual(["exa"]);
 		}
+		// `?` demands a character, so an entry with two of them denies only names
+		// of two or more — a one-character tool survives and the server must stay.
 		for (const disabledTools of [["*"], ["**"], ["?*"], ["*?"]]) {
 			const drop = filterExaMCPServers(
 				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
 				{ exa: SOURCE },
 			);
 			expect(drop.configs).toEqual({});
+		}
+		for (const disabledTools of [["??*"], ["*??"], ["?*?"]]) {
+			const keep = filterExaMCPServers(
+				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
+				{ exa: SOURCE },
+			);
+			expect(Object.keys(keep.configs)).toEqual(["exa"]);
 		}
 	});
 

@@ -207,6 +207,20 @@ test("`?` matches one raw character, astral ones included", () => {
 	expect(filterMCPTools({ toolNames: ["tool_😀", "tool_x"], disabledTools: ["tool_?"] }).allowed).toEqual([]);
 });
 
+test("a class body keeps the engine's own reading of its members", () => {
+	// Class bodies are compiled verbatim with the regex engine as the membership
+	// oracle, which is what makes escapes, ranges and Annex-B corners come out
+	// exactly as a user expects them to. That reading is the engine's, so a class
+	// holding an astral character sees two code units rather than one raw
+	// character — unlike the `?` wildcard, whose cardinality this module emits
+	// itself. Rewriting astral members would mean hand-parsing class bodies,
+	// which is precisely the source of silent meaning changes the verbatim rule
+	// avoids. Pinned so the difference between the two surfaces stays deliberate.
+	expect(run(["😀", "a"], ["[😀]"]).allowed).toEqual([]);
+	expect(run(["😀", "a"], ["[a😀]"]).allowed).toEqual(["a"]);
+	expect(run(["😀", "a"], ["[^😀]"]).allowed).toEqual(["a"]);
+});
+
 test("a star matches zero characters even after a literal dot", () => {
 	// picomatch emits `(?=.)` before a star following a literal `.`, so `.*` did
 	// not match a tool named exactly `.` and `*.*` missed `report.`. Tool names
@@ -215,6 +229,12 @@ test("a star matches zero characters even after a literal dot", () => {
 	expect(run([".", ".a", "a"], [".*"]).allowed).toEqual([".", ".a"]);
 	expect(run(["report.", "report", ".."], ["*.*"]).allowed).toEqual(["report.", ".."]);
 	expect(run([".", "a.", "a"], ["*."]).allowed).toEqual([".", "a."]);
+	// The same applies to a literal leading dot followed by a wildcard that is
+	// itself followed by more pattern: `.*?` is a dot, any run, and one more
+	// character, so a two-dot name qualifies.
+	expect(run(["..", "..."], [".*?"]).allowed).toEqual(["..", "..."]);
+	expect(run(["..", "a"], [".*[.]"]).allowed).toEqual([".."]);
+	expect(run(["..", "a"], [".*{.,b}"]).allowed).toEqual([".."]);
 });
 
 test("braces outside `{a,b}` alternation are literal", () => {

@@ -272,15 +272,19 @@ function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
  * Does this denylist entry deny every name the server could advertise?
  *
  * Recognized structurally rather than by probing one candidate name: `*` and `?`
- * match any number and exactly one character, so an entry built only from them
- * that contains at least one `*` matches every non-empty name — `*`, `**`, `?*`,
- * `*?`. A probe name would answer a different question (does the entry match
- * *this* name?), so `*probe` would look like deny-all and drop a server whose
- * non-native tools survive. Patterns outside this shape are left to the
+ * match any number and exactly one character, so an entry built only from them,
+ * containing at least one `*` and at most one `?`, matches every non-empty name
+ * — `*`, `**`, `?*`, `*?`. The `?` limit matters because a name may be a single
+ * character: `??*` denies only names of two or more, leaving one-character tools
+ * reachable. A probe name would answer a different question (does the entry
+ * match *this* name?), so `*probe` would look like deny-all and drop a server
+ * whose non-native tools survive. Patterns outside this shape fall back to the
  * filtering path below, which errs toward keeping the server.
  */
 function deniesEveryName(entry: string): boolean {
-	return entry.includes("*") && /^[*?]+$/.test(entry);
+	// At most one `?`: a second one demands a second character, and names may be
+	// a single character long, so `??*` denies only names of two or more.
+	return entry.includes("*") && /^[*?]{2,}$|^\*+$/.test(entry) && (entry.match(/\?/g)?.length ?? 0) <= 1;
 }
 
 /**

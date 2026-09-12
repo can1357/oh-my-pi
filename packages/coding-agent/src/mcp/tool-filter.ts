@@ -419,7 +419,11 @@ const ENCODED_STAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK
  * paths — a server may legitimately advertise a tool named `.` — so both
  * spellings are stripped to leave the wildcard matching every name.
  */
-const DOT_SEGMENT_GUARDS = ["(?!(?:^|\\/)\\.{1,2}(?:\\/|$))", "(?!\\.{1,2}(?:\\/|$))"] as const;
+const DOT_SEGMENT_GUARDS = [
+	"(?!(?:^|\\/)\\.{1,2}(?:\\/|$))",
+	"(?!\\.{1,2}(?:\\/|$))",
+	"(?!\\.{0,1}(?:\\/|$))",
+] as const;
 
 /**
  * picomatch's "at least one character here" assertion, removed after compilation.
