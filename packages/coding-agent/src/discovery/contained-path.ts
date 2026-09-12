@@ -28,8 +28,10 @@ export async function realpathIfExists(p: string): Promise<string | null> {
 	}
 }
 
-/** Outcome of resolving a fixed package path without reading it. */
-type ContainedPathResolution = { status: "missing" } | { status: "outside" } | { status: "ok"; realPath: string };
+export type ContainedPathResolution =
+	| { status: "missing" }
+	| { status: "outside" }
+	| { status: "ok"; realPath: string };
 
 /**
  * Resolve a fixed package path WITHOUT reading it: symlinks and equivalent
