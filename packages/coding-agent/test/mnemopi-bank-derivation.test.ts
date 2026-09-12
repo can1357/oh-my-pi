@@ -151,6 +151,26 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		expect(a).not.toBe(b);
 	});
 
+	// Regression: `resolveProjectRoot`'s discovery walk is lexical, so a
+	// checkout reached through a symlinked alias hashed a different string
+	// than the same checkout reached through its real path. Canonicalizing
+	// the resolved root (`fs.realpathSync`) collapses them onto one bank —
+	// the same identity contract worktrees and workspaces already get.
+	it("collapses a symlinked alias directory onto its real path", async () => {
+		const baseDir = await TempDir.create("@mnemopi-symlink-");
+		try {
+			const realProject = baseDir.join("real-project");
+			const aliasProject = baseDir.join("alias-project");
+			await fs.mkdir(realProject, { recursive: true });
+			await fs.symlink(realProject, aliasProject, "dir");
+			const fromReal = computeMnemopiBankScope(undefined, realProject, "per-project").bank;
+			const fromAlias = computeMnemopiBankScope(undefined, aliasProject, "per-project").bank;
+			expect(fromAlias).toBe(fromReal);
+		} finally {
+			await Bun.sleep(0);
+			await baseDir.remove();
+		}
+	});
 
 	it("per-project-tagged opens both the project bank and the shared default", () => {
 		const scope = computeMnemopiBankScope(undefined, "/projects/repo", "per-project-tagged");
