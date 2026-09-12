@@ -225,6 +225,16 @@ export class SessionTools {
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#xdevMountDeltaRevision = 0;
 	/**
+	 * Whether the current {@link #baseSystemPrompt} already renders the roster the
+	 * pending delta describes — true after a full rebuild, false after a frozen
+	 * (prefix-preserving) apply queues a change the base did not re-render. The
+	 * delta is subsumed only when such a base is the prompt actually delivered, a
+	 * decision {@link takePendingToolRosterNotice} defers to send time because a
+	 * per-turn `before_agent_start` override (registered after some rebuilds) can
+	 * still keep the rebuilt base off the wire.
+	 */
+	#basePromptReflectsRosterDelta = false;
+	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
 	 * {@link #ensureAnnouncedMountsSeeded}) and updated as notices are emitted, so
@@ -1105,12 +1115,14 @@ export class SessionTools {
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
 				// The rebuilt prompt renders the complete current roster, so a delta
-				// queued by an earlier frozen apply is subsumed once that prompt is the
-				// one delivered. A per-turn `before_agent_start` override keeps the
-				// rebuilt base off the wire (see {@link #applyAgentSystemPrompt}), so
-				// keep the delta then — the notice is the only channel carrying the
-				// roster change on this turn.
-				if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
+				// queued by an earlier frozen apply is subsumed once that base is the
+				// prompt actually delivered. Whether it is — a per-turn
+				// `before_agent_start` override can still hide it — is unknown here
+				// (the override may be registered after this rebuild, e.g. a memory
+				// backend's beforeAgentStartPrompt refresh), so mark the base as
+				// carrying the roster and let `takePendingToolRosterNotice` decide at
+				// send time.
+				this.#basePromptReflectsRosterDelta = true;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1155,6 +1167,9 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingToolRosterDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+		// A frozen apply changed the roster without re-rendering the base prompt, so
+		// the base no longer reflects the pending delta.
+		this.#basePromptReflectsRosterDelta = false;
 	}
 
 	/**
@@ -1265,15 +1280,25 @@ export class SessionTools {
 
 	/**
 	 * Consumes the hidden provider-visible roster notice for the current pending
-	 * delta. Unlike the xd:// mount notice this carries no meaningful payload (a
-	 * short tool-name list), so it is never previewed or deferred for context
-	 * budgeting: it is re-derived from the live delta after pre-prompt maintenance
-	 * and always delivered alongside the schema change it describes, keeping the
-	 * model's stated availability in lockstep with the wire tool list.
+	 * delta. This carries no meaningful payload (a short tool-name list), so it is
+	 * never previewed or deferred for context budgeting: it is re-derived from the
+	 * live delta after pre-prompt maintenance, keeping the model's stated
+	 * availability in lockstep with the wire tool list.
+	 *
+	 * The notice is suppressed only when the prompt actually delivered this turn is
+	 * a rebuilt base that already renders the full roster (`baseDelivered` and
+	 * {@link #basePromptReflectsRosterDelta}). A per-turn `before_agent_start`
+	 * override that hides the rebuilt base leaves `baseDelivered` false, so the
+	 * notice still ships — the only channel carrying the change on that turn.
 	 */
-	takePendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
-		const notice = this.#buildPendingToolRosterNotice();
-		if (notice) this.#pendingToolRosterDelta = undefined;
+	takePendingToolRosterNotice(options: {
+		baseDelivered: boolean;
+	}): CustomMessage<ToolRosterNoticeDetails> | undefined {
+		if (!this.#pendingToolRosterDelta) return undefined;
+		const subsumed = options.baseDelivered && this.#basePromptReflectsRosterDelta;
+		const notice = subsumed ? undefined : this.#buildPendingToolRosterNotice();
+		this.#pendingToolRosterDelta = undefined;
+		this.#basePromptReflectsRosterDelta = false;
 		return notice;
 	}
 
@@ -1630,13 +1655,14 @@ export class SessionTools {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
 		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
-		// An explicit rebuild re-renders the complete current roster, so a delta
-		// queued by an earlier frozen apply (e.g. a Code Mode boundary crossed
-		// mid model-cycle) is subsumed once that base is delivered. A per-turn
-		// `before_agent_start` override keeps the rebuilt base off the wire (see
-		// {@link #applyAgentSystemPrompt}), so keep the delta then so
-		// takePendingToolRosterNotice() still surfaces the change on this turn.
-		if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
+		// The rebuilt prompt renders the complete current roster, so a delta queued
+		// by an earlier frozen apply (e.g. a Code Mode boundary crossed mid
+		// model-cycle) is subsumed once this base is the prompt actually delivered.
+		// A per-turn `before_agent_start` override — which may be registered after
+		// this refresh, e.g. a memory backend's beforeAgentStartPrompt injection —
+		// can still hide it, so mark the base as carrying the roster and let
+		// `takePendingToolRosterNotice` decide at send time.
+		this.#basePromptReflectsRosterDelta = true;
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we

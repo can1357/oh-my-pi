@@ -277,6 +277,34 @@ describe("prefix-bound tool roster changes", () => {
 		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
 	});
 
+	it("keeps the roster notice when a rebuild precedes a turn override", async () => {
+		const override = ["per-turn override prompt"];
+		const harness = newSession(createPrefixBindingModel(), { beforeAgentStartSystemPrompt: override });
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+		// A rebuild happens while no override is registered yet — modelling a memory
+		// backend's beforeAgentStartPrompt refresh, which runs inside
+		// buildSystemPromptForAgentStart before emitBeforeAgentStart sets the
+		// per-turn override. The rebuilt base must not clear the delta outright: the
+		// override registered moments later hides that base from the wire.
+		await harness.session.refreshBaseSystemPrompt();
+
+		await harness.session.prompt("second");
+
+		// The override hid the rebuilt base, so the provider never saw the roster there.
+		expect(harness.systemPrompts[1]).toEqual(override);
+		// The notice is the only channel carrying the change, so it must survive.
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(1);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
+	});
+
 	it("delivers a roster notice for a change queued during pre-prompt maintenance", async () => {
 		const harness = newSession(createPrefixBindingModel());
 		sessions.push(harness.session);
