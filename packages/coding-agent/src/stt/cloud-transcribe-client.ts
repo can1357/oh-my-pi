@@ -30,7 +30,9 @@ const CODEX_STT_URL = `${CODEX_BASE_URL}${URL_PATHS.TRANSCRIBE}`;
 const CODEX_STT_PROVIDER = "openai-codex";
 /** Provider id the platform API-key credential is stored under. */
 const OPENAI_STT_PROVIDER = "openai";
-const CLOUD_STT_TIMEOUT_MS = 60_000;
+const CLOUD_STT_PROCESSING_TIMEOUT_MS = 60_000;
+/** Conservative floor: keep the request alive long enough to upload at 1 Mibit/s. */
+const CLOUD_STT_MIN_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
 const MIC_SAMPLE_RATE = 16_000;
@@ -199,7 +201,7 @@ async function transcribeWithCodexAccess(
 	if (attestation) headers[OPENAI_HEADERS.ATTESTATION] = attestation;
 	const form = new FormData();
 	form.append("file", wav, "dictation.wav");
-	return await postTranscription(fetchImpl, CODEX_STT_URL, headers, form, options.signal);
+	return await postTranscription(fetchImpl, CODEX_STT_URL, headers, form, wav.size, options.signal);
 }
 
 /**
@@ -222,6 +224,7 @@ async function transcribeWithApiKey(
 			`${baseUrl}/audio/transcriptions`,
 			sanitizeOverrideHeaders(credential.headers, false),
 			createTranscriptionForm(options, wav),
+			wav.size,
 			options.signal,
 		);
 	}
@@ -233,6 +236,7 @@ async function transcribeWithApiKey(
 				`${baseUrl}/audio/transcriptions`,
 				{ ...sanitizeOverrideHeaders(credential.headers, true), Authorization: `Bearer ${apiKey}` },
 				createTranscriptionForm(options, wav),
+				wav.size,
 				options.signal,
 			),
 		{
@@ -290,9 +294,11 @@ async function postTranscription(
 	url: string,
 	headers: Record<string, string>,
 	form: FormData,
+	uploadBytes: number,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
-	const timeout = AbortSignal.timeout(CLOUD_STT_TIMEOUT_MS);
+	const uploadTimeoutMs = Math.ceil((uploadBytes / CLOUD_STT_MIN_UPLOAD_BYTES_PER_SECOND) * 1000);
+	const timeout = AbortSignal.timeout(CLOUD_STT_PROCESSING_TIMEOUT_MS + uploadTimeoutMs);
 	const response = await fetchImpl(url, {
 		method: "POST",
 		headers,

@@ -1,5 +1,5 @@
 import { type ApiKeyResolver, type OAuthAccess, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
@@ -90,6 +90,29 @@ describe("cloud STT stream", () => {
 		const file = form.get("file") as File;
 		expect(file.name).toBe("dictation.wav");
 		expect(file.size).toBe(44 + 1600 * 2);
+	});
+
+	it("allows larger accepted recordings proportionally longer to upload", async () => {
+		const deadlines: number[] = [];
+		const timeoutSpy = spyOn(AbortSignal, "timeout").mockImplementation(milliseconds => {
+			deadlines.push(milliseconds);
+			return new AbortController().signal;
+		});
+		try {
+			for (const samples of [160, 16_000]) {
+				const handle = startCloudSttStream({
+					credential: { kind: "openai", apiKey: "sk-test" },
+					fetchImpl: stubFetch("ok").impl,
+				});
+				handle.pushAudio(sine16kHz(samples));
+				await handle.stop();
+			}
+		} finally {
+			timeoutSpy.mockRestore();
+		}
+		expect(deadlines).toHaveLength(2);
+		expect(deadlines[1]!).toBeGreaterThan(deadlines[0]!);
+		expect(deadlines[0]!).toBeGreaterThan(60_000);
 	});
 
 	it("sends the selected cloud model and falls back for local tier keys", async () => {
@@ -484,6 +507,51 @@ describe("cloud backend in STTController", () => {
 			await controller.toggle(editor, options);
 			expect(stub.calls).toHaveLength(2);
 			expect(credentialResolutions).toBe(2);
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it("buffers speech while cloud credentials are still resolving", async () => {
+		const stub = stubFetch("captured during refresh");
+		const credential = Promise.withResolvers<CloudSttCredential | undefined>();
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			committed: "",
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(text: string): void {
+				editor.committed += text;
+			},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const options = {
+			showWarning(_msg: string): void {},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{
+				resolveCloudCredential: () => credential.promise,
+				createCloudFetch: stub.impl,
+			},
+		);
+		try {
+			await controller.toggle(editor, options);
+			expect(controller.state).toBe("recording");
+			onAudio(null, sine16kHz());
+			const stopping = controller.toggle(editor, options);
+			expect(controller.state).toBe("transcribing");
+			credential.resolve({ kind: "openai", apiKey: "sk-test" });
+			await stopping;
+			expect(editor.committed).toBe("captured during refresh");
+			expect((stub.calls[0]!.init.body as FormData).get("file")).toBeInstanceOf(File);
 		} finally {
 			controller.dispose();
 		}
