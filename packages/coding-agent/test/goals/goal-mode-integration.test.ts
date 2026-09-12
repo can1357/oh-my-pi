@@ -2,6 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
@@ -492,6 +494,90 @@ describe("InteractiveMode goal mode integration", () => {
 		streaming = false;
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
 		await waiter.inputPromise;
+	});
+
+	it("stops repeated goal continuations when identical tool evidence adds no new signal", async () => {
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.session.setActiveToolsByName(["todo"]);
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{
+				name: "Verification",
+				tasks: [{ content: "Run focused checks", status: "completed" }],
+			},
+		]);
+		let providerCall = 0;
+		harness.session.agent.streamFn = () => {
+			const index = providerCall++;
+			const toolTurn = index % 2 === 0;
+			const toolCallId = `call-${Math.floor(index / 2)}`;
+			const message = {
+				role: "assistant" as const,
+				content: toolTurn
+					? [{ type: "toolCall" as const, id: toolCallId, name: "todo", arguments: { op: "view" } }]
+					: [{ type: "text" as const, text: "Verification remains complete." }],
+				api: "anthropic-messages" as const,
+				provider: "anthropic" as const,
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: toolTurn ? ("toolUse" as const) : ("stop" as const),
+				timestamp: Date.now(),
+			};
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: message.stopReason, message });
+			});
+			return stream;
+		};
+
+		const runContinuation = async (): Promise<void> => {
+			vi.useFakeTimers();
+			const waiter = await armInputWaiter(harness.mode);
+			vi.advanceTimersByTime(800);
+			await waitForMicrotasks();
+			vi.useRealTimers();
+			const input = waiter.getResolvedInput();
+			expect(input?.customType).toBe("goal-continuation");
+			if (!input?.customType) throw new Error("expected goal continuation");
+			expect(harness.mode.markPendingSubmissionStarted(input)).toBe(true);
+			await harness.session.promptCustomMessage({
+				customType: input.customType,
+				content: input.text,
+				display: false,
+				attribution: "agent",
+			});
+			harness.mode.finishPendingSubmission(input);
+		};
+
+		await runContinuation();
+		harness.session.setTodoPhases([
+			{
+				name: "Verification",
+				tasks: [{ content: "Review release artifact", status: "completed" }],
+			},
+		]);
+		await runContinuation();
+		await runContinuation();
+
+		vi.useFakeTimers();
+		const fourthWaiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		expect(fourthWaiter.getResolvedInput()).toBeUndefined();
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		vi.useRealTimers();
+		await fourthWaiter.inputPromise;
 	});
 
 	it("refuses /goal while plan mode is active", async () => {
