@@ -305,6 +305,43 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.getExpandedText()).toBe("/skill:review original\n\nnew draft still typing");
 	});
 
+	it.each(["/clear", "/export"])(
+		"Ctrl+Enter preserves newer drafts across delayed %s builtin dispatch",
+		async command => {
+			const hookEntered = Promise.withResolvers<void>();
+			const releaseHook = Promise.withResolvers<void>();
+			const commandEntered = Promise.withResolvers<void>();
+			const releaseCommand = Promise.withResolvers<void>();
+			const h = await createHarness(pi => {
+				pi.on("input", async () => {
+					hookEntered.resolve();
+					await releaseHook.promise;
+				});
+			});
+			const runCommand = async () => {
+				commandEntered.resolve();
+				await releaseCommand.promise;
+			};
+			h.ctx.handleResetContextCommand = runCommand;
+			h.ctx.handleExportCommand = runCommand;
+			h.editor.setText(command);
+			const submitting = h.pressSubmit(FOLLOW_UP);
+			await hookEntered.promise;
+			h.draftWithImage("newer [Image #1]");
+			releaseHook.resolve();
+			await commandEntered.promise;
+			const duringCommand = h.editor.getExpandedText();
+			h.editor.setText(`${duringCommand} still typing`);
+			releaseCommand.resolve();
+			await submitting;
+			expect(duringCommand).toBe("newer [Image #1]");
+			expect(h.editor.getExpandedText()).toBe("newer [Image #1] still typing");
+			expect(h.editor.pendingImages).toEqual([originalImage]);
+			expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
+			expect(h.prompt).not.toHaveBeenCalled();
+		},
+	);
+
 	for (const [label, key] of [
 		["Enter", ENTER],
 		["Ctrl+Enter", FOLLOW_UP],

@@ -1645,7 +1645,7 @@ export class InputController {
 
 		if (text) {
 			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
-			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
+			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached: true });
 			if (slashResult === true) {
 				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				return;

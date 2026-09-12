@@ -342,6 +342,8 @@ another submission cannot reuse it and ordinary later typing remains a new draft
 Handled/empty input consumes only the detached submission. Dispatch failures
 restore its text and attachments alongside any newer draft. This does not make
 the established interactive input-handler chain cancellable by Esc.
+Builtin submission cleanup also preserves the newer draft, including `/clear`
+and `/new`. Commands retain their explicit prefill and session-transition actions.
 
 ### Tool lifecycle
 
