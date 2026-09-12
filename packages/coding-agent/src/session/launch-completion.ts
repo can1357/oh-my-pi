@@ -1,18 +1,11 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import { normalizeExitReason } from "../launch/exit-reason";
+import { displayExitReason } from "../launch/exit-reason";
 import type { DaemonCompletionNotification } from "../launch/protocol";
-import { shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
 
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
 export { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
-
-/** Bound, sanitize, and de-home a runtime diagnostic before it reaches the model. */
-function modelExitReason(reason: string | undefined): string | undefined {
-	const normalized = normalizeExitReason(reason);
-	return normalized ? shortenEmbeddedPaths(normalized) : undefined;
-}
 
 /** One broker completion awaiting injection into its owning session. */
 export type LaunchCompletionEntry = DaemonCompletionNotification;
@@ -34,7 +27,7 @@ export function buildLaunchCompletionBatchMessage(entries: LaunchCompletionEntry
 					state: daemon.state,
 					exitCode: daemon.exitCode,
 					hasExitCode: daemon.exitCode !== undefined,
-					exitReason: modelExitReason(daemon.exitReason),
+					exitReason: displayExitReason(daemon.exitReason),
 				}),
 			)
 			.join("\n"),

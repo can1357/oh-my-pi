@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { startDaemonBrokerFromEnvironment, type DaemonBrokerStartOptions } from "../../src/launch/broker";
@@ -95,6 +96,12 @@ describe("daemon broker exit diagnostics", () => {
 			await shutdown(firstClient, firstBroker);
 		}
 
+		const metadata = (await Bun.file(path.join(runtimeDir, "daemons", "code-58", "meta.json")).json()) as {
+			daemon: { exitReason?: string };
+		};
+		const rawReason = `${os.homedir()}/private\u001b[31m/recovered`;
+		metadata.daemon.exitReason = rawReason;
+		await Bun.write(path.join(runtimeDir, "daemons", "code-58", "meta.json"), JSON.stringify(metadata));
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const broker = startBroker(projectDir, runtimeDir);
 		try {
@@ -108,7 +115,10 @@ describe("daemon broker exit diagnostics", () => {
 			const [, error] = await Promise.all([restartedPending, waitPending]);
 			expect(error).toBeInstanceOf(Error);
 			expect((error as Error).message).toContain("exit code 58");
-			expect((error as Error).message).toContain("without a reported termination reason");
+			const errorMessage = (error as Error).message;
+			expect(errorMessage).toContain("reason: ~/private/recovered");
+			expect(errorMessage).not.toContain(os.homedir());
+			expect(errorMessage).not.toContain("\u001b");
 		} finally {
 			await shutdown(client, broker);
 			process.title = previousTitle;

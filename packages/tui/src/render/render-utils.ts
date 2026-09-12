@@ -923,8 +923,12 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten home-prefixed paths inside free text, preserving surrounding
- * punctuation so error strings with embedded paths stay readable. */
+/**
+ * Replace home-directory paths embedded in display text without matching a
+ * longer path component. Windows-style homes are matched case-insensitively,
+ * and a home that sits inside a URI keeps its separator so the URI stays
+ * syntactically valid.
+ */
 export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 	const resolvedHome = homeDir ?? defaultHomeDir();
 	if (!resolvedHome) return text;
@@ -955,10 +959,8 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
 			const end = segment.length - trailing.length;
 			if (leading.length >= end) return segment;
-			const shortened = shortenPath(segment.slice(leading.length, end), resolvedHome);
-			const normalized = shortened.startsWith("~")
-				? shortened.replaceAll(path.win32.sep, path.posix.sep)
-				: shortened;
+			const embeddedPath = segment.slice(leading.length, end);
+			const normalized = embeddedPath.startsWith("~") ? embeddedPath.replaceAll("\\", "/") : embeddedPath;
 			return `${leading}${normalized}${trailing}`;
 		})
 		.join(" ");

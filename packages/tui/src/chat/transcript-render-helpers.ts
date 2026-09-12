@@ -11,7 +11,7 @@ import type { DaemonSnapshot, JobSnapshot } from "../tools/hub";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { Text } from "../components/text";
 import { TruncatedText } from "../components/truncated-text";
-import { createIrcMessageCard, normalizeDaemonExitReason } from "../tools/hub";
+import { createIrcMessageCard, displayDaemonExitReason } from "../tools/hub";
 import { formatArtifactErrorNotice, formatStyledArtifactReference, type OutputMeta } from "../tools/output-meta";
 import {
 	capPreviewLines,
@@ -82,8 +82,8 @@ function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" 
 }
 
 function formatBackgroundWorkReason(reason: string | undefined): string | undefined {
-	const normalized = normalizeDaemonExitReason(reason);
-	return normalized ? truncateToWidth(shortenEmbeddedPaths(normalized), TRUNCATE_LENGTHS.LINE) : undefined;
+	const normalized = displayDaemonExitReason(reason);
+	return normalized ? truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE) : undefined;
 }
 
 /** Terminal-state row for one completed background job or supervised process. */
@@ -95,7 +95,7 @@ function backgroundWorkCompletionRow(options: {
 	timedOut?: boolean;
 	durationMs?: number;
 	reason?: string;
-}): Text {
+}): TruncatedText {
 	const duration = typeof options.durationMs === "number" ? formatDuration(options.durationMs) : undefined;
 	const line = [
 		options.failed
@@ -109,7 +109,7 @@ function backgroundWorkCompletionRow(options: {
 	]
 		.filter(Boolean)
 		.join(" ");
-	return new Text(line, 1, 0);
+	return new TruncatedText(line, 1, 0);
 }
 
 /**

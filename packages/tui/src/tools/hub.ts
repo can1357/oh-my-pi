@@ -321,6 +321,14 @@ export interface LaunchParams {
 	timeout?: number;
 }
 
+/**
+ * One process's rows in a `list` render: the collapsed form keeps the process
+ * line with its diagnostic and a bounded slice of watcher rows.
+ */
+interface DaemonListGroup {
+	collapsedRows: string[];
+}
+
 /** Structured launch state retained for compact TUI rendering. */
 export interface LaunchToolDetails {
 	op: LaunchParams["op"];
@@ -803,9 +811,11 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 const MAX_EXIT_REASON_LENGTH = 1_024;
 
 /**
- * Mirror of `normalizeExitReason` in `@oh-my-pi/pi-coding-agent`
- * (`src/launch/exit-reason.ts`): the renderer cannot import the agent package,
- * so display normalization stays byte-identical to the durable form.
+ * Mirror of `normalizeExitReason`/`displayExitReason` in
+ * `@oh-my-pi/pi-coding-agent` (`src/launch/exit-reason.ts`): the renderer
+ * cannot import the agent package, so display normalization stays identical to
+ * the durable form. `normalize` bounds arbitrary runtime text; `display` also
+ * hides the home directory.
  */
 export function normalizeDaemonExitReason(reason: string | undefined): string | undefined {
 	if (reason === undefined) return undefined;
@@ -816,14 +826,18 @@ export function normalizeDaemonExitReason(reason: string | undefined): string | 
 		: normalized;
 }
 
+export function displayDaemonExitReason(reason: string | undefined): string | undefined {
+	const normalized = normalizeDaemonExitReason(reason);
+	return normalized ? shortenEmbeddedPaths(normalized) : undefined;
+}
+
 /**
  * Exit diagnostics survive whatever state the process reached: a nonzero exit
  * explains itself even when the supervisor never marked it `failed`. Bounded to
  * one status line so a long diagnostic cannot reflow the row.
  */
 function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
-	const normalized = normalizeDaemonExitReason(daemon.exitReason);
-	const reason = normalized ? shortenEmbeddedPaths(normalized) : undefined;
+	const reason = displayDaemonExitReason(daemon.exitReason);
 	return reason ? `${indent}Reason: ${truncateToWidth(reason, TRUNCATE_LENGTHS.LINE)}` : undefined;
 }
 
@@ -898,9 +912,10 @@ export function launchRenderResult(
 
 	const meta: string[] = [];
 	const body: string[] = [];
-	// `list` collapses by process, not by row: diagnostic and watcher rows belong
-	// to the process above them, so the limit counts groups.
-	const listGroups: string[][] = [];
+	// `list` collapses by process, not by row: the diagnostic and watcher rows
+	// belong to the process above them, so the limit counts processes and each
+	// group carries its own bounded collapsed form.
+	const listGroups: DaemonListGroup[] = [];
 	let description = params.name ?? daemon?.name;
 
 	if (isError) {
@@ -969,15 +984,22 @@ export function launchRenderResult(
 				const daemons = details?.daemons ?? [];
 				description = `${daemons.length || "no"} ${pluralize("process", daemons.length)}`;
 				for (const item of daemons) {
-					const rows = [
+					const baseRows = [
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
 					];
 					const itemReason = daemonReasonLine(item);
-					if (itemReason) rows.push(theme.fg("error", itemReason));
-					for (const watcher of details?.monitors ?? []) {
-						if (watcher.name === item.name) rows.push(watcherRow(watcher, item, theme));
+					if (itemReason) baseRows.push(theme.fg("error", itemReason));
+					const watcherRows = (details?.monitors ?? [])
+						.filter(watcher => watcher.name === item.name)
+						.map(watcher => watcherRow(watcher, item, theme));
+					const rows = [...baseRows, ...watcherRows];
+					const collapsedWatcherRows = watcherRows.slice(0, PREVIEW_LIMITS.COLLAPSED_LINES);
+					const omittedWatchers = watcherRows.length - collapsedWatcherRows.length;
+					const collapsedRows = [...baseRows, ...collapsedWatcherRows];
+					if (omittedWatchers > 0) {
+						collapsedRows.push(theme.fg("dim", `  ${formatMoreItems(omittedWatchers, "watcher")}`));
 					}
-					listGroups.push(rows);
+					listGroups.push({ collapsedRows });
 					body.push(...rows);
 				}
 				break;
@@ -1073,12 +1095,15 @@ export function launchRenderResult(
 		() => options.expanded,
 		(width, expanded) => {
 			let visible = body;
-			if (!expanded && op === "list" && listGroups.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
-				const remaining = listGroups.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
-				visible = [
-					...listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS).flat(),
-					theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
-				];
+			if (!expanded && op === "list") {
+				const visibleGroups = listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+				const remaining = listGroups.length - visibleGroups.length;
+				visible = visibleGroups.flatMap(group => group.collapsedRows);
+				if (remaining > 0) {
+					visible.push(
+						theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
+					);
+				}
 			}
 			return [header, ...visible].map(line => truncateToWidth(line, width));
 		},
