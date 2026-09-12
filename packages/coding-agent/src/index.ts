@@ -28,6 +28,7 @@ export * from "./extensibility/extensions";
 export * from "./extensibility/skills";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
+export * from "./live/activity-events";
 export type * from "./lsp";
 // Main entry point
 export * from "./main";
