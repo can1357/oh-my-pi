@@ -270,7 +270,7 @@ test("class ranges span the code points their endpoints name", () => {
 	// admitted when the sanitized PATTERN spells the same class — it does not.
 	// The sanitized domain collapses `x-y` and `x_y` to the same spelling, and
 	// the class admits `_` (0x5F lies inside `/`..`z`), so `-` is reached.
-	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy", "x-y"]);
+	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy"]);
 	// `[+-0]` spans `/` between `+` and `0`: `+`, `/`, `-`, `.`, `0` — not `m`.
 	expect(run(["x+y", "x/y", "x0y", "xmy"], ["x[+-0]y"]).allowed).toEqual(["x+y", "x/y", "x0y"]);
 	// A descending range is empty, as in POSIX classes.

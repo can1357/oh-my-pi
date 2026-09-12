@@ -9,7 +9,7 @@
 export function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	const sanitized = value
 		.toLowerCase()
-		.replace(/[^a-z_]+/g, "_")
+		.replace(/[^a-z0-9_-]+/g, "_")
 		.replace(/_+/g, "_")
 		.replace(/^_+|_+$/g, "");
 
