@@ -1394,12 +1394,36 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
 			const mountedCandidates = this.#resolveMountCandidates(normalized);
-			// Mounted candidates also retain dormant device-only write after a restriction;
-			// deferrable-only transport eligibility still follows the current active set.
-			await this.#applyToolPresentation(normalized, {
-				mounted: mountedCandidates,
-				writeSelected: this.getActiveToolNames().includes("write"),
-			});
+			// A genuine explicit `write` grant clears a stale explicit-downgrade marker:
+			// with no mount candidates it cannot be an injected `xd://` transport.
+			// Pinned or runtime-selected `write` origins stay fail-closed device-only
+			// because a pinned `write` bypasses the transport gate's plan-mode clause
+			// (`pinned !== true` short-circuits first) and would promote straight to
+			// live full write. Plan-mode selections stay guarded too: plan enter/arm
+			// inject `write` through this same API while plan mode is published, so an
+			// unguarded clear fires on the way into a plan. Restores carrying a
+			// mounted partition keep the marker via `mountedCandidates.size > 0`.
+			const previousDormantDeviceOnlyWrite = this.#dormantDeviceOnlyWrite;
+			if (
+				normalized.includes("write") &&
+				mountedCandidates.size === 0 &&
+				!this.#host.planModeEnabled() &&
+				this.#presentationPinnedToolNames?.has("write") !== true &&
+				this.#runtimeSelectedToolNames?.has("write") !== true
+			) {
+				this.#dormantDeviceOnlyWrite = false;
+			}
+			try {
+				// Mounted candidates also retain dormant device-only write after a restriction;
+				// deferrable-only transport eligibility still follows the current active set.
+				await this.#applyToolPresentation(normalized, {
+					mounted: mountedCandidates,
+					writeSelected: this.getActiveToolNames().includes("write"),
+				});
+			} catch (error) {
+				this.#dormantDeviceOnlyWrite = previousDormantDeviceOnlyWrite;
+				throw error;
+			}
 		});
 	}
 
