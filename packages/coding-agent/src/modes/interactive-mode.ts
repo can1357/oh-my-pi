@@ -3400,7 +3400,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		if (this.goalModeEnabled || this.goalModePaused) {
 			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
+				const previousTools =
+					this.session.isDeviceOnlyWrite() === true
+						? this.#goalModePreviousTools.filter(name => name !== "write")
+						: this.#goalModePreviousTools;
+				await this.session.setActiveToolsByName(previousTools);
 			}
 			this.session.setGoalModeState(undefined);
 			this.goalModeEnabled = false;
@@ -3480,7 +3484,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
 			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+				const deviceOnly = this.session.isDeviceOnlyWrite() === true;
+				const previousTools = this.session
+					.getEnabledToolNames()
+					.filter(name => name !== "goal" && !(deviceOnly && name === "write"));
 				this.#goalModePreviousTools = previousTools;
 				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 			}
@@ -3748,7 +3755,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+		const deviceOnly = this.session.isDeviceOnlyWrite() === true;
+		const previousTools = this.session
+			.getEnabledToolNames()
+			.filter(name => name !== "goal" && !(deviceOnly && name === "write"));
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
@@ -4747,7 +4757,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			// calling `goal create`. Record the pre-interview toolset first: the
 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
 			// eventual goal exit restores this set (dropping the goal tool again).
-			const enabledTools = this.session.getEnabledToolNames();
+			const deviceOnly = this.session.isDeviceOnlyWrite() === true;
+			const enabledTools = this.session.getEnabledToolNames().filter(name => !(deviceOnly && name === "write"));
 			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);

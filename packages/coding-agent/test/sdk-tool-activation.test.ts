@@ -3831,4 +3831,95 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			}
 		});
 	});
+
+	it("keeps an MCP-injected transport write device-only when replaying the enabled set", async () => {
+		const tempDir = makeTempDir();
+		const mcpDevice: CustomTool = {
+			name: "mcp__enabled_replay_device",
+			label: "enabled-replay/device",
+			description: "Discoverable MCP device used to exercise enabled-set replay.",
+			parameters: type({}),
+			mcpServerName: "enabled-replay",
+			mcpToolName: "device",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+		});
+
+		try {
+			await session.setActiveToolsByName(["read"]);
+			await session.refreshMCPTools([mcpDevice]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(mcpDevice.name);
+
+			await session.setActiveToolsByName(session.getEnabledToolNames());
+
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(mcpDevice.name);
+			const blockedTarget = path.join(tempDir, "enabled-replay-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("enabled-replay", {
+					path: blockedTarget,
+					content: "blocked",
+				}),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("promotes a downgraded write only when replaying a mount-free explicit selection", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "goal_replay_device",
+			label: "Goal Replay Device",
+			description: "Discoverable device used to exercise goal-style enabled-set replay.",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			await session.setActiveToolPresentation(["read", customAmbient.name], [customAmbient.name], {
+				fullWrite: false,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.setActiveToolsByName(session.getEnabledToolNames());
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(customAmbient.name);
+			const blockedTarget = path.join(tempDir, "goal-mounted-replay-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("goal-mounted-replay", {
+					path: blockedTarget,
+					content: "blocked",
+				}),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(customAmbient.name);
+			const promotedTarget = path.join(tempDir, "goal-mount-free-promoted.txt");
+			await session.getToolByName("write")!.execute("goal-mount-free-reselect", {
+				path: promotedTarget,
+				content: "promoted",
+			});
+			expect(await Bun.file(promotedTarget).text()).toBe("promoted");
+		} finally {
+			await session.dispose();
+		}
+	});
 });

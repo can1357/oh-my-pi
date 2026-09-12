@@ -1191,7 +1191,10 @@ export class SessionTools {
 					this.#dormantDeviceOnlyWrite = false;
 				}
 				if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite) {
-					this.#transportInjectedWrite = true;
+					// Direct reconciliations synthesize transport write and must poison
+					// enabled-set replay. A presentation restriction with a parked full-write
+					// grant remains a genuine explicit selection that can later be restored.
+					this.#transportInjectedWrite = options === undefined || !this.#dormantFullWrite;
 					this.#setDeviceOnlyWrite?.(true);
 				} else if (deactivateDeviceOnlyWrite) {
 					this.#setDeviceOnlyWrite?.(false);
@@ -1436,6 +1439,9 @@ export class SessionTools {
 			// no device-only state is live (a wound-down injection leaves no tainted
 			// state behind), or the selection carries mounts and write was never
 			// pinned/runtime-selected.
+			// P1: a live transport-provenance injection (for example MCP add-server
+			// or goal replay) must survive mounted enabled-set replay. Only a
+			// mount-free selection may promote it to unrestricted write.
 			// Mounted restores on pin-free origins with no downgrade clear
 			// (restriction-to-mounted-set restore, omit-and-re-add, upgrade-before-restriction).
 			// The same restore on a pinned origin with write removed stays blocked
@@ -1448,6 +1454,7 @@ export class SessionTools {
 			if (
 				normalized.includes("write") &&
 				!this.#host.planModeEnabled() &&
+				!(this.#transportInjectedWrite && this.#isDeviceOnlyWrite?.() === true && mountedCandidates.size > 0) &&
 				(this.#dormantDeviceOnlyWrite !== true ||
 					(mountedCandidates.size === 0 &&
 						this.#presentationPinnedToolNames?.has("write") !== true &&
