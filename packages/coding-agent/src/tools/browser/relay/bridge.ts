@@ -3348,6 +3348,12 @@ export class RelayBridge {
 					params: replayParams,
 				})) as Record<string, unknown> | undefined;
 			} catch (err) {
+				// The marker is suppression state for this one replay attempt. If the
+				// registration never becomes journaled, retaining it would hide an
+				// unrelated page exception that happens to carry the same value. A
+				// transport interruption already forces a fresh debugger root below, so
+				// the possibly accepted registration cannot survive recovery either.
+				if (applicationMarker !== undefined) tab.preloadApplicationMarkers.delete(applicationMarker);
 				// Chrome may have accepted this additive registration before the
 				// socket dropped and the result never reached us. An ordinary
 				// `relay extension disconnected` is just as ambiguous as an
