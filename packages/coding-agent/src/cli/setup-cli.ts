@@ -16,7 +16,7 @@ import { resolveSttCloudCredential } from "../stt/stt-controller";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
-import { selectSetupModel } from "./setup-model-picker";
+import * as setupModelPicker from "./setup-model-picker";
 
 export type SetupComponent = "python" | "speech";
 
@@ -177,9 +177,9 @@ export function buildSpeechComponents(hasCloudCredential: Promise<boolean>): Spe
 				return (await isSttModelCached(key)) ? key : `${key} — local fallback not downloaded`;
 			},
 			pick: async () => {
-				const cloud = settings.get("stt.backend") === "cloud";
+				const cloud = settings.get("stt.backend") === "cloud" && (await hasCloudCredential);
 				const options = cloud ? CLOUD_STT_MODEL_OPTIONS : STT_MODEL_OPTIONS;
-				const chosen = await selectSetupModel(
+				const chosen = await setupModelPicker.selectSetupModel(
 					"Speech-to-Text model",
 					[...options],
 					cloud ? resolveCloudSttModel(settings.get("stt.modelName")) : settings.get("stt.modelName"),
@@ -206,7 +206,7 @@ export function buildSpeechComponents(hasCloudCredential: Promise<boolean>): Spe
 				return (await isTtsModelCached(key)) ? key : `${key} — model/runtime not installed`;
 			},
 			pick: async () => {
-				const chosen = await selectSetupModel(
+				const chosen = await setupModelPicker.selectSetupModel(
 					"Text-to-Speech model",
 					[...TTS_LOCAL_MODEL_OPTIONS],
 					settings.get("tts.localModel"),

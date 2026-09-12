@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { buildSpeechComponents, checkPythonSetup } from "../src/cli/setup-cli";
 import { Settings, settings } from "../src/config/settings";
+import * as setupModelPicker from "../src/cli/setup-model-picker";
 import * as downloader from "../src/stt/downloader";
 import {
 	beginSettingsTest,
@@ -182,6 +183,20 @@ describe("omp setup speech", () => {
 		expect(await stt.status()).toBe("fast — local fallback not downloaded");
 		await stt.ensure(() => {});
 		expect(download).toHaveBeenCalledWith("fast", expect.any(Function));
+	});
+
+	it("offers local fallback models when cloud credentials are unavailable", async () => {
+		const picker = vi.spyOn(setupModelPicker, "selectSetupModel").mockResolvedValue("turbo");
+		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+
+		await stt.pick?.();
+
+		expect(picker.mock.calls[0]?.[1]).toEqual(
+			expect.arrayContaining([
+				{ value: "turbo", label: "Turbo (Whisper large-v3)", description: expect.any(String) },
+			]),
+		);
+		expect(settings.get("stt.modelName")).toBe("turbo");
 	});
 });
 
