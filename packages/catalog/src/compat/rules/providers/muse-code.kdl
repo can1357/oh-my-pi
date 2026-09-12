@@ -4,6 +4,9 @@ provider "muse-code" {
 	include-encrypted-reasoning #true
 	supports-reasoning-effort #true
 	clamp-output-to-model-max #true
+	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
+	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
+	supports-tool-choice #false
 	// Subscription tier bills per request; the compact edit prompt cuts the
 	// recurring tool-schema bytes. Verified 2026-09-05 against api.meta.ai/v1:
 	// `custom` tools are rejected with 400 "`custom` tools are not supported
