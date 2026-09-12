@@ -2302,6 +2302,64 @@ describe("openai-codex streaming", () => {
 		expect(result.errorMessage).not.toContain("Body already used");
 	});
 
+	it("does not retry Codex usage-limit 429s with short hints", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(
+					JSON.stringify({
+						error: {
+							code: "usage_limit_reached",
+							message: "You have hit your ChatGPT usage limit",
+						},
+					}),
+					{
+						status: 429,
+						headers: {
+							"content-type": "application/json",
+							"retry-after": "0.001",
+						},
+					},
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			fetch: fetchMock as FetchImpl,
+		}).result();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect((result.errorMessage ?? "").toLowerCase()).toContain("usage limit");
+	});
+
 	it.each([
 		[
 			"model_error",

@@ -3,7 +3,14 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
-import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	CREDIBLE_RATE_LIMIT_HINT_MS,
+	extractRetryHint,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -631,6 +638,12 @@ const OPENAI_COMPLETIONS_ERROR_STATUS_BY_TYPE: Readonly<Record<string, number>> 
 	REQUEST_TIMEOUT: 408,
 };
 
+const kOpenAICompletionsInBandRateLimit = Symbol("openAICompletionsInBandRateLimit");
+
+type OpenAICompletionsInBandRateLimitTagged = {
+	[kOpenAICompletionsInBandRateLimit]?: true;
+};
+
 function parseOpenAICompletionsErrorStatus(value: unknown): number | undefined {
 	const status =
 		typeof value === "number"
@@ -663,7 +676,13 @@ function createOpenAICompletionsStreamError(chunk: unknown, provider: string): E
 	if (status === undefined) {
 		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
 	}
-	return new AIError.ProviderHttpError(`${status} ${detail}`, status, { code: parsed.code });
+	const streamError = new AIError.ProviderHttpError(`${status} ${detail}`, status, { code: parsed.code });
+	if (status === 429) {
+		(streamError as AIError.ProviderHttpError & OpenAICompletionsInBandRateLimitTagged)[
+			kOpenAICompletionsInBandRateLimit
+		] = true;
+	}
+	return streamError;
 }
 
 const streamOpenAICompletionsOnce = (
@@ -1503,6 +1522,14 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (
+				(error as OpenAICompletionsInBandRateLimitTagged | null | undefined)?.[
+					kOpenAICompletionsInBandRateLimit
+				] === true
+			) {
+				(output as AssistantMessage & OpenAICompletionsInBandRateLimitTagged)[kOpenAICompletionsInBandRateLimit] =
+					true;
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -1520,12 +1547,37 @@ const streamOpenAICompletionsOnce = (
  * Retries benign empty completions and transient provider failures only before
  * assistant output commits the attempt.
  */
-export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamOpenAICompletionsOnce, {
+export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) => {
+	const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
+	const rateLimitHintCapMs =
+		maxRetryDelayMs > 0 ? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS) : CREDIBLE_RATE_LIMIT_HINT_MS;
+	return withReplaySafeStreamRetry(model, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
+		resolveProviderErrorRetry: message => {
+			if (
+				(message as AssistantMessage & OpenAICompletionsInBandRateLimitTagged)[
+					kOpenAICompletionsInBandRateLimit
+				] !== true
+			) {
+				return { _tag: "default" };
+			}
+			if (message.errorStatus !== 429 || message.errorMessage === undefined) {
+				return { _tag: "deny" };
+			}
+			const retryHintMs = extractRetryHint(undefined, message.errorMessage);
+			if (
+				AIError.isUsageLimitOutcome(message.errorStatus, message.errorMessage) ||
+				retryHintMs === undefined ||
+				retryHintMs > rateLimitHintCapMs
+			) {
+				return { _tag: "deny" };
+			}
+			return { _tag: "retry", delayMs: retryHintMs };
+		},
 	});
+};
 
 function createRequestSetup(
 	model: Model<"openai-completions">,

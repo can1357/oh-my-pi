@@ -249,6 +249,19 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
 	/**
+	 * Opt into the bounded 429 policy: at most {@link MAX_RATE_LIMIT_ATTEMPTS}
+	 * same-route attempts, and only while the response promises recovery within
+	 * {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+	 *
+	 * Enable it for LLM provider transports, whose caller (session turn
+	 * recovery) can rotate credentials or fall back to another model — recovery
+	 * a same-route replay can never achieve, and which the replay only delays.
+	 * Leave it off (the default) for generic helpers — embeddings, local-model
+	 * probes, catalog listings, web scrapers — where in-transport backoff is
+	 * the only recovery there is.
+	 */
+	rateLimitBudget?: boolean;
+	/**
 	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
 	 * disables Bun's native ~300s pre-response timeout (callers that own a
 	 * configurable first-event/idle watchdog or an external `AbortSignal`
@@ -262,11 +275,37 @@ const DEFAULT_MAX_DELAY_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 
 /**
+ * Same-route attempts (initial + retries) a 429 may spend.
+ *
+ * A rate limit is a property of the route — endpoint plus credential — not a
+ * glitch in one request: replaying the same request cannot clear it. Every
+ * extra attempt delays the layers that *can* recover (credential rotation,
+ * model fallback) and, under parallel subagents, re-applies the very load that
+ * tripped the limit. One retry is kept for the single case where replaying is
+ * justified: the provider itself promised the window clears within
+ * {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+ */
+export const MAX_RATE_LIMIT_ATTEMPTS = 2;
+
+/**
+ * Longest provider-supplied recovery hint still worth waiting out on the same
+ * route. A longer hint (or no hint at all) is not a credible short recovery
+ * signal, so the 429 surfaces immediately and session recovery decides.
+ */
+export const CREDIBLE_RATE_LIMIT_HINT_MS = 5_000;
+
+/**
  * Fetch with bounded retries and sensible defaults. Retries on any
  * `isRetryableStatus` (5xx, 408, 429) and on transient network errors. Server
  * `Retry-After`/quota hints are honoured up to `maxDelayMs`; a hint that exceeds
  * the cap returns the current response so the caller can fail fast. Aborts on
  * `init.signal` propagate as `"Request was aborted"`.
+ *
+ * Callers that pass `rateLimitBudget` budget 429s separately: at most
+ * {@link MAX_RATE_LIMIT_ATTEMPTS} same-route attempts, and only while the
+ * response promises recovery within {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+ * Capacity (5xx) and timeout (408) failures always keep the full `maxAttempts`
+ * budget, as does a 429 when the option is off (the default).
  *
  * The caller is responsible for inspecting `!response.ok` once the call returns.
  */
@@ -280,11 +319,13 @@ export async function fetchWithRetry(
 		defaultDelayMs,
 		prepareInit,
 		shouldRetryResponse,
+		rateLimitBudget = false,
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
+	let rateLimitAttempts = 0;
 
 	for (let attempt = 0; ; attempt++) {
 		if (signal?.aborted) throw new Error("Request was aborted");
@@ -314,13 +355,21 @@ export async function fetchWithRetry(
 		}
 
 		if (!isRetryableStatus(response.status)) return response;
+		const rateLimited = rateLimitBudget && response.status === 429;
+		if (rateLimited) rateLimitAttempts++;
 		if (attempt + 1 >= maxAttempts) return response;
+		if (rateLimited && rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS) return response;
 
 		const retryBody = await response.clone().text();
 		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
 
 		const hint = extractRetryHint(response, retryBody);
 		if (hint !== undefined && hint > maxDelayMs) return response;
+		// A 429 is only replayed on the provider's own short-recovery promise;
+		// blind backoff here just hides the limit from session recovery.
+		if (rateLimited && (hint === undefined || hint > Math.min(maxDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS))) {
+			return response;
+		}
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
 		await waitForRetry(delayMs, signal);

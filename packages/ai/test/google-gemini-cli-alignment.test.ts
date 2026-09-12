@@ -56,6 +56,25 @@ const validationRequiredBody = JSON.stringify({
 	},
 });
 
+const quotaExhaustedBody = JSON.stringify({
+	error: {
+		code: 429,
+		message: "Resource exhausted",
+		status: "RESOURCE_EXHAUSTED",
+		details: [
+			{
+				"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+				reason: "QUOTA_EXHAUSTED",
+				domain: "cloudcode-pa.googleapis.com",
+			},
+			{
+				"@type": "type.googleapis.com/google.rpc.RetryInfo",
+				retryDelay: "0.001s",
+			},
+		],
+	},
+});
+
 describe("Google Gemini CLI alignment", () => {
 	it("encodes enriched OAuth JSON while preserving token + projectId", async () => {
 		const expiresAt = Date.now() + 60 * 60 * 1000;
@@ -571,6 +590,23 @@ describe("Google Gemini CLI alignment", () => {
 			expect(fetchCalls).toBe(1);
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain("Cloud Code Assist API error (503)");
+		});
+
+		it("does not retry account quota responses that carry a short retry hint", async () => {
+			let fetchCalls = 0;
+			const fetchMock: FetchImpl = async () => {
+				fetchCalls += 1;
+				return new Response(quotaExhaustedBody, { status: 429 });
+			};
+			const model = createModel("google-gemini-cli");
+			const stream = streamGoogleGeminiCli(model, createContext(), {
+				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+				fetch: fetchMock,
+			});
+			const result = await stream.result();
+			expect(fetchCalls).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(429);
 		});
 	});
 

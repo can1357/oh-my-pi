@@ -555,6 +555,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					body,
 					signal: watchdog.signal,
 					fetch: options.fetch,
+					rateLimitBudget: true,
 					timeout: false,
 				});
 			} finally {
