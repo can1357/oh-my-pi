@@ -15,6 +15,7 @@ import {
 	truncateRecallQuery,
 } from "../hindsight/content";
 import { extractMessages } from "../hindsight/transcript";
+import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { MnemopiBackendConfig, MnemopiScoping } from "./config";
 import { mnemopiEmbedClient } from "./embed-client";
@@ -242,6 +243,7 @@ export class MnemopiSessionState {
 	lastRecallSnippet?: string;
 	unsubscribe?: () => void;
 	#retentionCursorLoaded = false;
+	#recallGeneration = 0;
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -257,12 +259,14 @@ export class MnemopiSessionState {
 
 	setSessionId(sessionId: string): void {
 		if (this.sessionId === sessionId) return;
+		this.#recallGeneration++;
 		this.sessionId = sessionId;
 		this.lastRetainedTurn = 0;
 		this.#retentionCursorLoaded = false;
 	}
 
 	resetConversationTracking(): void {
+		this.#recallGeneration++;
 		this.lastRetainedTurn = 0;
 		this.#retentionCursorLoaded = false;
 		this.hasRecalledForFirstTurn = false;
@@ -469,19 +473,25 @@ export class MnemopiSessionState {
 		return formatRecallBlock(results);
 	}
 
-	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
+	async beforeAgentStartPrompt(promptText: string): Promise<MemoryPromptPreparation | undefined> {
 		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
+		const generation = ++this.#recallGeneration;
 		const history = extractMessages(this.session.sessionManager);
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
 		const context = await this.recallForContext(truncated);
-		this.hasRecalledForFirstTurn = true;
-		if (!context) return undefined;
-		this.lastRecallSnippet = context;
-		return context;
+		return {
+			context,
+			commit: () => {
+				if (this.#recallGeneration !== generation) return false;
+				this.hasRecalledForFirstTurn = true;
+				if (context) this.lastRecallSnippet = context;
+				return true;
+			},
+		};
 	}
 
 	async recallForCompaction(messages: AgentMessage[]): Promise<string | undefined> {
@@ -598,6 +608,7 @@ export class MnemopiSessionState {
 
 	async maybeRecallOnAgentStart(): Promise<void> {
 		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return;
+		const generation = this.#recallGeneration;
 		const messages = extractMessages(this.session.sessionManager);
 		const lastUser = messages.findLast(message => message.role === "user");
 		if (!lastUser) return;
@@ -613,6 +624,9 @@ export class MnemopiSessionState {
 			});
 			return;
 		}
+		// A claimed user turn or a transcript reset supersedes this background
+		// lookup. Do not consume its first recall or overwrite its prompt context.
+		if (this.#recallGeneration !== generation) return;
 		this.hasRecalledForFirstTurn = true;
 		if (!context) return;
 		this.lastRecallSnippet = context;
@@ -734,6 +748,7 @@ export class MnemopiSessionState {
 	}
 
 	async dispose(options: { consolidate?: boolean; timeoutMs?: number } = {}): Promise<void> {
+		this.#recallGeneration++;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		if (this.aliasOf) return;

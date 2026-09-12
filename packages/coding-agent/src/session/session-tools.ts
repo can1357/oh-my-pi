@@ -99,8 +99,8 @@ interface SessionToolsOptions {
 
 interface SystemPromptPreparation {
 	systemPrompt: string[];
-	/** Publish staged base-prompt state only at the owning turn's validated commit boundary. */
-	commit?(): void;
+	/** Publish staged state at validated delivery; false declines the prepared turn without mutation. */
+	commit?(): boolean;
 }
 
 export interface MountedMCPToolRouteSource {
@@ -1473,7 +1473,9 @@ export class SessionTools {
 
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
-		return this.runToolRegistryMutation(async () => (await this.#prepareBaseSystemPrompt())?.commit?.());
+		return this.runToolRegistryMutation(async () => {
+			(await this.#prepareBaseSystemPrompt())?.commit?.();
+		});
 	}
 
 	async #prepareBaseSystemPrompt(isCurrent?: () => boolean): Promise<SystemPromptPreparation | undefined> {
@@ -1490,9 +1492,9 @@ export class SessionTools {
 		return {
 			systemPrompt: built.systemPrompt,
 			commit: () => {
-				if (this.#host.isDisposed() || isCurrent?.() === false) return;
+				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
 				// A handler may have rebuilt policy while this preparation was awaiting its final commit.
-				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return;
+				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
 				this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
@@ -1513,6 +1515,7 @@ export class SessionTools {
 					promptTools,
 					directToolNames,
 				);
+				return true;
 			},
 		};
 	}
@@ -1526,10 +1529,16 @@ export class SessionTools {
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
 		try {
-			const injected = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!isCurrent() || !injected) return { systemPrompt: this.#baseSystemPrompt };
+			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
+			if (!isCurrent() || !memory) return { systemPrompt: this.#baseSystemPrompt };
+			const injected = memory.context;
+			if (!injected) {
+				return {
+					systemPrompt: this.#baseSystemPrompt,
+					commit: () => isCurrent() && memory.commit(),
+				};
+			}
 
-			const previousBaseSystemPrompt = this.#baseSystemPrompt;
 			let refreshed: SystemPromptPreparation | undefined;
 			try {
 				refreshed = await this.runToolRegistryMutation(() => this.#prepareBaseSystemPrompt(isCurrent));
@@ -1541,23 +1550,20 @@ export class SessionTools {
 			}
 			if (!isCurrent()) return { systemPrompt: this.#baseSystemPrompt };
 
-			if (
-				refreshed &&
-				(refreshed.systemPrompt.length !== previousBaseSystemPrompt.length ||
-					refreshed.systemPrompt.some((part, index) => part !== previousBaseSystemPrompt[index]))
-			) {
-				return refreshed;
-			}
-
-			const stablePrompt = [...previousBaseSystemPrompt, injected];
+			const preparedBase = refreshed?.systemPrompt ?? this.#baseSystemPrompt;
+			const stablePrompt = [...preparedBase, injected];
 			return {
 				systemPrompt: stablePrompt,
 				commit: () => {
-					if (!isCurrent() || this.#baseSystemPrompt !== previousBaseSystemPrompt) return;
+					if (!isCurrent() || !memory.commit()) return false;
 					refreshed?.commit?.();
-					this.#host.captureMemoryPromotionSnapshot(previousBaseSystemPrompt);
-					this.#baseSystemPrompt = stablePrompt;
-					this.#applyAgentSystemPrompt(stablePrompt);
+					// A handler may have refreshed tools or policy. Promote the recall onto
+					// that winning base, never replace it with the preparation's snapshot.
+					const currentBase = this.#baseSystemPrompt;
+					this.#host.captureMemoryPromotionSnapshot(currentBase);
+					this.#baseSystemPrompt = currentBase === preparedBase ? stablePrompt : [...currentBase, injected];
+					this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+					return true;
 				},
 			};
 		} catch (err) {

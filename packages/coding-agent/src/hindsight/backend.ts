@@ -10,7 +10,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { onHindsightScopeChanged, type Settings } from "../config/settings";
-import type { MemoryBackend, MemoryBackendStartOptions } from "../memory-backend/types";
+import type { MemoryBackend, MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, computeBankScope } from "./bank";
 import { createHindsightClient } from "./client";
@@ -101,11 +101,19 @@ export const hindsightBackend: MemoryBackend = {
 		return parts.join("\n\n");
 	},
 
-	async beforeAgentStartPrompt(session: AgentSession, promptText: string): Promise<string | undefined> {
+	async beforeAgentStartPrompt(
+		session: AgentSession,
+		promptText: string,
+	): Promise<MemoryPromptPreparation | undefined> {
 		const state = session.getHindsightSessionState();
 		if (!state) return undefined;
 
-		return await state.beforeAgentStartPrompt(promptText);
+		const preparation = await state.beforeAgentStartPrompt(promptText);
+		if (!preparation) return undefined;
+		return {
+			context: preparation.context,
+			commit: () => session.getHindsightSessionState() === state && preparation.commit(),
+		};
 	},
 
 	async clear(_agentDir, _cwd, session): Promise<void> {

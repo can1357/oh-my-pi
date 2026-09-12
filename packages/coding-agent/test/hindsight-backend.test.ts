@@ -329,10 +329,12 @@ describe("hindsightBackend first-turn injection", () => {
 			session as never,
 			"What do I know about this user?",
 		);
-		expect(block).toContain("<memories>");
-		expect(block).toContain("Can prefers concise communication");
+		expect(block?.context).toContain("<memories>");
+		expect(block?.context).toContain("Can prefers concise communication");
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
+		block?.commit();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
-		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block);
+		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block?.context);
 	});
 
 	it("does not let agent_start preempt first-turn recall injection", async () => {
@@ -367,7 +369,8 @@ describe("hindsightBackend first-turn injection", () => {
 
 		// beforeAgentStartPrompt is the sole, awaited injection path.
 		const block = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "What is the canary phrase?");
-		expect(block).toContain("PURPLE-OTTER-9931");
+		expect(block?.context).toContain("PURPLE-OTTER-9931");
+		block?.commit();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
 	});
 

@@ -15,6 +15,7 @@ import type {
 	MemoryBackendSearchItem,
 	MemoryBackendStartOptions,
 	MemoryBackendStatus,
+	MemoryPromptPreparation,
 } from "../memory-backend/types";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
@@ -145,9 +146,23 @@ export const mnemopiBackend: MemoryBackend = {
 		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
 	},
 
-	async beforeAgentStartPrompt(session, promptText): Promise<string | undefined> {
+	async beforeAgentStartPrompt(session, promptText): Promise<MemoryPromptPreparation | undefined> {
 		const state = getMnemopiSessionState(session);
-		return await state?.beforeAgentStartPrompt(promptText);
+		const preparation = await state?.beforeAgentStartPrompt(promptText);
+		if (!preparation) return undefined;
+		if (preparation.context) {
+			// Match the canonical memory block's budget while the recall is staged
+			// separately from its static instructions. Commit still caches the full snippet.
+			const rendered = [STATIC_INSTRUCTIONS, preparation.context].join("\n\n").trim();
+			preparation.context =
+				truncateApproxTokens(rendered, session.settings.get("mnemopi.injectionTokenLimit"))
+					.slice(STATIC_INSTRUCTIONS.length)
+					.trim() || undefined;
+		}
+		return {
+			context: preparation.context,
+			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
+		};
 	},
 
 	async clear(agentDir, _cwd, session): Promise<void> {

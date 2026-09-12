@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, ensureBankExists } from "./bank";
 import type { HindsightApi, MemoryItemInput } from "./client";
@@ -226,6 +227,7 @@ export class HindsightSessionState {
 	#lastRetainedPrefixKey: string = "";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
+	#recallGeneration = 0;
 	/** Cached `<mental_models>` block injected into developer instructions. */
 	mentalModelsSnippet?: string;
 	/** When the cached snippet was last refreshed; gates the agent_end re-list. */
@@ -267,6 +269,7 @@ export class HindsightSessionState {
 	}
 
 	setSessionId(sessionId: string): void {
+		if (this.sessionId !== sessionId) this.#recallGeneration++;
 		this.sessionId = sessionId;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
@@ -274,6 +277,7 @@ export class HindsightSessionState {
 	}
 
 	resetConversationTracking(): void {
+		this.#recallGeneration++;
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
@@ -422,7 +426,7 @@ export class HindsightSessionState {
 		}
 	}
 
-	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
+	async beforeAgentStartPrompt(promptText: string): Promise<MemoryPromptPreparation | undefined> {
 		if (this.config.mentalModelsEnabled && this.mentalModelsLoadPromise && this.mentalModelsLoadedAt === undefined) {
 			await Promise.race([this.mentalModelsLoadPromise, Bun.sleep(MENTAL_MODEL_FIRST_TURN_DEADLINE_MS)]);
 		}
@@ -431,6 +435,7 @@ export class HindsightSessionState {
 
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
+		const generation = ++this.#recallGeneration;
 
 		const history = extractMessages(this.session.sessionManager);
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
@@ -439,11 +444,15 @@ export class HindsightSessionState {
 		const { context, ok } = await this.recallForContext(truncated);
 		if (!ok) return undefined;
 
-		this.hasRecalledForFirstTurn = true;
-		if (!context) return undefined;
-
-		this.lastRecallSnippet = context;
-		return context;
+		return {
+			context: context ?? undefined,
+			commit: () => {
+				if (this.#recallGeneration !== generation) return false;
+				this.hasRecalledForFirstTurn = true;
+				if (context) this.lastRecallSnippet = context;
+				return true;
+			},
+		};
 	}
 
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
@@ -524,6 +533,7 @@ export class HindsightSessionState {
 	}
 
 	dispose(): void {
+		this.#recallGeneration++;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.unsubscribeScope?.();

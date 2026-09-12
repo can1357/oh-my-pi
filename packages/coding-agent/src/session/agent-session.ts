@@ -6474,12 +6474,12 @@ export class AgentSession {
 			baseXdevCatalogDelivered: result?.systemPrompt === undefined,
 			commit: () => {
 				if (!isCurrent()) return undefined;
-				basePreparation.commit?.();
+				if (basePreparation.commit?.() === false) return undefined;
 				if (result?.systemPrompt !== undefined) {
 					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 				} else {
 					this.#tools.clearTurnSystemPromptOverride();
-					this.agent.setSystemPrompt(basePrompt);
+					this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
 				}
 				return messages;
 			},

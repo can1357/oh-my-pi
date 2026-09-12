@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { setImmediate } from "node:timers/promises";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -9,11 +10,25 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { BeforeAgentStartEvent, Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
+import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
+import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
+import { loadMnemopiConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import {
+	getMnemopiSessionState,
+	loadMnemopi,
+	loadMnemopiCore,
+	MnemopiSessionState,
+	setMnemopiSessionState,
+} from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const BASE = ["base identity", "base tools"];
 
@@ -38,15 +53,18 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 
 describe("queued user delivery policy", () => {
 	let session: AgentSession;
+	const tempDirs: TempDir[] = [];
 
 	afterEach(async () => {
 		await session?.dispose();
+		for (const dir of tempDirs.splice(0)) dir.removeSync();
 		vi.restoreAllMocks();
 	});
 
 	function setup(
 		responses: MockResponseSource = Array.from({ length: 8 }, () => ({ content: ["done"] })),
-		rebuildSystemPrompt?: () => Promise<{ systemPrompt: string[] }>,
+		rebuildSystemPrompt?: AgentSessionConfig["rebuildSystemPrompt"],
+		options: { settings?: Settings; tools?: AgentTool[]; policy?: boolean } = {},
 	) {
 		const mock = createMockModel({ responses });
 		const requests: Context[] = [];
@@ -61,6 +79,7 @@ describe("queued user delivery policy", () => {
 				extension("policy", async event => {
 					events.push(structuredClone(event));
 					await beforePrepare?.();
+					if (options.policy === false) return undefined;
 					const mode = manager
 						.getBranch()
 						.findLast(entry => entry.type === "custom" && entry.customType === "policy-mode");
@@ -71,7 +90,9 @@ describe("queued user delivery policy", () => {
 						message: { customType: "prepared-context", content: `context:${event.prompt}`, display: false },
 					};
 				}),
-				extension("independent", async event => ({ systemPrompt: [...event.systemPrompt, "independent policy"] })),
+				extension("independent", async event =>
+					options.policy === false ? undefined : { systemPrompt: [...event.systemPrompt, "independent policy"] },
+				),
 			],
 			new ExtensionRuntime(),
 			manager.getCwd(),
@@ -91,13 +112,14 @@ describe("queued user delivery policy", () => {
 			maxTokens: 2048,
 		});
 		const agent = new Agent({
-			initialState: { model, systemPrompt: BASE, tools: [], messages: [] },
+			initialState: { model, systemPrompt: BASE, tools: options.tools ?? [], messages: [] },
 			getApiKey: () => "test-key",
 			convertToLlm,
 			streamFn: (model, context, options) => {
 				requests.push({
 					systemPrompt: [...(context.systemPrompt ?? [])],
 					messages: structuredClone(context.messages),
+					tools: context.tools ? [...context.tools] : undefined,
 				});
 				return mock.stream(model, context, options);
 			},
@@ -107,7 +129,9 @@ describe("queued user delivery policy", () => {
 			sessionManager: manager,
 			modelRegistry: registry,
 			extensionRunner: runner,
-			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			settings: options.settings ?? Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			toolRegistry: new Map(options.tools?.map(tool => [tool.name, tool])),
+			builtInToolNames: options.tools?.map(tool => tool.name),
 			rebuildSystemPrompt,
 		});
 		session.subscribe(event => {
@@ -124,6 +148,365 @@ describe("queued user delivery policy", () => {
 			},
 		};
 	}
+
+	async function setupMemory(
+		backendId: "mnemopi" | "hindsight",
+		recall: (query: string) => Promise<string | undefined>,
+		policy = false,
+	) {
+		const dir = TempDir.createSync("@pi-queued-memory-");
+		tempDirs.push(dir);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"tools.xdev": false,
+			"memory.backend": backendId,
+			"mnemopi.dbPath": dir.join("memory.db"),
+			"mnemopi.scoping": "global",
+			"mnemopi.noEmbeddings": true,
+			"mnemopi.llmMode": "none",
+			"mnemopi.autoRetain": false,
+			"mnemopi.autoRecall": true,
+			"hindsight.apiUrl": "http://unused.invalid",
+			"hindsight.autoRetain": false,
+			"hindsight.autoRecall": true,
+			"hindsight.mentalModelsEnabled": false,
+		});
+		const backend = await memoryBackend.resolveMemoryBackend(settings);
+		const tools: AgentTool[] = ["old_tool", "new_tool"].map(name => ({
+			name,
+			label: name,
+			description: name,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+		}));
+		const fixture = setup(
+			undefined,
+			async toolNames => ({
+				systemPrompt: [
+					...BASE,
+					`tools:${toolNames.join(",")}`,
+					(await backend.buildDeveloperInstructions(dir.path(), settings, session)) ?? "",
+				],
+			}),
+			{ settings, tools, policy },
+		);
+		if (backendId === "mnemopi") {
+			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
+			const state = new MnemopiSessionState({
+				sessionId: session.sessionId,
+				session,
+				config: loadMnemopiConfig(settings, dir.path()),
+			});
+			setMnemopiSessionState(session, state);
+			state.attachSessionListeners();
+			vi.spyOn(state.memory, "recallEnhanced").mockImplementation(async query => {
+				const content = await recall(query);
+				return content ? [{ id: "recalled", content, source: null, timestamp: null, score: 1 }] : [];
+			});
+		} else {
+			const client = new HindsightApi({ baseUrl: "http://unused.invalid" });
+			const state = new HindsightSessionState({
+				sessionId: session.sessionId,
+				session,
+				config: loadHindsightConfig(settings, {}),
+				client,
+				bankId: "test-bank",
+				banksSet: new Set(["test-bank"]),
+			});
+			session.setHindsightSessionState(state);
+			vi.spyOn(client, "recall").mockImplementation(async (_bank, query) => {
+				const text = await recall(query);
+				return { results: text ? [{ id: "recalled", text }] : [] };
+			});
+		}
+		await session.setActiveToolsByName(["old_tool"]);
+		return fixture;
+	}
+
+	it.each(["mnemopi", "hindsight"] as const)(
+		"retries cancelled real %s recall and keeps one committed copy on later turns",
+		async backendId => {
+			let recalls = 0;
+			const { requests, pausePreparation } = await setupMemory(backendId, async () => `recall-${++recalls}`);
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			pausePreparation(async () => {
+				started.resolve();
+				await release.promise;
+			});
+			await session.steer("remember the project");
+			await started.promise;
+			const abort = session.abort();
+			release.resolve();
+			await abort;
+			expect(requests).toEqual([]);
+			expect(session.systemPrompt.join("\n")).not.toContain("recall-1");
+
+			pausePreparation(async () => {});
+			await session.prompt("resume");
+			await session.waitForIdle();
+			expect(recalls).toBe(2);
+			expect(requests[0].systemPrompt?.join("\n")).toContain("recall-2");
+			expect(requests[0].systemPrompt?.join("\n")).not.toContain("recall-1");
+			await session.prompt("continue");
+			expect(recalls).toBe(2);
+			expect(
+				requests
+					.at(-1)
+					?.systemPrompt?.join("\n")
+					.match(/recall-2/g),
+			).toHaveLength(1);
+			await session.refreshBaseSystemPrompt();
+			await session.prompt("after canonical rebuild");
+			expect(recalls).toBe(2);
+			expect(
+				requests
+					.at(-1)
+					?.systemPrompt?.join("\n")
+					.match(/recall-2/g),
+			).toHaveLength(1);
+		},
+	);
+
+	it.each(["mnemopi", "hindsight"] as const)(
+		"consumes an empty successful real %s recall only when delivery commits",
+		async backendId => {
+			let recalls = 0;
+			const { requests, pausePreparation } = await setupMemory(backendId, async () => {
+				recalls++;
+				return undefined;
+			});
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			pausePreparation(async () => {
+				started.resolve();
+				await release.promise;
+			});
+			await session.steer("empty recall");
+			await started.promise;
+			const abort = session.abort();
+			release.resolve();
+			await abort;
+			expect(requests).toEqual([]);
+			pausePreparation(async () => {});
+			await session.prompt("resume empty recall");
+			await session.waitForIdle();
+			expect(recalls).toBe(2);
+			await session.prompt("already recalled");
+			expect(recalls).toBe(2);
+		},
+	);
+
+	it.each(["mnemopi", "hindsight"] as const)(
+		"retries failed real %s recall on the next committed turn",
+		async backendId => {
+			let recalls = 0;
+			const { requests } = await setupMemory(backendId, async () => {
+				if (++recalls === 1) throw new Error("recall unavailable");
+				return "recovered recall";
+			});
+			await session.prompt("lookup unavailable");
+			expect(requests[0].systemPrompt?.join("\n")).not.toContain("recovered recall");
+			await session.prompt("lookup recovered");
+			expect(requests[1].systemPrompt?.join("\n")).toContain("recovered recall");
+			await session.prompt("already recalled");
+			expect(recalls).toBe(2);
+		},
+	);
+
+	it.each(["mnemopi", "hindsight"] as const)(
+		"delivers real %s recall with the winning tool policy in the same request",
+		async backendId => {
+			let recalls = 0;
+			const { requests, pausePreparation } = await setupMemory(backendId, async () => {
+				recalls++;
+				return "staged memory";
+			});
+			pausePreparation(async () => {
+				await session.setActiveToolsByName(["new_tool"]);
+			});
+			await session.steer("refresh tools during policy preparation");
+			await session.waitForIdle();
+			expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
+			const prompt = requests[0].systemPrompt?.join("\n");
+			expect(prompt).toContain("tools:new_tool");
+			expect(prompt).not.toContain("tools:old_tool");
+			expect(prompt?.match(/staged memory/g)).toHaveLength(1);
+			await session.prompt("next turn");
+			expect(recalls).toBe(1);
+			expect(requests[1].systemPrompt?.join("\n").match(/staged memory/g)).toHaveLength(1);
+		},
+	);
+
+	it.each(["mnemopi", "hindsight"] as const)(
+		"discards late real %s recall after the queue is replaced",
+		async backendId => {
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let recalls = 0;
+			const { agent, requests } = await setupMemory(backendId, async () => {
+				if (++recalls === 1) {
+					started.resolve();
+					await release.promise;
+					return "discarded recall";
+				}
+				return "current recall";
+			});
+			await session.steer("discarded task");
+			await started.promise;
+			agent.replaceQueues([], []);
+			release.resolve();
+			await session.waitForIdle();
+			expect(requests).toEqual([]);
+			await session.prompt("replacement task");
+			expect(recalls).toBe(2);
+			expect(requests[0].systemPrompt?.join("\n")).toContain("current recall");
+			expect(requests[0].systemPrompt?.join("\n")).not.toContain("discarded recall");
+		},
+	);
+
+	it.each(["mnemopi", "hindsight"] as const)(
+		"does not carry pending real %s recall into a replacement session",
+		async backendId => {
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let recalls = 0;
+			const { requests, pausePreparation } = await setupMemory(backendId, async () => `session-recall-${++recalls}`);
+			pausePreparation(async () => {
+				started.resolve();
+				await release.promise;
+			});
+			await session.steer("old session task");
+			await started.promise;
+			const transition = session.newSession();
+			release.resolve();
+			await transition;
+			expect(requests).toEqual([]);
+			pausePreparation(async () => {});
+			await session.prompt("new session task");
+			expect(requests[0].systemPrompt?.join("\n")).toContain("session-recall-2");
+			expect(requests[0].systemPrompt?.join("\n")).not.toContain("session-recall-1");
+		},
+	);
+
+	it.each([
+		["mnemopi", "reset"],
+		["mnemopi", "rekey"],
+		["hindsight", "reset"],
+		["hindsight", "rekey"],
+	] as const)(
+		"declines real %s delivery when its memory state is invalidated by %s in the hook",
+		async (backendId, change) => {
+			let recalls = 0;
+			const { agent, requests, delivered, pausePreparation } = await setupMemory(
+				backendId,
+				async () => `owned-recall-${++recalls}`,
+				true,
+			);
+			const state = backendId === "mnemopi" ? getMnemopiSessionState(session) : session.getHindsightSessionState();
+			if (!state) throw new Error("Real memory state was not installed");
+			const basePrompt = session.systemPrompt;
+			pausePreparation(async () => {
+				if (change === "reset") state.resetConversationTracking();
+				else state.setSessionId("rekeyed-memory-session");
+			});
+			await session.steer("retain rejected delivery");
+			await session.waitForIdle();
+			expect(requests).toEqual([]);
+			expect(delivered).toEqual([]);
+			expect(session.systemPrompt).toEqual(basePrompt);
+			expect(agent.peekSteeringQueue()).toMatchObject([
+				{ content: [{ type: "text", text: "retain rejected delivery" }] },
+			]);
+
+			pausePreparation(async () => {});
+			await session.prompt("resume valid delivery");
+			await session.waitForIdle();
+			expect(recalls).toBe(2);
+			expect(requests[0].systemPrompt?.join("\n")).toContain("owned-recall-2");
+			expect(requests[0].systemPrompt?.join("\n")).not.toContain("owned-recall-1");
+		},
+	);
+
+	it("discards older real mnemopi background recall when a tool-tail user preparation takes ownership", async () => {
+		const backgroundStarted = Promise.withResolvers<void>();
+		const releaseBackground = Promise.withResolvers<void>();
+		let recalls = 0;
+		const { agent, manager, requests, pausePreparation } = await setupMemory("mnemopi", async () => {
+			const attempt = ++recalls;
+			if (attempt === 1) {
+				backgroundStarted.resolve();
+				await releaseBackground.promise;
+			}
+			return `overlap-recall-${attempt}`;
+		});
+		const previousUser: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "previous unfinished task" }],
+			timestamp: 1,
+		};
+		const toolTail = createAssistantMessage("");
+		toolTail.content = [{ type: "toolCall", id: "unfinished", name: "old_tool", arguments: {} }];
+		toolTail.stopReason = "toolUse";
+		manager.appendMessage(previousUser);
+		manager.appendMessage(toolTail);
+		agent.replaceMessages([previousUser, toolTail]);
+
+		const removeDequeueGate = agent.addBeforeQueuedMessageDequeueHook(() => backgroundStarted.promise);
+		const prepared = Promise.withResolvers<void>();
+		const releasePolicy = Promise.withResolvers<void>();
+		pausePreparation(async () => {
+			prepared.resolve();
+			await releasePolicy.promise;
+		});
+		await session.steer("new task supersedes background recall");
+		await prepared.promise;
+		expect(recalls).toBe(2);
+		releaseBackground.resolve();
+		// Drain the fulfilled lookup's promise chain without waiting for elapsed wall-clock time.
+		await setImmediate();
+		session.clearQueue({ forInterrupt: true });
+		const abort = session.abort();
+		releasePolicy.resolve();
+		await abort;
+		removeDequeueGate();
+		expect(requests).toEqual([]);
+		pausePreparation(async () => {});
+		await session.prompt("resume user delivery");
+		await session.waitForIdle();
+		expect(recalls).toBe(3);
+		const prompt = requests[0].systemPrompt?.join("\n");
+		expect(prompt).toContain("overlap-recall-3");
+		expect(prompt).not.toContain("overlap-recall-1");
+		expect(prompt).not.toContain("overlap-recall-2");
+	});
+
+	it.each([64, 512])("bounds real mnemopi staged recall at an injection limit of %s", async limit => {
+		let recalls = 0;
+		const { requests } = await setupMemory("mnemopi", async () => {
+			recalls++;
+			return `recall prefix ${"memory detail ".repeat(500)}recall overflow`;
+		});
+		session.settings.set("mnemopi.injectionTokenLimit", limit);
+		await session.refreshBaseSystemPrompt();
+		await session.prompt("bounded first recall");
+		// The fixture's base/tool blocks precede the backend-owned instruction blocks.
+		const memoryPrompt = requests[0].systemPrompt?.slice(BASE.length + 1).join("\n\n") ?? "";
+		expect(memoryPrompt.length).toBeLessThanOrEqual(limit * 4);
+		expect(memoryPrompt).not.toContain("recall overflow");
+		if (limit === 64) {
+			expect(memoryPrompt).not.toContain("recall prefix");
+		} else {
+			expect(memoryPrompt).toContain("recall prefix");
+		}
+
+		session.settings.set("mnemopi.injectionTokenLimit", 6000);
+		await session.refreshBaseSystemPrompt();
+		await session.prompt("use the committed full recall");
+		expect(recalls).toBe(1);
+		expect(requests[1].systemPrompt?.join("\n")).toContain("recall overflow");
+	});
 
 	it("bootstraps a fresh steer and delivers returned context once with separate policy blocks", async () => {
 		const { requests, delivered } = setup();
@@ -242,36 +625,34 @@ describe("queued user delivery policy", () => {
 		expect(agent.peekSteeringQueue()).toMatchObject([{ content: [{ type: "text", text: "abort before delivery" }] }]);
 	});
 
-	it("preserves a newer base-prompt refresh performed by a preparation handler", async () => {
-		let newer = false;
-		let recalled = false;
-		const { requests, pausePreparation } = setup(undefined, async () => ({
-			systemPrompt: [...BASE, newer ? "updated tool policy" : "recalled memory"],
-		}));
-		const backend: MemoryBackend = {
-			id: "mnemopi",
-			async start() {},
-			async buildDeveloperInstructions() {
-				return "";
-			},
-			async clear() {},
-			async enqueue() {},
-			async beforeAgentStartPrompt() {
-				if (recalled) return undefined;
-				recalled = true;
-				return "recalled memory";
-			},
-		};
-		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+	it("uses a handler's refreshed base in the same request without an extension override", async () => {
+		const { requests, pausePreparation } = setup(
+			undefined,
+			async () => ({ systemPrompt: [...BASE, "updated tool policy"] }),
+			{ policy: false },
+		);
 		pausePreparation(async () => {
-			newer = true;
 			await session.refreshBaseSystemPrompt();
 		});
 		await session.steer("first");
 		await session.waitForIdle();
-		pausePreparation(async () => {});
-		await session.prompt("second");
-		expect(requests[1].systemPrompt).toEqual([...BASE, "updated tool policy", "policy:second", "independent policy"]);
+		expect(requests[0].systemPrompt).toEqual([...BASE, "updated tool policy"]);
+	});
+
+	it("keeps an explicit extension override ahead of a newer base in the same request", async () => {
+		const { requests, pausePreparation } = await setupMemory("hindsight", async () => "override memory", true);
+		pausePreparation(async () => {
+			await session.setActiveToolsByName(["new_tool"]);
+		});
+		await session.steer("first");
+		await session.waitForIdle();
+		expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
+		const prompt = requests[0].systemPrompt?.join("\n");
+		expect(prompt).toContain("policy:first");
+		expect(prompt).toContain("independent policy");
+		expect(prompt).toContain("override memory");
+		expect(prompt).toContain("tools:old_tool");
+		expect(prompt).not.toContain("tools:new_tool");
 	});
 
 	it.each(["memory lookup", "prompt rebuild", "extension hook", "extension hook after rebuild"] as const)(
@@ -303,7 +684,7 @@ describe("queued user delivery policy", () => {
 				async enqueue() {},
 				async beforeAgentStartPrompt() {
 					if (phase === "memory lookup") await pause();
-					return "memory from cancelled work";
+					return { context: "memory from cancelled work", commit: () => true };
 				},
 			};
 			vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
