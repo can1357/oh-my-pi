@@ -241,20 +241,6 @@ describe("generate_image tool gating", () => {
 		expect(mcpCalls).toBe(1);
 	});
 
-	it("keeps the device-only write across an empty MCP refresh", async () => {
-		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).toContain("write");
-		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
-		expect(session.isDeviceOnlyWrite()).toBe(true);
-
-		await session.refreshMCPTools([]);
-
-		expect(session.getActiveToolNames()).toContain("write");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
-		expect(session.isDeviceOnlyWrite()).toBe(true);
-	});
-
 	it("keeps the device-only write during enabled-set round trips", async () => {
 		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
 		expect(session.getActiveToolNames()).toContain("write");

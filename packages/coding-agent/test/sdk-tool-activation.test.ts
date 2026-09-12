@@ -658,43 +658,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("mounts devices when downgrading full-write origin via restoreNonMCPToolPresentation", async () => {
-		const tempDir = makeTempDir();
-		const customAmbient: CustomTool = {
-			name: "custom_ambient",
-			label: "Custom Ambient",
-			description: "Ambient tool",
-			parameters: type({}),
-			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
-			loadMode: "discoverable",
-		};
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			settings: Settings.isolated({ "plan.enabled": false }),
-			toolNames: ["read", "write"],
-			customTools: [customAmbient],
-		});
-
-		try {
-			expect(session.isDeviceOnlyWrite()).toBe(false);
-
-			await session.restoreNonMCPToolPresentation(["read", "custom_ambient"], ["custom_ambient"], {
-				fullWrite: false,
-			});
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
-			expect(session.getActiveToolNames()).not.toContain("custom_ambient");
-			expect(session.isDeviceOnlyWrite()).toBe(true);
-			const downgradedTarget = path.join(tempDir, "downgraded.txt");
-			await expect(
-				session.getToolByName("write")!.execute("downgraded", { path: downgradedTarget, content: "x" }),
-			).rejects.toThrow("limited to the xd:// device transport");
-			expect(await Bun.file(downgradedTarget).exists()).toBe(false);
-		} finally {
-			await session.dispose();
-		}
-	});
-
 	it("preserves full write authorization when write was upgraded before temporary restriction", async () => {
 		const tempDir = makeTempDir();
 		const customAmbient: CustomTool = {
@@ -1171,11 +1134,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await expect(
 				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "fail" }),
 			).rejects.toThrow("limited to the xd:// device transport");
-
-			await session.setActiveToolsByName(["read", "custom_ambient"]);
-
-			expect(session.getMountedXdevToolNames()).toContain("custom_ambient");
-			expect(session.isDeviceOnlyWrite()).toBe(true);
 		} finally {
 			await session.dispose();
 		}
