@@ -180,6 +180,52 @@ or configured usage resolver.
 
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
+### Command-backed providers
+
+`registerProvider` also supports providers whose transport is implemented by the
+extension itself. The `api` value is an extension-owned string (built-in API
+names are reserved), and `streamSimple` returns the canonical
+`AssistantMessageEventStream`; it does not need to be an HTTP endpoint:
+
+```ts
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.registerProvider("local-command", {
+    // Required model metadata; the custom stream does not use this URL.
+    baseUrl: "https://command-provider.invalid/",
+    apiKey: "unused-by-extension",
+    api: "local-command-api",
+    streamSimple(model, _context, _options) {
+      const stream = new AssistantMessageEventStream();
+      // Spawn the command, translate its output, and push canonical OMP events.
+      // The implementation owns process cleanup, cancellation, and errors.
+      void runCommandAndPushEvents(stream, model);
+      return stream;
+    },
+    models: [{
+      id: "local-command-model",
+      name: "Local command",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 16000,
+    }],
+  });
+}
+```
+
+This pattern is useful for a local CLI, stdio service, or JSONL process. A
+command-backed provider should keep its own tool loop inside the child process
+and emit only the resulting assistant events if those tools must remain owned
+by the child. A complete subprocess adapter should also remove credentials it
+must not inherit, honor `options.signal`, use `options.cwd`, map one stable
+session id to one child conversation, and convert non-zero exits into a stream
+error. `models.yml` remains HTTP/configuration-only; extensions are the supported
+escape hatch for non-HTTP transports.
+
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
 Also exposed:
