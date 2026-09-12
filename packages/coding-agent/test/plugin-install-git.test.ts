@@ -147,7 +147,7 @@ describe("PluginManager.install with git sources", () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			expect(cmd[0]).toBe("bun");
 			expect(cmd[1]).toBe("install");
-			expect(cmd[2]).toBe("https://gitlab.com/group/sub/project#v1.0.0");
+			expect(cmd[2]).toBe("git+https://gitlab.com/group/sub/project#v1.0.0");
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -184,6 +184,217 @@ describe("PluginManager.install with git sources", () => {
 		const result = await mgr.install("gitlab:group/sub/project#v1.0.0");
 
 		expect(result.name).toBe("gitlab-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("prefixes raw non-GitHub https URLs with git+ before invoking bun install", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe("bun");
+			expect(cmd[1]).toBe("install");
+			// The headline scenario for this fix: a bare `https://` spec for a
+			// non-GitHub host (bun only auto-detects git for GitHub URLs) must
+			// reach bun install with an explicit `git+` prefix, otherwise bun
+			// misreads it as an npm tarball and fails with ZlibError.
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git");
+
+			const prepare = (async () => {
+				// Simulate bun's on-disk effects: the dep is keyed by the
+				// package's real name and persists the spec it resolved.
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"example-plugin": "git+https://git.example.com/group/repo.git",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "example-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "example-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("https://git.example.com/group/repo.git");
+
+		expect(result.name).toBe("example-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("strips inline userinfo credentials before invoking bun install", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe("bun");
+			expect(cmd[1]).toBe("install");
+			// Inline credentials must not reach bun: `bun install` persists the
+			// spec into package.json/bun.lock, and a long-lived token must not
+			// land in those user files. Private repos authenticate via SSH,
+			// a credential helper, or .netrc instead.
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git#v1.0.0");
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"cred-plugin": "git+https://git.example.com/group/repo.git#v1.0.0",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "cred-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "cred-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("https://token@git.example.com/group/repo.git#v1.0.0");
+
+		expect(result.name).toBe("cred-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("does not double the git+ prefix when the spec already carries one", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe("bun");
+			expect(cmd[1]).toBe("install");
+			// The accepted input form may already carry `git+`: the prefix must
+			// not be doubled. Inline credentials are still stripped — they must
+			// not reach bun's persisted spec.
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git#v1.0.0");
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"prefix-cred-plugin": "git+https://git.example.com/group/repo.git#v1.0.0",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "prefix-cred-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "prefix-cred-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("git+https://token@git.example.com/group/repo.git#v1.0.0");
+
+		expect(result.name).toBe("prefix-cred-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("normalizes an @ref path suffix to #ref exactly once", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe("bun");
+			expect(cmd[1]).toBe("install");
+			// `@ref` path-suffix input: ref re-appended once as `#ref` (no
+			// doubled suffix).
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git#v1");
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"atref-plugin": "git+https://git.example.com/group/repo.git#v1",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "atref-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "atref-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("https://git.example.com/group/repo.git@v1");
+
+		expect(result.name).toBe("atref-plugin");
 		expect(result.version).toBe("1.0.0");
 	});
 
