@@ -53,6 +53,13 @@ export type CloudSttCredential =
 			apiKey: ApiKey;
 			baseUrl?: string;
 			headers?: Record<string, string>;
+	  }
+	| {
+			kind: "openai";
+			/** Explicit `auth: none`; provider headers remain authoritative. */
+			keyless: true;
+			baseUrl?: string;
+			headers?: Record<string, string>;
 	  };
 export interface CloudSttStreamOptions extends SttStreamOptions {
 	credential: CloudSttCredential;
@@ -209,27 +216,25 @@ async function transcribeWithApiKey(
 	wav: Blob,
 ): Promise<string> {
 	const baseUrl = credential.baseUrl?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
+	if ("keyless" in credential) {
+		return await postTranscription(
+			fetchImpl,
+			`${baseUrl}/audio/transcriptions`,
+			sanitizeOverrideHeaders(credential.headers, false),
+			createTranscriptionForm(options, wav),
+			options.signal,
+		);
+	}
 	return await withAuth(
 		credential.apiKey,
-		apiKey => {
-			// Both rebuilt per attempt: a retry needs its own multipart body, and
-			// the registry's provider headers are a live view whose command-backed
-			// values are re-run on the 401 force-refresh — a snapshot taken before
-			// the first attempt would pin the stale header across the retry.
-			const form = new FormData();
-			form.append("model", resolveCloudSttModel(options.model));
-			if (options.language) form.append("language", options.language);
-			if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
-			form.append("response_format", "json");
-			form.append("file", wav, "dictation.wav");
-			return postTranscription(
+		apiKey =>
+			postTranscription(
 				fetchImpl,
 				`${baseUrl}/audio/transcriptions`,
-				{ ...sanitizeOverrideHeaders(credential.headers), Authorization: `Bearer ${apiKey}` },
-				form,
+				{ ...sanitizeOverrideHeaders(credential.headers, true), Authorization: `Bearer ${apiKey}` },
+				createTranscriptionForm(options, wav),
 				options.signal,
-			);
-		},
+			),
 		{
 			signal: options.signal,
 			missingKeyMessage: "No OpenAI API key is available for cloud dictation.",
@@ -237,21 +242,32 @@ async function transcribeWithApiKey(
 	);
 }
 
+function createTranscriptionForm(options: CloudSttStreamOptions, wav: Blob): FormData {
+	const form = new FormData();
+	form.append("model", resolveCloudSttModel(options.model));
+	if (options.language) form.append("language", options.language);
+	if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
+	form.append("response_format", "json");
+	form.append("file", wav, "dictation.wav");
+	return form;
+}
+
 /**
- * Drop the request-owned headers from a provider override, matching any casing.
+ * Drop request-owned headers from a provider override, matching any casing.
  *
- * - `Content-Type`: the multipart body needs fetch to generate its own
- *   boundary, so a configured `application/json` would make the endpoint reject
- *   an otherwise valid recording.
- * - `Authorization`: a differently-cased override key would survive alongside
- *   the one this request sets, and fetch joins same-name headers into a single
- *   comma-separated value (`Custom old, Bearer new`) the endpoint rejects.
+ * `Content-Type` always belongs to fetch because it generates the multipart
+ * boundary. Authenticated requests also replace `Authorization` with the
+ * resolved bearer; keyless requests preserve a configured authorization
+ * scheme because provider headers are their only authentication mechanism.
  */
-function sanitizeOverrideHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
-	if (!headers) return undefined;
+function sanitizeOverrideHeaders(
+	headers: Record<string, string> | undefined,
+	stripAuthorization: boolean,
+): Record<string, string> {
+	if (!headers) return {};
 	const entries = Object.entries(headers).filter(([name]) => {
 		const lower = name.toLowerCase();
-		return lower !== "content-type" && lower !== "authorization";
+		return lower !== "content-type" && (!stripAuthorization || lower !== "authorization");
 	});
 	return entries.length === Object.keys(headers).length ? headers : Object.fromEntries(entries);
 }

@@ -1,5 +1,6 @@
 import { type ApiKeyResolver, type OAuthAccess, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
@@ -584,7 +585,9 @@ describe("resolveSttCloudCredential", () => {
 			},
 		};
 		const credential = await resolveSttCloudCredential(source, "s1");
-		if (credential?.kind !== "openai") throw new Error("expected the API-key route");
+		if (credential?.kind !== "openai" || !("apiKey" in credential)) {
+			throw new Error("expected the API-key route");
+		}
 		const apiKey = credential.apiKey;
 		if (typeof apiKey !== "function") throw new Error("expected a resolver-backed credential");
 		// Initial resolve reuses the preflight key without re-entering the registry.
@@ -604,6 +607,34 @@ describe("resolveSttCloudCredential", () => {
 			kind: "openai",
 			apiKey: "sk-key",
 		});
+	});
+
+	it("preserves keyless provider authentication headers without a bogus bearer", async () => {
+		const source = {
+			...registry(undefined, kNoAuth),
+			getProviderBaseUrl: () => "https://keyless.example/v1",
+			getProviderHeaders: () => ({
+				Authorization: "Custom endpoint-token",
+				"Content-Type": "application/json",
+			}),
+		};
+		const credential = await resolveSttCloudCredential(source, "s1");
+		expect(credential).toEqual({
+			kind: "openai",
+			keyless: true,
+			baseUrl: "https://keyless.example/v1",
+			headers: {
+				Authorization: "Custom endpoint-token",
+				"Content-Type": "application/json",
+			},
+		});
+		if (!credential) throw new Error("expected the keyless route");
+		const stub = stubFetch("keyless");
+		const handle = startCloudSttStream({ credential, fetchImpl: stub.impl });
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).resolves.toBe("keyless");
+		expect(stub.calls[0]!.url).toBe("https://keyless.example/v1/audio/transcriptions");
+		expect(stub.calls[0]!.init.headers).toEqual({ Authorization: "Custom endpoint-token" });
 	});
 
 	it("resolves nothing without any credential", async () => {
