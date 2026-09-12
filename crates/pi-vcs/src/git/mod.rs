@@ -269,9 +269,12 @@ fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
 
 /// Parse `core.worktree` out of git-config text. Sections and keys compare
 /// case-insensitively; subsections (`[core "x"]`) never match; quoted values
-/// unquote, unquoted values drop trailing `#`/`;` comments.
+/// unquote, unquoted values drop trailing `#`/`;` comments. Scans the whole
+/// file and keeps the last assignment seen — git's own precedence for a
+/// repeated scalar key — rather than stopping at the first match.
 fn parse_core_worktree(content: &str) -> Option<String> {
 	let mut in_core = false;
+	let mut worktree = None;
 	for raw in content.lines() {
 		let line = raw.trim();
 		if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -298,12 +301,9 @@ fn parse_core_worktree(content: &str) -> Option<String> {
 		} else if let Some(comment) = value.find(['#', ';']) {
 			value = value[..comment].trim_end();
 		}
-		if value.is_empty() {
-			return None;
-		}
-		return Some(value.to_owned());
+		worktree = (!value.is_empty()).then(|| value.to_owned());
 	}
-	None
+	worktree
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
@@ -411,5 +411,15 @@ mod tests {
 		assert_eq!(parse_gitdir_pointer("gitdir:../relative"), Some("../relative"));
 		assert_eq!(parse_gitdir_pointer("not a pointer"), None);
 		assert_eq!(parse_gitdir_pointer("gitdir:   "), None);
+	}
+
+	#[test]
+	fn core_worktree_repeated_key_honors_last_occurrence() {
+		// Git itself applies a repeated scalar key in file order, last wins —
+		// `git config --get core.worktree` on this exact text returns `/main`.
+		assert_eq!(
+			parse_core_worktree("[core]\n\tworktree = /wrong\n\tworktree = /main\n"),
+			Some("/main".to_owned())
+		);
 	}
 }
