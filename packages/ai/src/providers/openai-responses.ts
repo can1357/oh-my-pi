@@ -1167,6 +1167,7 @@ export function buildParams(
 			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForAllAssistantTurns,
 		requiresReasoningReplayForToolCalls:
 			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
+		allowsSyntheticReasoningContentForToolCalls: policy.reasoning.allowsSyntheticReasoningContentForToolCalls,
 		repairOrphanOutputs: true,
 	});
 

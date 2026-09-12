@@ -13869,6 +13869,18 @@
 			},
 			{
 				"source": "providers/openrouter.kdl:21",
+				"class": "meta",
+				"providers": [
+					"openrouter"
+				],
+				"family": "muse-spark",
+				"wire": {
+					"filterReasoningHistory": true,
+					"allowsSyntheticReasoningContentForToolCalls": false
+				}
+			},
+			{
+				"source": "providers/openrouter.kdl:27",
 				"class": "minimax",
 				"providers": [
 					"openrouter"
@@ -13884,7 +13896,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:26",
+				"source": "providers/openrouter.kdl:32",
 				"class": "openai",
 				"providers": [
 					"openrouter"
@@ -13900,7 +13912,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:31",
+				"source": "providers/openrouter.kdl:37",
 				"class": "stepfun",
 				"providers": [
 					"openrouter"
@@ -13916,7 +13928,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:35",
+				"source": "providers/openrouter.kdl:41",
 				"class": "unknown",
 				"providers": [
 					"openrouter"
@@ -13931,7 +13943,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:39",
+				"source": "providers/openrouter.kdl:45",
 				"providers": [
 					"openrouter"
 				],
@@ -13958,7 +13970,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:44",
+				"source": "providers/openrouter.kdl:50",
 				"providers": [
 					"openrouter"
 				],
@@ -13979,7 +13991,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:48",
+				"source": "providers/openrouter.kdl:54",
 				"providers": [
 					"openrouter"
 				],
@@ -13997,7 +14009,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:52",
+				"source": "providers/openrouter.kdl:58",
 				"providers": [
 					"openrouter"
 				],
@@ -14022,7 +14034,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:57",
+				"source": "providers/openrouter.kdl:63",
 				"providers": [
 					"openrouter"
 				],
@@ -14037,7 +14049,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:61",
+				"source": "providers/openrouter.kdl:67",
 				"providers": [
 					"openrouter"
 				],
@@ -14105,7 +14117,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:67",
+				"source": "providers/openrouter.kdl:73",
 				"providers": [
 					"openrouter"
 				],

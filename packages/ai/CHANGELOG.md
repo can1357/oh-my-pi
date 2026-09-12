@@ -6,6 +6,10 @@
 
 - Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 
+### Fixed
+
+- Fixed OpenRouter multi-turn tool-call sessions wedging with `400 Referenced reasoning item ... was not found or has expired` on Meta Muse Spark models by suppressing synthetic reasoning replay when reasoning history is filtered ([#10966](https://github.com/can1357/oh-my-pi/issues/10966)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added
@@ -40,7 +44,6 @@
 ### Fixed
 
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
-
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
@@ -67,7 +70,6 @@
 ### Fixed
 
 - Fixed Codex compaction timeouts triggering prolonged retries instead of advancing to the next compaction method.
-
 ## [18.1.11] - 2026-09-05
 
 ### Fixed

@@ -1845,6 +1845,8 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
+	/** Whether synthetic placeholder reasoning items are allowed when replaying tool-call turns without native reasoning. */
+	allowsSyntheticReasoningContentForToolCalls?: boolean;
 }
 
 /**
@@ -2090,6 +2092,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				computerCallIds,
 				options.requiresReasoningReplayForAllTurns ?? false,
 				options.requiresReasoningReplayForToolCalls ?? false,
+				options.allowsSyntheticReasoningContentForToolCalls ?? true,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2159,6 +2162,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	computerCallIds?: Set<string>,
 	requiresReasoningReplayForAllTurns = false,
 	requiresReasoningReplayForToolCalls = false,
+	allowsSyntheticReasoningContentForToolCalls = true,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2310,17 +2314,19 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		// exactly like a missing item (#10690), so substitute a non-empty
 		// placeholder. The `id` still prefers a surviving upstream item id.
 		const carriedReasoningText = carriedReasoningTexts.join("\n");
-		const reasoningText =
-			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
-		const reasoningId =
-			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
-		const reasoningItem: ResponseReasoningItem = {
-			type: "reasoning",
-			id: reasoningId,
-			summary: [],
-			content: [{ type: "reasoning_text", text: reasoningText }],
-		};
-		outputItems.unshift(reasoningItem);
+		if (carriedReasoningText.length > 0 || allowsSyntheticReasoningContentForToolCalls) {
+			const reasoningText =
+				carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
+			const reasoningId =
+				synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
+			const reasoningItem: ResponseReasoningItem = {
+				type: "reasoning",
+				id: reasoningId,
+				summary: [],
+				content: [{ type: "reasoning_text", text: reasoningText }],
+			};
+			outputItems.unshift(reasoningItem);
+		}
 	}
 
 	return outputItems;
