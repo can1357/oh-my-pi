@@ -52,6 +52,22 @@ export interface AgentMetricsSummary {
 	contextWindow?: number;
 }
 
+/**
+ * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT
+ * run: they are cleared when the ref re-enters `running` for a follow-up or
+ * wake turn. Launch is the ref's `createdAt`; these are the post-launch
+ * boundaries the parent needs to tell a genuinely working agent from one whose
+ * accepted result never terminalized.
+ */
+export interface AgentRunLifecycle {
+	/** When the run produced its final response (an accepted terminal `yield`). */
+	responseAt?: number;
+	/** When the run's final result was accepted by its driver. */
+	acceptedAt?: number;
+	/** When the ref last left `running` for a terminal status. */
+	terminalAt?: number;
+}
+
 /** Historical identity and telemetry that remain available after the live session is disposed. */
 export interface AgentHistorySummary {
 	agent?: string;
@@ -86,6 +102,8 @@ export interface AgentRef {
 	activity?: string;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Run lifecycle milestones (launch is {@link createdAt}). */
+	lifecycle?: AgentRunLifecycle;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -114,6 +132,8 @@ export interface RegisterInput {
 	lastActivity?: number;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Run lifecycle milestones restored from persisted history, when known. */
+	lifecycle?: AgentRunLifecycle;
 }
 
 export class AgentRegistry {
@@ -157,6 +177,7 @@ export class AgentRegistry {
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
 			history: input.history,
+			lifecycle: input.lifecycle,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
@@ -199,13 +220,67 @@ export class AgentRegistry {
 			return status === "aborted" || this.#rejectStatusUpdate(id, status, "aborted-is-terminal");
 		}
 		if (ref.status === status) return true;
+		const leftRunning = ref.status === "running";
 		ref.status = status;
 		// Activity describes current work; it is meaningless once the agent
 		// leaves `running`, so drop it to avoid showing stale work in rosters.
 		if (status !== "running") ref.activity = undefined;
 		ref.lastActivity = Date.now();
+		if (status === "running") {
+			// Milestones are run-scoped. A ref reused by a follow-up or wake
+			// turn must not carry the previous run's response/acceptance into
+			// the new run, or a later yield-less turn would look accepted.
+			ref.lifecycle = undefined;
+		} else if (leftRunning) {
+			ref.lifecycle = { ...ref.lifecycle, terminalAt: ref.lastActivity };
+		}
 		this.#emit({ type: "status_changed", ref });
 		return true;
+	}
+
+	/**
+	 * Record that this agent's run produced and handed over its final result,
+	 * and terminalize the ref when no turn is in flight. Acceptance is the
+	 * executor's run boundary: the result is settled, so a ref still `running`
+	 * with nothing streaming is a missed terminal transition the parent's
+	 * `hub` wait would otherwise keep blocking on. A ref with a genuinely
+	 * streaming session (a wake turn started at the boundary) stays `running`
+	 * and is surfaced by {@link staleAcceptedRuns} instead.
+	 *
+	 * Milestones are run-scoped: `responseAt` is the CURRENT call's response
+	 * time (never a previous run's, which {@link setStatus} cleared when the
+	 * ref re-entered `running`).
+	 *
+	 * Returns false when the id is gone, aborted, or no longer owned by
+	 * `expected`; those cases must not stamp a newer generation.
+	 */
+	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		const now = Date.now();
+		ref.lifecycle = {
+			...ref.lifecycle,
+			responseAt: responseAt ?? now,
+			acceptedAt: now,
+		};
+		if (ref.status === "running" && ref.session?.isStreaming !== true) {
+			this.setStatus(id, "idle", ref);
+		} else {
+			this.#emit({ type: "metadata_changed", ref });
+		}
+		return true;
+	}
+
+	/**
+	 * Accepted-but-running refs: the run's final result was handed over but the
+	 * ref never left `running`, and no turn is in flight. This is the lifecycle
+	 * leak `hub`'s running-agents roster reports so the parent can cancel it
+	 * instead of waiting on a run that already finished.
+	 */
+	staleAcceptedRuns(): AgentRef[] {
+		return this.list().filter(
+			ref => ref.status === "running" && ref.lifecycle?.acceptedAt !== undefined && !this.isRunning(ref),
+		);
 	}
 
 	/**
