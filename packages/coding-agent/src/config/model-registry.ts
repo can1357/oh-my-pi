@@ -92,6 +92,7 @@ import {
 	mergeDiscoveredModel,
 	mergeProviderRemoteCompactionConfig,
 	mergeRemoteCompactionConfig,
+	resolveProviderBaseUrl,
 	type ProviderOverride,
 	providersWithAuthoritativeProjectCatalog,
 } from "./model-patch";
@@ -1351,6 +1352,18 @@ export class ModelRegistry {
 			for (const modelDef of providerConfig.models ?? []) {
 				this.#collectCommandConfigValues(commandConfigs, undefined, modelDef.headers);
 			}
+			// Scope: effective APIs of models inheriting the provider URL; a
+			// provider-level api covers the override-only case; none is wide.
+			const baseUrlApis = new Set<Api>();
+			for (const modelDef of providerConfig.models ?? []) {
+				if (modelDef.baseUrl) continue;
+				const modelApi = modelDef.api ?? providerConfig.api;
+				if (modelApi) baseUrlApis.add(modelApi);
+			}
+			if (providerConfig.api && (providerConfig.models?.length ?? 0) === 0) {
+				baseUrlApis.add(providerConfig.api);
+			}
+			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
 			if (
 				providerConfig.baseUrl ||
@@ -1366,6 +1379,7 @@ export class ModelRegistry {
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
+					baseUrlApis: baseUrlScope,
 					baseUrl:
 						providerConfig.discovery?.type === "litellm"
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
@@ -2030,6 +2044,7 @@ export class ModelRegistry {
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
 		return {
 			baseUrl: override.baseUrl ?? baseOverride?.baseUrl,
+			baseUrlApis: override.baseUrlApis ?? baseOverride?.baseUrlApis,
 			apiKey: override.apiKey ?? baseOverride?.apiKey,
 			authHeader: override.authHeader ?? baseOverride?.authHeader,
 			headers: override.headers
@@ -2041,12 +2056,17 @@ export class ModelRegistry {
 		};
 	}
 	#applyProviderTransportOverride<
-		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+		T extends {
+			api: Api;
+			baseUrl?: string;
+			headers?: Record<string, string>;
+			remoteCompaction?: RemoteCompactionConfig<Api>;
+		},
 	>(
 		entry: T,
 		override: Pick<
 			ProviderOverride,
-			"baseUrl" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
+			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
 		>,
 	): T {
 		const headers = mergeAuthHeaderSources(
@@ -2056,7 +2076,7 @@ export class ModelRegistry {
 		);
 		return {
 			...entry,
-			baseUrl: override.baseUrl ?? entry.baseUrl,
+			baseUrl: resolveProviderBaseUrl(entry.api, entry.baseUrl, override),
 			headers,
 			// Preserve the model's existing transport when the override omits one;
 			// providers without a `transport` field keep the default per-API dispatch.
@@ -2068,7 +2088,7 @@ export class ModelRegistry {
 		model: Model<Api>,
 		override: Pick<
 			ProviderOverride,
-			"baseUrl" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
+			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
 		>,
 	): Model<Api> {
 		return buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));

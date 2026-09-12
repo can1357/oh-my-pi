@@ -4,12 +4,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
-import { applyModelPatch } from "@oh-my-pi/pi-coding-agent/config/model-patch";
+import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -808,6 +809,236 @@ describe("ModelRegistry", () => {
 			const compat = getOpenAICompat(model);
 			expect(compat?.supportsUsageInStreaming).toBe(true);
 			expect(compat?.maxTokensField).toBe("max_completion_tokens");
+		});
+	});
+
+	describe("mixed provider routes", () => {
+		let registry: ModelRegistry;
+
+		beforeAll(() => {
+			registry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "glm-5.3",
+								api: "anthropic-messages",
+								name: "GLM-5.3",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+						],
+					},
+				},
+			});
+		});
+
+		test("preserves Z.AI streamed content through the final assistant message", async () => {
+			const flash = registry.find("zai", "glm-5.3-flash");
+			if (!flash || flash.api !== "openai-completions") {
+				throw new Error("expected the bundled Z.AI flash model to use OpenAI Completions");
+			}
+			const openAIFlash = flash as Model<"openai-completions">;
+			expect(openAIFlash.baseUrl).toBe("https://api.z.ai/api/coding/paas/v4");
+			let requestUrl: string | undefined;
+			const fetchMock: FetchImpl = input => {
+				requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+				if (requestUrl !== "https://api.z.ai/api/coding/paas/v4/chat/completions") {
+					return Promise.resolve(
+						new Response(JSON.stringify({ code: 500, msg: "404_NOT_FOUND", success: false }), {
+							status: 200,
+							headers: { "content-type": "application/json" },
+						}),
+					);
+				}
+				const events = [
+					{
+						id: "chatcmpl-zai-fixture",
+						choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "thinking..." } }],
+					},
+					{
+						id: "chatcmpl-zai-fixture",
+						choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }],
+					},
+					{
+						id: "chatcmpl-zai-fixture",
+						choices: [{ index: 0, finish_reason: "stop", delta: { role: "assistant", content: "" } }],
+						usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
+					},
+				];
+				const payload = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+				return Promise.resolve(
+					new Response(payload, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+				);
+			};
+
+			const result = await streamOpenAICompletions(
+				openAIFlash,
+				{
+					messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }],
+				},
+				{ apiKey: "TEST_KEY", fetch: fetchMock },
+			).result();
+
+			expect(requestUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+			expect(result.content).toEqual(expect.arrayContaining([{ type: "text", text: "OK" }]));
+			expect(result.stopReason).toBe("stop");
+			expect(registry.find("zai", "glm-5.3")).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "https://api.z.ai/api/anthropic",
+			});
+		});
+
+		test("keeps a discovered model route when the provider override uses another API", () => {
+			const model = buildModel({
+				id: "glm-5.3-flash",
+				name: "GLM-5.3 Flash",
+				api: "openai-completions",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 131_072,
+			});
+			const merged = mergeDiscoveredModel(model, model, {
+				baseUrlApis: ["anthropic-messages"],
+				baseUrl: "https://api.z.ai/api/anthropic",
+			});
+			expect(merged).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+		});
+
+		test("scopes multiple custom APIs sharing the provider baseUrl", () => {
+			const multiApiRegistry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "glm-anthropic",
+								api: "anthropic-messages",
+								name: "GLM Anthropic",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+							{
+								id: "glm-openai",
+								api: "openai-completions",
+								name: "GLM OpenAI",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+						],
+					},
+				},
+			});
+			const flash = multiApiRegistry.find("zai", "glm-5.3-flash");
+			const glmAnthropic = multiApiRegistry.find("zai", "glm-anthropic");
+			const glmOpenai = multiApiRegistry.find("zai", "glm-openai");
+			expect(flash).toMatchObject({ api: "openai-completions", baseUrl: "https://api.z.ai/api/anthropic" });
+			expect(glmAnthropic).toMatchObject({ baseUrl: "https://api.z.ai/api/anthropic" });
+			expect(glmOpenai).toMatchObject({ baseUrl: "https://api.z.ai/api/anthropic" });
+		});
+
+		test("override-only provider api keeps a bundled model on its catalog route", () => {
+			const apiOnlyRegistry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						api: "anthropic-messages",
+					},
+				},
+			});
+			const flash = apiOnlyRegistry.find("zai", "glm-5.3-flash");
+			expect(flash).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+		});
+
+		test("a custom model baseUrl keeps its own host and does not scope the provider", () => {
+			const directHostRegistry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "glm-direct",
+								api: "anthropic-messages",
+								name: "GLM Direct",
+								baseUrl: "https://direct.example.com",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+						],
+					},
+				},
+			});
+			const direct = directHostRegistry.find("zai", "glm-direct");
+			const flash = directHostRegistry.find("zai", "glm-5.3-flash");
+			expect(direct).toMatchObject({ baseUrl: "https://direct.example.com" });
+			expect(flash).toMatchObject({ baseUrl: "https://api.z.ai/api/anthropic" });
+		});
+
+		test("refresh keeps pi-native gateway baseUrl across APIs", async () => {
+			writeRawModelsJson({
+				zai: {
+					baseUrl: "http://localhost:4000",
+					apiKey: "gateway-token",
+					api: "anthropic-messages",
+					transport: "pi-native",
+					models: [
+						{
+							id: "glm-anthropic",
+							api: "anthropic-messages",
+							name: "GLM Anthropic",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1_000_000,
+							maxTokens: 131_072,
+						},
+					],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refreshProvider("zai", "offline");
+
+			const flash = registry.find("zai", "glm-5.3-flash");
+			expect(flash).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "http://localhost:4000",
+				transport: "pi-native",
+			});
+			const glmAnthropic = registry.find("zai", "glm-anthropic");
+			expect(glmAnthropic).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "http://localhost:4000",
+			});
 		});
 	});
 
