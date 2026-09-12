@@ -21,6 +21,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { CLOUD_STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1115,7 +1116,11 @@ describe("ACP agent", () => {
 			speechToText: {
 				setting: "stt.modelName",
 				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+				models: [...STT_MODEL_OPTIONS, ...CLOUD_STT_MODEL_OPTIONS].map(({ value, label, description }) => ({
+					value,
+					label,
+					description,
+				})),
 			},
 			textToSpeech: {
 				modelSetting: "tts.localModel",
