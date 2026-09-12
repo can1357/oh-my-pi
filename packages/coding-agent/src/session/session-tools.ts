@@ -193,6 +193,14 @@ interface XdevMountNoticeDetails {
 interface PendingNoticePreview<T> {
 	notice: CustomMessage<T> | undefined;
 	revision: number;
+	/**
+	 * Fingerprint of the previewed notice's rendered content. Guards against
+	 * changes the {@link SessionTools.#xdevMountDeltaRevision} counter misses —
+	 * chiefly a same-named MCP tool reconnecting with a new schema during the
+	 * maintenance await, which rewrites the inline docs without moving the mount
+	 * set or the schema-excluding applied-tool signature.
+	 */
+	contentKey: string;
 }
 
 interface XdevMountNoticeProjection {
@@ -1288,18 +1296,24 @@ export class SessionTools {
 		};
 	}
 
-	/** Previews the hidden `xd://` mount notice and its immutable pending revision. */
+	/** Previews the hidden `xd://` mount notice, its pending revision, and a content fingerprint. */
 	peekPendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
 	}): PendingNoticePreview<XdevMountNoticeDetails> | undefined {
 		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
-		return projection ? { notice: projection.notice, revision: this.#xdevMountDeltaRevision } : undefined;
+		if (!projection) return undefined;
+		return {
+			notice: projection.notice,
+			revision: this.#xdevMountDeltaRevision,
+			contentKey: this.#xdevNoticeContentKey(projection.notice),
+		};
 	}
 
-	/** Consumes the mount notice only when no delta or catalog mutation followed its preview. */
+	/** Consumes the mount notice only when no delta, catalog, or schema change followed its preview. */
 	takePendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
 		expectedRevision: number;
+		expectedContentKey: string;
 	}): CustomMessage<XdevMountNoticeDetails> | undefined {
 		if (options.expectedRevision !== this.#xdevMountDeltaRevision) {
 			// Maintenance may have rebuilt and delivered the base catalog after the
@@ -1311,10 +1325,27 @@ export class SessionTools {
 		}
 		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
 		if (!projection) return undefined;
+		if (this.#xdevNoticeContentKey(projection.notice) !== options.expectedContentKey) {
+			// The rendered notice changed after the only context estimate without
+			// moving the revision — a same-named MCP tool reconnecting with a new
+			// schema during the await rewrites the inline docs (up to
+			// XDEV_DOCS_TOTAL_BUDGET). Defer the whole notice to the next user turn,
+			// which re-previews it against a fresh estimate, rather than delivering
+			// unbudgeted docs now.
+			return undefined;
+		}
 		this.#pendingXdevMountDelta = undefined;
 		this.#xdevMountDeltaRevision++;
 		this.#announcedMounts = projection.announcedMounts;
 		return projection.notice;
+	}
+
+	/** Stable fingerprint of a mount notice's rendered text, ignoring its timestamp. */
+	#xdevNoticeContentKey(notice: CustomMessage<XdevMountNoticeDetails> | undefined): string {
+		if (!notice) return "";
+		const { content } = notice;
+		if (typeof content === "string") return content;
+		return content.map(part => (part.type === "text" ? part.text : "")).join("\u0000");
 	}
 
 	#recordBasePromptXdevAdditions(): void {

@@ -6608,6 +6608,7 @@ export class AgentSession {
 				? this.#tools.takePendingXdevMountNotice({
 						baseCatalogDelivered: baseXdevCatalogDelivered,
 						expectedRevision: previewXdevMountNotice.revision,
+						expectedContentKey: previewXdevMountNotice.contentKey,
 					})
 				: undefined;
 			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;

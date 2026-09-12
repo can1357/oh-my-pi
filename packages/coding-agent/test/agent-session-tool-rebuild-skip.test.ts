@@ -1034,6 +1034,44 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).toContain("## Schema");
 	});
 
+	it("defers a mount notice whose docs change via a same-name schema replacement", async () => {
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "builtins");
+		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const searchReconnected = createMcpCustomTool(
+			"mcp__nucleus_search",
+			"nucleus",
+			"search",
+			"Search nucleus, now reconnected with a different documented schema",
+		);
+		await session.refreshMCPTools([search]);
+
+		// The preview estimates the notice for the original schema. During the await
+		// a same-named tool reconnects with different docs: the mount set and the
+		// schema-excluding applied signature are unchanged, so the revision never
+		// moves, but the rendered docs differ. The notice must defer rather than
+		// slip its (potentially XDEV_DOCS_TOTAL_BUDGET-sized) docs past the estimate.
+		const maintenanceSpy = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshMCPTools([searchReconnected]);
+			});
+		await session.prompt("first");
+		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
+		maintenanceSpy.mockRestore();
+
+		// The next user turn re-previews against the new schema and delivers it.
+		await session.prompt("second");
+		const notices = mountNoticesIn(contexts[1]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).toContain("reconnected with a different documented schema");
+	});
+
 	it("drops a mount delta that cancels out before the next prompt", async () => {
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			xdev: createTestXdevState(),
