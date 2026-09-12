@@ -520,6 +520,66 @@ describe("cloud backend in STTController", () => {
 		}
 	});
 
+	it("says once that the subscription route ignores model, language, and keywords", async () => {
+		settings.set("stt.language", "pt");
+		settings.set("stt.keywords", "AC-42");
+		const stub = stubFetch("hello");
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			committed: "",
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(text: string): void {
+				editor.committed += text;
+			},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const warnings: string[] = [];
+		const options = {
+			showWarning: (msg: string): void => {
+				warnings.push(msg);
+			},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{
+				resolveCloudCredential: () =>
+					Promise.resolve({
+						kind: "codex",
+						access: { accessToken: "subscription-token", accountId: "account-1" },
+						source: oauthSource("subscription-token").source,
+					}),
+				createCloudFetch: stub.impl,
+			},
+		);
+		try {
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			await controller.toggle(editor, options);
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("model, language, keywords");
+			// The Codex route really does drop them: only the audio file is posted.
+			const form = stub.calls[0]!.init.body as FormData;
+			expect(form.has("model")).toBe(false);
+			expect(form.has("language")).toBe(false);
+			expect(form.has("prompt")).toBe(false);
+			// Second dictation stays quiet.
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			await controller.toggle(editor, options);
+			expect(warnings).toHaveLength(1);
+		} finally {
+			controller.dispose();
+		}
+	});
+
 	it("buffers speech while cloud credentials are still resolving", async () => {
 		const stub = stubFetch("captured during refresh");
 		const credential = Promise.withResolvers<CloudSttCredential | undefined>();
