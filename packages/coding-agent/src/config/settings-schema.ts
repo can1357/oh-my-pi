@@ -2612,6 +2612,20 @@ export const SETTINGS_SCHEMA = {
 	// Context
 	// ────────────────────────────────────────────────────────────────────────
 
+	// Opt out of the #7703 walk-to-home raise for standalone AGENTS.md /
+	// CLAUDE.md. Default false keeps workspace files above a nested git root.
+	"context.stopAtRepoRoot": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Stop Context Walk at Repo Root",
+			description:
+				"Stop standalone AGENTS.md and CLAUDE.md discovery at the git repository root instead of continuing through enclosing workspace directories up to the home directory. Off (default) keeps the walk-to-home behavior.",
+		},
+	},
+
 	// Context promotion
 	"contextPromotion.enabled": {
 		type: "boolean",

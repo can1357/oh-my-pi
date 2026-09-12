@@ -75,6 +75,9 @@
 
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
 
+### Added
+
+- Added `context.stopAtRepoRoot` to clamp standalone `AGENTS.md` / `CLAUDE.md` discovery at the git repository root instead of walking through enclosing workspace directories up to `$HOME`. The default remains the walk-to-home behavior ([#11357](https://github.com/can1357/oh-my-pi/issues/11357)).
 ## [18.1.17] - 2026-09-10
 
 ### Added

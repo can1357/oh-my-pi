@@ -37,6 +37,13 @@ export interface LoadContext {
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
 	/**
+	 * When true, standalone AGENTS.md / CLAUDE.md discovery clamps at
+	 * {@link repoRoot} instead of raising the boundary to `$HOME` for a
+	 * nested repository. Default (unset / false) keeps the walk-to-home
+	 * contract from #7703. Threaded from `context.stopAtRepoRoot`.
+	 */
+	stopAtRepoRoot?: boolean;
+	/**
 	 * Session-local extension roots for sub-discovery. When set, extension
 	 * discovery uses these lanes instead of the invocation-scoped snapshot or
 	 * the process defaults, so post-startup reloads stay byte-identical to the
