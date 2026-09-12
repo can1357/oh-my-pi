@@ -1,12 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionRuntimeContract } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 
 function createRunner(): ExtensionRunner {
 	const runtime = {
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
-	} as unknown as ExtensionRuntime;
+	} as unknown as ExtensionRuntimeContract;
 	return new ExtensionRunner([], runtime, "/tmp", { getCwd: () => "/tmp" } as never, {} as never);
 }
 

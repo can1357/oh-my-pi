@@ -1757,8 +1757,6 @@ export class SessionTools {
 }
 
 function registeredFilesystemSourcePath(runner: ExtensionRunner | undefined, name: string): string | undefined {
-	const registered = runner?.getRegisteredTool(name);
-	if (!registered) return undefined;
-	const candidate = registered.definition.sourcePath ?? registered.extensionPath;
-	return candidate && isFilesystemSourcePath(candidate) ? candidate : undefined;
+	const path = runner?.getRegisteredTool(name)?.sourceInfo.path;
+	return path && isFilesystemSourcePath(path) ? path : undefined;
 }
