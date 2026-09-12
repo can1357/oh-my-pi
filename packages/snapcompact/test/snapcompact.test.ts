@@ -1213,6 +1213,8 @@ describe("archive helpers", () => {
 		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
+		expect(snapcompact.providerImageBudget("devin")).toBe(200);
+		expect(snapcompact.providerFrameBudget("devin")).toBe(snapcompact.MAX_FRAMES_DEFAULT);
 		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerFrameBudget("umans")).toBe(10);
 		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES_DEFAULT);

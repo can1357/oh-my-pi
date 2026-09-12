@@ -514,6 +514,8 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 	"google-gemini-cli": 200,
 	openrouter: 90,
 	umans: 10,
+	devin: 200,
+	"devin-agent": 200,
 };
 
 /** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
