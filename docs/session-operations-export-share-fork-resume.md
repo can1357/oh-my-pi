@@ -318,6 +318,12 @@ For compatibility, `--continue <full-UUID>` is normalized to `--resume <UUID>` w
 
 This is startup-only behavior; there is no interactive `/continue` slash command.
 
+## CLI `--new`
+
+`--new` (alias `--new-session`) suppresses `autoResume` for one launch: `createSessionManager` skips the `continueRecent` call and returns no manager, so session creation falls through to the SDK exactly as on a launch with the setting disabled. It is the only CLI-side opt-out of the setting.
+
+Combining it with another session source (`--continue`, `--resume`, `--fork`, `--from-claude`, `--from-codex`) is a `SessionResolutionError`, not a precedence rule. `/restart` drops the flag when it has a session to resume and re-adds it when it does not, so a deliberately fresh session relaunches fresh.
+
 ## How session switching actually mutates runtime state
 
 `AgentSession.switchSession(sessionPath)` does the runtime transition used by resume-like operations:

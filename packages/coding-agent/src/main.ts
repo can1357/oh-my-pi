@@ -686,8 +686,9 @@ export class SessionResolutionError extends Error {
 	}
 }
 
-function resolveForeignSessionSource(
-	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume">,
+/** Startup gate for `--from-claude`/`--from-codex`: resolves the import source or rejects a conflicting session source. */
+export function resolveForeignSessionSource(
+	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "newSession" | "noSession" | "resume">,
 ): ForeignSessionSource | undefined {
 	if (parsed.fromClaude && parsed.fromCodex) {
 		throw new SessionResolutionError("--from-claude and --from-codex cannot be used together");
@@ -697,8 +698,10 @@ function resolveForeignSessionSource(
 	if (parsed.noSession) {
 		throw new SessionResolutionError(`--from-${source} requires session persistence`);
 	}
-	if (parsed.continue || parsed.resume || parsed.fork) {
-		throw new SessionResolutionError(`--from-${source} cannot be combined with --continue, --resume, or --fork`);
+	if (parsed.continue || parsed.resume || parsed.fork || parsed.newSession) {
+		throw new SessionResolutionError(
+			`--from-${source} cannot be combined with --continue, --resume, --fork, or --new`,
+		);
 	}
 	return source;
 }
@@ -957,6 +960,9 @@ export async function createSessionManager(
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
 ): Promise<SessionManager | undefined> {
+	if (parsed.newSession && (parsed.continue || parsed.resume || parsed.fork)) {
+		throw new SessionResolutionError("--new cannot be combined with --continue, --resume, or --fork");
+	}
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
@@ -1035,8 +1041,9 @@ export async function createSessionManager(
 	// Auto-resume: behave like --continue if the setting is enabled and a prior
 	// session exists. When a prior session is resumed, mark parsed.continue so
 	// buildSessionOptions restores the session's model/thinking instead of
-	// overriding them with CLI defaults.
-	if (activeSettings.get("autoResume")) {
+	// overriding them with CLI defaults. `--new` opts out of the setting for one
+	// launch, which is otherwise unreachable from the CLI.
+	if (!parsed.newSession && activeSettings.get("autoResume")) {
 		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
 		if (manager.getEntries().length > 0) {
 			parsed.continue = true;

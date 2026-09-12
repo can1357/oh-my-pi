@@ -72,6 +72,7 @@ Argument handling:
 | --- | --- |
 | `--continue`, `-c` | Continue the previous session. |
 | `--resume [id]`, `-r`, `--session [id]` | Resume a session by ID prefix or path, or open the picker when no value is given. |
+| `--new`, `--new-session` | Start a new session even when the `autoResume` setting is enabled. Cannot be combined with `--continue`, `--resume`, `--fork`, or a foreign-session import. |
 | `--fork <session>` | Fork a saved session (by ID prefix or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md). |
 | `--from-claude` | Import a Claude Code session into OMP. |
 | `--from-codex` | Import a Codex session into OMP. |

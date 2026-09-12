@@ -720,7 +720,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `followUpMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `none`.                                                                               |
-| `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
+| `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd. `--new` skips it for one launch.                        |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
 | `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
 | `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. (Legacy ms values are migrated to seconds.) |

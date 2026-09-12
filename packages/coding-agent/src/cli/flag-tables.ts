@@ -295,6 +295,8 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--version",
 	"--allow-home",
 	"--continue",
+	"--new",
+	"--new-session",
 	"--from-claude",
 	"--from-codex",
 	"--no-session",
@@ -370,6 +372,8 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 	"--session",
 	"--continue",
 	"-c",
+	"--new",
+	"--new-session",
 	"--fork",
 	"--from-claude",
 	"--from-codex",
@@ -380,7 +384,9 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  *
  * Keeps every configuration flag as launched, but drops:
  * - session-source flags ({@link SESSION_SOURCE_FLAGS}, including inline
- *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead,
+ *   except that `--new` is re-emitted when there is no session to resume, so a
+ *   deliberately fresh launch stays fresh instead of falling into `autoResume`;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
  *   duplicate the initial prompt.
@@ -392,6 +398,7 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  */
 export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
 	const kept: string[] = [];
+	let sawNewSession = false;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") break; // end-of-options: the rest is literal prompt text
@@ -399,6 +406,7 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
 		if (SESSION_SOURCE_FLAGS.has(flag)) {
+			if (flag === "--new" || flag === "--new-session") sawNewSession = true;
 			if (consumesNext) i++;
 			continue;
 		}
@@ -406,5 +414,6 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		if (consumesNext) kept.push(argv[++i]);
 	}
 	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	else if (sawNewSession) kept.push("--new");
 	return kept;
 }
