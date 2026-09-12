@@ -1071,6 +1071,11 @@ interface SubagentRunMonitor {
 	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
+	/**
+	 * Text of the last assistant turn that read as a report — prose, with no
+	 * further work started. Source for `yield`'s data-less finalize.
+	 */
+	lastReportTurnText(): string | undefined;
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
@@ -1161,6 +1166,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
+	// Text of the most recent assistant turn that READ AS A REPORT: it carried
+	// prose and started no further work (no tool call, or only the terminal
+	// `yield`). This — not merely the last assistant message — is what a
+	// data-less `yield` finalize harvests. Both the idle reminder and the
+	// budget wrap-up tell a finished subagent to finalize "from last assistant
+	// turn", and models routinely comply one turn later, so the finalize turn
+	// itself is usually text-less. Turns that started more work are excluded on
+	// purpose: mid-run narration must never surface as a final result.
+	let lastReportTurnText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
 	const abortActiveSession = (): Promise<void> => {
@@ -1666,18 +1680,35 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
 					if (messageContent && Array.isArray(messageContent)) {
+						const turnText: string[] = [];
+						let startedMoreWork = false;
 						for (const block of messageContent) {
 							if (!isRecord(block)) continue;
 							if (block.type === "text" && typeof block.text === "string") {
 								outputChunks.push(block.text);
+								if (block.text) turnText.push(block.text);
 								continue;
 							}
 							if (block.type !== "toolCall" || typeof block.name !== "string") continue;
-							if (block.name === "yield" && !yieldCalled) {
-								yieldCallPending = true;
-								flushProgress = true;
+							if (block.name === "yield") {
+								if (!yieldCalled) {
+									yieldCallPending = true;
+									flushProgress = true;
+								}
+								continue;
 							}
+							startedMoreWork = true;
 						}
+						// Only the report turn immediately preceding the finalize is
+						// harvestable. A turn that started more work invalidates any
+						// earlier candidate: the model took the reminder's "resume
+						// work" path, so that prose predates the work and is no longer
+						// a description of the finished assignment. Skipping the
+						// update alone would leave it harvestable and hand the parent
+						// stale narration as the completed result.
+						const text = turnText.join("\n");
+						if (startedMoreWork) lastReportTurnText = undefined;
+						else if (text.trim()) lastReportTurnText = text;
 					}
 					if (softRequestBudget > 0 && !abortSent && !yieldCallPending) {
 						const stopThreshold = softRequestBudget * 1.5;
@@ -1930,6 +1961,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		attach,
 		captureSalvage,
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
+		lastReportTurnText: () => lastReportTurnText,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
 		finish: () => {
@@ -2286,7 +2318,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchema: args.outputSchema,
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
-			lastAssistantText: monitor.lastAssistantSalvageText(),
+			lastAssistantText: monitor.lastReportTurnText(),
 		});
 	} finally {
 		popLoopPhase();
