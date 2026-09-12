@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the collab guest reconnect/resync path eagerly disposing the previous transcript before the replacement finished staging, which defeated the staged rebuild's rollback; a live tool block orphaned by a failed resync now stops instead of leaking its shared spinner-ticker registration for the rest of the process ([#9377](https://github.com/can1357/oh-my-pi/pull/9377) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed reconnecting to a collab session while a tool was still running sometimes leaving its spinner animation active for the rest of the process ([#9377](https://github.com/can1357/oh-my-pi/pull/9377) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.1.19] - 2026-09-12
 
