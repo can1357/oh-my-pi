@@ -66,6 +66,8 @@ function makeHarness(): NewSessionHarness {
 			presented++;
 		},
 		reloadTodos: async () => {},
+		flushPendingModelSwitch: async () => {},
+		clearPendingModelSwitch: () => {},
 		ui: { requestRender: () => {} },
 	} as unknown as InteractiveModeContext;
 

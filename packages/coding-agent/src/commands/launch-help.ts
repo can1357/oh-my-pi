@@ -17,6 +17,10 @@ export const launchHelp = {
 		model: Flags.string({
 			description: 'Model to use (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")',
 		}),
+		agent: Flags.string({
+			description:
+				"Run the session as a discovered task agent (persona): system prompt, tools, and model come from the agent definition. See docs/task-agent-discovery.md#using-agents-as-a-main-session-persona",
+		}),
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),

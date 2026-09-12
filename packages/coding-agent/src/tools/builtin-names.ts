@@ -1,3 +1,5 @@
+import type { EvalBackendsAllowance } from "./eval-backends";
+
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
@@ -61,6 +63,29 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 		out.push(normalized);
 	}
 	return out;
+}
+
+/**
+ * The `exec` shorthand maps to the concrete execution tools: `bash` always,
+ * plus `eval` when an eval backend is available. Extracted from the executor's
+ * child tool derivation (fr-vW/fo80l) so the persona grant and the child-side
+ * capability intersect expand the shorthand through the SAME rule instead of
+ * drifting copies.
+ *
+ * `backends === undefined` means "assume available": grant layers computed
+ * before a session exists (the persona grant) cannot read eval settings — the
+ * registry/`effective()` layer gates `eval` at use time, so expanding it here
+ * never grants a tool the session cannot actually run.
+ */
+export function expandExecToolShorthand(names: readonly string[], backends?: EvalBackendsAllowance): string[] {
+	// Case-insensitive membership: a frontmatter `tools: [EXEC]` is the same
+	// shorthand, and callers may expand BEFORE normalization (the persona grant
+	// normalizes the expanded result).
+	if (!names.some(name => name.toLowerCase() === "exec")) return [...names];
+	const expanded = names.filter(name => name.toLowerCase() !== "exec");
+	if (!backends || backends.python || backends.js) expanded.push("eval");
+	expanded.push("bash");
+	return Array.from(new Set(expanded));
 }
 
 /** MCP tool names carry the `mcp__<server>_<tool>` prefix minted by `createMCPToolName`. */

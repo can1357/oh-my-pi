@@ -29,6 +29,8 @@ export interface Args {
 	profile?: string;
 	alias?: string;
 	allowHome?: boolean;
+	/** Run the session as a discovered task agent (persona) by name. */
+	agent?: string;
 	provider?: string;
 	model?: string;
 	config?: string[];

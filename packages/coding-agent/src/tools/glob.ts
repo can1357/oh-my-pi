@@ -122,10 +122,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	get description(): string {
 		return prompt.render(globDescription, {
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				this.session.settings.get("task.disabledAgents") as string[] | undefined,
-				this.session.getSessionSpawns?.() ?? "*",
-			),
+			scoutAvailable:
+				this.session.isScoutSpawnable?.() ??
+				isScoutSpawnable(
+					this.session.settings.get("task.disabledAgents") as string[] | undefined,
+					this.session.getSessionSpawns?.() ?? "*",
+				),
 		});
 	}
 	readonly parameters = findSchema;

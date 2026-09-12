@@ -45,6 +45,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
+import { resolveModelOverride } from "../../config/model-resolver";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -66,14 +67,22 @@ import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import {
+	appendPersonaJournalEntry,
+	personaJournalModeIsTail,
+	deserializePersonaBaseline,
+	reconcileSessionPersona,
+	readPersistedAgentPersona,
+} from "../../session/persisted-persona";
+import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../../session/persona-model-hooks";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { refreshAgentDiscovery } from "../../task";
-import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
+import { type ConfiguredThinkingLevel, AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
+import type { DiscoveredAgent, PersonaExplicitOverrides } from "../../session/tool-policy";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
 import { ToolError } from "../../tools/tool-errors";
@@ -83,6 +92,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
+import { refreshAgentDiscovery } from "../../task";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -115,6 +125,169 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+
+const PERSONA_DEFERRED_NOTICE_TEMPLATE =
+	'Agent "{name}" model switch deferred: mid-turn. Its tools and prompt apply now; the model stays until the turn ends.';
+const PERSONA_RESTORE_DEFERRED_NOTICE_TEMPLATE = "Agent persona cleared: model restore deferred until the turn ends.";
+const PERSONA_GONE_NOTICE_TEMPLATE = 'Agent persona "{name}" is no longer available; session resumed without it.';
+
+/**
+ * ACP persona model hooks: the mid-turn channels are in-band text notices
+ * (pre-runtime ACP semantics — tools/prompt flip immediately, the model
+ * switch/restore is skipped until the surface retries when the turn ends),
+ * everything else falls through to the shared default hooks.
+ */
+export function createAcpPersonaModelHooks(
+	session: AgentSession,
+	emitNotice: (text: string) => void | Promise<void>,
+): PersonaModelApplyHooks {
+	const defaultHooks = createDefaultPersonaModelHooks(session);
+	// fw_sA: one session-level deferred slot is flushed at `agent_end`
+	// (#handlePromptEvent). Snapshot the queue as it stands BEFORE this
+	// transaction touches it so a rollback restores the prior owner's entry
+	// instead of deleting it (TUI #pendingModelSwitch parity).
+	const priorPending = session.getDeferredModelRestore?.();
+	// Model/thinking resolution mirrors the TUI's queue channel: the default
+	// hooks resolve the agent's pattern synchronously; a pattern-carried
+	// `:level` suffix rides the same value the non-deferred apply would set.
+	const resolveQueuedSelection = (
+		agent: DiscoveredAgent,
+	): { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined => {
+		if (!agent.model || agent.model.length === 0) {
+			// Thinking-only persona: the flush forwards both halves to
+			// setModelTemporary, which applies a thinking-only change without
+			// touching the model (fo80k).
+			if (agent.thinkingLevel === undefined) return undefined;
+			const current = session.model;
+			return current ? { model: current, thinkingLevel: agent.thinkingLevel } : undefined;
+		}
+		const resolved = resolveModelOverride(agent.model, session.modelRegistry, session.settings);
+		if (!resolved.model) return undefined;
+		const queuedThinking =
+			agent.thinkingLevel ?? (resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined);
+		return { model: resolved.model, thinkingLevel: queuedThinking };
+	};
+	return {
+		...defaultHooks,
+		shouldDeferModelSwitch: () => session.isStreaming,
+		deferModelSwitchWhileStreaming: agent => {
+			// Chained switches (A active, mid-turn enter of modeled B): the
+			// runtime already queued A's pre-persona restore through the exit
+			// channel. B's selection must REPLACE it — leaving A's restore queued
+			// would apply the pre-A model at agent_end while B runs (and B's
+			// model would never land). The notice keeps promising what the queue
+			// now delivers.
+			// j2w merge: a thinking-only selection carries the LIVE model (A's
+			// persona model), so it must keep an already-queued entry's model and
+			// only take over the thinking level — replacing wholesale would swap
+			// A's owed baseline restore for A's persona model.
+			const selection = resolveQueuedSelection(agent);
+			if (selection) {
+				const thinkingOnly = !agent.model || agent.model.length === 0;
+				const prior = thinkingOnly ? session.getDeferredModelRestore?.() : undefined;
+				session.queueDeferredModelRestore?.(
+					prior?.model ?? selection.model,
+					selection.thinkingLevel ?? prior?.thinkingLevel,
+				);
+			}
+			void emitNotice(PERSONA_DEFERRED_NOTICE_TEMPLATE.replace("{name}", agent.name));
+		},
+		deferModelRestoreWhileStreaming: baseline => {
+			// Mid-turn persona exit: queue the pre-persona restore on the
+			// session; `agent_end` applies it, so the advertised turn-end
+			// restore actually lands.
+			if (!baseline.model) return;
+			session.queueDeferredModelRestore?.(baseline.model, baseline.thinkingLevel);
+			void emitNotice(PERSONA_RESTORE_DEFERRED_NOTICE_TEMPLATE);
+		},
+		// Rollback safety: undo THIS transaction's queue mutation by restoring
+		// the transaction-start entry (not blanket-clearing): a failed chained
+		// switch rolls the runtime back to A, whose own owed switch (or an
+		// earlier successful exit's restore) must survive.
+		onPersonaSwitchFailed: () => {
+			if (priorPending) session.queueDeferredModelRestore?.(priorPending.model, priorPending.thinkingLevel);
+			else session.clearDeferredModelRestore?.();
+		},
+	};
+}
+
+/**
+ * Re-activates the persisted persona on session load/resume/fork through the
+ * shared `reconcileSessionPersona` helper (journal read, discovery, baseline
+ * deserialization, `PersonaRuntime.reconcile`, gone-persona degrade). On
+ * success appends a fresh `mode_change agent` entry (drift-free resume) with
+ * the (unchanged) baseline carried forward so the contract key survives across
+ * load/resume cycles. `emitNotice` routes surfaced text (a gone-persona
+ * notice) through the caller's channel; the session-open paths buffer it until
+ * registration so the client is never notified for an unknown session id.
+ */
+export async function reconcileAcpSessionPersona(
+	session: AgentSession,
+	emitNotice: (text: string) => void | Promise<void>,
+	launchPersona?: { agent: DiscoveredAgent; explicit?: PersonaExplicitOverrides },
+): Promise<void> {
+	const result = await reconcileSessionPersona(session, {
+		buildHooks: current => createAcpPersonaModelHooks(current, emitNotice),
+		onGone: (current, name) => emitNotice(PERSONA_GONE_NOTICE_TEMPLATE.replace("{name}", name)),
+		onError: (current, persona, error) => {
+			// No journal write and no client notice on an internal failure: the
+			// session simply resumes without the persona rather than failing load.
+			logger.warn("Failed to reconcile persisted persona on ACP session open", {
+				sessionId: current.sessionId,
+				persona,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		},
+	});
+	if (result.entered && !launchPersona) {
+		// Re-append carries the (unchanged) baseline forward so the contract key
+		// survives across load/resume cycles — but only when the persona entry
+		// is already the journal's LAST mode: appending ahead of a transparent
+		// plan/goal/vibe marker would make `agent` the resolved mode on the next
+		// load and silently lose the outer mode's state.
+		const entries = session.sessionManager.getEntries();
+		const desired = readPersistedAgentPersona(entries);
+		if (desired && personaJournalModeIsTail(entries)) {
+			appendPersonaJournalEntry(session, desired);
+		}
+		return;
+	}
+	// `--agent X` launch precedence over the loaded journal (fvInv parity with
+	// the TUI `--agent X --resume` seam): switchSession tore the construction-time
+	// launch persona down and restored the target journal's state, so re-assert
+	// the requested persona HERE. `launchPersona.agent` is resolved against THIS
+	// workspace by the factory — a name that misses there stays undefined (the
+	// documented ACP degrade) and the stored persona survives; a name that hits
+	// wins, including over a stored persona reconcileSessionPersona just entered.
+	// The stored entry's baseline — whichever persona it records — stays
+	// authoritative for the eventual exit; otherwise capture the restored live
+	// state.
+	if (!launchPersona) return;
+	const runtime = session.getPersonaRuntime?.();
+	if (!runtime) return;
+	const persisted = readPersistedAgentPersona(session.sessionManager.getEntries());
+	const baselineOverride = persisted?.baseline ? deserializePersonaBaseline(session, persisted.baseline) : undefined;
+	try {
+		await runtime.reconcile(
+			{ agent: launchPersona.agent, explicit: launchPersona.explicit, baselineOverride },
+			createAcpPersonaModelHooks(session, emitNotice),
+		);
+	} catch (error) {
+		// Same degrade philosophy as the stored reconcile: a failed launch-persona
+		// re-assert must not fail the load; the session runs without it.
+		logger.warn("Failed to re-assert ACP launch persona after session open", {
+			sessionId: session.sessionId,
+			persona: launchPersona.agent.name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return;
+	}
+	appendPersonaJournalEntry(session, {
+		name: launchPersona.agent.name,
+		explicit: launchPersona.explicit,
+		baseline: runtime.getActiveBaseline(),
+	});
+}
 
 type AgentImageContent = {
 	type: "image";
@@ -223,6 +396,7 @@ type MCPSourceMap = {
 type AcpSessionHandle = {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	launchPersona?: { agent: DiscoveredAgent; explicit?: PersonaExplicitOverrides };
 };
 
 type CreateAcpSession = (
@@ -233,8 +407,11 @@ type CreateAcpSession = (
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
 	session: AgentSession;
 	setToolUIContext: AcpSessionHandle["setToolUIContext"] | undefined;
+	launchPersona: AcpSessionHandle["launchPersona"] | undefined;
 } {
-	return "session" in created ? created : { session: created, setToolUIContext: undefined };
+	return "session" in created
+		? { session: created.session, setToolUIContext: created.setToolUIContext, launchPersona: created.launchPersona }
+		: { session: created, setToolUIContext: undefined, launchPersona: undefined };
 }
 
 type AcpSpeechOption = {
@@ -253,7 +430,10 @@ type AcpSpeechTtsModelOption = AcpSpeechOption & {
 };
 
 function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
-	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
+	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({
+		value,
+		label,
+	}));
 	return {
 		settings: {
 			speechToTextModel: "stt.modelName",
@@ -269,7 +449,11 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 		speechToText: {
 			setting: "stt.modelName",
 			defaultValue: DEFAULT_STT_MODEL_KEY,
-			models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+			models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({
+				value,
+				label,
+				description,
+			})),
 		},
 		textToSpeech: {
 			modelSetting: "tts.localModel",
@@ -281,7 +465,10 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 				value: key,
 				label,
 				description,
-				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
+				voices: modelVoices.map(({ id, label: voiceLabel }) => ({
+					value: id,
+					label: voiceLabel,
+				})),
 			})),
 			voices,
 		},
@@ -341,7 +528,11 @@ async function elicitFormFromAcpClient(
 			} catch (error) {
 				// A throwing `onTimeout` must not leave the elicitation promise
 				// pending — settle it via `finish` below regardless.
-				logger.warn("ACP elicitation onTimeout threw", { sessionId, method, error });
+				logger.warn("ACP elicitation onTimeout threw", {
+					sessionId,
+					method,
+					error,
+				});
 			}
 			finish(undefined);
 		}, dialogOptions.timeout);
@@ -460,7 +651,10 @@ export function createAcpExtensionUiContext(
 				// surface the placeholder text as `description` — the closest
 				// semantic field a client can render alongside the input.
 				// Empty / whitespace-only placeholders are treated as absent.
-				{ type: "string", ...(placeholder?.trim() ? { description: placeholder } : {}) },
+				{
+					type: "string",
+					...(placeholder?.trim() ? { description: placeholder } : {}),
+				},
 				dialogOptions,
 			);
 			return typeof value === "string" ? value : undefined;
@@ -601,7 +795,10 @@ export function createAcpExtensionUiContext(
 		},
 		getAllThemes: async () => [],
 		getTheme: async () => undefined,
-		setTheme: async () => ({ success: false, error: "Theme changes are unavailable in ACP mode" }),
+		setTheme: async () => ({
+			success: false,
+			error: "Theme changes are unavailable in ACP mode",
+		}),
 		getToolsExpanded: () => false,
 		setToolsExpanded: () => {},
 	};
@@ -919,7 +1116,9 @@ export class AcpAgent implements Agent {
 	}
 
 	#createPromptLifecycleError(message: string): PromptLifecycleError {
-		return Object.assign(new Error(message), { code: "ACP_SESSION_CLOSED" as const });
+		return Object.assign(new Error(message), {
+			code: "ACP_SESSION_CLOSED" as const,
+		});
 	}
 
 	#trackPromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
@@ -1079,7 +1278,10 @@ export class AcpAgent implements Agent {
 		try {
 			await cleanup;
 		} catch (error: unknown) {
-			logger.warn("ACP cancel cleanup timed out; closing session", { sessionId: record.session.sessionId, error });
+			logger.warn("ACP cancel cleanup timed out; closing session", {
+				sessionId: record.session.sessionId,
+				error,
+			});
 			await this.#closeManagedSession(record.session.sessionId, record);
 		}
 	}
@@ -1142,7 +1344,12 @@ export class AcpAgent implements Agent {
 				const sessions = await SessionManager.listAll();
 				const buckets = new Map<
 					string,
-					{ cwd: string; sessionCount: number; lastActivityAt: number; lastTitle: string }
+					{
+						cwd: string;
+						sessionCount: number;
+						lastActivityAt: number;
+						lastTitle: string;
+					}
 				>();
 				for (const s of sessions) {
 					if (!s.cwd) continue;
@@ -1188,7 +1395,11 @@ export class AcpAgent implements Agent {
 				const sm = await Settings.init();
 				const disabledIds = (sm.get("disabledExtensions") as string[] | undefined) ?? [];
 				const extensions = await loadAllExtensions(cwd, disabledIds);
-				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
+				return {
+					extensions: extensions as unknown as Array<{
+						[key: string]: unknown;
+					}>,
+				};
 			}
 			case "_omp/extensions/toggle": {
 				const providerId = params.providerId;
@@ -1276,11 +1487,17 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, launchPersona } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
 		);
+		const forkNotices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice") {
+				forkNotices.push(event.message);
+			}
+		});
 		try {
 			const success = await session.switchSession(sourcePath);
 			if (!success) {
@@ -1291,10 +1508,19 @@ export class AcpAgent implements Agent {
 				throw new Error(`ACP session fork failed: ${params.sessionId}`);
 			}
 		} catch (error) {
+			unsubscribe();
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
+		await reconcileAcpSessionPersona(
+			session,
+			text => {
+				forkNotices.push(text);
+			},
+			launchPersona,
+		);
+		unsubscribe();
+		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, forkNotices);
 	}
 
 	async #openStoredSession(
@@ -1303,27 +1529,43 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		sessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, launchPersona } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
 		);
+		const openNotices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice") {
+				openNotices.push(event.message);
+			}
+		});
 		try {
 			const success = await session.switchSession(sessionPath);
 			if (!success) {
 				throw new Error(`ACP session load was cancelled: ${sessionId}`);
 			}
 		} catch (error) {
+			unsubscribe();
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		await reconcileAcpSessionPersona(
+			session,
+			text => {
+				openNotices.push(text);
+			},
+			launchPersona,
+		);
+		unsubscribe();
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, openNotices);
 	}
 
 	async #registerPreparedSession(
 		session: AgentSession,
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
+		personaNotices: string[] = [],
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
@@ -1333,10 +1575,34 @@ export class AcpAgent implements Agent {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(session.sessionId, record);
+			// Persona notices are flushed only after the session id is registered:
+			// notifications sent earlier race the load/fork response and hit
+			// `Received session notification for unknown session` — the same race
+			// `#scheduleBootstrapUpdates` guards against.
+			if (personaNotices.length > 0) {
+				await this.#emitPersonaNotices(personaNotices, session.sessionId);
+			}
 			return record;
 		} catch (error) {
 			await this.#disposeSessionRecord(record);
 			throw error;
+		}
+	}
+
+	/**
+	 * Emits persona notices collected during reconcile AFTER the session is
+	 * registered, in order.
+	 */
+	async #emitPersonaNotices(notices: string[], sessionId: string): Promise<void> {
+		for (const text of notices) {
+			await this.#connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text },
+					messageId: crypto.randomUUID(),
+				},
+			});
 		}
 	}
 
@@ -1363,6 +1629,21 @@ export class AcpAgent implements Agent {
 	}
 
 	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
+		// fured: a session notice (e.g. the gone-persona degrade on a headless
+		// switch) reaches the client as an in-band message chunk — the same
+		// channel #emitPersonaNotices uses, so the text is never silently
+		// swallowed by the generic reconcile path.
+		if (event.type === "notice") {
+			try {
+				await this.#emitPersonaNotices([event.message], record.session.sessionId);
+			} catch (error) {
+				logger.warn("Failed to emit a session notice to the ACP client", {
+					sessionId: record.session.sessionId,
+					error,
+				});
+			}
+			return;
+		}
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}
@@ -1464,6 +1745,22 @@ export class AcpAgent implements Agent {
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
 		if (event.type === "agent_end") {
+			// fw_sA: apply a deferred persona model restore queued by a mid-turn
+			// exit before the turn's trailing updates flush.
+			try {
+				if (await record.session.flushDeferredModelRestore()) {
+					// The queued restore rode the runtime's parked pre-chain
+					// baseline; drop that parked value once consumed (TUI
+					// flushPendingModelSwitch parity) so a much later mid-turn
+					// enter does not re-adopt a stale baseline.
+					record.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
+				}
+			} catch (error) {
+				logger.warn("Failed to apply deferred persona model restore at turn end", {
+					sessionId: record.session.sessionId,
+					error: String(error),
+				});
+			}
 			await this.#flushMissedFinalAssistantText(record, event);
 			await this.#flushUnreportedTurnError(record, event);
 			await this.#emitEndOfTurnUpdates(record);
@@ -1476,7 +1773,6 @@ export class AcpAgent implements Agent {
 			});
 		}
 	}
-
 	/**
 	 * Deliver the final visible answer when the assistant `message_end` never
 	 * reached this prompt turn's subscription. Session event handlers are
@@ -1581,7 +1877,10 @@ export class AcpAgent implements Agent {
 			(event.type === "message_start" || !record.liveMessageId || !record.liveMessageProgress)
 		) {
 			record.liveMessageId = crypto.randomUUID();
-			record.liveMessageProgress = { textEmitted: false, thoughtEmitted: false };
+			record.liveMessageProgress = {
+				textEmitted: false,
+				thoughtEmitted: false,
+			};
 		}
 	}
 
@@ -1615,7 +1914,10 @@ export class AcpAgent implements Agent {
 		if (typeof message !== "object" || message === null) {
 			return undefined;
 		}
-		record.liveMessageProgress ??= { textEmitted: false, thoughtEmitted: false };
+		record.liveMessageProgress ??= {
+			textEmitted: false,
+			thoughtEmitted: false,
+		};
 		return record.liveMessageProgress;
 	}
 
@@ -1686,7 +1988,10 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	#convertPromptBlocks(blocks: PromptRequest["prompt"]): { text: string; images: AgentImageContent[] } {
+	#convertPromptBlocks(blocks: PromptRequest["prompt"]): {
+		text: string;
+		images: AgentImageContent[];
+	} {
 		const textParts: string[] = [];
 		const images: AgentImageContent[] = [];
 		for (const block of blocks) {
@@ -1695,7 +2000,11 @@ export class AcpAgent implements Agent {
 					textParts.push(block.text);
 					break;
 				case "image":
-					images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+					images.push({
+						type: "image",
+						data: block.data,
+						mimeType: block.mimeType,
+					});
 					break;
 				case "resource":
 					if ("text" in block.resource) {
@@ -1705,7 +2014,11 @@ export class AcpAgent implements Agent {
 						// blobs aren't directly consumable by the LLM. Route image blobs
 						// to the images array so the user's intent survives; everything
 						// else falls back to the URI placeholder below.
-						images.push({ type: "image", data: block.resource.blob, mimeType: block.resource.mimeType });
+						images.push({
+							type: "image",
+							data: block.resource.blob,
+							mimeType: block.resource.mimeType,
+						});
 					} else {
 						textParts.push(`[embedded resource: ${block.resource.uri}]`);
 					}
@@ -1789,7 +2102,11 @@ export class AcpAgent implements Agent {
 	#buildThinkingOptions(session: AgentSession): Array<{ value: string; name: string; description?: string }> {
 		return [
 			{ value: THINKING_OFF, name: "Off" },
-			{ value: AUTO_THINKING, name: "Auto", description: "Auto-detect per prompt" },
+			{
+				value: AUTO_THINKING,
+				name: "Auto",
+				description: "Auto-detect per prompt",
+			},
 			...session.getAvailableThinkingLevels().map(level => ({
 				value: level,
 				name: level,
@@ -1829,7 +2146,13 @@ export class AcpAgent implements Agent {
 	}
 
 	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
-		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
+		const modes = [
+			{
+				id: ACP_DEFAULT_MODE_ID,
+				name: "Default",
+				description: "Standard ACP headless mode",
+			},
+		];
 		if (session.settings.get("plan.enabled")) {
 			modes.push({
 				id: ACP_PLAN_MODE_ID,
@@ -1849,6 +2172,12 @@ export class AcpAgent implements Agent {
 		const availableModes = this.#getAvailableModes(session);
 		if (!availableModes.some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);
+		}
+		if (modeId === ACP_PLAN_MODE_ID && session.getToolPolicy?.()?.isPersonaActive()) {
+			// Mirror the TUI (handlePlanModeCommand refuses while a persona is
+			// active): the persona's tool grant and the plan partition would
+			// fight. Exiting the persona (`/agent`) first is the entry order.
+			throw new Error("Exit the agent persona before entering plan mode.");
 		}
 		if (modeId === ACP_PLAN_MODE_ID) {
 			const previous = session.getPlanModeState();
@@ -2374,7 +2703,11 @@ export class AcpAgent implements Agent {
 						sessionId,
 						update: {
 							sessionUpdate: "agent_message_chunk",
-							content: { type: "image", data: item.data, mimeType: item.mimeType },
+							content: {
+								type: "image",
+								data: item.data,
+								mimeType: item.mimeType,
+							},
 							messageId,
 						},
 					});
@@ -2472,7 +2805,12 @@ export class AcpAgent implements Agent {
 		if (options.includeStart === false) {
 			return notifications;
 		}
-		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
+		return [
+			...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, {
+				cwd,
+			}),
+			...notifications,
+		];
 	}
 
 	#buildReplayToolArgs(details: unknown): { path?: string } {
@@ -2517,7 +2855,11 @@ export class AcpAgent implements Agent {
 					typeof item.data === "string" &&
 					typeof item.mimeType === "string"
 				) {
-					replay.push({ type: "image", data: item.data, mimeType: item.mimeType });
+					replay.push({
+						type: "image",
+						data: item.data,
+						mimeType: item.mimeType,
+					});
 				}
 			}
 		}
@@ -2611,7 +2953,9 @@ export class AcpAgent implements Agent {
 				getContextUsage: () => record.session.getContextUsage(),
 				waitForIdle: () => record.session.agent.waitForIdle(),
 				newSession: async options => {
-					const success = await record.session.newSession({ parentSession: options?.parentSession });
+					const success = await record.session.newSession({
+						parentSession: options?.parentSession,
+					});
 					if (success && options?.setup) {
 						await options.setup(record.session.sessionManager);
 					}
@@ -2622,7 +2966,9 @@ export class AcpAgent implements Agent {
 					return { cancelled: result.cancelled };
 				},
 				navigateTree: async (targetId, options) => {
-					const result = await record.session.navigateTree(targetId, { summarize: options?.summarize });
+					const result = await record.session.navigateTree(targetId, {
+						summarize: options?.summarize,
+					});
 					return { cancelled: result.cancelled };
 				},
 				switchSession: async sessionPath => {
@@ -2734,7 +3080,9 @@ export class AcpAgent implements Agent {
 		throw new Error(`Unsupported MCP server transport: ${server.type}`);
 	}
 
-	#toNameValueMap(values: Array<{ name: string; value: string }>): { [name: string]: string } {
+	#toNameValueMap(values: Array<{ name: string; value: string }>): {
+		[name: string]: string;
+	} {
 		const mapped: { [name: string]: string } = {};
 		for (const value of values) {
 			mapped[value.name] = value.value;

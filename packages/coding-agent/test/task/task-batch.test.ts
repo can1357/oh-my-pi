@@ -151,6 +151,21 @@ describe("task.batch schema gating", () => {
 		expect(tool.description).not.toContain("Concurrent edits to the same files auto-resolve");
 	});
 
+	// Regression: renderDescription must forward `batchEnabled` to the Handlebars
+	// template. Omitting it left the default `task.batch=true` session advertising
+	// the single-agent wording while the wire schema required `{ context, tasks[] }`.
+	it("description branches on the batch setting to match the wire schema", async () => {
+		mockDiscovery();
+
+		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		expect(batch.description).toContain("passing multiple items in a single `tasks[]` batch");
+		expect(batch.description).not.toContain("Run ONE subagent synchronously");
+
+		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		expect(flat.description).toContain("Delegate work to ONE background subagent per call");
+		expect(flat.description).not.toContain("passing multiple items in a single `tasks[]` batch");
+	});
+
 	it("describes a restricted specialist as the spawn-policy default", async () => {
 		mockDiscovery(scoutAgent);
 		const tool = await TaskTool.create(createSession({ spawns: "scout" }));

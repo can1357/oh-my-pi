@@ -11,6 +11,7 @@ Package-specific references:
 - [MCP configuration guide](../../docs/mcp-config.md)
 - [MCP runtime lifecycle](../../docs/mcp-runtime-lifecycle.md)
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
+- [Task agent discovery](../../docs/task-agent-discovery.md) — agents as subagents and as a main-session persona (`--agent`, `/agent`)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
 ## Memory backends

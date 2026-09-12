@@ -83,6 +83,7 @@ Argument handling:
 | Flag | Description |
 | --- | --- |
 | `--model <id-or-role>` | Model or configured role to use (role: `slow` or `@slow`; fuzzy model match: `opus`, `gpt-5.2`, or `openai/gpt-5.2`). |
+| `--agent <name>` | Run the session as a discovered task agent (persona): system prompt, tools, and model come from the agent definition. See [task agent discovery](./task-agent-discovery.md#using-agents-as-a-main-session-persona). |
 | `--smol <id>` | Smol/fast model for lightweight tasks (or `PI_SMOL_MODEL`). |
 | `--slow <id>` | Slow/reasoning model for thorough analysis (or `PI_SLOW_MODEL`). |
 | `--plan <id>` | Plan model for architectural planning (or `PI_PLAN_MODEL`). |

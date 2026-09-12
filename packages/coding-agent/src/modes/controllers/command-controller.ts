@@ -1034,7 +1034,14 @@ export class CommandController {
 				await Bun.sleep(10);
 			}
 		}
+		// The TUI's pending model queue is surface state AgentSession.newSession
+		// cannot reach: an owed persona restore from the outgoing session would
+		// otherwise flush onto the fresh transcript's first agent_end. Best-effort
+		// flush first (a landed restore is a no-op on a fresh session), then the
+		// commit discards whatever remains.
+		await this.ctx.flushPendingModelSwitch();
 		if (!(await this.ctx.session.newSession(options))) return;
+		this.ctx.clearPendingModelSwitch();
 		// A focused subagent view keeps its own history: return to the main session
 		// first so the transcript below cannot rebuild from the subagent's surviving
 		// conversation, then drop any turn-scoped anchors (coalescing timers,
