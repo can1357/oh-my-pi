@@ -246,15 +246,19 @@ function translatePattern(pattern: string): string {
 		const ch = pattern[i];
 		if (ch === "\\") {
 			const next = pattern[i + 1];
-			if (next === undefined) {
-				// A lone trailing backslash addresses exactly one literal backslash.
-				// `makeRe` has no matcher-factory fallback for it (it compiles `$^`,
-				// which never matches), so it is spelled as an escaped backslash.
-				out += "\\\\";
+			// `\\` is one literal backslash, spelled `\u005C` rather than `\\`:
+			// picomatch's compiler never returns on four or more consecutive
+			// backslashes (an infinite loop, so the `try`/`catch` around `makeRe`
+			// cannot rescue it), and every literal backslash written as `\\` would
+			// halve the distance to that limit. The unicode escape is one character
+			// wide, identical to `\\` under the engine, and cannot chain.
+			if (next === undefined || next === "\\") {
+				out += "\\u005C";
+				i++;
 				continue;
 			}
 			// `\/`, `\§` and `\¤` become the plain encoded literal; every other
-			// escape (`\*`, `\?`, `\\`, …) must survive as an escape.
+			// escape (`\*`, `\?`, …) must survive as an escape.
 			if (next === "/" || next === SLASH_CODE || next === ESCAPE_MARK) out += translateLiteral(next);
 			else out += "\\" + next;
 			i++;

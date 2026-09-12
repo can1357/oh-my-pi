@@ -253,6 +253,20 @@ test("grouping and extglob syntax stay literal beside a supported wildcard", () 
 	expect(run(NAMES, ["!(search)"]).unmatched).toEqual(["!(search)"]);
 });
 
+test("a run of literal backslashes compiles instead of hanging the compiler", () => {
+	// picomatch's compiler never returns once its input carries a class followed
+	// by four consecutive backslashes, and an infinite loop is not something the
+	// `try`/`catch` around `makeRe` can rescue — parsing such a config entry would
+	// pin the event loop instead of degrading to an unmatched entry. Spelling each
+	// literal backslash as `\u005C` keeps them from chaining, so the pattern is
+	// compiled, matches nothing, and reports the entry as unmatched.
+	const four = "\\\\\\\\";
+	const eight = four + four;
+	const result = run(["a", "\\\\"], ["[a]" + eight]);
+	expect(result.allowed).toEqual([]);
+	expect(result.unmatched).toEqual(["[a]" + eight]);
+});
+
 test("a trailing backslash addresses one literal backslash", () => {
 	// picomatch compiles a trailing `\` through its matcher-factory fast path, so
 	// the translated form must spell it out: a bare `\` compiles to `$^` (never
