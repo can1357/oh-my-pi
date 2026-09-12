@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import {
@@ -31,17 +31,22 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 // `@sinclair/typebox` is served from.
 installLegacyPiSpecifierShim();
 
+// Own the mock-API registration under a source ID unique to this file so
+// cleanup removes only our entry — clearing the shared registry would drop
+// registrations other suites own at module scope (e.g.
+// session-manager/workspace-prompt-refresh.test.ts), failing them by schedule.
+const MOCK_API_SOURCE_ID = "legacy-pi-ai-type-remap.test";
 const tempRoots: string[] = [];
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	unregisterCustomApis(MOCK_API_SOURCE_ID);
 });
 
 afterAll(async () => {
 	for (const dir of tempRoots) {
 		await removeWithRetries(dir);
 	}
-	clearCustomApis();
 });
 
 async function writeFixtureExtension(source: string): Promise<string> {
@@ -391,7 +396,7 @@ it("runs the legacy pi-ai compat `complete` export with SoL-Pi's reducer call sh
 			options?: SimpleStreamOptions & { timeoutMs?: number },
 		) => Promise<AssistantMessage>;
 	};
-	registerMockApi();
+	registerMockApi(MOCK_API_SOURCE_ID);
 	const mock = createMockModel({ responses: [{ content: ["reduced output"] }] });
 	const response = await loaded.completeCompat(
 		mock.model,
