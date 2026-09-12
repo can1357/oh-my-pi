@@ -15,6 +15,7 @@ import {
 	CompletionConfigurationSchema,
 	ConversationalPlannerMode,
 	GetChatMessageRequestSchema,
+	type GetChatMessageRequest,
 	GetChatMessageResponseSchema,
 	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
@@ -132,6 +133,15 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		const toolLastParseLen = new Map<string, number>();
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
+		// Per-turn phase timings for the "first delta" breakdown. The official
+		// chisel client holds its auth state and a shared HTTP pool across turns;
+		// these marks let a slow turn be attributed to auth, transport, or the
+		// server-side wait instead of a single opaque ttft number.
+		let authMs: number | undefined;
+		let headersMs: number | undefined;
+		let firstFrameMs: number | undefined;
+		let serverLatencyMs: number | undefined;
+
 
 		const markFirstToken = () => {
 			if (firstTokenTime === undefined) firstTokenTime = performance.now();
@@ -164,50 +174,98 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		try {
 			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
-			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
-			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
 				apiKey: options?.apiKey,
-				userJwt: auth.userJwt,
+				userJwt: "",
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
 				messages: transformMessages(context.messages, model),
 			};
-			// Router models (`adaptive`) are not valid chat model uids: the server
-			// resolves them through AssignModel and expects the returned uid plus
-			// assignment JWT on the chat request that shares the cascade id.
-			let assignment: ModelAssignment | undefined;
-			if (model.compat.modelRouter) {
-				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
-				output.upstreamModel = assignment.modelUid;
-			}
-			const request = buildDevinChatRequest(model, context, options, turn, assignment);
-			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			const gz = gzipSync(reqBytes);
-			logger.debug("devin: sending chat request", {
-				model: model.id,
-				tools: context.tools?.length ?? 0,
-				requestBytes: reqBytes.byteLength,
-				compressedBytes: gz.byteLength,
-			});
-			const frame = Buffer.alloc(5 + gz.length);
-			frame[0] = CONNECT_COMPRESSED_FLAG;
-			frame.writeUInt32BE(gz.length, 1);
-			frame.set(gz, 5);
+			let response: Response | undefined;
+			let request: GetChatMessageRequest | undefined;
+			let reqBytes: Uint8Array | undefined;
+			let gz: Uint8Array | undefined;
+			let postStartMs = 0;
+			// A cached userJwt can be rejected (401/403) before its exp claim; the
+			// official client never re-auths per turn, so one forced refresh is the
+			// entire recovery path — no retry storm.
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const authStart = performance.now();
+				const auth = await fetchDevinAuthMetadata(
+					options?.apiKey,
+					baseUrl,
+					fetchImpl,
+					options?.signal,
+					attempt > 0,
+				);
+				authMs = (authMs ?? 0) + (performance.now() - authStart);
+				const chatBaseUrl = auth.baseUrl ?? baseUrl;
+				turn.userJwt = auth.userJwt;
+				// Router models (`adaptive`) are not valid chat model uids: the server
+				// resolves them through AssignModel and expects the returned uid plus
+				// assignment JWT on the chat request that shares the cascade id.
+				let assignment: ModelAssignment | undefined;
+				if (model.compat.modelRouter) {
+					assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
+					output.upstreamModel = assignment.modelUid;
+				}
+				const builtRequest = buildDevinChatRequest(model, context, options, turn, assignment);
+				const builtReqBytes = toBinary(GetChatMessageRequestSchema, builtRequest);
+				const builtGz = gzipSync(builtReqBytes);
+				request = builtRequest;
+				reqBytes = builtReqBytes;
+				gz = builtGz;
+				logger.debug("devin: sending chat request", {
+					model: model.id,
+					tools: context.tools?.length ?? 0,
+					requestBytes: builtReqBytes.byteLength,
+					compressedBytes: builtGz.byteLength,
+					...(attempt > 0 ? { authRetry: true } : {}),
+				});
+				const frame = Buffer.alloc(5 + builtGz.length);
+				frame[0] = CONNECT_COMPRESSED_FLAG;
+				frame.writeUInt32BE(builtGz.length, 1);
+				frame.set(builtGz, 5);
 
-			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
-				method: "POST",
-				headers: {
-					"content-type": "application/connect+proto",
-					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
-					"accept-encoding": "identity",
-					"user-agent": "connect-go/1.18.1 (go1.26.3)",
-					"connect-accept-encoding": "gzip",
-					...options?.headers,
-				},
-				body: frame,
-				signal: options?.signal,
-			});
+				postStartMs = performance.now();
+				response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
+					method: "POST",
+					headers: {
+						"content-type": "application/connect+proto",
+						"connect-protocol-version": "1",
+						"connect-content-encoding": "gzip",
+						"accept-encoding": "identity",
+						"user-agent": "connect-go/1.18.1 (go1.26.3)",
+						"connect-accept-encoding": "gzip",
+						...options?.headers,
+					},
+					body: frame,
+					signal: options?.signal,
+				});
+
+				if (response.ok) break;
+				if (response.status === 401 || response.status === 403) {
+					// The JWT the server just rejected must not stay cached — a fresh
+					// token minted on attempt 1 would otherwise be served to every
+					// later turn even though the server already refused it.
+					invalidateDevinAuth(options?.apiKey, baseUrl);
+					if (attempt === 0) {
+						logger.warn("devin: chat request rejected, refreshing cached auth once", {
+							model: model.id,
+							status: response.status,
+						});
+						await response.body?.cancel().catch(() => {});
+						continue;
+					}
+				}
+				break;
+			}
+			if (!response || !request || !reqBytes || !gz) {
+				throw new AIError.ProviderResponseError("Devin API error: chat request was never sent", {
+					provider: model.provider,
+					kind: "runtime",
+				});
+			}
+			headersMs = performance.now() - postStartMs;
 
 			if (!response.ok) {
 				const text = await response.text();
@@ -327,6 +385,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					// The router reports the concrete model it landed on; it can differ
 					// from the uid AssignModel handed back (fallbacks, capacity routing).
 					if (msg.actualModelUid) output.upstreamModel = msg.actualModelUid;
+					if (firstFrameMs === undefined) firstFrameMs = performance.now() - postStartMs;
+					// The server reports its own elapsed time on every frame; the max
+					// is the upstream-side duration, separable from client overhead.
+					if (msg.latency > 0) serverLatencyMs = Math.max(serverLatencyMs ?? 0, msg.latency * 1000);
+
 
 					if (msg.deltaThinking) {
 						markFirstToken();
@@ -453,6 +516,16 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			calculateCost(model, output.usage, output.timestamp);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			logger.debug("devin: turn timing", {
+				model: model.id,
+				authMs: authMs !== undefined ? Math.round(authMs) : undefined,
+				headersMs: headersMs !== undefined ? Math.round(headersMs) : undefined,
+				firstFrameMs: firstFrameMs !== undefined ? Math.round(firstFrameMs) : undefined,
+				serverLatencyMs: serverLatencyMs !== undefined ? Math.round(serverLatencyMs) : undefined,
+				ttftMs: output.ttft !== undefined ? Math.round(output.ttft) : undefined,
+				durationMs: Math.round(output.duration),
+			});
+
 
 			stream.push({ type: "done", reason: doneReason, message: output });
 			stream.end();
@@ -465,6 +538,15 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			output.errorMessage = result.message;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			logger.debug("devin: turn timing (failed)", {
+				model: model.id,
+				authMs: authMs !== undefined ? Math.round(authMs) : undefined,
+				headersMs: headersMs !== undefined ? Math.round(headersMs) : undefined,
+				firstFrameMs: firstFrameMs !== undefined ? Math.round(firstFrameMs) : undefined,
+				serverLatencyMs: serverLatencyMs !== undefined ? Math.round(serverLatencyMs) : undefined,
+				ttftMs: output.ttft !== undefined ? Math.round(output.ttft) : undefined,
+				durationMs: Math.round(output.duration),
+			});
 			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
@@ -483,12 +565,115 @@ interface DevinTurn {
 	messages: Message[];
 }
 
+/**
+ * Process-lifetime cache for `GetUserJwt` results. The official chisel client
+ * holds its auth state inside a long-lived process (no per-turn GetUserJwt
+ * appears in its logs); omp previously paid a serial auth RTT on every turn.
+ *
+ * Entries are keyed by (fetch identity, apiKey, baseUrl) and expire at the JWT
+ * `exp` claim minus a safety margin. A token without a readable `exp` is never
+ * cached — its lifetime is unverifiable, so the safe default is to
+ * re-authenticate. Entries are keyed by (apiKey, baseUrl): the JWT is a bearer
+ * token bound to the credential, not to the transport that carried the auth
+ * request.
+ */
+interface DevinAuthCacheEntry {
+	userJwt: string;
+	baseUrl?: string;
+	/** Epoch ms after which the entry must not be served. */
+	expiresAt: number;
+}
+
+const devinAuthCache = new Map<string, DevinAuthCacheEntry>();
+
+/**
+ * Per-key write epoch. Auth requests are not joined, so two concurrent calls
+ * can resolve out of order; a slower, earlier-issued response must never
+ * overwrite a newer write — e.g. a force-refresh minted after a 401, or an
+ * invalidation that landed while the request was in flight.
+ */
+const devinAuthEpoch = new Map<string, number>();
+let devinAuthEpochSeq = 0;
+
+/** Refresh margin: serve a cached JWT only while this far from its exp. */
+const DEVIN_AUTH_EXPIRY_MARGIN_MS = 60_000;
+
+/**
+ * Cache key: (apiKey, baseUrl) only. The JWT is a bearer token — it is valid
+ * regardless of which transport carries it, and `streamSimple` rebuilds its
+ * transport wrapper every turn, so keying on fetch identity would give every
+ * turn a fresh slot and the cache would never hit. NUL separator prevents
+ * "a"+"bc" / "ab"+"c" collisions.
+ */
+function devinAuthCacheKey(
+	apiKey: string | undefined,
+	baseUrl: string,
+): string {
+	return `${apiKey ?? ""}\0${baseUrl}`;
+}
+
+/** Drop a cached entry — used when the server rejects a previously cached JWT. */
+function invalidateDevinAuth(
+	apiKey: string | undefined,
+	baseUrl: string,
+): void {
+	const key = devinAuthCacheKey(apiKey, baseUrl);
+	devinAuthCache.delete(key);
+	// Bump the epoch so an in-flight auth issued before this invalidation cannot
+	// write its (already rejected) token back over the cleared slot.
+	devinAuthEpoch.set(key, ++devinAuthEpochSeq);
+}
+
+/** Read the `exp` claim (seconds) out of a JWT payload; 0 when undecodable. */
+function devinJwtExpiryMs(jwt: string): number {
+	const payload = jwt.split(".")[1];
+	if (!payload) return 0;
+	try {
+		const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: unknown };
+		return typeof decoded.exp === "number" && decoded.exp > 0 ? decoded.exp * 1000 : 0;
+	} catch {
+		return 0;
+	}
+}
+
 async function fetchDevinAuthMetadata(
 	apiKey: string | undefined,
 	baseUrl: string,
 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
 	signal: AbortSignal | undefined,
+	forceRefresh = false,
 ): Promise<{ userJwt: string; baseUrl?: string }> {
+	const key = devinAuthCacheKey(apiKey, baseUrl);
+	if (forceRefresh) {
+		devinAuthCache.delete(key);
+		// Same guard as invalidateDevinAuth: an older in-flight auth must not
+		// overwrite the token this refresh is about to mint.
+		devinAuthEpoch.set(key, ++devinAuthEpochSeq);
+	}
+	const cached = devinAuthCache.get(key);
+	if (cached && cached.expiresAt > Date.now()) {
+		return { userJwt: cached.userJwt, ...(cached.baseUrl ? { baseUrl: cached.baseUrl } : {}) };
+	}
+	const myEpoch = ++devinAuthEpochSeq;
+	// Record the epoch at issue time, not completion: a newer request (or an
+	// invalidation) issued while this one is in flight raises the key's epoch,
+	// and this older response then loses the write below.
+	devinAuthEpoch.set(key, myEpoch);
+	const entry = await requestDevinAuthMetadata(apiKey, baseUrl, fetchImpl, signal);
+	// expiresAt <= now means "no usable exp" — do not cache. A newer write
+	// (any later-issued request, force-refresh, or invalidation) also wins.
+	if (entry.expiresAt > Date.now() && myEpoch >= (devinAuthEpoch.get(key) ?? 0)) {
+		devinAuthCache.set(key, entry);
+	}
+	return { userJwt: entry.userJwt, ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}) };
+}
+
+async function requestDevinAuthMetadata(
+	apiKey: string | undefined,
+	baseUrl: string,
+	fetchImpl: NonNullable<StreamOptions["fetch"]>,
+	signal: AbortSignal | undefined,
+): Promise<DevinAuthCacheEntry> {
 	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
 		method: "POST",
@@ -515,7 +700,13 @@ async function fetchDevinAuthMetadata(
 		});
 	}
 	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
+	const expMs = devinJwtExpiryMs(decoded.userJwt);
+	return {
+		userJwt: decoded.userJwt,
+		...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : {}),
+		// 0 = no readable exp → never served from cache.
+		expiresAt: expMs > 0 ? expMs - DEVIN_AUTH_EXPIRY_MARGIN_MS : 0,
+	};
 }
 
 /**
