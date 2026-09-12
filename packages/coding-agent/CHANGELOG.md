@@ -113,6 +113,11 @@
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
 - Fixed wrong-typed `compat.stripImageInput` in `models.yml` being silently accepted, so the documented vision opt-out is now validated like its neighbours ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
 
+### Fixed
+
+- macOS self-updates preserve executable backups still used by running sessions, preventing lost privacy-permission attribution.
+- Startup and daemon commands no longer crash when project-directory canonicalization encounters EPERM or EACCES.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
