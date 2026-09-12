@@ -3423,16 +3423,15 @@ export class RelayBridge {
 						params: {
 							...originalParams,
 							source: clearPreloadApplicationMarker(applicationMarker),
-							runImmediately: false,
+							runImmediately: true,
 						},
 					})) as Record<string, unknown> | undefined;
 					if (typeof cleanup?.identifier !== "string") {
 						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 					}
 					cleanupRootIdentifier = cleanup.identifier;
-					// Clear the marker in the current document. Future navigations clear it
-					// through the companion registration above.
-					await this.#preloadApplicationMarker(tab.tabId, applicationMarker, originalParams.worldName);
+					// The immediate companion clears the marker in every existing context,
+					// including child frames. Future navigations run it after the producer.
 				} catch (err) {
 					if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
 					throw err;

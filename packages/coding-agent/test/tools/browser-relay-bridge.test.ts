@@ -3533,7 +3533,7 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
-	it("runs a preload once during registration handoff and removes its producer before cleanup", async () => {
+	it("runs a preload once and clears its marker in every existing frame during handoff", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3584,18 +3584,16 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const cleanup = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect((cleanup?.params as { source?: string } | undefined)?.source).not.toContain(source);
-		expect(cleanup?.params).toMatchObject({ runImmediately: false });
+		expect(cleanup?.params).toMatchObject({ runImmediately: true });
 		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() =>
 			ext2
 				.pending("send")
 				.some(
 					rpc =>
 						rpc.method === "Page.disable" ||
-						(rpc.method === "Runtime.evaluate" &&
-							(rpc.params as { expression?: string } | undefined)?.expression?.includes("delete this")),
+						(rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
+							(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true),
 				),
 		);
 		ack(bridge, ext2, "send");
@@ -4011,8 +4009,6 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-		ack(bridge, ext2, "send", { result: { value: true } });
 		const markedReplay = ext2
 			.rpcs("send")
 			.find(
@@ -4104,15 +4100,7 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { identifier: "root-script-immediate" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
-		await waitFor(() =>
-			ext2
-				.pending("send")
-				.some(
-					rpc =>
-						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
-						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === false,
-				),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		expect(
 			ext2
 				.rpcs("send")
@@ -4121,7 +4109,7 @@ describe("RelayBridge tab grouping", () => {
 						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
 						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
 				),
-		).toHaveLength(1);
+		).toHaveLength(2);
 	});
 
 	it("observes preload navigation without client Page or Runtime domains", async () => {
@@ -4185,8 +4173,6 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-		ack(bridge, ext2, "send", { result: { value: true } });
 		const markedReplay = ext2
 			.rpcs("send")
 			.find(
@@ -4935,18 +4921,7 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-		ack(bridge, ext2, "send", { result: { value: true } });
-		await waitFor(() =>
-			ext2
-				.pending("send")
-				.some(
-					rpc =>
-						rpc.method === "Page.disable" ||
-						(rpc.method === "Runtime.evaluate" &&
-							(rpc.params as { expression?: string } | undefined)?.expression?.includes("delete this")),
-				),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.disable"));
 		ack(bridge, ext2, "send");
 		await flush();
 		const privateMarker = (marked?.params as { source?: string } | undefined)?.source?.match(
@@ -5029,8 +5004,6 @@ describe("RelayBridge tab grouping", () => {
 				socket.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			);
 			ack(bridge, socket, "send", { identifier: `${rootPrefix}-cleanup` });
-			await waitFor(() => socket.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-			ack(bridge, socket, "send", { result: { value: true } });
 			await waitFor(() => socket.pending("send").some(rpc => rpc.method === "Page.disable"));
 			ack(bridge, socket, "send");
 			await flush();
