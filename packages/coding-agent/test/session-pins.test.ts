@@ -118,4 +118,57 @@ describe("session-pins", () => {
 		// Pin unknown id -> no change to order
 		expect(sortPinnedFirst(all, new Set(["unknown-id"])).map(s => s.id)).toEqual(["s1", "s2", "s3", "s4"]);
 	});
+
+	it("keeps every pin when many toggles race concurrently", async () => {
+		// Regression: toggleSessionPin used to load-modify-write without a lock,
+		// so overlapping toggles from multiple omp instances (CLI picker,
+		// interactive mode, collab guest) interleaved load-load-write-write and
+		// silently dropped each other's pins.
+		const ids = Array.from({ length: 24 }, (_, i) => `session-race-${i}`);
+		await Promise.all(ids.map(id => toggleSessionPin(id, tempDir)));
+
+		const loaded = await loadPinnedSessionIds(tempDir);
+		expect(loaded.size).toBe(ids.length);
+		for (const id of ids) expect(loaded.has(id)).toBe(true);
+	});
+
+	it("never exposes a truncated pins file while writes are in flight", async () => {
+		// Regression: Bun.write truncated in place, so a crash mid-write
+		// stranded a truncated file the next launch degraded to an empty set.
+		// The sampler observes on-disk states CONCURRENTLY with the toggles:
+		// every observed state must parse (or be absent); a torn write or a
+		// rename window that exposes partial content fails the parse.
+		// Completion is polled WITHOUT awaiting the aggregate promise, so the
+		// loop keeps reading between writes; a rejected toggle propagates via
+		// the final Promise.all instead of hanging the sampler.
+		const ids = Array.from({ length: 12 }, (_, i) => `session-torn-${i}`);
+		const pinsFile = path.join(tempDir, "session-pins.json");
+		let settledCount = 0;
+		const toggles = ids.map(id =>
+			toggleSessionPin(id, tempDir).finally(() => {
+				settledCount++;
+			}),
+		);
+		let samples = 0;
+		const sampler = (async () => {
+			while (settledCount < toggles.length) {
+				try {
+					const raw = await fs.readFile(pinsFile, "utf-8");
+					JSON.parse(raw);
+					samples++;
+				} catch (err) {
+					const code = (err as NodeJS.ErrnoException).code;
+					if (code !== "ENOENT") throw err;
+				}
+			}
+		})();
+		await Promise.all([sampler, ...toggles]);
+		expect(samples).toBeGreaterThan(0);
+
+		const raw = await fs.readFile(pinsFile, "utf-8");
+		expect(() => JSON.parse(raw)).not.toThrow();
+		expect((JSON.parse(raw) as string[]).length).toBe(ids.length);
+		const files = await fs.readdir(tempDir);
+		expect(files.some(f => f.endsWith(".tmp"))).toBe(false);
+	});
 });
