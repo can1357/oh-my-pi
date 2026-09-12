@@ -416,4 +416,107 @@ describe("withReplaySafeStreamRetry", () => {
 
 		await expect(stream.result()).rejects.toBe(configError);
 	});
+
+	it("retries when a tool call emits start and an empty end with no argument content before an error", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				if (attempts > 1) return contentAttempt();
+				// Mirror the object-args producer branch: a delta event is pushed
+				// per chunk even when empty, the `{}` flush is suppressed, and the
+				// error sweep finalizes through the same finishToolCallBlock, so a
+				// completed call there is event-identical to this unfilled one.
+				const message = assistant();
+				message.stopReason = "error";
+				message.errorMessage = "The socket connection was closed unexpectedly";
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "toolcall_start", contentIndex: 0, partial: message },
+					{ type: "toolcall_delta", contentIndex: 0, delta: "", partial: message },
+					{
+						type: "toolcall_end",
+						contentIndex: 0,
+						toolCall: { type: "toolCall", id: "call-1", name: "read", arguments: {} },
+						partial: message,
+					},
+					{ type: "error", reason: "error", error: message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		// The failed attempt's toolcall lifecycle markers must not reach the consumer.
+		expect(events.some(e => e.type === "toolcall_start")).toBe(false);
+		expect(events.some(e => e.type === "toolcall_end")).toBe(false);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("commits on a toolcall_delta with content and does not retry", async () => {
+		let attempts = 0;
+		const message = assistant();
+		message.content = [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "/x" } }];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "toolcall_start", contentIndex: 0, partial: message },
+					{ type: "toolcall_delta", contentIndex: 0, delta: '{"path":"/x"}', partial: message },
+					{ type: "toolcall_end", contentIndex: 0, toolCall: message.content[0], partial: message },
+					{ type: "done", reason: "stop", message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryEmptyCompletion: true },
+		);
+
+		await drain(stream);
+
+		expect(attempts).toBe(1);
+	});
+
+	it("does not retry a completed zero-argument tool call when the transport fails after toolcall_end", async () => {
+		let attempts = 0;
+		const message = assistant();
+		message.content = [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }];
+		message.stopReason = "error";
+		message.errorMessage = "The socket connection was closed unexpectedly";
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "toolcall_start", contentIndex: 0, partial: message },
+					// String-arg hosts emit `{}` itself as a non-empty delta, which
+					// commits the attempt before toolcall_end arrives.
+					{ type: "toolcall_delta", contentIndex: 0, delta: "{}", partial: message },
+					{ type: "toolcall_end", contentIndex: 0, toolCall: message.content[0], partial: message },
+					{ type: "error", reason: "error", error: message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(events.at(-1)?.type).toBe("error");
+		// The completed call reaches the consumer instead of being discarded.
+		expect(events.some(e => e.type === "toolcall_end")).toBe(true);
+		expect(result.stopReason).toBe("error");
+	});
 });
