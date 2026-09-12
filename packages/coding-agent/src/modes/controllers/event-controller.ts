@@ -2169,7 +2169,7 @@ export class EventController {
 			this.ctx.clearPinnedError();
 		}
 		const retryStartMs = Date.now();
-		const retryLabel = `Retrying (${event.attempt}/${event.maxAttempts})`;
+		const retryLabel = `Retrying (${event.attempt}/${Number.isFinite(event.maxAttempts) ? event.maxAttempts : "∞"})`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),

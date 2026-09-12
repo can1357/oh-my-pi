@@ -94,6 +94,7 @@ Settings:
 
 - `retry.enabled` (default `true`)
 - `retry.maxRetries` (default `10`)
+- `retry.maxRetriesOverrides` (default `{}`; per-provider budget overrides keyed by provider id, or `"*"` for every other provider; values are attempt caps or `"unlimited"`)
 - `retry.baseDelayMs` (default `500`)
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 
@@ -114,6 +115,7 @@ Backoff sequence with default settings, before jitter:
 The actual local sleep is 75–100% of the nominal value, matching Anthropic-style retry jitter so concurrent sessions do not retry in lockstep.
 
 Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay. If the computed delay is greater than `retry.maxDelayMs` and no switch succeeded, retry ends immediately with a final error instead of sleeping.
+Per-provider overrides (`retry.maxRetriesOverrides`) replace the global budget at budget-check time: the exact provider key wins, `"*"` covers every other provider, and `"unlimited"` lifts the same-model retry cap for that provider (backoff and the fail-fast delay cap still apply). Budgets are tracked per serving route: a model-fallback switch grants the new route its own override budget, while credential rotation on the same route keeps the cumulative count. Classifier-refusal chain walks stay bounded by the cumulative saga count instead, so each switch cannot grant the walk a fresh budget. Terminal `auto_retry_end { success: false }` failures carry `reason` (`"budget-exhausted"` | `"delay-cap-exceeded"`), `provider`, and `model` fields so extensions can observe exhaustion without parsing error text.
 
 ## Abort mechanics
 
@@ -163,6 +165,7 @@ Defined in settings schema under retry group:
 
 - `retry.enabled`
 - `retry.maxRetries`
+- `retry.maxRetriesOverrides`
 - `retry.baseDelayMs`
 - `retry.maxDelayMs`
 - `retry.modelFallback` (default `true`; gates retry model-fallback switching)

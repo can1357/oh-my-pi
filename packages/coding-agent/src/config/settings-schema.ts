@@ -1874,6 +1874,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"retry.maxRetriesOverrides": {
+		type: "record",
+		default: {} as Record<string, number | "unlimited">,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Retry Overrides Per Provider",
+			description:
+				'Per-provider retry budget overrides keyed by provider id, or "*" for every other provider, e.g. {"opencode-zen":"unlimited","*":10}. A provider key replaces retry.maxRetries whenever that provider fails; "unlimited" removes the same-model retry cap for it. Backoff and fail-fast delay caps still apply.',
+		},
+	},
+
 	"retry.baseDelayMs": { type: "number", default: 500 },
 	"retry.maxDelayMs": {
 		type: "number",
@@ -6366,9 +6378,11 @@ export interface TitleSettings {
 export interface ContextPromotionSettings {
 	enabled: boolean;
 }
+
 export interface RetrySettings {
 	enabled: boolean;
 	maxRetries: number;
+	maxRetriesOverrides: Record<string, number | "unlimited">;
 	baseDelayMs: number;
 	maxDelayMs: number;
 	waitForUsageReset: boolean;

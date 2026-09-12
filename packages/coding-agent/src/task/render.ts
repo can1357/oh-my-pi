@@ -1035,7 +1035,7 @@ function renderAgentProgress(
 		const remainingMs = Math.max(0, progress.retryState.startedAtMs + progress.retryState.delayMs - nowMs);
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
-			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
+			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts === "unlimited" ? "∞" : progress.retryState.maxAttempts} ${waitLabel}: ` +
 			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {

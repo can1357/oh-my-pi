@@ -256,7 +256,9 @@ function renderOutcomeLine(
 function agentActivity(progress: AgentProgress | undefined): string {
 	if (!progress) return chalk.dim("starting");
 	if (progress.retryState) {
-		return chalk.yellow(`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`);
+		return chalk.yellow(
+			`rate-limited · retry ${progress.retryState.attempt}/${Number.isFinite(progress.retryState.maxAttempts) ? progress.retryState.maxAttempts : "∞"}`,
+		);
 	}
 	const intent = oneLine(progress.lastIntent ?? "", ACTIVITY_WIDTH);
 	if (progress.currentTool) {

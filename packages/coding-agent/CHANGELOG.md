@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Per-provider retry budget overrides via retry.maxRetriesOverrides (number or "unlimited", "*" fallback key); terminal auto_retry_end failures now carry reason/provider/model enrichment fields ([#11139](https://github.com/can1357/oh-my-pi/pull/11139) by [@Qiiks](https://github.com/Qiiks)).
+
 ### Fixed
 
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).

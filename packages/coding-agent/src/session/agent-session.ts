@@ -4276,6 +4276,9 @@ export class AgentSession {
 				attempt: event.attempt,
 				finalError: event.finalError,
 				retryErrors: event.retryErrors,
+				reason: event.reason,
+				provider: event.provider,
+				model: event.model,
 			});
 		} else if (event.type === "retry_fallback_applied") {
 			await this.#extensionRunner.emit({

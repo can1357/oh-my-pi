@@ -1078,7 +1078,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			section("Current");
 			addWrapped(current);
 			if (progress?.retryState) {
-				add(theme.fg("warning", `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`));
+				add(
+					theme.fg(
+						"warning",
+						`retry ${progress.retryState.attempt}/${Number.isFinite(progress.retryState.maxAttempts) ? progress.retryState.maxAttempts : "∞"}`,
+					),
+				);
 			}
 		}
 
