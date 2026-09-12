@@ -269,12 +269,12 @@ describe("selector setting side effects", () => {
 			const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 			assistant.setToolResultImagesVisible = setToolResultImagesVisible;
 			const clearInlineImages = vi.fn();
-			const requestRender = vi.fn();
+			const resetDisplay = vi.fn();
 			const ctx = {
 				hideToolActivity: !hidden,
 				toolOutputExpanded: true,
 				chatContainer: { children: [tool, readGroup, assistant], setToolActivityVisible },
-				ui: { clearInlineImages, requestRender },
+				ui: { clearInlineImages, resetDisplay },
 			};
 			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
 
@@ -287,10 +287,10 @@ describe("selector setting side effects", () => {
 			expect(setReadExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
 			expect(ctx.toolOutputExpanded).toBe(hidden);
 			expect(clearInlineImages).toHaveBeenCalledTimes(hidden ? 1 : 0);
-			expect(requestRender).toHaveBeenCalledTimes(1);
+			expect(resetDisplay).toHaveBeenCalledTimes(1);
 			if (hidden) {
 				expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-					requestRender.mock.invocationCallOrder[0],
+					resetDisplay.mock.invocationCallOrder[0],
 				);
 			}
 		});

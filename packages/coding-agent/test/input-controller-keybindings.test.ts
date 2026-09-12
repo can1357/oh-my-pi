@@ -313,7 +313,7 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.hideToolActivity).toBe(true);
 		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
 		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
 	});
 
