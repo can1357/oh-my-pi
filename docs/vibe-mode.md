@@ -1,6 +1,6 @@
 # Vibe mode
 
-Vibe mode turns the top-level interactive session into a **director** for persistent background worker sessions instead of letting it edit or execute commands itself. The director's active tools are reduced to `read`, optional parent-owned `todo`, and five worker-control tools. Workers do the searching, editing, running, and building; the director verifies their claims by reading touched files. When available, `todo` belongs only to the parent director.
+Vibe mode turns the top-level interactive session into a **director** for persistent background worker sessions instead of letting it edit or execute commands itself. The director's active tools are reduced to `read`, an optional `ask`, an optional parent-owned `todo`, and five worker-control tools. Workers do the searching, editing, running, and building; the director verifies their claims by reading touched files. When `ask` is available it requests a decision from the user, while `todo` belongs only to the parent director. See [Director-only tools](#director-only-tools) for exactly when each one is present.
 
 ## Enabling and disabling
 
@@ -12,7 +12,7 @@ Toggle it with the `/vibe` slash command:
 /vibe                 # run again to exit
 ```
 
-- Entering activates a parent-session worker scope, installs the vibe tools, reduces the active toolset to `read`, optional parent-owned `todo`, and the vibe tools, and injects the director instructions.
+- Entering activates a parent-session worker scope, installs the vibe tools, reduces the active toolset to `read` plus the vibe tools, and injects the director instructions. An optional `ask` and an optional parent-owned `todo` are kept when they qualify.
 - An inline prompt (`/vibe <prompt>`) enters the mode and submits that prompt as the first directive.
 - Exiting restores the prior toolset, cancels in-flight worker turns, kills every worker session in the scope, and persists terminal lifecycle records. A worker never outlives an intentional mode exit.
 - Vibe mode is mutually exclusive with both active **and paused** plan/goal modes; exit those modes first.
@@ -32,6 +32,12 @@ Every worker is a real, keep-alive task-executor subagent with the normal coding
 
 The tier always selects the bundled `sonic` or `task` definition, not a same-named discovered custom agent. Model resolution otherwise matches task-agent routing: `task.agentModelOverrides.sonic` / `.task` wins over the bundled agent model, and role aliases resolve through `modelRoles`, with the parent active/default model as fallback.
 
+## Director-only tools
+
+`ask` is kept in the director toolset only when the session owns the built-in tool — an interactive UI with `ask.enabled` on — **and** `ask` was still in the enabled toolset when you entered the mode. Entering never re-grants an `ask` you had turned off via `/tools`, and exiting restores the exact prior toolset. It asks the **user** for a decision; it is not a worker-control action and is not a substitute for delegating investigation or execution. In headless sessions, the tool is not registered and is therefore omitted from the director toolset.
+
+When `todo.enabled` is on, `todo` remains available for the parent director's workstream bookkeeping. Workers keep their own task state.
+
 ## Worker-control tools
 
 | Tool         | Input and behavior                                                                                                                                                                                   |
@@ -50,7 +56,7 @@ Worker ids are scoped to the owning agent and parent session; a worker from anot
 
 ## Workflow
 
-1. Split the request into independent workstreams — one persistent worker per workstream so each accumulates useful conversation context.
+1. Split the request into independent workstreams — one persistent worker per workstream so each accumulates useful conversation context. If a decision belongs to the user, use `ask`; do not use it for work a worker can investigate.
 2. Call `vibe_spawn` with a self-contained brief: files, constraints, and observable acceptance criteria. Workers start blank and never see the director's conversation.
 3. Keep directing other workers while turns are in flight. Use `vibe_wait` only when blocked; a timed-out wait can be reissued.
 4. Use `vibe_send` naturally for corrections and next steps. A mid-turn send steers when possible; otherwise it becomes the worker's next turn automatically.
