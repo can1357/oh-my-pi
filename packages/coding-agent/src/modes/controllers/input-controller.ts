@@ -2339,17 +2339,14 @@ export class InputController {
 	 * of the assistant's working detail — reasoning blocks and tool output — into
 	 * their collapsed presentation. Single-axis toggles stay on their own keys, so
 	 * this is the only entry point that moves both at once.
+	 *
+	 * Deliberately silent: the replay shows the new presentation, so a status line
+	 * would only leave a transcript row that can never be dismissed.
 	 */
 	toggleDetailVisibility(): void {
-		const thinkingToggleable = !this.#thinkingBlocksUntoggleable();
-		if (thinkingToggleable) this.#applyThinkingBlockVisibility(!this.ctx.hideThinkingBlock);
+		if (!this.#thinkingBlocksUntoggleable()) this.#applyThinkingBlockVisibility(!this.ctx.hideThinkingBlock);
 		this.#applyToolOutputDetailsHidden(!this.ctx.hideToolOutputDetails);
 		this.#resetTranscriptRendering();
-		const thinking = thinkingToggleable
-			? `Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`
-			: "Thinking is off";
-		const details = this.ctx.hideToolOutputDetails ? "hidden" : "visible";
-		this.ctx.showStatus(`${thinking} · Tool output details: ${details}`);
 	}
 
 	/**

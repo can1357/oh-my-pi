@@ -169,14 +169,16 @@ describe("InputController assistant detail toggle", () => {
 		// One replay per gesture, not one per axis.
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenLastCalledWith("Thinking blocks: hidden · Tool output details: hidden");
+		// Silent gesture: a status row would sit in the transcript with no way to
+		// dismiss it, and the replay already shows the new presentation.
+		expect(showStatus).not.toHaveBeenCalled();
 
 		controller.toggleDetailVisibility();
 
 		expect(ctx.hideThinkingBlock).toBe(false);
 		expect(ctx.hideToolOutputDetails).toBe(false);
 		expect(resetDisplay).toHaveBeenCalledTimes(2);
-		expect(showStatus).toHaveBeenLastCalledWith("Thinking blocks: visible · Tool output details: visible");
+		expect(showStatus).not.toHaveBeenCalled();
 	});
 
 	it("still folds tool output when thinking cannot be toggled", () => {
@@ -190,7 +192,7 @@ describe("InputController assistant detail toggle", () => {
 		expect(set).not.toHaveBeenCalledWith("hideThinkingBlock", expect.anything());
 		expect(ctx.hideToolOutputDetails).toBe(true);
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenLastCalledWith("Thinking is off · Tool output details: hidden");
+		expect(showStatus).not.toHaveBeenCalled();
 	});
 
 	it("refuses ctrl+o while tool output details are hidden", () => {
