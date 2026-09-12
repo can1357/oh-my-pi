@@ -5,6 +5,9 @@ import {
 	calculateContextTokens,
 	compact,
 	estimateTokens,
+	findCutPoint,
+	type SessionEntry,
+	sessionEntryToContextMessages,
 	serializeConversation,
 } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 
@@ -59,5 +62,83 @@ describe("legacy shim compaction helpers", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 		expect(calculateContextTokens(usage)).toBe(115);
+	});
+});
+
+// Issue #11796: `omp install git:github.com/NVlabs/SoL-Pi` failed Bun's static
+// export check because the shim never forwarded `findCutPoint`. omp's canonical
+// `findCutPoint` also grew a required `Tokenizer` parameter, so the shim exposes
+// an upstream-signature (tokenizer-less, 4-arg) wrapper backed by the shared
+// model-agnostic tokenizer — a raw re-export would misread `startIndex` as the
+// tokenizer and throw at runtime.
+describe("legacy shim findCutPoint", () => {
+	const entries: SessionEntry[] = [
+		{
+			type: "message",
+			id: "a",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "alpha", timestamp: 0 },
+		},
+		{
+			type: "message",
+			id: "b",
+			parentId: "a",
+			timestamp: new Date(1000).toISOString(),
+			message: { role: "user", content: "beta", timestamp: 1000 },
+		},
+	];
+
+	it("accepts the upstream tokenizer-less 4-arg call shape and keeps all entries under a large budget", () => {
+		const result = findCutPoint(entries, 0, entries.length, 50_000);
+		// A raw re-export would pass `startIndex` (0) where the canonical helper
+		// expects a Tokenizer and throw on `.countMessage`; reaching a numeric
+		// cut index proves the wrapper injected the tokenizer.
+		expect(result.firstKeptEntryIndex).toBe(0);
+		expect(result.isSplitTurn).toBe(false);
+	});
+});
+
+// Issue #11796: SoL-Pi's online-context-compact also imports
+// `sessionEntryToContextMessages`, absent from omp entirely, so it would fail the
+// same static check right after `findCutPoint`. The shim ports upstream Pi's
+// per-entry projector.
+describe("legacy shim sessionEntryToContextMessages", () => {
+	it("projects a message entry to its underlying message", () => {
+		const message = { role: "user" as const, content: "hi", timestamp: 0 };
+		const entry: SessionEntry = {
+			type: "message",
+			id: "m",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message,
+		};
+		expect(sessionEntryToContextMessages(entry)).toEqual([message]);
+	});
+
+	it("projects a compaction entry to a single compaction-summary message", () => {
+		const entry: SessionEntry = {
+			type: "compaction",
+			id: "c",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			summary: "did stuff",
+			firstKeptEntryId: "a",
+			tokensBefore: 1234,
+		};
+		const messages = sessionEntryToContextMessages(entry);
+		expect(messages).toHaveLength(1);
+		expect(messages[0].role).toBe("compactionSummary");
+	});
+
+	it("yields no messages for state-only entries", () => {
+		const entry: SessionEntry = {
+			type: "model_change",
+			id: "mc",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			model: "anthropic/x",
+		};
+		expect(sessionEntryToContextMessages(entry)).toEqual([]);
 	});
 });
