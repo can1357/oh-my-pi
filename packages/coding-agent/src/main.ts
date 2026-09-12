@@ -110,7 +110,7 @@ import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChange
 import { EventBus } from "./utils/event-bus";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
-type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
+type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<number>;
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
@@ -151,6 +151,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
+	"task.agentServiceTierOverrides",
 	"task.agentPrewalk",
 	"task.agentAdvisor",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
@@ -2113,7 +2114,7 @@ export async function runRootCommand(
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
-				await runPrintMode(session, {
+				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,
 					initialMessage,
@@ -2126,7 +2127,7 @@ export async function runRootCommand(
 				}
 				await session.dispose();
 				stopThemeWatcher();
-				await postmortem.quit(0);
+				await postmortem.quit(exitCode);
 			}
 		}
 	} catch (error) {

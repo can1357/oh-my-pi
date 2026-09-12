@@ -77,7 +77,11 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 			parentUuid: "claude-assistant",
 			timestamp: "2026-01-01T00:00:02.000Z",
 			message: {
-				content: [{ type: "tool_result", tool_use_id: "tool-claude", content: "file contents" }],
+				content: [
+					{ type: "text", text: "Preserve this before the result." },
+					{ type: "tool_result", tool_use_id: "tool-claude", content: "file contents" },
+					{ type: "text", text: "Preserve this after the result." },
+				],
 			},
 		},
 		{ type: "custom-title", customTitle: "Imported Claude", timestamp: "2026-01-01T00:00:03.000Z" },
@@ -100,14 +104,20 @@ describe("ClaudeSessionStore", () => {
 		expect(manager.getSessionName()).toBe("Imported Claude");
 		const entries = manager.getEntries();
 		const messages = entries.filter(entry => entry.type === "message");
-		expect(messages.map(entry => entry.message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(messages.map(entry => entry.message.role)).toEqual(["user", "assistant", "user", "toolResult", "user"]);
 		const assistant = messages.find(entry => entry.message.role === "assistant");
 		if (assistant?.message.role !== "assistant") throw new Error("Missing imported Claude assistant");
 		const call = assistant.message.content.find(block => block.type === "toolCall");
 		expect(call).toMatchObject({ id: "tool-claude", name: "read", arguments: { path: "file.ts" } });
-		const result = messages.find(entry => entry.message.role === "toolResult");
+		const beforeResult = messages[2];
+		if (beforeResult?.message.role !== "user") throw new Error("Missing pre-result Claude follow-up");
+		expect(beforeResult.message.content).toEqual([{ type: "text", text: "Preserve this before the result." }]);
+		const result = messages[3];
 		if (result?.message.role !== "toolResult") throw new Error("Missing imported Claude tool result");
 		expect(result.message.toolCallId).toBe("tool-claude");
+		const afterResult = messages[4];
+		if (afterResult?.message.role !== "user") throw new Error("Missing post-result Claude follow-up");
+		expect(afterResult.message.content).toEqual([{ type: "text", text: "Preserve this after the result." }]);
 		expect(
 			entries.some(entry => entry.type === "model_change" && entry.model === "anthropic/claude-sonnet-4-5"),
 		).toBe(true);
