@@ -63,6 +63,12 @@ interface StreamRetryOptions {
 	acceptEmptyResponse?: boolean;
 }
 
+/** Caller override for provider-error replay when the caller owns additional provenance. */
+export type ReplaySafeProviderErrorRetryDecision =
+	| { readonly _tag: "default" }
+	| { readonly _tag: "deny" }
+	| { readonly _tag: "retry"; readonly delayMs?: number };
+
 /** Controls which replay-safe provider results may issue a fresh request. */
 export interface ReplaySafeStreamRetryPolicy {
 	/** Retry benign terminal stops that contain no visible output. */
@@ -71,6 +77,8 @@ export interface ReplaySafeStreamRetryPolicy {
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
 	maxProviderErrorRetries?: number;
+	/** Resolve provider-error retryability when the caller owns additional provenance. */
+	resolveProviderErrorRetry?: (message: AssistantMessage) => ReplaySafeProviderErrorRetryDecision;
 }
 
 class FinalizedProviderStreamError extends Error {
@@ -148,22 +156,32 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!hasVisibleAssistantContent(completedMessage) &&
 				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
+			const providerErrorRetryDecision: ReplaySafeProviderErrorRetryDecision =
+				failedMessage === undefined
+					? { _tag: "deny" }
+					: (policy.resolveProviderErrorRetry?.(failedMessage) ?? { _tag: "default" });
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
 				!committed &&
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
-				AIError.isProviderRetryableError(
-					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
-				);
+				(providerErrorRetryDecision._tag === "retry" ||
+					(providerErrorRetryDecision._tag === "default" &&
+						AIError.isProviderRetryableError(
+							new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
+						)));
 
 			let delayMs: number | undefined;
 			if (retryEmpty) {
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
 				emptyRetries++;
 			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
+				const backoffDelayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
+				delayMs =
+					providerErrorRetryDecision._tag === "retry" && providerErrorRetryDecision.delayMs !== undefined
+						? Math.max(providerErrorRetryDecision.delayMs, backoffDelayMs)
+						: backoffDelayMs;
 				providerErrorRetries++;
 			}
 

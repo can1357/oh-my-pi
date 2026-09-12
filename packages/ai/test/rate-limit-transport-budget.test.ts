@@ -71,6 +71,13 @@ function completionsSuccess(text: string): Response {
 	});
 }
 
+function completionsInBandRateLimited(message: string): Response {
+	return new Response(`data: ${JSON.stringify({ error: { type: "TOO_MANY_REQUESTS", message } })}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 function anthropicSuccess(text: string): Response {
 	const events = [
 		{
@@ -112,11 +119,13 @@ function anthropicSuccess(text: string): Response {
 /** Counts transport requests for one full provider call. */
 async function countCompletionsRequests(respond: (request: number) => Response): Promise<{
 	requests: number;
+	retryDelays: number[];
 	stopReason: string;
 	errorStatus?: number;
 	text?: string;
 }> {
 	let requests = 0;
+	const retryDelays: number[] = [];
 	const fetchMock: FetchImpl = async () => {
 		requests++;
 		return respond(requests);
@@ -124,10 +133,13 @@ async function countCompletionsRequests(respond: (request: number) => Response):
 	const result = await streamOpenAICompletions(completionsModel, context, {
 		apiKey: "test-key",
 		fetch: fetchMock,
-		providerRetryWait: async () => {},
+		providerRetryWait: async delayMs => {
+			retryDelays.push(delayMs);
+		},
 	}).result();
 	return {
 		requests,
+		retryDelays,
 		stopReason: result.stopReason,
 		errorStatus: result.errorStatus,
 		text: result.content.find(block => block.type === "text")?.text,
@@ -163,6 +175,29 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.requests).toBe(2);
 		expect(outcome.stopReason).toBe("stop");
 		expect(outcome.text).toBe("recovered");
+	});
+
+	it("waits for one short-hinted retry for an in-band OpenAI 429", async () => {
+		const outcome = await countCompletionsRequests(request =>
+			request === 1
+				? completionsInBandRateLimited("Too many requests. Please retry in 3s")
+				: completionsSuccess("recovered"),
+		);
+		expect(outcome.requests).toBe(2);
+		expect(outcome.retryDelays).toEqual([3_000]);
+		expect(outcome.stopReason).toBe("stop");
+		expect(outcome.text).toBe("recovered");
+	});
+
+	it.each([
+		["without a hint", "Too many requests"],
+		["with a long hint", "Too many requests. Please retry in 300s"],
+		["for account quota with a short hint", "You have hit your usage limit. Please retry in 20ms"],
+	])("does not replay an in-band OpenAI 429 %s", async (_label, message) => {
+		const outcome = await countCompletionsRequests(() => completionsInBandRateLimited(message));
+		expect(outcome.requests).toBe(1);
+		expect(outcome.stopReason).toBe("error");
+		expect(outcome.errorStatus).toBe(429);
 	});
 
 	it("spends one request on a quota-exhaustion 429 so credential rotation runs immediately", async () => {
