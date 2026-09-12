@@ -189,6 +189,16 @@ function createHtmlNormalizationState(): HtmlNormalizationState {
 
 const HTML_COMMENT_REGEX = /<!--[\s\S]*?-->/g;
 const HTML_TAG_REGEX = /<\/?(?:br|p|ol|ul|li|span|text|code|hr|blockquote)\b(?:\s[^>]*)?\s*\/?>/gi;
+// Inband tool-call dialect tags (anthropic antml:*, minimax:*, and the
+// non-prefixed variants) that leak into rendered text when the inband scanner
+// is inactive (e.g. user-pasted output, native-tools models). Stripped before
+// HTML normalization so they never appear as raw markup.
+const INBAND_DIALECT_TAG_REGEX =
+	/<\/?(?:antml:function_calls|antml:tool_calls|antml:invoke|antml:parameter|minimax:tool_call|function_calls|tool_calls|tool_call|invoke|parameter)\b(?:\s[^>]*)?\s*\/?>/gi;
+
+function stripInbandDialectTags(text: string): string {
+	return text.replace(INBAND_DIALECT_TAG_REGEX, "");
+}
 // Block-level HTML that needs structural (not just textual) rendering: standalone
 // `<hr>` becomes a rule and balanced `<blockquote>…</blockquote>` renders with
 // quote styling. Group 1 captures blockquote inner content; it is undefined for hr.
@@ -238,7 +248,7 @@ function normalizeHtmlForTerminal(
 	let output = "";
 	let lastIndex = 0;
 	let inCode = false;
-	const withoutComments = raw.replace(HTML_COMMENT_REGEX, "");
+	const withoutComments = raw.replace(HTML_COMMENT_REGEX, "").replace(INBAND_DIALECT_TAG_REGEX, "");
 
 	for (const match of withoutComments.matchAll(HTML_TAG_REGEX)) {
 		const tag = match[0];
@@ -3175,7 +3185,7 @@ export class Markdown implements Component {
 			switch (token.type) {
 				case "text": {
 					const rawText = trimLeadingWhitespace ? token.text.replace(/^\s+/, "") : token.text;
-					const text = normalizeHtmlEntitiesForTerminal(rawText);
+					const text = normalizeHtmlEntitiesForTerminal(stripInbandDialectTags(rawText));
 					trimLeadingWhitespace = false;
 					markHtmlItemWhenContent(text);
 					if (token.tokens) markHtmlItemWhenContent(plainInlineTokens(token.tokens));
@@ -3267,7 +3277,7 @@ export class Markdown implements Component {
 					// Handle any other inline token types as plain text
 					if ("text" in token && typeof token.text === "string") {
 						const rawText = trimLeadingWhitespace ? token.text.replace(/^\s+/, "") : token.text;
-						const text = normalizeHtmlEntitiesForTerminal(rawText);
+						const text = normalizeHtmlEntitiesForTerminal(stripInbandDialectTags(rawText));
 						trimLeadingWhitespace = false;
 						markHtmlItemWhenContent(text);
 						result += applyTextWithNewlines(text);
@@ -3688,7 +3698,7 @@ export function renderInlineMarkdown(text: string, mdTheme: MarkdownTheme, baseC
 				})
 				.join(applyText(" "));
 		} else if ("text" in token && typeof token.text === "string") {
-			result += applyText(normalizeHtmlEntitiesForTerminal(token.text));
+			result += applyText(normalizeHtmlEntitiesForTerminal(stripInbandDialectTags(token.text)));
 		}
 	}
 	return result;
@@ -3707,7 +3717,7 @@ function renderInlineTokens(tokens: Token[], mdTheme: MarkdownTheme, applyText: 
 				if (token.tokens && token.tokens.length > 0) {
 					result += renderInlineTokens(token.tokens, mdTheme, applyText);
 				} else {
-					result += applyText(normalizeHtmlEntitiesForTerminal(token.text));
+					result += applyText(normalizeHtmlEntitiesForTerminal(stripInbandDialectTags(token.text)));
 				}
 				break;
 			case "strong":
@@ -3734,7 +3744,7 @@ function renderInlineTokens(tokens: Token[], mdTheme: MarkdownTheme, applyText: 
 				break;
 			default:
 				if ("text" in token && typeof token.text === "string") {
-					result += applyText(normalizeHtmlEntitiesForTerminal(token.text));
+					result += applyText(normalizeHtmlEntitiesForTerminal(stripInbandDialectTags(token.text)));
 				}
 				break;
 		}

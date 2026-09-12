@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Inband tool-call dialect tags (`<antml:*>`, `<minimax:*>`, `<function_calls>`, `<invoke>`, `<parameter>`) are now stripped from rendered markdown instead of leaking as raw markup when they appear in text that bypasses the inband scanner.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

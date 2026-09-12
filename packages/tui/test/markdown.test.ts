@@ -1708,6 +1708,82 @@ bar`,
 
 			expect(joinedPlain).toBe('<▃> & "test" 😀 😀');
 		});
+
+		it("should strip antml: inband dialect tags but keep their content", () => {
+			const markdown = new Markdown(
+				'<antml:function_calls>\n<antml:invoke name="Read">\n<antml:parameter name="path">Cargo.toml</antml:parameter>\n</antml:invoke>\n</antml:function_calls>',
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const plain = markdown
+				.render(80)
+				.map(line => stripVTControlCharacters(line))
+				.join("\n");
+
+			expect(plain).not.toContain("antml:");
+			expect(plain).not.toContain("function_calls");
+			expect(plain).not.toContain("invoke");
+			expect(plain).not.toContain("parameter");
+			expect(plain).toContain("Cargo.toml");
+		});
+
+		it("should strip non-prefixed inband dialect tags but keep their content", () => {
+			const markdown = new Markdown(
+				'<function_calls>\n<invoke name="Read">\n<parameter name="path">src/main.rs</parameter>\n</invoke>\n</function_calls>',
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const plain = markdown
+				.render(80)
+				.map(line => stripVTControlCharacters(line))
+				.join("\n");
+
+			expect(plain).not.toContain("<function_calls");
+			expect(plain).not.toContain("<invoke");
+			expect(plain).not.toContain("<parameter");
+			expect(plain).toContain("src/main.rs");
+		});
+
+		it("should strip minimax: inband dialect tags but keep their content", () => {
+			const markdown = new Markdown(
+				'<minimax:tool_call>\n<invoke name="Read">\n<parameter name="path">lib.rs</parameter>\n</invoke>\n</minimax:tool_call>',
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const plain = markdown
+				.render(80)
+				.map(line => stripVTControlCharacters(line))
+				.join("\n");
+
+			expect(plain).not.toContain("minimax:");
+			expect(plain).not.toContain("tool_call");
+			expect(plain).toContain("lib.rs");
+		});
+
+		it("should preserve content surrounding stripped dialect tags", () => {
+			const markdown = new Markdown(
+				'before <parameter name="x">value</parameter> after',
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const plain = markdown
+				.render(80)
+				.map(line => stripVTControlCharacters(line).trim())
+				.join(" ");
+
+			expect(plain).toContain("before");
+			expect(plain).toContain("value");
+			expect(plain).toContain("after");
+			expect(plain).not.toContain("parameter");
+		});
 	});
 });
 
