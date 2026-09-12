@@ -16,6 +16,7 @@ import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-sess
 import type { BlobPutOptions, BlobPutResult } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const ENTER = "\r";
 const FOLLOW_UP = "\x1b[13;5u";
@@ -54,6 +55,7 @@ async function createHarness(factory: ExtensionFactory) {
 		isCompacting: false,
 		queuedMessageCount: 0,
 		prompt,
+		promptCustomMessage: vi.fn(async () => true),
 		abort: vi.fn(async () => {}),
 		maybeStartTitleGeneration: vi.fn(),
 	};
@@ -94,7 +96,8 @@ async function createHarness(factory: ExtensionFactory) {
 		withLocalSubmission: async <T>(_text: string, submit: () => Promise<T>) => submit(),
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
-	ctx.queueCompactionMessage = (text, mode, images) => helpers.queueCompactionMessage(text, mode, images);
+	ctx.queueCompactionMessage = (text, mode, images, options) =>
+		helpers.queueCompactionMessage(text, mode, images, options);
 	const controller = new InputController(ctx);
 	controller.setupKeyHandlers();
 	controller.setupEditorSubmitHandler();
@@ -163,6 +166,143 @@ describe("interactive native input ingress", () => {
 		expect(h.blobs.get(link)?.toString()).toBe("replacement");
 		expect(h.editor.imageLinks).toEqual([link]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("queue rejected");
+	});
+
+	it("Ctrl+Enter detaches its draft before hooks so repeat submission and later typing cannot reuse it", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const seen: string[] = [];
+		const h = await createHarness(pi => {
+			pi.on("input", async event => {
+				seen.push(event.text);
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.draftWithImage();
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		const repeated = h.pressSubmit(FOLLOW_UP);
+		h.editor.pendingImages = [transformedImage];
+		h.editor.pendingImageLinks = ["local://new.jpeg"];
+		h.editor.imageLinks = h.editor.pendingImageLinks;
+		h.editor.setText("new draft [Image #1]");
+		release.resolve();
+		await Promise.all([submitting, repeated]);
+		expect(seen).toEqual(["original [Image #1]"]);
+		expect(h.editor.getText()).toBe("new draft [Image #1]");
+		expect(h.editor.pendingImages).toEqual([transformedImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg"]);
+	});
+
+	for (const decision of ["handles", "empties"] as const) {
+		it(`Ctrl+Enter preserves a newer draft when its delayed hook ${decision} input`, async () => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const h = await createHarness(pi => {
+				pi.on("input", async () => {
+					entered.resolve();
+					await release.promise;
+					return decision === "handles" ? { handled: true } : { text: "", images: [] };
+				});
+			});
+			h.draftWithImage();
+			const submitting = h.pressSubmit(FOLLOW_UP);
+			await entered.promise;
+			h.editor.setText("keep this draft");
+			release.resolve();
+			await submitting;
+			expect(h.editor.getText()).toBe("keep this draft");
+			expect(h.editor.pendingImages).toEqual([]);
+		});
+	}
+
+	it("Ctrl+Enter preserves newer typing while placing transformed input in the compaction queue", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+				return { text: "queued after compaction" };
+			});
+		});
+		h.session.isCompacting = true;
+		h.editor.setText("original");
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.editor.setText("new draft");
+		release.resolve();
+		await submitting;
+		expect(h.ctx.compactionQueuedMessages).toEqual([
+			{ text: "queued after compaction", mode: "followUp", images: undefined },
+		]);
+		expect(h.editor.getText()).toBe("new draft");
+	});
+
+	it("Ctrl+Enter restores a rejected submission alongside newer text and image attachments", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.prompt.mockRejectedValueOnce(new Error("queue rejected"));
+		h.draftWithImage();
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.editor.pendingImages = [transformedImage];
+		h.editor.pendingImageLinks = ["local://new.jpeg"];
+		h.editor.imageLinks = h.editor.pendingImageLinks;
+		h.editor.setText("new draft [Image #1]");
+		release.resolve();
+		await submitting;
+		expect(h.editor.getExpandedText()).toContain("original [Image #2]");
+		expect(h.editor.getExpandedText()).toContain("new draft [Image #1]");
+		expect(h.editor.pendingImages).toEqual([transformedImage, originalImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg", "local://original.png"]);
+	});
+
+	it("Ctrl+Enter skill dispatch preserves drafts typed during both interception and queue rejection", async () => {
+		using temp = TempDir.createSync("@omp-native-input-skill-");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		const filePath = temp.join("SKILL.md");
+		await Bun.write(filePath, "---\nname: review\ndescription: Draft ownership probe\n---\nReview the request.\n");
+		h.ctx.skillCommands.set("skill:review", {
+			name: "review",
+			description: "",
+			filePath,
+			baseDir: temp.path(),
+			source: "test",
+		});
+		const dispatchEntered = Promise.withResolvers<void>();
+		const dispatchRelease = Promise.withResolvers<void>();
+		h.session.promptCustomMessage.mockImplementation(async () => {
+			dispatchEntered.resolve();
+			await dispatchRelease.promise;
+			throw new Error("skill queue rejected");
+		});
+		h.editor.setText("/skill:review original");
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.editor.setText("new draft");
+		release.resolve();
+		await dispatchEntered.promise;
+		const draftDuringDispatch = h.editor.getText();
+		h.editor.setText(`${draftDuringDispatch} still typing`);
+		dispatchRelease.resolve();
+		await submitting;
+		expect(draftDuringDispatch).toBe("new draft");
+		expect(h.editor.getExpandedText()).toBe("/skill:review original\n\nnew draft still typing");
 	});
 
 	for (const [label, key] of [

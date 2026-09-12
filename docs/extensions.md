@@ -337,6 +337,12 @@ RPC input handlers may await extension UI responses without blocking the stdin
 reader. See [RPC completion and ordering](./rpc.md#promptqueue-concurrency-and-ordering),
 including local-only completion for consumed `abort_and_prompt` replacements.
 
+Ctrl+Enter detaches the submitted draft before awaiting native handlers, so
+another submission cannot reuse it and ordinary later typing remains a new draft.
+Handled/empty input consumes only the detached submission. Dispatch failures
+restore its text and attachments alongside any newer draft. This does not make
+the established interactive input-handler chain cancellable by Esc.
+
 ### Tool lifecycle
 
 - `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)

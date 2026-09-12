@@ -1102,10 +1102,16 @@ export class UiHelpers {
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		options?: { preserveDraft?: boolean },
+	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
 		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
-		this.ctx.editor.clearDraft(text);
+		if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
+		else this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
 			queuedImages ? "Queued message with image for after compaction" : "Queued message for after compaction",

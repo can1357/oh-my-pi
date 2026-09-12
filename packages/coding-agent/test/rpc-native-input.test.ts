@@ -17,6 +17,7 @@ class NativeInputProbe {
 	readonly events: Frame[] = [];
 	readonly requests: ProviderRequest[] = [];
 	readonly #listeners = new Set<() => void>();
+	readonly #gates = new Map<string, () => void>();
 	#serial = 0;
 	#child?: Subprocess<"pipe", "pipe", "pipe">;
 	#server?: Server<undefined>;
@@ -24,13 +25,20 @@ class NativeInputProbe {
 	#readers: Promise<void>[] = [];
 	#failure?: Error;
 
-	async start(mode: "rpc" | "rpc-ui"): Promise<void> {
+	async start(mode: "rpc" | "rpc-ui", pipedCommands?: RpcCommand[]): Promise<void> {
 		this.#server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			fetch: async request => {
 				const body: unknown = await request.json();
 				if (!isRecord(body)) return new Response("Expected object", { status: 400 });
+				if (new URL(request.url).pathname === "/gates" && typeof body.name === "string") {
+					const gate = Promise.withResolvers<void>();
+					this.#gates.set(body.name, gate.resolve);
+					this.#notify();
+					await gate.promise;
+					return new Response("ok");
+				}
 				if (new URL(request.url).pathname === "/events") {
 					this.events.push(body);
 					this.#notify();
@@ -126,7 +134,13 @@ class NativeInputProbe {
 			})(),
 		];
 		void child.exited.then(() => this.#notify());
-		await this.command({ type: "get_state" });
+		if (pipedCommands) {
+			child.stdin.write(pipedCommands.map(command => JSON.stringify(command)).join("\n") + "\n");
+			child.stdin.end();
+			await this.wait(() => this.frames.find(frame => frame.type === "ready"), "piped CLI ready");
+		} else {
+			await this.command({ type: "get_state" });
+		}
 	}
 
 	#notify(): void {
@@ -183,6 +197,10 @@ class NativeInputProbe {
 		return this.wait(() => this.requests[index], `provider request ${index}`);
 	}
 
+	gate(name: string): Promise<() => void> {
+		return this.wait(() => this.#gates.get(name), `extension gate ${name}`);
+	}
+
 	localResult(id: string): Promise<Frame> {
 		return this.wait(
 			() => this.frames.find(frame => frame.type === "prompt_result" && frame.id === id),
@@ -203,6 +221,10 @@ class NativeInputProbe {
 	async disconnect(): Promise<number> {
 		if (!this.#child) throw new Error("Probe not started");
 		this.#child.stdin.end();
+		return this.exited();
+	}
+
+	exited(): Promise<number> {
 		return this.wait(() => this.#child?.exitCode ?? undefined, "CLI shutdown after stdin EOF");
 	}
 
@@ -216,6 +238,7 @@ class NativeInputProbe {
 			await Promise.all(this.#readers);
 		}
 		for (const request of this.requests) request.release();
+		for (const release of this.#gates.values()) release();
 		this.#server?.stop(true);
 		this.temp[Symbol.dispose]();
 	}
@@ -593,6 +616,154 @@ for (const mode of ["rpc", "rpc-ui"] as const) {
 				await probe.close();
 			}
 		}, 60000);
+
+		test("a later abort invalidates a replacement already waiting for abort cleanup", async () => {
+			const probe = new NativeInputProbe();
+			try {
+				await probe.start(mode);
+				await probe.command({ type: "prompt", message: "HOLD_ABORT_CONTEXT" });
+				const release = await probe.gate("abort-context");
+				const replacement = await probe.send({
+					type: "abort_and_prompt",
+					message: "/native-local STALE_REPLACEMENT",
+				});
+				const stop = await probe.send({ type: "abort" });
+				// Background bash is a reader handshake, not an ordinary command blocked by abort.
+				await probe.command({ type: "bash", command: "true" });
+				expect(probe.frames.some(frame => frame.type === "response" && frame.id === replacement)).toBe(false);
+				release();
+				expect(await probe.response(stop)).toMatchObject({ success: true });
+				expect(await probe.response(replacement)).toMatchObject({ success: true });
+				expect(await probe.localResult(replacement)).toMatchObject({ agentInvoked: false });
+				expect(probe.events.filter(event => event.event === "command")).toEqual([]);
+				expect((await probe.command({ type: "get_state" })).data).toMatchObject({
+					isStreaming: false,
+					queuedMessageCount: 0,
+				});
+				expect(probe.requests).toHaveLength(0);
+			} finally {
+				await probe.close();
+			}
+		}, 60000);
+
+		test("only the newest replacement survives overlapping abort-and-prompt cleanup", async () => {
+			const probe = new NativeInputProbe();
+			try {
+				await probe.start(mode);
+				await probe.command({ type: "prompt", message: "HOLD_ABORT_CONTEXT" });
+				const release = await probe.gate("abort-context");
+				const stale = await probe.send({ type: "abort_and_prompt", message: "/native-local STALE_REPLACEMENT" });
+				const current = await probe.send({ type: "abort_and_prompt", message: "rewrite:CURRENT_REPLACEMENT" });
+				await probe.command({ type: "bash", command: "true" });
+				release();
+				expect(await probe.localResult(stale)).toMatchObject({ agentInvoked: false });
+				expect(await probe.response(current)).toMatchObject({ success: true });
+				const request = await probe.request(0);
+				expect(userContent(request)).toContain("CURRENT_REPLACEMENT");
+				expect(probe.events.filter(event => event.event === "command")).toEqual([]);
+				await probe.finish(request);
+			} finally {
+				await probe.close();
+			}
+		}, 60000);
+
+		test("drains a one-shot piped prompt through native hooks after stdin EOF", async () => {
+			const probe = new NativeInputProbe();
+			try {
+				await probe.start(mode, [{ id: "piped", type: "prompt", message: "rewrite:PIPED_PROMPT" }]);
+				const request = await probe.request(0);
+				expect(userContent(request)).toContain("PIPED_PROMPT");
+				expect(userContent(request)).not.toContain("rewrite:");
+				request.release();
+				expect(await probe.exited()).toBe(0);
+				expect(probe.input("rewrite:PIPED_PROMPT")).toHaveLength(1);
+			} finally {
+				await probe.close();
+			}
+		}, 60000);
+
+		test("EOF cancels UI-dependent ingress but drains an accepted non-UI prompt behind it", async () => {
+			const probe = new NativeInputProbe();
+			try {
+				await probe.start(mode);
+				await probe.command({ type: "prompt", message: "wait-ui:disconnect" });
+				await probe.wait(
+					() => probe.frames.find(frame => frame.type === "extension_ui_request" && frame.method === "confirm"),
+					"pending dialog before piped prompt",
+				);
+				await probe.send({ type: "prompt", message: "rewrite:AFTER_DISCONNECTED_UI" });
+				const exit = probe.disconnect();
+				const request = await probe.request(0);
+				expect(userContent(request)).toContain("AFTER_DISCONNECTED_UI");
+				expect(userContent(request)).not.toContain("wait-ui:");
+				expect(userContent(request)).not.toContain("AFTER_UI");
+				request.release();
+				expect(await exit).toBe(0);
+				expect(probe.requests).toHaveLength(1);
+			} finally {
+				await probe.close();
+			}
+		}, 60000);
+
+		test("EOF drains non-UI input even when an earlier piped handler catches its rejected dialog", async () => {
+			const probe = new NativeInputProbe();
+			try {
+				await probe.start(mode, [
+					{ id: "caught", type: "prompt", message: "caught-ui" },
+					{ id: "plain", type: "prompt", message: "rewrite:PIPED_AFTER_CAUGHT_UI" },
+				]);
+				const request = await probe.request(0);
+				expect(userContent(request)).toContain("PIPED_AFTER_CAUGHT_UI");
+				expect(userContent(request)).not.toContain("CAUGHT_UI_MUST_NOT_FORWARD");
+				request.release();
+				expect(await probe.exited()).toBe(0);
+				expect(probe.requests).toHaveLength(1);
+			} finally {
+				await probe.close();
+			}
+		}, 60000);
+
+		for (const decision of ["commit", "cancel"] as const) {
+			test(`suspends pending input during a session transition that will ${decision}`, async () => {
+				const probe = new NativeInputProbe();
+				try {
+					await probe.start(mode);
+					const armed = await probe.command({ type: "prompt", message: `/native-transition ${decision}` });
+					await probe.localResult(String(armed.id));
+					const pending = await probe.command({ type: "prompt", message: "wait-ui:transition" });
+					const ui = await probe.wait(
+						() => probe.frames.find(frame => frame.type === "extension_ui_request" && frame.method === "confirm"),
+						"input dialog before transition",
+					);
+					const transition = await probe.send({ type: "new_session" });
+					const release = await probe.gate("transition");
+					await probe.send({ type: "extension_ui_response", id: String(ui.id), confirmed: true });
+					await probe.wait(
+						() => probe.events.find(event => event.event === "input:B" && event.text === "AFTER_UI"),
+						"input hook finishes inside transition",
+					);
+					await probe.command({ type: "bash", command: "true" });
+					expect(probe.requests).toHaveLength(0);
+					release();
+					expect(await probe.response(transition)).toMatchObject({
+						success: true,
+						data: { cancelled: decision === "cancel" },
+					});
+					if (decision === "cancel") {
+						const request = await probe.request(0);
+						expect(userContent(request)).toContain("AFTER_UI");
+						await probe.finish(request);
+					} else {
+						expect(await probe.localResult(String(pending.id))).toMatchObject({ agentInvoked: false });
+						expect((await probe.command({ type: "get_messages" })).data).toMatchObject({ messages: [] });
+						expect(probe.requests).toHaveLength(0);
+					}
+					expect(probe.input("wait-ui:transition")).toHaveLength(1);
+				} finally {
+					await probe.close();
+				}
+			}, 60000);
+		}
 
 		test("acknowledges a delayed prompt and accepts its extension UI response", async () => {
 			const probe = new NativeInputProbe();

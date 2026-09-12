@@ -825,10 +825,7 @@ export class InputController {
 		imageLinks?: (string | undefined)[],
 	): Promise<{ text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] } | undefined> {
 		const result = await this.ctx.session.extensionRunner?.emitInput(text, images, "interactive");
-		if (result?.handled) {
-			this.ctx.editor.clearDraft();
-			return undefined;
-		}
+		if (result?.handled) return undefined;
 		if (result?.text !== undefined) text = result.text.trim();
 		if (result?.images !== undefined) {
 			images = result.images;
@@ -837,10 +834,7 @@ export class InputController {
 				this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
 			);
 		}
-		if (!text && !images?.length) {
-			this.ctx.editor.clearDraft();
-			return undefined;
-		}
+		if (!text && !images?.length) return undefined;
 		return { text, images, imageLinks };
 	}
 
@@ -898,7 +892,10 @@ export class InputController {
 
 			if (runner?.hasHandlers("input")) {
 				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
-				if (!input) return;
+				if (!input) {
+					this.ctx.editor.clearDraft();
+					return;
+				}
 				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
@@ -1383,6 +1380,19 @@ export class InputController {
 		}
 	}
 
+	/** Restore a failed submission without replacing a draft typed while it awaited dispatch. */
+	#restoreInputDraft(text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]): void {
+		const editor = this.ctx.editor;
+		const currentText = editor.getExpandedText();
+		const restoredText = shiftImageMarkers(text, editor.pendingImages.length);
+		if (images?.length) {
+			editor.pendingImages.push(...images);
+			editor.pendingImageLinks.push(...(imageLinks ?? images.map(() => undefined)));
+			editor.imageLinks = editor.pendingImageLinks;
+		}
+		editor.setCollapsedText([restoredText, currentText].filter(part => part.trim()).join("\n\n"));
+	}
+
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
 	 * using the supplied `streamingBehavior`. Returns false when the text is not
@@ -1395,22 +1405,28 @@ export class InputController {
 		streamingBehavior: "steer" | "followUp",
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
+		preserveDraft = false,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
 		const restoreDraft = () => {
-			this.ctx.editor.setText(text);
-			if (draftImages && draftImages.length > 0) {
-				this.ctx.editor.pendingImages = [...draftImages];
-				this.ctx.editor.pendingImageLinks = draftImageLinks
-					? [...draftImageLinks]
-					: draftImages.map(() => undefined);
-				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+			if (preserveDraft) {
+				this.#restoreInputDraft(text, draftImages, draftImageLinks);
+			} else {
+				this.ctx.editor.setText(text);
+				if (draftImages && draftImages.length > 0) {
+					this.ctx.editor.pendingImages = [...draftImages];
+					this.ctx.editor.pendingImageLinks = draftImageLinks
+						? [...draftImageLinks]
+						: draftImages.map(() => undefined);
+					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+				}
 			}
 		};
 
-		this.ctx.editor.clearDraft(text);
+		if (preserveDraft) this.ctx.editor.addToHistory(text);
+		else this.ctx.editor.clearDraft(text);
 		let optimistic = false;
 		try {
 			// Build the user-attributed skill message once so the optimistic
@@ -1601,10 +1617,20 @@ export class InputController {
 			return;
 		}
 
+		// Detach before the first await: another Ctrl+Enter cannot submit the
+		// same draft, and later typing belongs to the next submission.
+		this.ctx.editor.clearDraft();
+
 		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
-			const input = await this.#runInputHandlers(text, images, imageLinks);
-			if (!input) return;
-			({ text, images, imageLinks } = input);
+			try {
+				const input = await this.#runInputHandlers(text, images, imageLinks);
+				if (!input) return;
+				({ text, images, imageLinks } = input);
+			} catch (error) {
+				this.#restoreInputDraft(text, images, imageLinks);
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
+			}
 		}
 
 		// Compaction first: while compacting, free text gets queued via
@@ -1613,7 +1639,7 @@ export class InputController {
 		// `promptCustomMessage`. The compaction-resume path re-parses the
 		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
-			this.ctx.queueCompactionMessage(text, "followUp", images);
+			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
 			return;
 		}
 
@@ -1635,7 +1661,7 @@ export class InputController {
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
 			return;
 		}
 
@@ -1643,18 +1669,12 @@ export class InputController {
 		// queue rejection): restore both text AND pending images so an image-only
 		// or text+image draft can be retried, mirroring the main submit error path.
 		const restoreOnError = (error: unknown) => {
-			if (images && images.length > 0) {
-				this.ctx.editor.pendingImages = [...images];
-				this.ctx.editor.pendingImageLinks = imageLinks ? [...imageLinks] : images.map(() => undefined);
-				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-			}
-			// Collapse restores the chip tokens (and their band cards) for the failed draft.
-			this.ctx.editor.setCollapsedText(text);
+			this.#restoreInputDraft(text, images, imageLinks);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.clearDraft(text);
+			this.ctx.editor.addToHistory(text);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -1670,7 +1690,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.clearDraft(text);
+		this.ctx.editor.addToHistory(text);
 		try {
 			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
 				imageCount: images?.length ?? 0,

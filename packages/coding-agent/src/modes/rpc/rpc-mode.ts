@@ -73,11 +73,26 @@ export type PendingExtensionRequest = {
 	reject: (error: Error) => void;
 };
 
+// EOF cancels only ingress that depended on a disconnected UI request. Other
+// accepted input still drains, including one-shot piped prompts.
+const rpcInputScope = new AsyncLocalStorage<{ disconnected: boolean }>();
+
 /** Pending extension UI request map that can fail closed when the RPC client disconnects. */
 export class RpcPendingExtensionRequests extends Map<string, PendingExtensionRequest> {
 	#closedError: Error | undefined;
 
 	override set(id: string, request: PendingExtensionRequest): this {
+		const scope = rpcInputScope.getStore();
+		if (scope) {
+			const reject = request.reject;
+			request = {
+				resolve: request.resolve,
+				reject: error => {
+					scope.disconnected = true;
+					reject(error);
+				},
+			};
+		}
 		if (this.#closedError) {
 			request.reject(this.#closedError);
 			return this;
@@ -418,6 +433,9 @@ export class RpcInputDispatcher {
 			// overtake it, including an explicit steer/follow-up awaiting ingress.
 			if (command.type === "abort" || command.type === "abort_and_prompt") {
 				const task = this.#dispatchSerialCommand(command);
+				// Overtake earlier ingress, but retain it and every still-live
+				// abort as barriers for commands accepted after this one.
+				this.#tail = Promise.allSettled([this.#tail, task]).then(() => {});
 				this.#tasks.add(task);
 				void task.finally(() => this.#tasks.delete(task));
 				return;
@@ -1079,76 +1097,100 @@ export async function runRpcMode(
 	// hook must not reorder later user submissions or hold acknowledgements/UI.
 	let inputTail: Promise<void> = Promise.resolve();
 	let inputGeneration = 0;
-	let inputClosed = false;
+	let abortTail: Promise<void> = Promise.resolve();
+	const abortUserInput = () => {
+		const generation = ++inputGeneration;
+		const completion = Promise.allSettled([abortTail, session.abort({ reason: USER_INTERRUPT_LABEL })]).then(
+			results => {
+				for (const result of results) {
+					if (result.status === "rejected") throw result.reason;
+				}
+			},
+		);
+		abortTail = completion.catch(() => {});
+		return { generation, completion };
+	};
+	let inputTransition: Promise<void> | undefined;
 	type UserInputCommand = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
-	const dispatchUserInput = (command: UserInputCommand): Promise<boolean> => {
-		const generation = inputGeneration;
+	const dispatchUserInput = (command: UserInputCommand, generation = inputGeneration): Promise<boolean> => {
+		const scope = { disconnected: false };
 		const sessionId = session.sessionId;
 		const isCurrent = () =>
-			!inputClosed && !shutdownState.requested && generation === inputGeneration && sessionId === session.sessionId;
-		const dispatch = inputTail.then(async (): Promise<{ completion: Promise<boolean> }> => {
-			let text = command.message;
-			let images = command.images;
-			const runner = session.extensionRunner;
-			if (runner?.hasHandlers("input")) {
-				const result = await runner.emitInput(text, images, "rpc");
-				if (result.handled) return { completion: Promise.resolve(false) };
-				if (result.text !== undefined) text = result.text.trim();
-				if (result.images !== undefined) images = result.images;
-			}
-			// An abort/session switch during a hook must not resurrect its prompt.
-			if (!isCurrent() || (!text.trim() && !images?.length)) {
-				return { completion: Promise.resolve(false) };
-			}
-			if (command.type === "steer" || command.type === "follow_up") {
-				if (command.type === "steer") await session.steer(text, images);
-				else await session.followUp(text, images);
-				return { completion: Promise.resolve(true) };
-			}
-			if (command.type === "prompt") {
-				const invocation = resolveRpcSkillInvocation(session, text);
-				if (invocation) {
-					const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
-					return {
-						completion: isCurrent()
-							? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built, images)
-							: Promise.resolve(false),
-					};
+			!scope.disconnected &&
+			!shutdownState.requested &&
+			!inputTransition &&
+			generation === inputGeneration &&
+			sessionId === session.sessionId;
+		const dispatch = inputTail.then(() =>
+			rpcInputScope.run(scope, async (): Promise<{ completion: Promise<boolean> }> => {
+				await inputTransition;
+				if (!isCurrent()) return { completion: Promise.resolve(false) };
+				let text = command.message;
+				let images = command.images;
+				const runner = session.extensionRunner;
+				if (runner?.hasHandlers("input")) {
+					const result = await runner.emitInput(text, images, "rpc");
+					if (result.handled) return { completion: Promise.resolve(false) };
+					if (result.text !== undefined) text = result.text.trim();
+					if (result.images !== undefined) images = result.images;
 				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(text, {
-					session,
-					sessionManager: session.sessionManager,
-					settings: session.settings,
-					cwd: session.sessionManager.getCwd(),
-					output: text => output({ type: "command_output", text }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					runCommandInBackground: task => shutdownCoordinator.track(task()),
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
-				});
-				if (builtinResult !== false) {
-					return {
-						completion:
-							"prompt" in builtinResult && isCurrent()
-								? session.prompt(builtinResult.prompt, { images })
-								: Promise.resolve("agentInvoked" in builtinResult && builtinResult.agentInvoked === true),
-					};
+				await inputTransition;
+				// An abort/session switch during a hook must not resurrect its prompt.
+				if (!isCurrent() || (!text.trim() && !images?.length)) {
+					return { completion: Promise.resolve(false) };
 				}
-			}
-			return {
-				completion: isCurrent()
-					? session.prompt(text, {
-							images,
-							...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
-						})
-					: Promise.resolve(false),
-			};
-		});
+				if (command.type === "steer" || command.type === "follow_up") {
+					if (command.type === "steer") await session.steer(text, images);
+					else await session.followUp(text, images);
+					return { completion: Promise.resolve(true) };
+				}
+				if (command.type === "prompt") {
+					const invocation = resolveRpcSkillInvocation(session, text);
+					if (invocation) {
+						const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
+						await inputTransition;
+						return {
+							completion: isCurrent()
+								? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built, images)
+								: Promise.resolve(false),
+						};
+					}
+					const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+						session,
+						sessionManager: session.sessionManager,
+						settings: session.settings,
+						cwd: session.sessionManager.getCwd(),
+						output: text => output({ type: "command_output", text }),
+						refreshCommands: emitAvailableCommandsUpdate,
+						reloadPlugins: reloadPluginState,
+						runCommandInBackground: task => shutdownCoordinator.track(task()),
+						notifyTitleChanged: async () => {
+							output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+						},
+						notifyConfigChanged: async () => {
+							output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						},
+					});
+					await inputTransition;
+					if (builtinResult !== false) {
+						return {
+							completion:
+								"prompt" in builtinResult && isCurrent()
+									? session.prompt(builtinResult.prompt, { images })
+									: Promise.resolve("agentInvoked" in builtinResult && builtinResult.agentInvoked === true),
+						};
+					}
+				}
+				return {
+					completion: isCurrent()
+						? session.prompt(text, {
+								images,
+								...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
+							})
+						: Promise.resolve(false),
+				};
+			}),
+		);
 		inputTail = dispatch.then(
 			() => {},
 			() => {},
@@ -1173,16 +1215,18 @@ export async function runRpcMode(
 
 			case "prompt":
 			case "abort_and_prompt": {
+				let generation = inputGeneration;
 				if (command.type === "abort_and_prompt") {
-					inputGeneration++;
-					await session.abort({ reason: USER_INTERRUPT_LABEL });
+					const abort = abortUserInput();
+					generation = abort.generation;
+					await abort.completion;
 				}
 				// Acknowledge before asynchronous hooks, skills, commands or turns.
 				// One scope includes interception and any handler-generated work.
 				shutdownCoordinator.track(
 					watchAndReportLocalOnlyPromptResult({
 						id,
-						startPrompt: () => dispatchUserInput(command),
+						startPrompt: () => dispatchUserInput(command, generation),
 						output,
 						onError: promptError => output(error(id, command.type, promptError.message)),
 						extensionUserMessageTracker,
@@ -1198,17 +1242,30 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				inputGeneration++;
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await abortUserInput().completion;
 				return success(id, "abort");
 			}
 
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
-				return success(id, result.type, result.data);
+				const transition = Promise.withResolvers<void>();
+				inputTransition = transition.promise;
+				try {
+					const result = await handleRpcSessionChange(session, command, subagentRegistry);
+					if (!result.data.cancelled) {
+						inputGeneration++;
+						await emitAvailableCommandsUpdate();
+					}
+					return success(id, result.type, result.data);
+				} catch (error) {
+					// A failed transition may already have disconnected the old session.
+					inputGeneration++;
+					throw error;
+				} finally {
+					inputTransition = undefined;
+					transition.resolve();
+				}
 			}
 
 			// =================================================================
@@ -1638,7 +1695,6 @@ export async function runRpcMode(
 
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
 	// first so active/queued commands can settle, then drain accepted work.
-	inputClosed = true;
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");

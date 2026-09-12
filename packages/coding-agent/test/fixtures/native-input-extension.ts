@@ -44,6 +44,10 @@ export default function nativeInputExtension(pi: ExtensionAPI): void {
 			);
 			return { handled: true };
 		}
+		if (event.text === "caught-ui") {
+			await ctx.ui.confirm("Disconnected input", event.text).catch(() => false);
+			return { text: "CAUGHT_UI_MUST_NOT_FORWARD" };
+		}
 		if (event.text.startsWith("wait-ui:")) {
 			const confirmed = await ctx.ui.confirm("Native input gate", event.text);
 			await record({ event: "ui:resolved", text: event.text, confirmed });
@@ -53,6 +57,27 @@ export default function nativeInputExtension(pi: ExtensionAPI): void {
 	pi.on("input", async event => {
 		await record({ event: "input:B", text: event.text, source: event.source, images: event.images });
 		if (event.text === "CHAIN_STAGE") return { text: "CHAIN_FINAL" };
+	});
+	let contextGated = false;
+	pi.on("context", async event => {
+		if (!contextGated && JSON.stringify(event.messages).includes("HOLD_ABORT_CONTEXT")) {
+			contextGated = true;
+			await fetch(`${url}/gates`, { method: "POST", body: JSON.stringify({ name: "abort-context" }) });
+		}
+	});
+	let transitionDecision: string | undefined;
+	pi.registerCommand("native-transition", {
+		description: "Gate the next session transition",
+		handler: async args => {
+			transitionDecision = args;
+		},
+	});
+	pi.on("session_before_switch", async () => {
+		if (!transitionDecision) return;
+		const decision = transitionDecision;
+		transitionDecision = undefined;
+		await fetch(`${url}/gates`, { method: "POST", body: JSON.stringify({ name: "transition" }) });
+		return { cancel: decision === "cancel" };
 	});
 	pi.on("before_agent_start", async event => {
 		await record({ event: "before_agent_start", text: event.prompt, images: event.images });

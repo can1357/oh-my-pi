@@ -582,8 +582,16 @@ model turns. `prompt`/`abort_and_prompt` acknowledge before asynchronous input
 handlers finish; subsequent failures retain the original command and id. UI and
 host-tool/URI responses remain dispatchable while handlers await them. Abort
 commands can overtake a waiting input handler; its normal forwarding is cancelled
-when it finishes. Disconnect or requested shutdown likewise prevents pending
-input from starting a new normal turn.
+when it finishes. Commands accepted after an abort wait for its cleanup, including
+all earlier aborts still settling. A newer abort or replacement invalidates an
+older `abort_and_prompt` replacement before it can dispatch.
+
+Session transitions suspend pending ingress until the transition settles. A
+committed transition cancels old-session input; a vetoed transition preserves it
+unless an abort also invalidated it. Requested shutdown prevents pending normal
+dispatch. Stdin EOF rejects unresolved UI/host requests and cancels input whose
+UI interaction disconnected, but still drains other accepted input, including
+one-shot piped prompts.
 
 ### While streaming
 
