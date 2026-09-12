@@ -8,6 +8,7 @@ import {
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
+	matchesUsageLimitText,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 
@@ -678,6 +679,27 @@ describe("isUsageLimitOutcome", () => {
 		// 429 concurrency cap: shed-and-backoff, do not rotate.
 		expect(isUsageLimitOutcome(429, message)).toBe(false);
 		expect(isUsageLimit(Object.assign(new Error(message), { status: 429 }))).toBe(false);
+	});
+
+	it("rotates Anthropic credits-required walls", () => {
+		const body =
+			'429 {"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","model":"claude-fable-5"}}}';
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	// The entitlement wall rotates, but "usage credits" also appears in
+	// unrelated diagnostics. Those must stay in their own lane: rotating on a
+	// 500 from a billing service blocks a credential that never hit a cap.
+	it("leaves non-entitlement usage-credits wording alone", () => {
+		const diagnostic = "500 Failed to fetch usage credits from billing service";
+		expect(parseRateLimitReason(diagnostic)).not.toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(500, diagnostic)).toBe(false);
+		expect(matchesUsageLimitText(diagnostic)).toBe(false);
+
+		const perMinute = "429 Usage credits are limited per minute for this workspace";
+		expect(parseRateLimitReason(perMinute)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
 	});
 });
 

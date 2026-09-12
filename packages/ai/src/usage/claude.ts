@@ -53,6 +53,25 @@ function normalizeClaudeBaseUrl(baseUrl?: string): string {
 	return `${url.origin}${path}/api/oauth`;
 }
 
+/**
+ * Subscription usage is served by Anthropic's OAuth API, which a custom
+ * `baseUrl` pointed at a Messages-only endpoint does not expose. Probe the
+ * configured host first so a full mirror keeps answering (including its own
+ * `/profile` identity), then fall back to the canonical endpoint — but only
+ * when the configured host answered that it has no usage endpoint there (see
+ * {@link ClaudeUsagePayloadResult.endpointAbsent}), so a host that refuses the
+ * credential or fails transiently keeps the request.
+ *
+ * Without the fallback the report degrades to rate-limit headers, and those
+ * carry the model-scoped weekly row only on responses for that model family,
+ * so a scoped window can read far below its real utilization until a request
+ * hits the family again.
+ */
+function claudeUsageBaseUrls(baseUrl?: string): readonly string[] {
+	const configured = normalizeClaudeBaseUrl(baseUrl);
+	return configured === DEFAULT_ENDPOINT ? [DEFAULT_ENDPOINT] : [configured, DEFAULT_ENDPOINT];
+}
+
 interface ClaudeUsageBucket {
 	utilization?: number;
 	resets_at?: string;
@@ -274,38 +293,93 @@ async function waitBeforeRetry(
 	}
 }
 
+/** Statuses that answer "this host does not implement the endpoint". */
+const ENDPOINT_ABSENT_STATUSES = new Set([404, 405, 410, 501]);
+
+interface ClaudeUsagePayloadResult {
+	/** Best payload seen; may lack usage data when the retries gave up. */
+	payload: ClaudeUsageResponse | null;
+	/** The host answered, but does not serve subscription usage at this path. */
+	endpointAbsent: boolean;
+}
+
+/**
+ * A body with none of the usage keys is a host answering something else at this
+ * path (an error document, an index page), not an account whose windows are all
+ * empty — the latter still carries the keys.
+ */
+function looksLikeUsagePayload(payload: ClaudeUsageResponse): boolean {
+	return (
+		"five_hour" in payload ||
+		"seven_day" in payload ||
+		"limits" in payload ||
+		"extra_usage" in payload ||
+		"spend" in payload
+	);
+}
+
 async function fetchUsagePayload(
 	url: string,
 	headers: Record<string, string>,
 	ctx: UsageFetchContext,
 	signal?: AbortSignal,
-): Promise<ClaudeUsageResponse | null> {
-	if (signal?.aborted) return null;
+): Promise<ClaudeUsagePayloadResult> {
+	if (signal?.aborted) return { payload: null, endpointAbsent: false };
 
 	let lastPayload: ClaudeUsageResponse | null = null;
+	let endpointAbsent = false;
 	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
 		try {
 			const response = await ctx.fetch(url, { headers, signal });
 
 			if (!response.ok) {
-				const retryable = isRetryableStatus(response.status);
+				// Absence outranks the generic transient classification: 501 is a 5xx,
+				// but "not implemented" does not become implemented on replay.
+				const absent = ENDPOINT_ABSENT_STATUSES.has(response.status);
+				const retryable = !absent && isRetryableStatus(response.status);
 				ctx.logger?.warn("Claude usage fetch failed", {
 					status: response.status,
 					statusText: response.statusText,
 					attempt,
 					willRetry: retryable && attempt < MAX_ATTEMPTS - 1,
 				});
-				if (!retryable) return null;
+				if (!retryable) return { payload: null, endpointAbsent: absent };
 				const retryAfter = response.headers.get("retry-after");
 				if (!(await waitBeforeRetry(attempt, retryAfter, signal, ctx.retryWait))) break;
 				continue;
 			}
 
-			const parsed = (await response.json()) as unknown;
+			const body = await response.text();
+			if (body.trim().length === 0) {
+				// An empty 2xx serves nothing here; a gateway answering unknown paths
+				// this way has no usage endpoint to poll.
+				return { payload: lastPayload, endpointAbsent: true };
+			}
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(body) as unknown;
+			} catch {
+				// A non-JSON 2xx is this host answering something else at this path
+				// (an index page, a plain-text notice). A body that claims JSON and
+				// fails to parse is truncated or garbled instead, so keep retrying it
+				// against this host rather than moving the request.
+				const claimsJson = /json/i.test(response.headers.get("content-type") ?? "");
+				ctx.logger?.warn("Claude usage response was not JSON", {
+					contentType: response.headers.get("content-type") ?? undefined,
+					attempt,
+					willRetry: claimsJson && attempt < MAX_ATTEMPTS - 1,
+				});
+				if (!claimsJson) return { payload: lastPayload, endpointAbsent: true };
+				if (!(await waitBeforeRetry(attempt, null, signal, ctx.retryWait))) break;
+				continue;
+			}
 			if (isRecord(parsed)) {
 				const payload = parsed as ClaudeUsageResponse;
 				lastPayload = payload;
-				if (hasUsageData(payload)) return payload;
+				if (hasUsageData(payload)) return { payload, endpointAbsent: false };
+				endpointAbsent = !looksLikeUsagePayload(payload);
+			} else {
+				endpointAbsent = true;
 			}
 
 			ctx.logger?.warn("Claude usage response missing usage data", {
@@ -314,7 +388,7 @@ async function fetchUsagePayload(
 			});
 			if (!(await waitBeforeRetry(attempt, null, signal, ctx.retryWait))) break;
 		} catch (error) {
-			if (isAbortError(error, signal)) return null;
+			if (isAbortError(error, signal)) return { payload: null, endpointAbsent: false };
 			ctx.logger?.warn("Claude usage fetch error", {
 				error: String(error),
 				attempt,
@@ -324,7 +398,7 @@ async function fetchUsagePayload(
 		}
 	}
 
-	return lastPayload;
+	return { payload: lastPayload, endpointAbsent };
 }
 
 interface ClaudeProfile {
@@ -608,15 +682,35 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	const credential = params.credential;
 	if (credential.type !== "oauth" || !credential.accessToken) return null;
 
-	const baseUrl = normalizeClaudeBaseUrl(params.baseUrl);
-	const url = `${baseUrl}/usage`;
 	const headers: Record<string, string> = {
 		...CLAUDE_HEADERS,
 		authorization: `Bearer ${credential.accessToken}`,
 	};
 
-	const payload = await fetchUsagePayload(url, headers, ctx, params.signal);
-	if (!payload || !isRecord(payload)) return null;
+	let baseUrl: string | undefined;
+	let payload: ClaudeUsageResponse | null = null;
+	for (const candidate of claudeUsageBaseUrls(params.baseUrl)) {
+		const result = await fetchUsagePayload(`${candidate}/usage`, headers, ctx, params.signal);
+		if (result.payload && hasUsageData(result.payload)) {
+			baseUrl = candidate;
+			payload = result.payload;
+			break;
+		}
+		// Usage-shaped body without numbers: retries already gave up on fresher
+		// numbers here, so hold it while the remaining candidate is probed.
+		if (result.payload && !payload) {
+			baseUrl = candidate;
+			payload = result.payload;
+		}
+		if (params.signal?.aborted) break;
+		// Only a host that answered "no usage endpoint here" justifies moving the
+		// request off the configured one. A refused credential (401/403) or a
+		// transient failure is that host's answer about this account, so it stands
+		// and the next poll retries it.
+		if (!result.endpointAbsent) break;
+	}
+	if (!payload || baseUrl === undefined) return null;
+	const url = `${baseUrl}/usage`;
 
 	const apiLimitEntries = parseApiLimitEntries(payload.limits);
 	const fiveHour = parseBucket(payload.five_hour) ?? apiLimitEntries.find(entry => entry.kind === "session")?.bucket;
