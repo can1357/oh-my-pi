@@ -7,7 +7,7 @@
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
 - `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
 - Native extension input handlers now intercept RPC submissions and main-session Ctrl+Enter, including queued input, with consistent transformations and local-only completion ([#11834](https://github.com/can1357/oh-my-pi/pull/11834) by [@andrebrait](https://github.com/andrebrait)).
-- Skill invocations through RPC retain and normalize attachments after input-hook transformations ([#11834](https://github.com/can1357/oh-my-pi/pull/11834) by [@andrebrait](https://github.com/andrebrait)).
+- Skill invocations through RPC retain normalized attachments and receive vision descriptions for text-only models, including queued turns ([#11834](https://github.com/can1357/oh-my-pi/pull/11834) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.1.18] - 2026-09-11
 

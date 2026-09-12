@@ -25,7 +25,11 @@ class NativeInputProbe {
 	#readers: Promise<void>[] = [];
 	#failure?: Error;
 
-	async start(mode: "rpc" | "rpc-ui", pipedCommands?: RpcCommand[]): Promise<void> {
+	async start(
+		mode: "rpc" | "rpc-ui",
+		pipedCommands?: RpcCommand[],
+		options?: { textModel?: boolean; images?: { blockImages?: boolean; describeForTextModels?: boolean } },
+	): Promise<void> {
 		this.#server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
@@ -56,9 +60,16 @@ class NativeInputProbe {
 					id,
 					object: "chat.completion.chunk",
 					created: 1,
-					model: "probe",
+					model: body.model,
 					choices: [
-						{ index: 0, delta: { role: "assistant", content: "LOCAL_PROVIDER_DONE" }, finish_reason: null },
+						{
+							index: 0,
+							delta: {
+								role: "assistant",
+								content: body.model === "vision-probe" ? "VISION_DESCRIPTION_RED_PIXEL" : "LOCAL_PROVIDER_DONE",
+							},
+							finish_reason: null,
+						},
 					],
 				};
 				const end = {
@@ -78,6 +89,9 @@ class NativeInputProbe {
 				skills: { enableSkillCommands: true },
 				compaction: { enabled: false },
 				todo: { enabled: false },
+				magicKeywords: { enabled: true, ultrathink: true },
+				modelRoles: { vision: "native-input-probe/vision-probe" },
+				images: options?.images,
 			}),
 		);
 		await Bun.write(
@@ -100,7 +114,7 @@ class NativeInputProbe {
 				"--extension",
 				path.join(import.meta.dir, "fixtures", "native-input-extension.ts"),
 				"--model",
-				"native-input-probe/probe",
+				options?.textModel ? "native-input-probe/text-probe" : "native-input-probe/probe",
 			],
 			{
 				cwd: this.temp.path(),
@@ -435,6 +449,177 @@ for (const mode of ["rpc", "rpc-ui"] as const) {
 				await probe.close();
 			}
 		}, 60000);
+
+		for (const route of ["idle", "steer", "followUp"] as const) {
+			test(`describes skill attachments for a text-only target through ${route}`, async () => {
+				const probe = new NativeInputProbe();
+				const image: ImageContent = {
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+				};
+				const normalizedImages = (await normalizeModelContextImages([image]))!;
+				const normalizedImage = normalizedImages[0]!;
+				try {
+					await probe.start(mode, undefined, { textModel: true });
+					await probe.command({ type: "set_interrupt_mode", mode: "wait" });
+					let active: ProviderRequest | undefined;
+					if (route !== "idle") {
+						await probe.command({ type: "prompt", message: "ACTIVE_BEFORE_SKILL" });
+						active = await probe.request(0);
+					}
+					const response = await probe.command({
+						type: "prompt",
+						message: "/skill:native-probe describe-attachment",
+						images: [image],
+						streamingBehavior: route === "idle" ? undefined : route,
+					});
+					const visionIndex = active ? 1 : 0;
+					const vision = await probe.request(visionIndex);
+					expect(vision.body.model).toBe("vision-probe");
+					expect(userContent(vision)).toContain(`data:${normalizedImage.mimeType};base64,${normalizedImage.data}`);
+					// The RPC acknowledgement is not held by the vision helper.
+					expect(probe.frames.some(frame => frame.type === "prompt_result" && frame.id === response.id)).toBe(
+						false,
+					);
+					let laterInput: string | undefined;
+					if (active) {
+						laterInput = await probe.send({ type: "follow_up", message: "LATER_PLAIN_INPUT" });
+						await probe.command({ type: "bash", command: "true" });
+						active.release();
+						await probe.wait(
+							() =>
+								probe.frames.find(
+									frame =>
+										frame.type === "message_end" &&
+										isRecord(frame.message) &&
+										frame.message.role === "assistant",
+								),
+							"active turn finishes while skill description is pending",
+						);
+					}
+					vision.release();
+					const target = await probe.request(visionIndex + 1);
+					expect(target.body.model).toBe("text-probe");
+					const payload = JSON.stringify(target.body.messages);
+					expect(payload).toContain("VISION_DESCRIPTION_RED_PIXEL");
+					expect(payload).toContain("NATIVE_SKILL_BODY");
+					expect(payload).toContain("describe-attachment");
+					expect(payload).not.toContain("image_url");
+					expect(payload.indexOf("VISION_DESCRIPTION_RED_PIXEL")).toBeLessThan(
+						payload.indexOf("NATIVE_SKILL_BODY"),
+					);
+					if (laterInput) {
+						target.release();
+						const laterTarget = await probe.request(visionIndex + 2);
+						expect(userContent(laterTarget)).toContain("LATER_PLAIN_INPUT");
+						await probe.finish(laterTarget);
+						expect(await probe.response(laterInput)).toMatchObject({ success: true });
+					} else {
+						await probe.finish(target);
+					}
+					const transcript = await probe.command({ type: "get_messages" });
+					if (!isRecord(transcript.data) || !Array.isArray(transcript.data.messages))
+						throw new Error("Missing transcript");
+					const messages = transcript.data.messages.filter(isRecord);
+					const companions = messages.filter(message => message.customType === "image-attachment-description");
+					expect(companions).toHaveLength(1);
+					expect(companions[0]).toMatchObject({ role: "custom", display: false, attribution: "user" });
+					const skill = messages.find(message => message.customType === "skill-prompt");
+					expect(skill).toMatchObject({
+						role: "custom",
+						display: true,
+						attribution: "user",
+						details: { name: "native-probe", args: "describe-attachment", lineCount: 1 },
+					});
+					expect(messages.indexOf(companions[0]!)).toBeLessThan(messages.indexOf(skill!));
+					expect(probe.requests.filter(request => request.body.model === "vision-probe")).toHaveLength(1);
+					expect(probe.input("/skill:native-probe describe-attachment")).toHaveLength(1);
+					if (route === "idle") {
+						expect(probe.events.filter(event => event.event === "before_agent_start").at(-1)?.images).toEqual(
+							normalizedImages,
+						);
+					}
+				} finally {
+					await probe.close();
+				}
+			}, 60000);
+		}
+
+		for (const route of ["idle", "followUp"] as const) {
+			test(`cancels a slow ${route} skill description without a ghost companion or detached turn`, async () => {
+				const probe = new NativeInputProbe();
+				const image: ImageContent = {
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+				};
+				try {
+					await probe.start(mode, undefined, { textModel: true });
+					await probe.command({ type: "set_interrupt_mode", mode: "wait" });
+					if (route !== "idle") {
+						await probe.command({ type: "prompt", message: "ACTIVE_BEFORE_CANCEL" });
+						await probe.request(0);
+					}
+					const pending = await probe.command({
+						type: "prompt",
+						message: "/skill:native-probe ultrathink cancelled-attachment",
+						images: [image],
+						streamingBehavior: route === "idle" ? undefined : route,
+					});
+					const vision = await probe.request(route === "idle" ? 0 : 1);
+					expect(vision.body.model).toBe("vision-probe");
+					await probe.command({ type: "abort" });
+					// Cancellation must settle even while the helper's HTTP response remains gated.
+					expect(await probe.localResult(String(pending.id))).toMatchObject({ agentInvoked: false });
+					vision.release();
+					await probe.command({ type: "prompt", message: "SUCCESSOR_AFTER_CANCEL" });
+					const successor = await probe.request(route === "idle" ? 1 : 2);
+					expect(successor.body.model).toBe("text-probe");
+					const payload = JSON.stringify(successor.body.messages);
+					expect(payload).toContain("SUCCESSOR_AFTER_CANCEL");
+					expect(payload).not.toContain("VISION_DESCRIPTION_RED_PIXEL");
+					expect(payload).not.toContain("NATIVE_SKILL_BODY");
+					await probe.finish(successor);
+					expect((await probe.command({ type: "get_state" })).data).toMatchObject({ queuedMessageCount: 0 });
+					const transcript = JSON.stringify((await probe.command({ type: "get_messages" })).data);
+					expect(transcript).not.toContain("image-attachment-description");
+					expect(transcript).not.toContain("ultrathink-notice");
+					expect(probe.requests).toHaveLength(route === "idle" ? 2 : 3);
+				} finally {
+					await probe.close();
+				}
+			}, 60000);
+		}
+
+		for (const gate of ["vision-target", "disabled", "blocked"] as const) {
+			test(`does not describe skill attachments when ${gate}`, async () => {
+				const probe = new NativeInputProbe();
+				const image: ImageContent = {
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+				};
+				try {
+					await probe.start(mode, undefined, {
+						textModel: gate !== "vision-target",
+						images: { describeForTextModels: gate !== "disabled", blockImages: gate === "blocked" },
+					});
+					await probe.command({ type: "prompt", message: "/skill:native-probe", images: [image] });
+					const target = await probe.request(0);
+					expect(target.body.model).toBe(gate === "vision-target" ? "probe" : "text-probe");
+					expect(userContent(target)).toContain("NATIVE_SKILL_BODY");
+					expect(userContent(target).includes("image_url")).toBe(gate === "vision-target");
+					await probe.finish(target);
+					expect(probe.requests).toHaveLength(1);
+					expect(JSON.stringify((await probe.command({ type: "get_messages" })).data)).not.toContain(
+						"image-attachment-description",
+					);
+				} finally {
+					await probe.close();
+				}
+			}, 60000);
+		}
 
 		test("reports a deleted skill through a same-id failure after prompt acknowledgement", async () => {
 			const probe = new NativeInputProbe();

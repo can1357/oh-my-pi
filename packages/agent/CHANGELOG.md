@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional queued-message grouping so attachment context and its user message stay together in one-at-a-time delivery ([#11834](https://github.com/can1357/oh-my-pi/pull/11834) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

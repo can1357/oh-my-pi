@@ -1151,11 +1151,20 @@ export async function runRpcMode(
 					if (invocation) {
 						const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
 						await inputTransition;
-						return {
-							completion: isCurrent()
-								? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built, images)
-								: Promise.resolve(false),
-						};
+						if (!isCurrent()) return { completion: Promise.resolve(false) };
+						// With a prebuilt skill, dispatch selects its queue/idle route synchronously.
+						// Finish queued attachment preparation before later ingress can overtake it;
+						// an idle invocation still leaves its model turn outside the input tail.
+						const queued = session.isStreaming;
+						const completion = runRpcSkillCommand(
+							session,
+							invocation,
+							command.streamingBehavior ?? "steer",
+							built,
+							images,
+						);
+						if (queued) await completion;
+						return { completion };
 					}
 					const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 						session,

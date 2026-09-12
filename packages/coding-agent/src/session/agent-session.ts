@@ -1237,6 +1237,10 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.agent.setQueuedMessageGrouping(
+			(previous, next) =>
+				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
+		);
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
@@ -6052,6 +6056,26 @@ export class AgentSession {
 		return this.#providerBoundary.normalizeAgentMessageImages(message);
 	}
 
+	async #prepareCustomMessageImages<T>(
+		message: CustomMessage<T>,
+		signal: AbortSignal,
+	): Promise<{
+		message: CustomMessage<T>;
+		images: ImageContent[] | undefined;
+		descriptionNotice: CustomMessage | undefined;
+	}> {
+		const normalized = await this.#normalizeAgentMessageImages(message);
+		const images =
+			typeof normalized.content === "string"
+				? undefined
+				: normalized.content.filter((part): part is ImageContent => part.type === "image");
+		const descriptionNotice =
+			normalized.attribution === "user" && images?.length && !signal.aborted
+				? await this.#buildImageDescriptionNotice(images, signal)
+				: undefined;
+		return { message: normalized, images, descriptionNotice };
+	}
+
 	#magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean {
 		return this.settings.get("magicKeywords.enabled") && this.settings.get(`magicKeywords.${keyword}`);
 	}
@@ -6350,25 +6374,11 @@ export class AgentSession {
 			);
 		}
 
-		if (options?.queueOnly) {
+		if (options?.queueOnly || this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
-			return true;
-		}
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
-			if (!streamingBehavior) throw new AgentBusyError();
-
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
-			return true;
+			return this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, keywordNotices);
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -6406,20 +6416,25 @@ export class AgentSession {
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
-			// Queued custom prompts normalize at enqueue; idle custom prompts reach this boundary raw.
+			// Prepare custom attachments once, within prompt ownership, before publishing their companions.
 			if (
 				message.role === "custom" &&
 				typeof message.content !== "string" &&
 				message.content.some(part => part.type === "image")
 			) {
-				message = await this.#normalizeAgentMessageImages(message);
 				if (this.#promptGeneration !== generation || this.#isDisposed) return false;
+				const prepared = await this.#prepareCustomMessageImages(
+					message,
+					this.#postPromptTasksAbortController.signal,
+				);
+				if (this.#promptGeneration !== generation || this.#isDisposed) return false;
+				message = prepared.message;
 				options = {
 					...options,
-					images:
-						typeof message.content === "string"
-							? undefined
-							: message.content.filter((part): part is ImageContent => part.type === "image"),
+					images: prepared.images,
+					prependMessages: prepared.descriptionNotice
+						? [...(options?.prependMessages ?? []), prepared.descriptionNotice]
+						: options?.prependMessages,
 				};
 			}
 			// Flush any pending bash messages before the new prompt
@@ -7162,9 +7177,11 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
-	): Promise<void> {
-		// Captured before the normalization await below — see #sessionGeneration's doc comment.
+		prependMessages: CustomMessage[] = [],
+	): Promise<boolean> {
+		// Keep preparation local until the attachment and all companions can be published together.
 		const sessionGeneration = this.#sessionGeneration;
+		const generation = this.#promptGeneration;
 		const details =
 			queueChipText !== undefined
 				? ({
@@ -7184,27 +7201,47 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
-		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		const prepared = await this.#prepareCustomMessageImages(
+			appMessage,
+			deliverAs === "aside"
+				? this.#modelDiscoveryAbortController.signal
+				: this.#postPromptTasksAbortController.signal,
+		);
+		if (
+			appMessage.attribution === "user" &&
+			(this.#isDisposed || (deliverAs !== "aside" && this.#promptGeneration !== generation))
+		) {
+			return false;
+		}
 		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
-			this.#irc.queueAside([normalizedAppMessage]);
-			// The image-normalization await above can span the run's settle, so the run may
+			this.#irc.queueAside([
+				...prependMessages,
+				...(prepared.descriptionNotice ? [prepared.descriptionNotice] : []),
+				prepared.message,
+			]);
+			// Image preparation can span the run's settle, so the run may
 			// already be idle by the time the record lands in the aside queue with no loop
 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
 			// correctly once idle, matching #queueUserMessage's aside branch.
 			this.#resumeStrandedIrcAsides();
-			return;
+			return true;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (deliverAs === "followUp") {
-			this.agent.followUp(normalizedAppMessage);
+			for (const notice of prependMessages) this.agent.followUp(notice);
+			if (prepared.descriptionNotice) this.agent.followUp(prepared.descriptionNotice);
+			this.agent.followUp(prepared.message);
 		} else {
-			this.agent.steer(normalizedAppMessage);
+			for (const notice of prependMessages) this.agent.steer(notice);
+			if (prepared.descriptionNotice) this.agent.steer(prepared.descriptionNotice);
+			this.agent.steer(prepared.message);
 		}
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**

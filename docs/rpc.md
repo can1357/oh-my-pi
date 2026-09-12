@@ -579,6 +579,12 @@ Prompts returned by builtins retain the original `prompt` command's explicit
 `steer`/`follow_up` success acknowledges completed input/queue processing, not a
 completed agent turn, including when a handler consumed the input locally.
 
+Image attachments on user-invoked skills use the same text-only-model vision
+description fallback as ordinary prompts, including queued skill turns. The
+hidden description stays with its skill message; cancelling preparation does
+not publish either message. Vision-capable targets and the `images.blockImages`
+and `images.describeForTextModels` settings retain their normal behavior.
+
 Input interception and route scheduling are ordered, without serializing whole
 model turns. `prompt`/`abort_and_prompt` acknowledge before asynchronous input
 handlers finish; subsequent failures retain the original command and id. UI and

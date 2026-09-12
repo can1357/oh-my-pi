@@ -22,6 +22,24 @@ export default function nativeInputExtension(pi: ExtensionAPI): void {
 				contextWindow: 128000,
 				maxTokens: 256,
 			},
+			{
+				id: "text-probe",
+				name: "Text-only native input probe",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 256,
+			},
+			{
+				id: "vision-probe",
+				name: "Local image description probe",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 256,
+			},
 		],
 	});
 	pi.on("input", async (event, ctx) => {
