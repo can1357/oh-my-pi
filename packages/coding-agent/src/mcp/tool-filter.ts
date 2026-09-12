@@ -85,8 +85,12 @@ const RAW_CHAR =
 /** Zero or more RAW characters, so a star cannot stop between the halves of a pair. */
 const RAW_STAR = `(?:${RAW_CHAR})*`;
 
-/** Characters picomatch reads structurally, and the one-character escape that defuses each. */
-const NEUTRALIZE: Record<string, string> = {
+/**
+ * Characters picomatch reads structurally, and the one-character escape that
+ * defuses each. A `.` is included so that a brace range cannot be detected, and
+ * a NUL because picomatch drops it while tokenizing.
+ */
+const STRUCTURAL: Record<string, string> = {
 	"/": "\\x2F",
 	".": "\\x2E",
 	"|": "\\x7C",
@@ -123,19 +127,48 @@ function parseTokens(pattern: string, options: ParseOptions): Token[] {
 }
 
 /**
- * Defuse the characters picomatch would read structurally, keeping a user's own
- * escape in front of one meaningful: `\/` and `/` both mean the literal slash.
+ * Spell a pattern so that picomatch's structural reading cannot engage, and so
+ * that every character keeps its literal meaning.
  *
- * A NUL goes last, after the backslash rewrite, because its escape spelling
- * introduces a backslash of its own. Picomatch silently drops NUL while
- * tokenizing, so an entry like `*\0` would otherwise compile as a bare `*`
- * and match every tool.
+ * A `\X` is a glob escape: it names the literal character `X`, whatever `X` is.
+ * Forwarding the pair into the regex instead would let JavaScript's own escapes
+ * take over — `\d` would mean "any digit" and select a tool named `5` rather
+ * than the literal `d`, `\n` a newline rather than `n`, `\x41` the character
+ * `A` rather than the text `x41`. Each escaped character is therefore spelled as
+ * a `\xNN` escape of its own: one character wide, unambiguous to the parser,
+ * and literal to the engine. A `\` with nothing after it names a literal
+ * backslash.
+ *
+ * An unescaped structural character is spelled the same way, so `/`, `.`, `|`,
+ * `(`, `)`, `"` and NUL cannot engage the machinery they drive — no `/` means no
+ * separator handling, and no `|` means no alternation.
  */
 function prepare(pattern: string): string {
-	const neutralized = pattern
-		.replaceAll("\\\\", "\\u005C")
-		.replaceAll(/\\([./|"()])|([./|"()])/g, (_match, escaped: string, bare: string) => NEUTRALIZE[escaped ?? bare]);
-	return neutralized.replaceAll("\u0000", NEUTRALIZE["\u0000"]);
+	let out = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\") {
+			const next = pattern[i + 1];
+			// A trailing backslash names one literal backslash.
+			out += next === undefined ? "\\u005C" : hexEscape(next);
+			if (next !== undefined) i++;
+			continue;
+		}
+		out += STRUCTURAL[ch] ?? ch;
+	}
+	return out;
+}
+
+/**
+ * Spell one character so the engine reads it as itself.
+ *
+ * Used for an escaped character, whose meaning is its literal spelling even when
+ * that character is a glob metacharacter (`\*` names a literal star rather than
+ * a wildcard) or a regex escape (`\d` names `d`).
+ */
+function hexEscape(ch: string): string {
+	const code = ch.charCodeAt(0);
+	return code === 0x5c ? "\\u005C" : `\\x${code.toString(16).toUpperCase().padStart(2, "0")}`;
 }
 
 /**

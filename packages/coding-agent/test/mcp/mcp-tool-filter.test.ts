@@ -421,6 +421,26 @@ test("a NUL in a pattern addresses a NUL character", () => {
 	]);
 });
 
+test("an escaped character is that literal character, whatever it spells in a regex", () => {
+	// A glob escape names the character it escapes: the documented surface is
+	// that only `*`, `?`, `[...]` and `{a,b}` carry meaning, so `\d` addresses a
+	// tool named `d` — not "any digit", which is what forwarding the pair into
+	// the regex would mean (`\d` selected a tool named `5`). The same holds for
+	// the letter escapes and for `\xNN`, which must stay the text `xNN` rather
+	// than the character that escape denotes.
+	expect(run(["d", "5", "a"], ["\\d"]).allowed).toEqual(["d"]);
+	expect(run(["b", "a\\b"], ["\\b"]).allowed).toEqual(["b"]);
+	expect(run(["n", "\n"], ["\\n"]).allowed).toEqual(["n"]);
+	expect(run(["x41", "A"], ["\\x41"]).allowed).toEqual(["x41"]);
+	expect(run(["5", "a"], ["\\5"]).allowed).toEqual(["5"]);
+	// The deny direction subtracts the same literal.
+	expect(filterMCPTools({ toolNames: ["d", "5"], disabledTools: ["\\d"] }).allowed).toEqual(["5"]);
+	// A metacharacter's own escape keeps meaning the literal metacharacter.
+	expect(run(["*", "a"], ["\\*"]).allowed).toEqual(["*"]);
+	expect(run(["{", "a"], ["\\{"]).allowed).toEqual(["{"]);
+	// And a class member escapes the same way.
+	expect(run(["d", "5"], ["[\\d]"]).allowed).toEqual(["d"]);
+});
 test("matching is host-independent: windows separators never alter semantics", () => {
 	// picomatch auto-injects `windows: true` on win32 hosts when the option is
 	// unset, making `*`/`?`/negated classes treat `\` as a path separator. Tool
