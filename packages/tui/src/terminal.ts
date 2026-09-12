@@ -293,6 +293,59 @@ function ttyInputQueueBytes(): number {
 	return out[0];
 }
 
+/** libc read signature used by the stall watchdog's direct-input fallback. */
+type FdRead = (fd: number, buf: Pointer, count: number) => number;
+
+/** Cached libc read binding; null once dlopen failed (stays disabled). */
+let ttyDirectRead: FdRead | null | undefined;
+
+/**
+ * Decodes direct-read chunks across call boundaries so a UTF-8 sequence
+ * split between two reads is never corrupted.
+ */
+const stdinDirectDecoder = new TextDecoder();
+
+/**
+ * Drain the kernel tty input queue of process stdin and deliver it straight
+ * to the data handler, bypassing the JS stream. The stall watchdog's last
+ * resort: strace of a live flapping corpse showed bun's `resume()` performs
+ * exactly one speculative read and never re-registers the fd with epoll, so
+ * a re-armed pump drains one batch and dies again. Callers must have paused
+ * the stream first — then nothing else reads the fd and delivery is ours.
+ * Returns the number of bytes delivered.
+ */
+function ttyInputQueueRead(handler: (data: string) => void): number {
+	if (ttyDirectRead === undefined) {
+		try {
+			const libc = dlopen(process.platform === "darwin" ? "libSystem.dylib" : "libc.so.6", {
+				read: { args: [FFIType.i32, FFIType.ptr, FFIType.usize], returns: FFIType.isize },
+			});
+			ttyDirectRead = libc.symbols.read as FdRead;
+		} catch {
+			ttyDirectRead = null;
+		}
+	}
+	if (!ttyDirectRead) return 0;
+	const buf = new Uint8Array(4096);
+	const bufPtr = ptr(buf);
+	if (!bufPtr) return 0;
+	let delivered = 0;
+	try {
+		// Re-probe the count each round: bytes can arrive mid-drain, and
+		// reading at most the queued count never blocks.
+		for (let queued = ttyInputQueueBytes(); queued > 0; queued = ttyInputQueueBytes()) {
+			const n = ttyDirectRead(process.stdin.fd, bufPtr, Math.min(queued, buf.length));
+			if (n <= 0) break;
+			delivered += n;
+			handler(stdinDirectDecoder.decode(buf.subarray(0, n), { stream: true }));
+		}
+		handler(stdinDirectDecoder.decode());
+	} catch {
+		// A failed syscall round just retries on the next stall tick.
+	}
+	return delivered;
+}
+
 /**
  * Liveness window for {@link StdinStallWatchdog}: no data event and no queue
  * progress for this long with bytes readable means a dead stream pump.
@@ -1246,7 +1299,19 @@ export class ProcessTerminal implements Terminal {
 					process.stdin.on("data", this.#stdinDataHandler);
 				}
 				process.stdin.pause();
+				// bun's resume() performs only one speculative read and — per
+				// strace of a live flapping corpse — never re-registers the fd
+				// with epoll, so a re-armed pump dies again on the next batch.
+				// While the stream is paused nothing else reads the fd: deliver
+				// the stuck bytes ourselves so input no longer depends on the
+				// broken watcher at all.
+				const delivered = this.#stdinDataHandler ? ttyInputQueueRead(this.#stdinDataHandler) : 0;
 				process.stdin.resume();
+				if (delivered) {
+					logger.warn("stdin stall watchdog: delivered queued input directly", {
+						delivered,
+					});
+				}
 			} catch (err) {
 				logger.error("stdin stall watchdog re-arm failed", { err: String(err) });
 			}
