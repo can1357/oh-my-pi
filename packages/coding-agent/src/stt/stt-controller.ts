@@ -4,7 +4,13 @@ import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { kNoAuth } from "../config/model-provider-discovery";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
-import { DEFAULT_STT_BACKEND, isSttBackend, type SttBackend } from "./cloud-models";
+import {
+	DEFAULT_CLOUD_STT_MODEL,
+	DEFAULT_STT_BACKEND,
+	isCloudSttModel,
+	isSttBackend,
+	type SttBackend,
+} from "./cloud-models";
 import { type CloudSttCredential, type CloudSttStreamOptions, startCloudSttStream } from "./cloud-transcribe-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec } from "./models";
@@ -181,6 +187,7 @@ export class STTController {
 	readonly #resolveCloudCredential: (signal: AbortSignal) => Promise<CloudSttCredential | undefined>;
 	readonly #createCloudFetch: CloudSttStreamOptions["fetchImpl"];
 	#didWarnMissingCloudCredential = false;
+	#didWarnIgnoredCloudOptions = false;
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
 	#streamRecorder: CaptureHandle | null = null;
@@ -245,7 +252,10 @@ export class STTController {
 		try {
 			const credential = await this.#resolveCloudCredential(signal);
 			signal.throwIfAborted();
-			if (credential) return credential;
+			if (credential) {
+				this.#warnIgnoredCloudOptions(credential, options);
+				return credential;
+			}
 		} catch (err) {
 			signal.throwIfAborted();
 			logger.error("STT cloud credential resolution failed", {
@@ -259,6 +269,27 @@ export class STTController {
 			);
 		}
 		return null;
+	}
+
+	/**
+	 * The ChatGPT-subscription route posts only the audio file: the Codex
+	 * transcribe endpoint has no `model`/`language`/`prompt` fields, and an
+	 * `openai-codex` bearer cannot be sent to the platform API that does. Say so
+	 * once per session rather than letting a configured transcription model,
+	 * language, or keyword list appear to apply when it does not.
+	 */
+	#warnIgnoredCloudOptions(credential: CloudSttCredential, options: ToggleOptions): void {
+		if (credential.kind !== "codex" || this.#didWarnIgnoredCloudOptions) return;
+		const ignored: string[] = [];
+		const model = settings.get("stt.modelName") as string | undefined;
+		if (model !== undefined && isCloudSttModel(model) && model !== DEFAULT_CLOUD_STT_MODEL) ignored.push("model");
+		if (settings.get("stt.language")) ignored.push("language");
+		if (String(settings.get("stt.keywords") ?? "").trim()) ignored.push("keywords");
+		if (ignored.length === 0) return;
+		this.#didWarnIgnoredCloudOptions = true;
+		options.showWarning(
+			`Cloud dictation is using your ChatGPT subscription, whose transcription endpoint ignores ${ignored.join(", ")}. Configure an OpenAI API key to use ${ignored.length > 1 ? "them" : "it"}.`,
+		);
 	}
 
 	async #ensureLocalDeps(options: ToggleOptions): Promise<boolean> {
