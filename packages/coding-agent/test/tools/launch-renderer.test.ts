@@ -140,6 +140,32 @@ describe("hub launch rendering", () => {
 		expect(rendered.some(line => line.includes("svc-10"))).toBe(false);
 		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);
 	});
+	it("collapses list by daemon count when diagnostic rows are present", async () => {
+		const uiTheme = await theme();
+		const daemons = Array.from({ length: 11 }, (_, i) =>
+			daemon({
+				name: `svc-${i}`,
+				id: `d-${i}`,
+				state: "failed",
+				exitCode: 58,
+				exitReason: "process exited without a reported termination reason",
+			}),
+		);
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: { op: "list", daemons } satisfies LaunchToolDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+		expect(rendered.some(line => line.includes("svc-7"))).toBe(true);
+		expect(rendered.some(line => line.includes("svc-8"))).toBe(false);
+		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);
+	});
 
 	it("marks a failed start with the daemon's exit reason even though the result is not an error", async () => {
 		const uiTheme = await theme();
