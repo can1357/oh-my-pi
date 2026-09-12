@@ -2477,7 +2477,7 @@ type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kSt
 // Proxies sometimes send payloadless progress frames. They carry no text; a
 // supplied non-string payload is malformed output, not an empty delta.
 function optionalResponsesText(value: unknown, field: string): string | undefined {
-	if (value == null) return undefined;
+	if (value === undefined) return undefined;
 	if (typeof value !== "string") throw new TypeError(`Invalid Responses ${field}: expected a string`);
 	return value;
 }
@@ -2487,7 +2487,7 @@ function ensureReasoningSummaryPart(
 	summaryIndex: number | undefined,
 ): ResponseReasoningItem["summary"][number] {
 	item.summary = item.summary || [];
-	summaryIndex ??= Math.max(0, item.summary.length - 1);
+	if (summaryIndex === undefined) summaryIndex = Math.max(0, item.summary.length - 1);
 	if (!Number.isSafeInteger(summaryIndex) || summaryIndex < 0) {
 		throw new TypeError("Invalid Responses summary_index: expected a non-negative integer");
 	}
@@ -2503,8 +2503,8 @@ export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
 	part: ResponseReasoningItem["summary"][number] | undefined,
 ): void {
-	if (part == null) return;
-	if (part.type !== "summary_text") throw new TypeError("Invalid Responses reasoning summary part");
+	if (part === undefined) return;
+	if (part?.type !== "summary_text") throw new TypeError("Invalid Responses reasoning summary part");
 	part.text = optionalResponsesText(part.text, "summary text") ?? "";
 	item.summary = item.summary || [];
 	item.summary.push(part);
@@ -3409,7 +3409,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const rawInput =
 					optionalResponsesText(item.input, "custom tool input") ??
 					(block?.[kStreamingArgumentsDone]
-						? (block.arguments.input as string)
+						? optionalResponsesText(block.arguments.input, "custom tool input")
 						: block?.[kStreamingPartialJson]) ??
 					"";
 				const toolCall: ToolCall = {

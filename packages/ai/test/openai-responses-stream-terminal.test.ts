@@ -562,54 +562,56 @@ describe("processResponsesStream: terminal events", () => {
 		]);
 	});
 
-	test("persists final custom tool input on the block and drops the accumulation buffer", async () => {
-		const output = makeOutput();
-		const emitted: EmittedEvent[] = [];
-		const stream = { push: (e: unknown) => emitted.push(e as EmittedEvent), end: () => {} } as never;
+	test.each(["*** Begin Patch", undefined])(
+		"persists completed custom tool input when terminal input is %j",
+		async input => {
+			const output = makeOutput();
+			const emitted: EmittedEvent[] = [];
+			const stream = { push: (e: unknown) => emitted.push(e as EmittedEvent), end: () => {} } as never;
 
-		const patch = "*** Begin Patch";
-		await processResponsesStream(
-			makeStream([
-				{
-					type: "response.output_item.added",
-					output_index: 0,
-					item: { type: "custom_tool_call", id: "ctc_1", call_id: "call_c", name: "apply_patch", input: "" },
-				},
-				{
-					type: "response.custom_tool_call_input.delta",
-					output_index: 0,
-					item_id: "ctc_1",
-					delta: patch,
-				},
-				{
-					type: "response.custom_tool_call_input.done",
-					output_index: 0,
-					item_id: "ctc_1",
-					input: patch,
-				},
-				{
-					type: "response.output_item.done",
-					output_index: 0,
-					item: { type: "custom_tool_call", id: "ctc_1", call_id: "call_c", name: "apply_patch", input: patch },
-				},
-			]),
-			output,
-			stream,
-			makeModel(),
-		);
+			const patch = "*** Begin Patch";
+			await processResponsesStream(
+				makeStream([
+					{
+						type: "response.output_item.added",
+						output_index: 0,
+						item: { type: "custom_tool_call", id: "ctc_1", call_id: "call_c", name: "apply_patch", input: "" },
+					},
+					{
+						type: "response.custom_tool_call_input.delta",
+						output_index: 0,
+						item_id: "ctc_1",
+						delta: patch,
+					},
+					{
+						type: "response.custom_tool_call_input.done",
+						output_index: 0,
+						item_id: "ctc_1",
+						input: patch,
+					},
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "custom_tool_call", id: "ctc_1", call_id: "call_c", name: "apply_patch", input },
+					},
+				]),
+				output,
+				stream,
+				makeModel(),
+			);
 
-		expect(output.content).toHaveLength(1);
-		const block = output.content[0];
-		if (block?.type !== "toolCall") throw new Error("expected a toolCall block");
-		expect(block.customWireName).toBe("apply_patch");
-		expect(block.arguments).toEqual({ input: patch });
-		expect((block as unknown as Record<string, unknown>).partialJson).toBeUndefined();
+			expect(output.content).toHaveLength(1);
+			const block = output.content[0];
+			if (block?.type !== "toolCall") throw new Error("expected a toolCall block");
+			expect(block.customWireName).toBe("apply_patch");
+			expect(block.arguments).toEqual({ input: patch });
 
-		const end = emitted.find(e => e.type === "toolcall_end") as
-			| { toolCall: { arguments: Record<string, unknown> } }
-			| undefined;
-		expect(end?.toolCall.arguments).toEqual({ input: patch });
-	});
+			const end = emitted.find(e => e.type === "toolcall_end") as
+				| { toolCall: { arguments: Record<string, unknown> } }
+				| undefined;
+			expect(end?.toolCall.arguments).toEqual({ input: patch });
+		},
+	);
 
 	test("maps end_turn=false on response.completed to a pause_turn stop", async () => {
 		const stream = { push: () => {}, end: () => {} } as never;
@@ -793,6 +795,7 @@ describe("processResponsesStream: reasoning summary recovery", () => {
 				{ type: "response.output_item.added", item: { type: "reasoning", id: "rs_proxy", summary: [] } },
 				{ type: "response.reasoning_summary_part.added" },
 				{ type: "response.reasoning_summary_text.delta" },
+				{ type: "response.reasoning_summary_text.done" },
 				{ type: "response.reasoning_summary_text.done", text: "First" },
 				{ type: "response.reasoning_summary_part.done" },
 				{ type: "response.reasoning_summary_part.added", part: { type: "summary_text" } },
@@ -810,19 +813,39 @@ describe("processResponsesStream: reasoning summary recovery", () => {
 		expect(output.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "First\n\nSecond" })]);
 	});
 
-	test.each([-1, 0.5, "0"])("rejects malformed summary index %j instead of guessing a section", async summaryIndex => {
-		await expect(
-			processResponsesStream(
-				makeStream([
-					{ type: "response.output_item.added", item: { type: "reasoning", summary: [] } },
-					{ type: "response.reasoning_summary_text.done", summary_index: summaryIndex, text: "Plan" },
-				]),
-				makeOutput(),
-				{ push: () => {} } as never,
-				makeModel(),
-			),
-		).rejects.toBeInstanceOf(TypeError);
-	});
+	test.each([null, -1, 0.5, "0"])(
+		"rejects malformed summary index %j instead of guessing a section",
+		async summaryIndex => {
+			await expect(
+				processResponsesStream(
+					makeStream([
+						{ type: "response.output_item.added", item: { type: "reasoning", summary: [] } },
+						{ type: "response.reasoning_summary_text.done", summary_index: summaryIndex, text: "Plan" },
+					]),
+					makeOutput(),
+					{ push: () => {} } as never,
+					makeModel(),
+				),
+			).rejects.toBeInstanceOf(TypeError);
+		},
+	);
+
+	test.each([null, { type: "summary_text", text: null }])(
+		"rejects an explicit null summary part or its text: %j",
+		async part => {
+			await expect(
+				processResponsesStream(
+					makeStream([
+						{ type: "response.output_item.added", item: { type: "reasoning", summary: [] } },
+						{ type: "response.reasoning_summary_part.added", part },
+					]),
+					makeOutput(),
+					{ push: () => {} } as never,
+					makeModel(),
+				),
+			).rejects.toBeInstanceOf(TypeError);
+		},
+	);
 });
 
 describe("processResponsesStream: lost output_item.added recovery", () => {
@@ -1129,6 +1152,7 @@ describe("processResponsesStream: payloadless proxy frames", () => {
 				{ type: "response.output_item.added", item: { type: "message", id: "msg_proxy", content: [] } },
 				{ type: "response.content_part.added" },
 				{ type: `response.${wireType}.delta` },
+				{ type: `response.${wireType}.done` },
 				{ type: `response.${wireType}.done`, [field]: text },
 				{ type: `response.${wireType}.done`, [field]: text },
 				{ type: "response.output_item.done", item: { type: "message", id: "msg_proxy", content: [] } },
@@ -1226,12 +1250,59 @@ describe("processResponsesStream: payloadless proxy frames", () => {
 		{ event: "refusal", item: { type: "message", content: [] } },
 		{ event: "function_call_arguments", item: { type: "function_call", call_id: "fn", name: "read", arguments: "" } },
 		{ event: "custom_tool_call_input", item: { type: "custom_tool_call", call_id: "ct", name: "patch", input: "" } },
-	])("rejects supplied non-string $event output rather than hiding it", async ({ event, item }) => {
+	])("rejects supplied null and other non-string $event deltas rather than hiding them", async ({ event, item }) => {
+		for (const delta of [null, { text: "not a string" }]) {
+			await expect(
+				processResponsesStream(
+					makeStream([
+						{ type: "response.output_item.added", item },
+						{ type: `response.${event}.delta`, delta },
+					]),
+					makeOutput(),
+					{ push: () => {} } as never,
+					makeModel(),
+				),
+			).rejects.toBeInstanceOf(TypeError);
+		}
+	});
+
+	test.each([
+		{ event: "reasoning_summary_text", field: "text", item: { type: "reasoning", summary: [] } },
+		{ event: "output_text", field: "text", item: { type: "message", content: [] } },
+		{ event: "refusal", field: "refusal", item: { type: "message", content: [] } },
+		{
+			event: "function_call_arguments",
+			field: "arguments",
+			item: { type: "function_call", call_id: "fn", name: "read", arguments: "" },
+		},
+		{
+			event: "custom_tool_call_input",
+			field: "input",
+			item: { type: "custom_tool_call", call_id: "ct", name: "patch", input: "" },
+		},
+	])("rejects explicit null $event done snapshots", async ({ event, field, item }) => {
 		await expect(
 			processResponsesStream(
 				makeStream([
 					{ type: "response.output_item.added", item },
-					{ type: `response.${event}.delta`, delta: { text: "not a string" } },
+					{ type: `response.${event}.done`, [field]: null },
+				]),
+				makeOutput(),
+				{ push: () => {} } as never,
+				makeModel(),
+			),
+		).rejects.toBeInstanceOf(TypeError);
+	});
+
+	test("rejects explicit null terminal custom input instead of falling back to streamed input", async () => {
+		const item = { type: "custom_tool_call", id: "ct_null", call_id: "ct", name: "patch" };
+		await expect(
+			processResponsesStream(
+				makeStream([
+					{ type: "response.output_item.added", item: { ...item, input: "" } },
+					{ type: "response.custom_tool_call_input.delta", delta: "partial patch" },
+					{ type: "response.custom_tool_call_input.done", input: "complete patch" },
+					{ type: "response.output_item.done", item: { ...item, input: null } },
 				]),
 				makeOutput(),
 				{ push: () => {} } as never,
