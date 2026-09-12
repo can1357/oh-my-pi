@@ -563,6 +563,8 @@ const costSegment: StatusLineSegment = {
 	render(ctx) {
 		const { cost, premiumRequests } = ctx.usageStats;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
+		const advisorUsage = ctx.advisorUsage;
+		const hasAdvisorLimits = Boolean(advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay));
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const pricingPeriod = state.model?.cost
@@ -570,7 +572,14 @@ const costSegment: StatusLineSegment = {
 			: undefined;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests && !pricingPeriod) {
+		if (
+			!cost &&
+			!advisorCost &&
+			!hasAdvisorLimits &&
+			!usingSubscription &&
+			!normalizedPremiumRequests &&
+			!pricingPeriod
+		) {
 			return { content: "", visible: false };
 		}
 
@@ -590,8 +599,32 @@ const costSegment: StatusLineSegment = {
 		if (normalizedPremiumRequests) {
 			billingParts.push(`★ ${statusValue(ctx, formatNumber(normalizedPremiumRequests))}`);
 		}
-		if (advisorCost) {
-			const prefix = billingParts.length ? "+ " : "";
+		// The advisor's dollar figure is imputed from token counts at list price
+		// and is meaningless on a subscription; the real gate is the account's
+		// provider-reported usage windows. Show the 5h/7d limits when the
+		// advisor's provider reports them, falling back to the token-derived
+		// amount only for providers with no quota endpoint (so non-quota
+		// advisors don't silently drop their only cost signal).
+		if (advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay)) {
+			const limitParts: string[] = [];
+			if (advisorUsage.fiveHour) {
+				const pct = advisorUsage.fiveHour.percent;
+				const reset =
+					advisorUsage.fiveHour.resetMinutes !== undefined
+						? ` (${formatUsageReset(advisorUsage.fiveHour.resetMinutes, "m")})`
+						: "";
+				limitParts.push(`5h ${usagePercent(pct)}${reset}`);
+			}
+			if (advisorUsage.sevenDay) {
+				const pct = advisorUsage.sevenDay.percent;
+				const reset =
+					advisorUsage.sevenDay.resetHours !== undefined
+						? ` (${formatUsageReset(advisorUsage.sevenDay.resetHours, "h")})`
+						: "";
+				limitParts.push(`7d ${usagePercent(pct)}${reset}`);
+			}
+			billingParts.push(`${billingParts.length ? "+ " : ""}${limitParts.join(theme.sep.dot)} (adv)`);
+		} else if (advisorCost) {
 			// Resolve the advisor subscription flag lazily: with no active advisor
 			// it walks the whole model catalog (getAvailable → hasAuth per provider
 			// → credential-file reads), and the status line re-renders at the
@@ -600,9 +633,8 @@ const costSegment: StatusLineSegment = {
 			const spend = ctx.startupPlaceholder
 				? formatAdvisorSpendPlaceholder(advisorUsingSubscription, theme)
 				: formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme);
-			billingParts.push(`${prefix}${spend}`);
+			billingParts.push(`${billingParts.length ? "+ " : ""}${spend} (adv)`);
 		}
-		if (billingParts.length === 0) return { content: "", visible: false };
 
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},
@@ -833,6 +865,14 @@ function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 	if (percent >= 80) return "error";
 	if (percent >= 50) return "warning";
 	return "muted";
+}
+
+/** Percent display: inherits the segment color (bright) until 50%, then
+ *  warning, then error at 80%. `floor` matches provider dashboard flooring. */
+function usagePercent(percent: number, floor = false): string {
+	const text = `${floor ? Math.floor(percent) : Math.round(percent)}%`;
+	const color = pickUsageColor(percent);
+	return color ? theme.fg(color, text) : text;
 }
 
 function formatUsageReset(value: number, unit: "m" | "h"): string {

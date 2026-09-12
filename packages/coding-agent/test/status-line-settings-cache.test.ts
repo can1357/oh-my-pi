@@ -211,7 +211,11 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(content.indexOf("Indexer ready")).toBeLessThan(content.indexOf("Tests passing"));
 		expect(content.indexOf("Tests passing")).toBeLessThan(content.indexOf("Test Model"));
 		expect(component.render(120)).toEqual([]);
-		expect(visibleWidth(component.getTopBorder(24).content)).toBeLessThanOrEqual(24);
+		// A two-line overflow border is two rows, so the budget is per row: the
+		// terminal wraps per row, and `visibleWidth` over the joined string sums
+		// both. No rendered row may exceed the requested width.
+		const rows = component.getTopBorder(24).content.split("\n");
+		expect(Math.max(...rows.map(row => visibleWidth(row)))).toBeLessThanOrEqual(24);
 
 		component.setHookStatus("a-indexer", undefined);
 		component.setHookStatus("z-tests", undefined);

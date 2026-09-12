@@ -81,6 +81,10 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 			fiveHour: { percent: 32, resetMinutes: 71 },
 			sevenDay: { percent: 68, resetHours: 52 },
 		},
+		advisorUsage: {
+			fiveHour: { percent: 21, resetMinutes: 71 },
+			sevenDay: { percent: 55, resetHours: 52 },
+		},
 	};
 }
 
