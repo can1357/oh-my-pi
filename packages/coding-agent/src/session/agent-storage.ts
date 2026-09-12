@@ -469,6 +469,15 @@ FROM model_usage_legacy
 	}
 
 	/**
+	 * Drops legacy `settings` rows after they have been written to config.yml.
+	 * The table is only a migration source; leaving rows would resurrect values
+	 * if config.yml is later deleted.
+	 */
+	clearMigratedSettings(): void {
+		this.#db.run("DELETE FROM settings");
+	}
+
+	/**
 	 * Records model usage, updating the last-used timestamp.
 	 * @param modelKey - Model key in "provider/modelId" format
 	 */

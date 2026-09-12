@@ -1954,6 +1954,11 @@ export class Settings {
 			try {
 				await this.#writeYamlAtomically(this.#configPath, settings);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
+				try {
+					this.#storage?.clearMigratedSettings();
+				} catch (error) {
+					logger.warn("Settings: failed to clear migrated agent.db settings", { error: String(error) });
+				}
 			} catch {}
 		}
 	}

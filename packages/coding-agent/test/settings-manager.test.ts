@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -21,7 +22,7 @@ import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -2192,6 +2193,40 @@ describe("Settings", () => {
 			expect(fs.existsSync(jsonPath)).toBe(false);
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
+
+		it("does not resurrect agent.db settings after config.yml is deleted", async () => {
+			const dbPath = getAgentDbPath(agentDir);
+			const db = new Database(dbPath);
+			db.exec(`
+				CREATE TABLE settings (
+					key TEXT PRIMARY KEY,
+					value TEXT NOT NULL,
+					updated_at INTEGER NOT NULL DEFAULT 0
+				);
+			`);
+			db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, 1)").run(
+				"symbolPreset",
+				JSON.stringify("ascii"),
+			);
+			db.close();
+
+			const first = await Settings.init({ cwd: projectDir, agentDir });
+			expect(first.get("symbolPreset")).toBe("ascii");
+			expect((await readSettings()).symbolPreset).toBe("ascii");
+
+			const storage = await AgentStorage.open(dbPath);
+			expect(storage.getSettings()).toBeNull();
+
+			await fs.promises.unlink(getConfigPath());
+			AgentStorage.close();
+			resetSettingsForTest();
+
+			const second = await Settings.init({ cwd: projectDir, agentDir });
+			expect(second.get("symbolPreset")).toBe("unicode");
+			expect(second.isConfigured("symbolPreset")).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+		});
+
 		it("migrates legacy power booleans with system=true to system level", async () => {
 			await writeSettings({
 				power: {
