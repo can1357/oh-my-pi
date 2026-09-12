@@ -810,7 +810,8 @@ async function registerPersistedSubagentsFromDir(
 		const sameFamily = scoped && existingBare !== undefined && collectAgentFamily(registry, ownerId).has(fsId);
 		const staleSameFamily =
 			sameFamily && existingBare?.sessionFile !== null && existingBare?.sessionFile !== sessionFile;
-		let id = scoped && existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
+		let id =
+			scoped && existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
 		const existing = id === fsId ? existingBare : registry.get(id);
 		const replaceable =
 			existing !== undefined &&
@@ -854,7 +855,13 @@ async function registerPersistedSubagentsFromDir(
 			// real ref means this is the ordinary `replaceable` supersession
 			// path, which must run its own CAS against that specific ref, not
 			// this fallback for a bare id we upfront believed was free.
-			if (scoped && expected === null && id === fsId && current !== undefined && current.sessionFile !== sessionFile) {
+			if (
+				scoped &&
+				expected === null &&
+				id === fsId &&
+				current !== undefined &&
+				current.sessionFile !== sessionFile
+			) {
 				id = qualifyPersistedAgentId(ownerId, fsId);
 				current = registry.get(id);
 			}
