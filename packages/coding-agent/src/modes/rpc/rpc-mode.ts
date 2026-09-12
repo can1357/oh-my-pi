@@ -10,7 +10,9 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { once } from "node:events";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -71,11 +73,26 @@ export type PendingExtensionRequest = {
 	reject: (error: Error) => void;
 };
 
+// EOF cancels only ingress that depended on a disconnected UI request. Other
+// accepted input still drains, including one-shot piped prompts.
+const rpcInputScope = new AsyncLocalStorage<{ disconnected: boolean }>();
+
 /** Pending extension UI request map that can fail closed when the RPC client disconnects. */
 export class RpcPendingExtensionRequests extends Map<string, PendingExtensionRequest> {
 	#closedError: Error | undefined;
 
 	override set(id: string, request: PendingExtensionRequest): this {
+		const scope = rpcInputScope.getStore();
+		if (scope) {
+			const reject = request.reject;
+			request = {
+				resolve: request.resolve,
+				reject: error => {
+					scope.disconnected = true;
+					reject(error);
+				},
+			};
+		}
 		if (this.#closedError) {
 			request.reject(this.#closedError);
 			return this;
@@ -156,53 +173,19 @@ export async function runRpcSkillCommand(
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	images?: ImageContent[],
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
-			content: built.message,
+			content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
 			display: true,
 			details: built.details,
 			attribution: "user",
 		},
 		{ streamingBehavior },
 	);
-}
-
-/**
- * Skill branch of the `prompt` command: resolves the invocation cheaply, then
- * registers the slow dispatch with watchAndReportLocalOnlyPromptResult and
- * returns immediately. The caller answers the command right away — building
- * the skill prompt and running the prompt pipeline (usage preflight,
- * compaction, provider calls) can outlast any client's prompt timeout under
- * provider stress; the plain-prompt path responds first for the same reason.
- */
-export async function dispatchRpcSkillPrompt(input: {
-	id: string | undefined;
-	session: RpcSkillCommandSession;
-	message: string;
-	streamingBehavior: "steer" | "followUp" | undefined;
-	output: (obj: object) => void;
-	onError: (error: Error) => void;
-	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): Promise<RpcSkillCommandResult | null> {
-	const invocation = resolveRpcSkillInvocation(input.session, input.message);
-	if (!invocation) return null;
-	// buildSkillPromptMessage is cheap file I/O and covers the failure the old
-	// synchronous path reported immediately (a removed or unreadable SKILL.md);
-	// keep that error contract by awaiting it before answering. The expensive
-	// promptCustomMessage pipeline (usage preflight, compaction, provider
-	// calls) is what moves behind the acknowledgement.
-	const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
-	watchAndReportLocalOnlyPromptResult({
-		id: input.id,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
-		output: input.output,
-		onError: input.onError,
-		extensionUserMessageTracker: input.extensionUserMessageTracker,
-	});
-	return { agentInvoked: true };
 }
 
 export async function tryRunRpcSkillCommand(
@@ -223,8 +206,8 @@ export function reportLocalOnlyPromptResult(input: {
 	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
-}): void {
-	void input.prompt
+}): Promise<void> {
+	return input.prompt
 		.then(async agentInvoked => {
 			if (agentInvoked) return;
 			await input.waitForExtensionAgentMessageTasks?.();
@@ -238,6 +221,7 @@ export function reportLocalOnlyPromptResult(input: {
 }
 
 type RpcExtensionUserMessageScope = {
+	active: boolean;
 	hasAgentMessageTask: boolean;
 	pendingAgentMessageTasks: Set<Promise<void>>;
 };
@@ -249,18 +233,16 @@ type RpcExtensionUserMessageScope = {
  * with triggerTurn; that prompt must not report agentInvoked:false to the host.
  */
 export class RpcExtensionUserMessageTracker {
-	#activePromptScopes = new Set<RpcExtensionUserMessageScope>();
+	#promptScope = new AsyncLocalStorage<RpcExtensionUserMessageScope>();
 
 	markAgentMessageTask(): void {
-		for (const scope of this.#activePromptScopes) {
-			scope.hasAgentMessageTask = true;
-		}
+		const scope = this.#promptScope.getStore();
+		if (scope?.active) scope.hasAgentMessageTask = true;
 	}
 
 	trackAgentMessageTask(task: Promise<unknown>): void {
-		for (const scope of this.#activePromptScopes) {
-			this.#trackAgentMessageTaskForScope(scope, task);
-		}
+		const scope = this.#promptScope.getStore();
+		if (scope?.active) this.#trackAgentMessageTaskForScope(scope, task);
 	}
 
 	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
@@ -288,20 +270,20 @@ export class RpcExtensionUserMessageTracker {
 		waitForAgentMessageTasks: () => Promise<void>;
 	} {
 		const scope: RpcExtensionUserMessageScope = {
+			active: true,
 			hasAgentMessageTask: false,
 			pendingAgentMessageTasks: new Set(),
 		};
-		this.#activePromptScopes.add(scope);
 		let prompt: Promise<T>;
 		try {
-			prompt = startPrompt();
+			prompt = this.#promptScope.run(scope, startPrompt);
 		} catch (error) {
-			this.#activePromptScopes.delete(scope);
+			scope.active = false;
 			throw error;
 		}
 		return {
 			prompt: prompt.finally(() => {
-				this.#activePromptScopes.delete(scope);
+				scope.active = false;
 			}),
 			hasAgentMessageTask: () => scope.hasAgentMessageTask,
 			waitForAgentMessageTasks: () => this.#waitForAgentMessageTasks(scope),
@@ -315,9 +297,9 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): void {
+}): Promise<void> {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
-	reportLocalOnlyPromptResult({
+	return reportLocalOnlyPromptResult({
 		id: input.id,
 		prompt: trackedPrompt.prompt,
 		output: input.output,
@@ -444,6 +426,18 @@ export class RpcInputDispatcher {
 			const command = parsed as RpcCommand;
 			if (command.type === "bash") {
 				dispatchRpcInputFrame(command, this.#deps);
+				return;
+			}
+
+			// An input hook may be waiting on asynchronous work. Aborting must
+			// overtake it, including an explicit steer/follow-up awaiting ingress.
+			if (command.type === "abort" || command.type === "abort_and_prompt") {
+				const task = this.#dispatchSerialCommand(command);
+				// Overtake earlier ingress, but retain it and every still-live
+				// abort as barriers for commands accepted after this one.
+				this.#tail = Promise.allSettled([this.#tail, task]).then(() => {});
+				this.#tasks.add(task);
+				void task.finally(() => this.#tasks.delete(task));
 				return;
 			}
 
@@ -1099,6 +1093,111 @@ export async function runRpcMode(
 	});
 	await emitAvailableCommandsUpdate();
 
+	// Serialize interception and route scheduling, not model turns. A delayed
+	// hook must not reorder later user submissions or hold acknowledgements/UI.
+	let inputTail: Promise<void> = Promise.resolve();
+	let inputGeneration = 0;
+	let abortTail: Promise<void> = Promise.resolve();
+	const abortUserInput = () => {
+		const generation = ++inputGeneration;
+		const completion = Promise.allSettled([abortTail, session.abort({ reason: USER_INTERRUPT_LABEL })]).then(
+			results => {
+				for (const result of results) {
+					if (result.status === "rejected") throw result.reason;
+				}
+			},
+		);
+		abortTail = completion.catch(() => {});
+		return { generation, completion };
+	};
+	let inputTransition: Promise<void> | undefined;
+	type UserInputCommand = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
+	const dispatchUserInput = (command: UserInputCommand, generation = inputGeneration): Promise<boolean> => {
+		const scope = { disconnected: false };
+		const sessionId = session.sessionId;
+		const isCurrent = () =>
+			!scope.disconnected &&
+			!shutdownState.requested &&
+			!inputTransition &&
+			generation === inputGeneration &&
+			sessionId === session.sessionId;
+		const dispatch = inputTail.then(() =>
+			rpcInputScope.run(scope, async (): Promise<{ completion: Promise<boolean> }> => {
+				await inputTransition;
+				if (!isCurrent()) return { completion: Promise.resolve(false) };
+				let text = command.message;
+				let images = command.images;
+				const runner = session.extensionRunner;
+				if (runner?.hasHandlers("input")) {
+					const result = await runner.emitInput(text, images, "rpc");
+					if (result.handled) return { completion: Promise.resolve(false) };
+					if (result.text !== undefined) text = result.text.trim();
+					if (result.images !== undefined) images = result.images;
+				}
+				await inputTransition;
+				// An abort/session switch during a hook must not resurrect its prompt.
+				if (!isCurrent() || (!text.trim() && !images?.length)) {
+					return { completion: Promise.resolve(false) };
+				}
+				if (command.type === "steer" || command.type === "follow_up") {
+					if (command.type === "steer") await session.steer(text, images);
+					else await session.followUp(text, images);
+					return { completion: Promise.resolve(true) };
+				}
+				if (command.type === "prompt") {
+					const invocation = resolveRpcSkillInvocation(session, text);
+					if (invocation) {
+						const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
+						await inputTransition;
+						return {
+							completion: isCurrent()
+								? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built, images)
+								: Promise.resolve(false),
+						};
+					}
+					const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+						session,
+						sessionManager: session.sessionManager,
+						settings: session.settings,
+						cwd: session.sessionManager.getCwd(),
+						output: text => output({ type: "command_output", text }),
+						refreshCommands: emitAvailableCommandsUpdate,
+						reloadPlugins: reloadPluginState,
+						runCommandInBackground: task => shutdownCoordinator.track(task()),
+						notifyTitleChanged: async () => {
+							output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+						},
+						notifyConfigChanged: async () => {
+							output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						},
+					});
+					await inputTransition;
+					if (builtinResult !== false) {
+						return {
+							completion:
+								"prompt" in builtinResult && isCurrent()
+									? session.prompt(builtinResult.prompt, { images })
+									: Promise.resolve("agentInvoked" in builtinResult && builtinResult.agentInvoked === true),
+						};
+					}
+				}
+				return {
+					completion: isCurrent()
+						? session.prompt(text, {
+								images,
+								...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
+							})
+						: Promise.resolve(false),
+				};
+			}),
+		);
+		inputTail = dispatch.then(
+			() => {},
+			() => {},
+		);
+		return dispatch.then(result => result.completion);
+	};
+
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
@@ -1114,99 +1213,59 @@ export async function runRpcMode(
 			// Prompting
 			// =================================================================
 
-			case "prompt": {
-				const skillResult = await dispatchRpcSkillPrompt({
-					id,
-					session,
-					message: command.message,
-					streamingBehavior: command.streamingBehavior,
-					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
-					extensionUserMessageTracker,
-				});
-				if (skillResult) {
-					return success(id, "prompt", skillResult);
+			case "prompt":
+			case "abort_and_prompt": {
+				let generation = inputGeneration;
+				if (command.type === "abort_and_prompt") {
+					const abort = abortUserInput();
+					generation = abort.generation;
+					await abort.completion;
 				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
-					session,
-					sessionManager: session.sessionManager,
-					settings: session.settings,
-					cwd: session.sessionManager.getCwd(),
-					output: text => output({ type: "command_output", text }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					runCommandInBackground: task => shutdownCoordinator.track(task()),
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
-				});
-				if (builtinResult !== false) {
-					if ("prompt" in builtinResult) {
-						watchAndReportLocalOnlyPromptResult({
-							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
-							output,
-							onError: promptError => output(error(id, "prompt", promptError.message)),
-							extensionUserMessageTracker,
-						});
-						return success(id, "prompt");
-					}
-					// A consumed builtin is normally local-only, but some (e.g.
-					// `/retry`) schedule an agent turn whose events stream after
-					// this response. Report that so the host does not finalize the
-					// request as non-agent work while the agent is running.
-					return success(id, "prompt", { agentInvoked: builtinResult.agentInvoked === true });
-				}
-
-				// Don't await - events will stream
-				// Extension commands are executed immediately, file prompt templates are expanded
-				// If streaming and streamingBehavior specified, queues via steer/followUp
-				watchAndReportLocalOnlyPromptResult({
-					id,
-					startPrompt: () =>
-						session.prompt(command.message, {
-							images: command.images,
-							streamingBehavior: command.streamingBehavior,
-						}),
-					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
-					extensionUserMessageTracker,
-				});
-				return success(id, "prompt");
+				// Acknowledge before asynchronous hooks, skills, commands or turns.
+				// One scope includes interception and any handler-generated work.
+				shutdownCoordinator.track(
+					watchAndReportLocalOnlyPromptResult({
+						id,
+						startPrompt: () => dispatchUserInput(command, generation),
+						output,
+						onError: promptError => output(error(id, command.type, promptError.message)),
+						extensionUserMessageTracker,
+					}),
+				);
+				return success(id, command.type);
 			}
 
-			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
-			}
-
+			case "steer":
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
-				return success(id, "follow_up");
+				await dispatchUserInput(command);
+				return success(id, command.type);
 			}
 
 			case "abort": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await abortUserInput().completion;
 				return success(id, "abort");
-			}
-
-			case "abort_and_prompt": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				session
-					.prompt(command.message, { images: command.images })
-					.catch(e => output(error(id, "abort_and_prompt", e.message)));
-				return success(id, "abort_and_prompt");
 			}
 
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
-				return success(id, result.type, result.data);
+				const transition = Promise.withResolvers<void>();
+				inputTransition = transition.promise;
+				try {
+					const result = await handleRpcSessionChange(session, command, subagentRegistry);
+					if (!result.data.cancelled) {
+						inputGeneration++;
+						await emitAvailableCommandsUpdate();
+					}
+					return success(id, result.type, result.data);
+				} catch (error) {
+					// A failed transition may already have disconnected the old session.
+					inputGeneration++;
+					throw error;
+				} finally {
+					inputTransition = undefined;
+					transition.resolve();
+				}
 			}
 
 			// =================================================================

@@ -43,6 +43,36 @@ describe("reportLocalOnlyPromptResult", () => {
 		expect(output).toEqual([{ type: "prompt_result", id: "req_1", agentInvoked: false }]);
 	});
 
+	test("a delayed input request does not inherit another request's extension turn", async () => {
+		const tracker = new RpcExtensionUserMessageTracker();
+		const releaseInput = Promise.withResolvers<void>();
+		const output: object[] = [];
+		const localRequest = tracker.watchPrompt(async () => {
+			await releaseInput.promise;
+			return false;
+		});
+		const generatedRequest = tracker.watchPrompt(async () => {
+			tracker.markAgentMessageTask();
+			return false;
+		});
+		const report = (id: string, tracked: typeof localRequest) =>
+			reportLocalOnlyPromptResult({
+				id,
+				prompt: tracked.prompt,
+				hasExtensionAgentMessageTask: tracked.hasAgentMessageTask,
+				waitForExtensionAgentMessageTasks: tracked.waitForAgentMessageTasks,
+				output: frame => output.push(frame),
+				onError: error => {
+					throw error;
+				},
+			});
+		const localResult = report("local", localRequest);
+		await report("generated", generatedRequest);
+		releaseInput.resolve();
+		await localResult;
+		expect(output).toEqual([{ type: "prompt_result", id: "local", agentInvoked: false }]);
+	});
+
 	test("does not emit false prompt_result when an extension command schedules a user message", async () => {
 		const output: object[] = [];
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();

@@ -229,6 +229,91 @@ describe("dispatchRpcInputFrame", () => {
 });
 
 describe("RpcInputDispatcher", () => {
+	test("abort overtakes a blocked submission without losing either response", async () => {
+		const releaseInput = Promise.withResolvers<void>();
+		const inputStarted = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "steer") {
+				inputStarted.resolve();
+				await releaseInput.promise;
+				return { id: command.id, type: "response", command: "steer", success: true };
+			}
+			if (command.type === "abort") {
+				return { id: command.id, type: "response", command: "abort", success: true };
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+		dispatcher.dispatch({ id: "input", type: "steer", message: "delayed" });
+		await inputStarted.promise;
+		dispatcher.dispatch({ id: "stop", type: "abort" });
+		await flushMicrotasks();
+		try {
+			expect(outputs).toEqual([{ id: "stop", type: "response", command: "abort", success: true }]);
+		} finally {
+			releaseInput.resolve();
+			await dispatcher.drain();
+		}
+		expect(outputs).toEqual([
+			{ id: "stop", type: "response", command: "abort", success: true },
+			{ id: "input", type: "response", command: "steer", success: true },
+		]);
+	});
+
+	test("later prompts wait for every overtaking abort cleanup even when aborts settle out of order", async () => {
+		const inputGate = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "steer") {
+				await inputGate.promise;
+				return { id: command.id, type: "response", command: "steer", success: true };
+			}
+			if (command.type === "abort" || command.type === "abort_and_prompt") {
+				await requestExtensionInput(depsRef, `${command.id}-cleanup`, "Finish cleanup?");
+				activePrompt = undefined;
+				return { id: command.id, type: "response", command: command.type, success: true };
+			}
+			if (command.type === "prompt") {
+				activePrompt = command.message;
+				return { id: command.id, type: "response", command: "prompt", success: true };
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const depsRef = deps;
+		let activePrompt: string | undefined;
+		const dispatcher = new RpcInputDispatcher({ deps });
+		dispatcher.dispatch({ id: "waiting", type: "steer", message: "waiting input" });
+		await flushMicrotasks();
+		dispatcher.dispatch({ id: "first", type: "abort" });
+		dispatcher.dispatch({ id: "second", type: "abort_and_prompt", message: "replacement" });
+		dispatcher.dispatch({ id: "after", type: "prompt", message: "AFTER_CLEANUP" });
+		try {
+			// UI replies still bypass both the old ingress and the new abort barriers.
+			dispatcher.dispatch({ type: "extension_ui_response", id: "second-cleanup", value: "done" });
+			inputGate.resolve();
+			await flushMicrotasks();
+			expect(outputs).toContainEqual({
+				id: "second",
+				type: "response",
+				command: "abort_and_prompt",
+				success: true,
+			});
+			expect(outputs).not.toContainEqual({
+				id: "after",
+				type: "response",
+				command: "prompt",
+				success: true,
+			});
+			dispatcher.dispatch({ type: "extension_ui_response", id: "first-cleanup", value: "done" });
+			await dispatcher.drain();
+			expect(activePrompt).toBe("AFTER_CLEANUP");
+		} finally {
+			inputGate.resolve();
+			dispatcher.dispatch({ type: "extension_ui_response", id: "first-cleanup", value: "done" });
+			dispatcher.dispatch({ type: "extension_ui_response", id: "second-cleanup", value: "done" });
+			await dispatcher.drain();
+		}
+	});
+
 	test("control frames resolve extension UI requests while an ordinary command is active", async () => {
 		const { deps, outputs } = makeDeps(async command => {
 			if (command.type !== "prompt") throw new Error(`unexpected command type: ${command.type}`);

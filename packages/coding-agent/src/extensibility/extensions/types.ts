@@ -905,7 +905,7 @@ export interface UserPythonEvent {
 // Input Events
 // ============================================================================
 
-/** Fired when the user submits input (interactive mode only). */
+/** Fired at external user-input ingress: main-session interactive submissions and RPC input commands. */
 export interface InputEvent {
 	type: "input";
 	text: string;
