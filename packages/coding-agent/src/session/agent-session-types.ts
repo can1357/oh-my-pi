@@ -311,7 +311,7 @@ export interface AgentSessionConfig {
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */
 	advisorSharedInstructions?: string;
-	/** Shared advisor max notes per update loaded from WATCHDOG.yml. */
+	/** Shared non-blocker budget from top-level WATCHDOG.yml maxNotesPerUpdate. */
 	advisorSharedMaxNotesPerUpdate?: number;
 	/** Project context rendered for advisor sessions. */
 	advisorContextPrompt?: string;

@@ -52,7 +52,6 @@ async function runScenario(
 	} as unknown as AdvisorAgent;
 	const host: AdvisorRuntimeHost = {
 		snapshotMessages: () => messages,
-		enqueueAdvice: () => {},
 	} as unknown as AdvisorRuntimeHost;
 	const runtime = new AdvisorRuntime(agent, host);
 	runtime.onTurnEnd();
@@ -134,7 +133,6 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 		} as unknown as AdvisorAgent;
 		const host: AdvisorRuntimeHost = {
 			snapshotMessages: () => messages,
-			enqueueAdvice: () => {},
 		} as unknown as AdvisorRuntimeHost;
 		const runtime = new AdvisorRuntime(agent, host);
 		runtime.onTurnEnd();

@@ -36,8 +36,6 @@ export interface AdvisorAgent {
 export interface AdvisorRuntimeHost {
 	/** Live primary transcript (use `agent.state.messages`). */
 	snapshotMessages(): AgentMessage[];
-	/** Surface one advice note to the primary (enqueues into the session YieldQueue). */
-	enqueueAdvice(note: string, severity?: "nit" | "concern" | "blocker"): void;
 	/** Redact primary transcript bytes before they reach the advisor model. */
 	obfuscator?: SecretObfuscator;
 	/**

@@ -52,7 +52,7 @@ persisting `advisor.enabled`:
 omp -p --advisor "Review this task."
 ```
 
-While a primary prompt is running, advisor concerns and blockers continue to steer that live turn. After the final prompt settles, print mode preserves late advisor notes without starting hidden primary turns, then waits up to ten minutes for final reviews before disposing the session. Error exits use a 30-second drain budget so failed automation can terminate. If either deadline expires, OMP logs the reviews that disposal will abandon; completed reviews retain their transcript and token/cost usage.
+While a primary prompt is running, eligible advisor notes can steer that run. After the final prompt settles, print mode preserves late advisor notes without starting hidden primary turns, then waits up to ten minutes for final reviews before disposing the session. Error exits use a 30-second drain budget so failed automation can terminate. If either deadline expires, OMP logs the reviews that disposal will abandon; completed reviews retain their transcript and token/cost usage.
 
 Slash commands:
 
@@ -121,7 +121,7 @@ When you deliberately interrupt the agent (Esc, or a cancel from collab, ACP, RP
 
 A normal yield the agent drove itself is treated differently from a deliberate interrupt, but it is not a blanket "always steers and resumes". The loop state and completed turn first determine the normal delivery path:
 
-- **While the loop is still streaming** (the raise arrived before the yield, or during a resume you already drove), the note normally steers into the live turn.
+- **While the loop is still streaming**, blockers can steer into the live turn. Nits and concerns from an in-progress review remain deferred until a final boundary.
 - **Once the loop has yielded and gone idle**, delivery keys on how the turn ended:
   - If the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume (a new message, `.`/`c`, or a steer/follow-up), exactly like the interrupt case. A `blocker` is the exception: it normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628).
   - Otherwise (the agent yielded mid-work, no terminal answer), an idle `concern`/`blocker` normally triggers a fresh turn so the advice is acted on immediately.
@@ -135,18 +135,18 @@ So the advisor can steer and resume a run the agent ended on its own **while it 
 
 `advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `3`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
 
-While an advisor update is reviewing work still in progress, `AdviseTool` withholds `nit` and `concern` calls; only a `blocker` may interrupt partial work. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
+While an advisor update reviews work still in progress, `AdviseTool` defers `nit` and `concern` calls until a final boundary; only a `blocker` may interrupt partial work. Deferred notes pass the emission guard before reservation. A higher-severity note may displace a pending lower-severity note from the same review, but cannot displace notes from earlier reviews or retract routed advice. A final boundary flushes pending notes without resetting the current review's budget.
 
 ### Emission guard
 
-Each advisor has its own `AdvisorEmissionGuard` (`src/advisor/emission-guard.ts`) on the route from `AdviseTool` to the YieldQueue/steer channel. It enforces the system prompt's "at most one accepted note per update" and no-repeat rules:
+Each advisor has its own `AdvisorEmissionGuard` (`src/advisor/emission-guard.ts`) on the route from `AdviseTool` to the YieldQueue/steer channel. It enforces the system prompt's per-update non-blocker advice budget and no-repeat rules:
 
 1. **Normalization.** Lowercase, NFKC, collapse every run of non-alphanumeric characters to one space, then trim. `"Stop."`, `"*Stop*"`, and `"  stop  "` all key to `stop`.
 2. **Content-free phrase filter.** Short phrases with no concrete reason — `stop`, `done`, `complete`, `no issue continue`, `lgtm`, `nothing to add`, and similar — are suppressed.
-3. **Exact-text dedupe.** Any normalized note already accepted by this advisor in this session is dropped. The FIFO history holds at most 4096 entries.
-4. **Per-update rate limit.** At most one note per advisor model `prompt()` cycle is accepted. Suppressed noise never consumes the budget.
+3. **Severity-aware dedupe.** A repeated normalized note is dropped at equal or lower severity. A real escalation (`nit` → `concern` → `blocker`) remains eligible even after the earlier note was delivered. The FIFO history holds at most 4096 entries.
+4. **Per-update rank budget.** Up to N non-blocker notes per advisor model `prompt()` cycle (default 4, configurable from 1–32). At capacity, a higher-severity note may replace the lowest-rank still-pending note from the same update. Routed notes retain their slots; earlier updates' pending notes remain reserved. Blockers are exempt, and suppressed noise consumes no budget. Precedence: per-advisor config > shared `WATCHDOG.yml` top-level > `advisor.maxNotesPerUpdate` setting > default 4. There is no additional aggregate backlog budget.
 
-Guard-level suppression is invisible to the model because `AdviseTool` has already returned `Recorded.`. The tool's earlier equal-or-lower-severity duplicate check is intentionally visible as `Duplicate advice ignored.`; in-progress non-blockers return `Recorded.` without routing.
+Acknowledgments distinguish acceptance, conditional deferral, duplicates, noise, and budget suppression. Acceptance means the host accepted the note for primary delivery, not that the primary model consumed it. Deferred acceptance warns that a higher-severity finding from the same review may displace the note. A rejected note receives no delivery promise; the advisor should not rephrase rejected findings to evade the guard.
 
 The guard's full state — dedupe history and per-update gate — clears on every advisor reset (compaction, session switch, `/new`), so a re-primed reviewer can re-raise issues it already raised against the rewritten transcript.
 
@@ -286,6 +286,7 @@ Fields:
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
+- `maxNotesPerUpdate` (top level or per advisor): accepted non-blocker notes per prompt update, default `4`. A per-advisor value overrides the top-level value, which overrides the `advisor.maxNotesPerUpdate` setting.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
 
 ### Discovery locations

@@ -44,7 +44,6 @@ import {
 	AdviseTool,
 	type AdvisorAgent,
 	type AdvisorConfig,
-	type AdvisorEmissionDecision,
 	AdvisorEmissionGuard,
 	AdvisorLoopGuard,
 	type AdvisorMessageDetails,
@@ -156,7 +155,6 @@ interface ActiveAdvisor {
 	agent: Agent;
 	runtime: AdvisorRuntime;
 	adviseTool: AdviseTool;
-	emissionGuard: AdvisorEmissionGuard;
 	recorder: AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
@@ -379,8 +377,9 @@ export class SessionAdvisors {
 		for (const advisor of this.#advisors) {
 			if (advisor.runtime.disposed) continue;
 			// Only the terminal primary boundary owns the deferred flush. Continuing
-			// tool turns must keep partial-work critiques withheld.
-			if (willContinue !== true) advisor.adviseTool.beginUpdate(false);
+			// tool turns must keep partial-work critiques withheld. The flush never
+			// resets the per-update budget — no new advisor update starts here.
+			if (willContinue !== true) advisor.adviseTool.flushDeferredNotes();
 			try {
 				advisor.runtime.onTurnEnd(messages, { willContinue });
 			} catch (error) {
@@ -716,8 +715,8 @@ export class SessionAdvisors {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.reset("conversation-boundary");
+			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
-			a.emissionGuard.reset();
 			this.#attachAdvisorRecorderFeed(a);
 		}
 		this.#advisorPrimaryTurnsCompleted = 0;
@@ -868,10 +867,13 @@ export class SessionAdvisors {
 			} = descriptor;
 
 			const budgetPerUpdate = this.#advisorMaxNotesPerUpdate(config);
+			// The tool owns admission end-to-end: the guard decides acceptance,
+			// suppression reason, and pending-note displacement; the tool routes
+			// accepted notes and acknowledges truthfully. No separate accept wrapper.
 			const emissionGuard = new AdvisorEmissionGuard({ budgetPerUpdate });
 			const adviseTool = new AdviseTool(
 				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
-				(note, severity) => this.#acceptAdvice(advisorRef, note, severity),
+				emissionGuard,
 			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
@@ -1110,17 +1112,16 @@ export class SessionAdvisors {
 			);
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
-				enqueueAdvice: (note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
-					// Flush the deferred backlog (notes already cleared the emission guard
-					// when reserved), then reset the guard's per-update budget for this
-					// prompt's live notes.
+					// Flushes the deferred backlog on the in-progress→completed
+					// transition (notes already cleared admission when reserved) and
+					// resets the guard's per-update budget for this prompt's live
+					// notes — both owned by the tool now.
 					advisorRef.adviseTool.beginUpdate(inProgress);
-					advisorRef.emissionGuard.beginUpdate();
 				},
 				onTurnError: (error, failedMessages, signal) =>
 					this.#recoverAdvisorTurn(advisorRef, error, failedMessages, signal),
@@ -1174,7 +1175,6 @@ export class SessionAdvisors {
 				agent: advisorAgent,
 				runtime,
 				adviseTool,
-				emissionGuard,
 				recorder,
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
@@ -1234,19 +1234,10 @@ export class SessionAdvisors {
 		return isTerminalTextAssistantAnswer(messages[tail]);
 	}
 
-	/** Emission-guard gate: classify noise, duplicates, and over-budget notes so
-	 *  AdviseTool can report the exact outcome instead of claiming every rejection
-	 *  is a duplicate. Accepted notes consume the current update's budget. */
-	#acceptAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
-		const decision = advisor.emissionGuard.accept(note, severity);
-		if (decision !== "accepted")
-			logger.debug("advisor advice suppressed by emission guard", { decision, severity, advisor: advisor.name });
-		return decision;
-	}
-
-	/** Route an already-accepted advice note to the primary. Never re-runs the
-	 *  emission guard — the note passed {@link #acceptAdvice} when it was emitted,
-	 *  so a deferred flush replays the backlog without re-filtering. */
+	/** Route an already-accepted advice note to the primary. Never re-runs
+	 *  admission — the note cleared the emission guard inside AdviseTool when it
+	 *  was emitted, so a deferred flush replays the backlog without
+	 *  re-filtering. */
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.

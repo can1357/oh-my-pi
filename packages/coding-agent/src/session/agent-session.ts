@@ -7830,7 +7830,7 @@ export class AgentSession {
 			// Re-record advisor concerns the interrupt would otherwise strand, as
 			// visible/persisted advice without triggering a turn (the agent is idle
 			// now): cards steered into the queue before the user stopped, plus any
-			// that arrived via enqueueAdvice mid-abort and were parked hidden in
+			// that arrived via AdviseTool routing mid-abort and were parked hidden in
 			// #pendingNextTurnMessages while the turn was still tearing down. Other
 			// deferred next-turn context (non-advisor) stays queued, in order.
 			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
