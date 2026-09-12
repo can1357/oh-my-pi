@@ -616,7 +616,7 @@ function shouldEmitRpcTitles(): boolean {
 }
 
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
-	return value === "off" || value === "progress" || value === "events";
+	return value === "off" || value === "progress" || value === "messages" || value === "events";
 }
 
 /** Sends an RPC select request while retaining aligned option descriptions. */
