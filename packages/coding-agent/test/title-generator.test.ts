@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -350,6 +351,61 @@ describe("title generator", () => {
 		);
 	});
 
+	it("stops title fallback traversal after cancellation", async () => {
+		const primary = getModelOrThrow("claude-haiku-4-5");
+		const fallback = getModelOrThrow("claude-sonnet-4-5");
+		const controller = new AbortController();
+		let apiKeyCalls = 0;
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			controller.abort();
+			return {
+				stopReason: "aborted",
+				errorMessage: "Request was aborted",
+				content: [],
+			} as never;
+		});
+
+		const title = await generateSessionTitle(
+			"Investigate the resolver",
+			{
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => {
+					apiKeyCalls += 1;
+					return "test-key";
+				},
+				getApiKeyForProvider: async () => "test-key",
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-key",
+			} as never,
+			{
+				get(path: string) {
+					if (path === "providers.tinyModel") return "online";
+					if (path === "retry.modelFallback") return true;
+					if (path === "retry.fallbackChains")
+						return { [`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`] };
+					return undefined;
+				},
+				getModelRole(role: string) {
+					if (role === "tiny") return `${primary.provider}/${primary.id}`;
+					if (role === "smol") return `${fallback.provider}/${fallback.id}`;
+					return undefined;
+				},
+				getStorage() {
+					return undefined;
+				},
+			} as never,
+			"session-abort",
+			undefined,
+			undefined,
+			undefined,
+			controller.signal,
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(apiKeyCalls).toBe(1);
+	});
+
 	it("uses a reasoning-safe output budget for reasoning models", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
@@ -576,6 +632,197 @@ describe("title generator", () => {
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
 		expect(mockComplete.mock.calls[0]?.[0]).toBe(smolModel);
+	});
+
+	it("does not attempt the current model when no registry models are available", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Unexpected</title>" }],
+		} as never);
+		const registry = {
+			getAvailable: () => [],
+			getApiKey: async () => "test-key",
+			resolver: () => async () => "test-key",
+		};
+		expect(
+			await generateSessionTitle("Investigate", registry as never, createSettings(model), undefined, model),
+		).toBeNull();
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("preserves routed current-model title fallback for distinct @upstream routes", async () => {
+		const base = getModelFor("openrouter", "google/gemini-2.5-flash");
+		const registryLookup = { getAvailable: () => [base] };
+		const cerebras = resolveModelOverride(
+			["openrouter/google/gemini-2.5-flash@cerebras"],
+			registryLookup as never,
+		).model!;
+		const openaiRouted = resolveModelOverride(
+			["openrouter/google/gemini-2.5-flash@openai"],
+			registryLookup as never,
+		).model!;
+		expect(formatModelStringWithRouting(cerebras)).toBe("openrouter/google/gemini-2.5-flash@cerebras");
+		expect(formatModelStringWithRouting(openaiRouted)).toBe("openrouter/google/gemini-2.5-flash@openai");
+
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async model => {
+			if (formatModelStringWithRouting(model) === "openrouter/google/gemini-2.5-flash@cerebras") {
+				return {
+					stopReason: "error",
+					errorStatus: 400,
+					errorMessage: "upstream cerebras failed",
+					content: [],
+				} as never;
+			}
+			return {
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Routed Recovery</title>" }],
+			} as never;
+		});
+		const settings = {
+			get(path: string) {
+				if (path === "providers.tinyModel") return "online";
+				if (path === "retry.modelFallback") return true;
+				return undefined;
+			},
+			getModelRole(role: string) {
+				if (role === "tiny") return "openrouter/google/gemini-2.5-flash@cerebras";
+				return undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = {
+			getAvailable: () => [base],
+			getApiKey: async () => "test-key",
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle("Investigate routing", registry, settings, undefined, openaiRouted);
+		expect(title).toBe("Routed Recovery");
+		const attempted = completeSimpleMock.mock.calls.map(call => formatModelStringWithRouting(call[0] as Model<Api>));
+		expect(attempted).toEqual([
+			"openrouter/google/gemini-2.5-flash@cerebras",
+			"openrouter/google/gemini-2.5-flash@openai",
+		]);
+	});
+
+	it("expands appended currentModel fallbackChains without merging role chains", async () => {
+		const current = getModelOrThrow("claude-opus-4-8");
+		const currentFallback = getModelOrThrow("claude-sonnet-4-5");
+		const roleOnly = getModelFor("openai", "gpt-4o-mini");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async model => {
+			if (model.id === current.id) {
+				return {
+					stopReason: "error",
+					errorStatus: 400,
+					errorMessage: "Model is not available in the active live catalog",
+					content: [],
+				} as never;
+			}
+			return {
+				stopReason: "stop",
+				content: [{ type: "text", text: `<title>From ${model.id}</title>` }],
+			} as never;
+		});
+		const settings = {
+			get(path: string) {
+				if (path === "providers.tinyModel") return "online";
+				if (path === "retry.modelFallback") return true;
+				if (path === "retry.fallbackChains") {
+					return {
+						[`${current.provider}/${current.id}`]: [`${currentFallback.provider}/${currentFallback.id}`],
+						// Role/default chains must not be merged onto the appended current model.
+						tiny: [`${roleOnly.provider}/${roleOnly.id}`],
+						default: [`${roleOnly.provider}/${roleOnly.id}`],
+					};
+				}
+				return undefined;
+			},
+			getModelRole() {
+				return undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = {
+			getAvailable: () => [current, currentFallback, roleOnly],
+			getApiKey: async () => "test-key",
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings, undefined, current);
+		expect(title).toBe(`From ${currentFallback.id}`);
+		const attempted = completeSimpleMock.mock.calls.map(call => (call[0] as Model<Api>).id);
+		expect(attempted).toEqual([current.id, currentFallback.id]);
+		expect(attempted).not.toContain(roleOnly.id);
+	});
+
+	it.each([true, false])("honors modelFallback=%s when the title model returns a provider error", async enabled => {
+		const smolModel = getModelOrThrow("claude-opus-4-8");
+		const fallbackModel = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async model => {
+			if (model.id === smolModel.id) {
+				return {
+					stopReason: "error",
+					errorStatus: 400,
+					errorMessage: "Model is not available in the active live catalog",
+					content: [],
+				} as never;
+			}
+			return {
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Recovered Title</title>" }],
+			} as never;
+		});
+		const settings = {
+			get(path: string) {
+				if (path === "providers.tinyModel") return "online";
+				if (path === "retry.fallbackChains") {
+					return { [`${smolModel.provider}/${smolModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`] };
+				}
+				if (path === "retry.modelFallback") return enabled;
+				return undefined;
+			},
+			getModelRole(role: string) {
+				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
+				return undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = {
+			getAvailable: () => [smolModel, fallbackModel],
+			getApiKey: async () => "test-key",
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle(
+			"Investigate the resolver",
+			registry,
+			settings,
+			undefined,
+			fallbackModel,
+		);
+		if (!enabled) {
+			expect(title).toBeNull();
+			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+			expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(smolModel);
+			return;
+		}
+		expect(title).toBe("Recovered Title");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(smolModel);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(fallbackModel);
 	});
 });
 
