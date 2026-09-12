@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -41,6 +43,7 @@ describe("write tool read projection guard", () => {
 	});
 
 	afterEach(async () => {
+		InternalUrlRouter.resetForTests();
 		await fs.rm(tmpDir, { recursive: true, force: true });
 	});
 
@@ -151,6 +154,37 @@ describe("write tool read projection guard", () => {
 		expect(await Bun.file(archivePath).bytes()).toEqual(before);
 		const entries = await readArchiveEntries({ bytes: before, format: "zip" });
 		expect(new TextDecoder().decode(entries.get(member))).toBe(original);
+	});
+
+	it("rejects actual bounded mutable-resource output before internal URL dispatch", async () => {
+		const url = "vault://document";
+		let resourceContent = `${Array.from({ length: 60 }, (_, index) => `resource ${index + 1}`).join("\n")}\n`;
+		let writeCalled = false;
+		const handler: ProtocolHandler = {
+			scheme: "vault",
+			immutable: false,
+			resolve: async resolvedUrl => ({
+				url: resolvedUrl.href,
+				content: resourceContent,
+				contentType: "text/plain",
+			}),
+			write: async (_resolvedUrl, nextContent) => {
+				writeCalled = true;
+				resourceContent = nextContent;
+			},
+		};
+		InternalUrlRouter.instance().register(handler);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-url", { path: `${url}:1-20` }),
+		);
+		expect(projection).toContain("[37 more lines in resource. Use :24 to continue]");
+
+		await expect(new WriteTool(session).execute("write-url", { path: url, content: projection })).rejects.toThrow(
+			"incomplete read projection",
+		);
+		expect(writeCalled).toBe(false);
+		expect(resourceContent).toContain("resource 60");
 	});
 
 	it("compares against the ACP buffer before bridge writes", async () => {

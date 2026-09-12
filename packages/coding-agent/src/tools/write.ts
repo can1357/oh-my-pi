@@ -1236,6 +1236,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 				const handler = internalRouter.getHandler(scheme);
 				if (handler?.write) {
+					if (scheme !== "xd" && endsWithReadTruncationNotice(content)) {
+						const currentResource = await internalRouter.resolve(path, {
+							cwd: this.session.cwd,
+							settings: this.session.settings,
+							signal,
+						});
+						assertNotShorterReadProjection(path, content, currentResource.content);
+					}
 					// Handler-owned writes mutate user data outside the local
 					// sandbox. xd:// dispatches retain each wrapped tool's tier.
 					if (scheme !== "xd") {
