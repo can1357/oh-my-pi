@@ -87,4 +87,27 @@ describe("AgentSession video attachments", () => {
 		}
 		expect(modelText.join("\n")).toContain(SOURCE_PATH);
 	});
+
+	it("removes a queued video contact sheet and its private source path before delivery", async () => {
+		const target = session;
+		if (!target) throw new Error("Session was not initialized");
+		const preview = createVideoPreviewImage({ type: "image", data: TINY_PNG, mimeType: "image/png" }, SOURCE_PATH);
+		let injected = false;
+		let removed: boolean | undefined;
+		target.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			await target.followUp("Review [Video #1]", [preview]);
+			removed = target.removeQueuedMessage("Review [Video #1]", "followUp");
+		});
+
+		await target.prompt("start");
+		await target.waitForIdle();
+
+		expect(removed).toBe(true);
+		expect(target.agent.hasQueuedMessages()).toBe(false);
+		expect(target.messages.filter(message => message.role === "user" || message.role === "custom")).toEqual([
+			expect.objectContaining({ role: "user", content: [{ type: "text", text: "start" }] }),
+		]);
+	});
 });

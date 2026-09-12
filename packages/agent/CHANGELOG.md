@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.replaceQueue()` to replace one pending queue without changing the other queue ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added
