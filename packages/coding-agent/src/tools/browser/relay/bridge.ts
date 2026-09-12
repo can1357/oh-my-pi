@@ -1395,7 +1395,10 @@ export class RelayBridge {
 			sequence: 0,
 		} satisfies SessionRootSubscription;
 		const disable = this.#subscriptionDisableCommand(orphaned);
-		if (!disable) return;
+		const requiresFreshRoot =
+			orphaned.method === "Emulation.setHardwareConcurrencyOverride" &&
+			!isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency);
+		if (!disable && !requiresFreshRoot) return;
 		await this.#awaitPendingSubscriptions(tab, key);
 		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
 		const current = this.#latestSubscriptionForKey(tab, key);

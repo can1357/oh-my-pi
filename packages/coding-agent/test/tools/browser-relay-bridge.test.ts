@@ -2229,6 +2229,49 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("replaces the debugger root when an orphaned in-flight hardware override cannot be reset", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await flush();
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Emulation.setHardwareConcurrencyOverride"]);
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach after orphaned override");
+		ack(bridge, ext, "detach");
+		await waitFor(() => ext.pending("attach").length === 1, "fresh-root reattach after orphaned override");
+		ack(bridge, ext, "attach");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "holder command after orphan fresh root");
+		expect(ext.rpcs("send").at(-1)).toMatchObject({ method: "Network.getCookies" });
+		ack(bridge, ext, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("cleans up an earlier replayed subscription when its owner disconnects during a later replay await", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
