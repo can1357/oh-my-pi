@@ -113,8 +113,12 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "type": "boolean",
-          "description": "Whether OMP should try to connect this server."
+          "oneOf": [
+            { "type": "boolean" },
+            { "enum": ["true", "false", "1", "0"] },
+            { "type": "string", "pattern": "^\\$\\{[^}:]+(:-(true|false|1|0))?\\}$" }
+          ],
+          "description": "Whether OMP should try to connect this server. Accepts a boolean, one of the coercible string literals \"true\", \"false\", \"1\", \"0\" (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
         },
         "lazy": {
           "oneOf": [
