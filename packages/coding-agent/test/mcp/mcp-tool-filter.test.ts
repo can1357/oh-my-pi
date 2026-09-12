@@ -14,7 +14,7 @@
  *   description, annotations, and original ordering.
  */
 import { expect, test } from "bun:test";
-import { applyMCPToolFilter, filterMCPTools } from "../../src/mcp/tool-filter";
+import { applyMCPToolFilter, enumeratePatternNames, filterMCPTools } from "../../src/mcp/tool-filter";
 import type { MCPToolDefinition } from "../../src/mcp/types";
 
 const NAMES = ["search", "read_channel", "send_message", "create_doc", "admin/delete"];
@@ -449,6 +449,43 @@ test("an escaped character is that literal character, whatever it spells in a re
 	expect(run(["😀", "a", "\uD83D"], ["\\😀"]).allowed).toEqual(["😀"]);
 	expect(run(["aあb", "ab"], ["a\\あb"]).allowed).toEqual(["aあb"]);
 });
+test("enumerated names are always names the pattern actually matches", () => {
+	// The enumerator reads a pattern's tokens to say which concrete names it can
+	// select, and picomatch injects its OWN regex escapes into those tokens (a
+	// `+` arrives as `\+`). A candidate is therefore only ever reported after
+	// the pattern's matcher has admitted it, so a mis-read token can narrow the
+	// result to nothing — reported as "cannot enumerate" — but never widen it to
+	// a name the pattern does not match.
+	for (const [pattern, names] of [
+		["a+", ["a+"]],
+		["c++_helper", ["c++_helper"]],
+		["$fetch", ["$fetch"]],
+		["^", ["^"]],
+		["web_search_ex[a]", ["web_search_exa"]],
+		["\\d", ["d"]],
+		["\\x41", ["x41"]],
+	] as [string, string[]][]) {
+		expect(enumeratePatternNames(pattern)).toEqual(names);
+	}
+	// A class reaching outside the probe alphabet cannot be enumerated from it,
+	// so it declines rather than reporting only the members that happen to fall
+	// inside — the caller then keeps a server instead of dropping one whose
+	// selection it merely could not name.
+	expect(enumeratePatternNames("web_search_ex[aà]")).toBeNull();
+	expect(enumeratePatternNames("[aé]")).toBeNull();
+	// An unbounded or branch-selecting pattern has no nameable set either.
+	for (const pattern of ["*", "?", "send_*", "{a,b}"]) {
+		expect(enumeratePatternNames(pattern)).toBeNull();
+	}
+});
+
+test("an over-long pattern cannot make enumeration throw", () => {
+	// The parser rejects a pattern past its input limit; enumerating one must
+	// decline rather than raise, because the Exa path calls it while loading
+	// config — a single pasted entry must not take down config loading.
+	expect(enumeratePatternNames("a".repeat(70000))).toBeNull();
+});
+
 test("matching is host-independent: windows separators never alter semantics", () => {
 	// picomatch auto-injects `windows: true` on win32 hosts when the option is
 	// unset, making `*`/`?`/negated classes treat `\` as a path separator. Tool

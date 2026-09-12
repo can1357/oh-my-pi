@@ -357,36 +357,26 @@ function isClosedClass(token: Token): boolean {
 /**
  * Characters a class is probed against when its members must be enumerated.
  *
- * The printable ASCII range covers every tool name in practice; a class that
- * admits nothing from it is declined rather than assumed empty.
+ * The printable ASCII range covers every tool name in practice. A class that
+ * reaches outside it cannot be enumerated from this alphabet, so it is declined
+ * rather than reported as the members that happen to fall inside.
  */
 const CLASS_ALPHABET = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => String.fromCharCode(0x20 + i));
 
 /**
- * Turn a prepared token spelling back into the characters it names.
+ * The characters a class token admits, or null when it cannot be enumerated.
  *
- * A text token carries the spelling `prepare` produced, where every escaped and
- * structural character became a `\xNN`/`\uNNNN` escape of one character.
- */
-function unescapePatternText(value: string): string {
-	return value.replaceAll(/\\x([0-9A-F]{2})|\\u([0-9A-F]{4})/g, (_match, byte: string, unit: string) =>
-		String.fromCharCode(Number.parseInt(byte ?? unit, 16)),
-	);
-}
-
-/**
- * The characters a class token admits, or null when it reaches beyond
- * enumeration.
- *
- * A negated member list admits nearly every character, and a range may include
- * characters outside the probe alphabet, so both are declined: the caller then
- * treats the pattern as selecting something it cannot name rather than
- * concluding it selects nothing.
+ * A token value may carry picomatch's own spelling as well as the raw one, so
+ * the members are read from the engine rather than from the spelling: the class
+ * is compiled and each candidate asked. A negated member list admits nearly
+ * every character, a range may reach outside the probe alphabet, and a value
+ * spelling any character outside it may admit one, so each of those is declined
+ * — the caller then treats the pattern as selecting something it cannot name
+ * rather than concluding it selects nothing.
  */
 function classMembers(token: Token): string[] | null {
-	// A negated member list admits nearly every character, and a range may reach
-	// outside the probe alphabet, so neither can be enumerated.
 	if (token.value.startsWith("[^") || token.value.includes("-")) return null;
+	if ([...token.value].some(ch => !CLASS_ALPHABET.includes(ch))) return null;
 	let regex: RegExp;
 	try {
 		regex = new RegExp(`^(?:${token.value})$`);
@@ -419,8 +409,34 @@ function enumerateToken(token: Token): string[] | null {
 			if (isAlternationDelimiter(token)) return null;
 			return [token.value.endsWith("}") ? "}" : "{"];
 		default:
-			return [unescapePatternText(token.value)];
+			// A text token may carry picomatch's own escaping for a character
+			// that is special to a regex (`\+`, `\^`). Reading those candidates
+			// against the matcher, rather than trusting the spelling here, is
+			// what keeps a mis-decoded candidate from being reported as a name.
+			return [...new Set([token.value, unescapePatternText(token.value), decodeGlobEscapes(token.value)])];
 	}
+}
+
+/**
+ * Turn a `\xNN`/`\uNNNN` spelling back into the character it names.
+ *
+ * A candidate only; the caller verifies each one against the matcher, so a
+ * spelling that was never one of this module's escapes simply fails that check.
+ */
+function unescapePatternText(value: string): string {
+	return value.replaceAll(/\\x([0-9A-F]{2})|\\u([0-9A-F]{4})/g, (_match, byte: string, unit: string) =>
+		String.fromCharCode(Number.parseInt(byte ?? unit, 16)),
+	);
+}
+
+/**
+ * Read a glob escape's character: `\\+` names `+`, `\\d` names `d`.
+ *
+ * Only a candidate; the matcher confirms it, so a backslash that was not an
+ * escape in the original pattern is rejected rather than reported.
+ */
+function decodeGlobEscapes(value: string): string {
+	return value.replaceAll(/\\(.)/g, "$1");
 }
 
 /**
@@ -432,10 +448,26 @@ function enumerateToken(token: Token): string[] | null {
  * asking whether a filter selects something outside a known name set must read
  * null as "it can" — that is the answer that keeps a server rather than
  * dropping one whose tools were merely not enumerable.
+ *
+ * Every candidate this walk builds is confirmed against the pattern's own
+ * matcher before it is reported, so a mis-read token can only narrow the result
+ * to nothing — and an empty result is reported as "cannot enumerate" — never
+ * widen it to a name the pattern does not actually match. A pattern the parser
+ * rejects cannot be enumerated either.
  */
 export function enumeratePatternNames(pattern: string, limit = 64): string[] | null {
+	let matcher: ToolMatcher;
+	let tokens: Token[];
+	try {
+		matcher = compilePattern(pattern);
+		tokens = parseTokens(prepare(pattern), PARSE_OPTIONS);
+	} catch {
+		// A pattern the parser rejects (an over-long one included) names nothing
+		// this walk can state; the caller stays conservative.
+		return null;
+	}
 	let names = [""];
-	for (const token of parseTokens(prepare(pattern), PARSE_OPTIONS)) {
+	for (const token of tokens) {
 		const parts = enumerateToken(token);
 		if (parts === null) return null;
 		if (parts.length === 0) continue;
@@ -448,7 +480,8 @@ export function enumeratePatternNames(pattern: string, limit = 64): string[] | n
 		}
 		names = next;
 	}
-	return names;
+	const matched = names.filter(name => matcher(name));
+	return matched.length === 0 ? null : matched;
 }
 
 /** Per-pattern matcher over raw tool names; cached across filter calls. */
