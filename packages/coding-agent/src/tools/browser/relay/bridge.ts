@@ -1451,7 +1451,11 @@ export class RelayBridge {
 		if (clearSequence !== undefined && clearSequence > sequence) return;
 		if (this.#interruptedClearKey(msg)) {
 			const current = this.#latestSubscriptionForKey(tab, trackingKey);
-			if (current && current.sequence > sequence) return;
+			if (current && current.sequence > sequence) {
+				this.#forgetTabSubscriptionThroughSequence(tab, trackingKey, sequence);
+				tab.subscriptionClearSequences.set(trackingKey, sequence);
+				return;
+			}
 			tab.subscriptionClearSequences.set(trackingKey, sequence);
 		}
 		const separator = msg.method.indexOf(".");

@@ -3261,6 +3261,79 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")[0]?.params).toEqual({ timezoneId: "Asia/Shanghai" });
 	});
 
+	it("does not restore a pre-clear owner's setter after a newer owner disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const olderOwner = new FakeCdpSocket();
+		const olderConn = bridge.cdpConnected(olderOwner);
+		const olderSession = await attachPage(bridge, ext, olderOwner, olderConn, 1);
+		const newerOwner = new FakeCdpSocket();
+		const newerConn = bridge.cdpConnected(newerOwner);
+		const newerSession = await attachPage(bridge, ext, newerOwner, newerConn, 1);
+
+		const olderSetterId = ++msgSeq;
+		bridge.cdpMessage(
+			olderConn,
+			JSON.stringify({
+				id: olderSetterId,
+				sessionId: olderSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "Asia/Shanghai" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "older timezone setter");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			olderConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: olderSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "" },
+			}),
+		);
+		bridge.cdpMessage(
+			newerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: newerSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "America/New_York" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 2, "overlapping clear and newer setter");
+
+		const [clear, newerSetter] = ext.pending("send");
+		if (!clear || !newerSetter) throw new Error("expected clear and newer setter");
+		ext.markAcked(newerSetter.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: newerSetter.id, ok: true, result: {} }));
+		await flush();
+		ext.markAcked(clear.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: clear.id, ok: true, result: {} }));
+		await flush();
+
+		bridge.cdpClosed(newerConn);
+		await waitFor(() => ext.rpcs("send").length === 4, "newer owner cleanup");
+		expect(ext.rpcs("send")[3]).toMatchObject({
+			method: "Emulation.setTimezoneOverride",
+			params: { timezoneId: "" },
+		});
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("replays preserved preload scripts across recovery and remaps their identifiers", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
