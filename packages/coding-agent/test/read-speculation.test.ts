@@ -196,6 +196,17 @@ describe("read speculation assessment", () => {
 			"";
 		expect(text).toContain("link.txt");
 		expect(text).not.toContain("real.txt");
+		// The committed result must be byte-identical to an ordinary read of
+		// the same path: any missed render site breaks this equality.
+		const ordinary = await new ReadTool(createSession(testDir)).execute("ordinary-link-read", args);
+		const ordinaryText =
+			ordinary?.content?.find((entry): entry is { type: "text"; text: string } => entry.type === "text")?.text ?? "";
+		expect(text).toBe(ordinaryText);
+		const metaOf = (result: unknown) =>
+			(result as { details?: { meta?: { source?: { type?: string; value?: unknown } } } } | undefined)?.details
+				?.meta;
+		expect(String(metaOf(committed)?.source?.value ?? "")).toContain("link.txt");
+		expect(metaOf(committed)?.source).toEqual(metaOf(ordinary)?.source);
 	});
 
 	it("defers conflict-aware reads without mutating live conflict history", async () => {
