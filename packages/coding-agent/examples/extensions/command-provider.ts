@@ -11,45 +11,58 @@
  *
  * Features:
  * - maps OMP thinking levels onto the command's own effort flag
+ * - hands the prompt to the child through its prompt-file flag, so prompt size
+ *   is bounded by the filesystem instead of the OS command line (32767
+ *   characters on Windows) and prompt text never appears in a process listing;
+ *   `promptTransport: "argv"` covers commands that only take a positional
+ *   prompt
+ * - seeds the child conversation with the retained context when a session id
+ *   is new to this process, so switching models or forking a session does not
+ *   drop the transcript, then sends only the new turn
  * - spawns one child per request and streams its output as canonical assistant
  *   events, with `options.signal`, `options.cwd`, and `options.sessionId`
- *   forwarded so cancellation, the working directory, and one child
- *   conversation per stable session id all behave
+ *   forwarded. The canonical `AssistantMessageEventStream` settles `result()`
+ *   with the error message for a terminal failure rather than rejecting, which
+ *   is what the agent loop reads back after observing the error event
  * - builds the child environment from an allowlist: platform basics, proxy/TLS
  *   settings, XDG locations, and the child's own MUSE_* switches. OMP's
  *   provider keys are never inherited, so the child authenticates the way it
  *   normally does on this machine (for Muse: its own login/session)
- * - converts a hung command into a timeout and a non-zero exit into a stream
- *   error instead of an empty success
+ * - gives every provider its own API id: custom APIs live in one global
+ *   registry keyed by id, so a shared default would let a second command
+ *   provider take over the first one's requests
+ * - keeps a hung command from wedging a turn (timeout), turns a non-zero exit
+ *   into an error event, and kills the child when the request is aborted
+ * - refuses unusable Windows batch shims: the Muse installer ships `muse.cmd`
+ *   next to `muse-bin-<version>.exe`, and cmd.exe re-parses anything handed to
+ *   the shim, so the versioned executable named by `.muse-version` is used
  *
  * Usage:
  * 1. Copy this file to ~/.omp/agent/extensions/, or load it with
  *    `omp --extension packages/coding-agent/examples/extensions/command-provider.ts`
  * 2. Select `muse-exec/muse-exec` with /model
  * 3. Override the preset without editing it: MUSE_EXEC_COMMAND,
- *    MUSE_EXEC_ARGS, MUSE_OMP_PROVIDER, MUSE_OMP_MODEL
- *
- * On Windows the Muse installer only puts `muse.cmd` on PATH, and Bun refuses
- * to hand prompt text to a batch shim (cmd.exe would re-parse quotes, `&`, and
- * `<`). Point MUSE_EXEC_COMMAND at the versioned `muse-bin-<version>.exe` the
- * shim itself selects.
+ *    MUSE_EXEC_ARGS (a JSON string array, or whitespace-separated),
+ *    MUSE_OMP_PROVIDER, MUSE_OMP_MODEL
  */
-import { existsSync } from "node:fs";
-import { extname, join } from "node:path";
-import type {
-	Api,
-	AssistantMessage,
-	AssistantMessageEvent,
-	AssistantMessageEventStream,
-	Context,
-	Effort,
-	Model,
-	SimpleStreamOptions,
-	Usage,
-} from "@oh-my-pi/pi-ai";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Context, Effort, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-export const COMMAND_PROVIDER_API = "command-subprocess-api" as Api;
+/** Prefix for the API id a command provider registers under. */
+export const COMMAND_PROVIDER_API = "command-subprocess-api";
+
+/**
+ * Custom API ids are global: `registerCustomApi()` keeps one stream handler per
+ * id, so two command providers sharing an id would run the second provider's
+ * command for the first provider's models.
+ */
+export function commandProviderApiId(providerName: string): Api {
+	return `${COMMAND_PROVIDER_API}:${providerName}` as Api;
+}
 
 /** Efforts offered for command-backed models, least to most intensive. */
 export const COMMAND_PROVIDER_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -78,27 +91,62 @@ export function resolveReasoningEffort(options?: SimpleStreamOptions): string {
 	return "max";
 }
 
+/** Child sessions this process has already seeded, oldest first. */
+const seededSessions = new Set<string>();
+const SEEDED_SESSION_LIMIT = 64;
+
+/**
+ * Mark a child session as seeded. Returns true when the id had not been seen
+ * yet, which is exactly when the child has no conversation to continue.
+ */
+export function markSessionSeeded(sessionId: string): boolean {
+	if (seededSessions.has(sessionId)) return false;
+	seededSessions.add(sessionId);
+	if (seededSessions.size > SEEDED_SESSION_LIMIT) {
+		const oldest = seededSessions.values().next().value;
+		if (oldest !== undefined) seededSessions.delete(oldest);
+	}
+	return true;
+}
+
 export interface CommandProviderConfig {
 	providerName: string;
+	/** API id override. Defaults to {@link commandProviderApiId}; keep it unique per provider. */
 	api?: Api;
 	modelId: string;
 	modelName?: string;
+	/** Command to run. Resolved against PATH; Windows batch shims are replaced by the executable they launch. */
 	command?: string;
 	commandArgs?: readonly string[];
-	/** Build the command arguments after the configured prefix. */
+	/** Build the arguments after `command`, excluding the prompt. */
 	buildArgs?: (input: {
 		sessionId: string;
 		cwd: string;
 		prompt: string;
+		promptPath: string;
 		model: Model<Api>;
 		effort: string;
 	}) => readonly string[];
+	/**
+	 * How the prompt reaches the child. `prompt-file` (default) writes it to a
+	 * temp file and appends {@link CommandProviderConfig.promptFileArgs}; `argv`
+	 * appends the prompt itself as the last argument.
+	 */
+	promptTransport?: "prompt-file" | "argv";
+	/** Arguments that hand the temp prompt file to the command. Default `--prompt-file <path>`. */
+	promptFileArgs?: (promptPath: string) => readonly string[];
+	/** Resolve the real executable a Windows batch shim launches; returning undefined reports the shim as unusable. */
+	shimExecutable?: (shimPath: string) => Promise<string | undefined>;
 	/** Extract a text delta from one decoded JSONL record. */
 	extractText?: (record: unknown, state: { emittedText: string }) => string | undefined;
 	/** Extract a readable terminal failure from one decoded JSONL record. */
 	extractError?: (record: unknown) => string | undefined;
-	/** Convert OMP context into the prompt accepted by the command. */
+	/** Convert OMP context into the prompt for one incremental turn. */
 	formatPrompt?: (context: Context) => string;
+	/** Serialize the retained context sent to a child session that has no history yet. */
+	formatSeed?: (context: Context) => string;
+	/** Seed a new child session with the retained context instead of only the new turn. Default true. */
+	seedContextOnNewSession?: boolean;
 	/** Resolve the child working directory. Defaults to OMP's request cwd or process.cwd(). */
 	cwd?: string | ((options: SimpleStreamOptions | undefined) => string | undefined);
 	/** Extra child environment values; `undefined` removes an allowlisted key. */
@@ -111,83 +159,6 @@ export interface CommandProviderConfig {
 
 interface JsonRecord {
 	payload?: { kind?: string; text?: string; reason?: string; terminal?: string };
-}
-
-/**
- * Small host-independent implementation of OMP's structural stream contract.
- * Keeping this runtime-free lets the same file load from a user extension
- * directory in a compiled `omp` binary, where host packages are injected for
- * types but are not necessarily resolvable as npm dependencies.
- */
-class LocalAssistantMessageEventStream {
-	private queue: AssistantMessageEvent[] = [];
-	private waiters: Array<{
-		resolve: (result: IteratorResult<AssistantMessageEvent>) => void;
-		reject: (error: unknown) => void;
-	}> = [];
-	private finished = false;
-	private failure: unknown;
-	private readonly final: Promise<AssistantMessage>;
-	private resolveFinal!: (message: AssistantMessage) => void;
-	private rejectFinal!: (error: unknown) => void;
-
-	constructor() {
-		this.final = new Promise<AssistantMessage>((resolve, reject) => {
-			this.resolveFinal = resolve;
-			this.rejectFinal = reject;
-		});
-		this.final.catch(() => {});
-	}
-
-	push(event: AssistantMessageEvent): void {
-		if (this.finished) return;
-		if (event.type === "done") {
-			this.finished = true;
-			this.resolveFinal(event.message);
-		} else if (event.type === "error") {
-			this.finished = true;
-			this.rejectFinal(event.error);
-		}
-		const waiter = this.waiters.shift();
-		if (waiter) waiter.resolve({ value: event, done: false });
-		else this.queue.push(event);
-		if (this.finished) {
-			while (this.waiters.length) this.waiters.shift()!.resolve({ value: undefined as never, done: true });
-		}
-	}
-
-	fail(error: unknown): void {
-		if (this.finished) return;
-		this.finished = true;
-		this.failure = error;
-		this.rejectFinal(error);
-		while (this.waiters.length) this.waiters.shift()!.reject(error);
-	}
-
-	end(): void {
-		if (this.finished) return;
-		this.fail(new Error("Command provider ended without a final assistant message."));
-	}
-
-	result(): Promise<AssistantMessage> {
-		return this.final;
-	}
-
-	async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
-		while (true) {
-			if (this.queue.length) {
-				yield this.queue.shift()!;
-				continue;
-			}
-			if (this.failure) throw this.failure;
-			if (this.finished) return;
-			const next = await new Promise<IteratorResult<AssistantMessageEvent>>((resolve, reject) =>
-				this.waiters.push({ resolve, reject }),
-			);
-			if (next.done) return;
-			yield next.value;
-		}
-	}
 }
 
 function textFromMessageContent(content: unknown): string {
@@ -215,6 +186,16 @@ export function latestUserPrompt(context: Context): string {
 		}
 	}
 	throw new Error("The command provider received a context without a user prompt.");
+}
+
+/** Default seed for a child session with no history: system prompt plus every retained turn. */
+export function formatContextSeed(context: Context): string {
+	const sections = (context.systemPrompt ?? []).map(prompt => `[system]\n${prompt}`);
+	for (const message of context.messages) {
+		const text = textFromMessageContent(message.content).trim();
+		if (text) sections.push(`[${message.role}]\n${text}`);
+	}
+	return sections.join("\n\n");
 }
 
 function emptyUsage(): Usage {
@@ -258,6 +239,7 @@ function defaultMuseError(record: unknown): string | undefined {
 	return payload.reason || `Muse run terminated with status ${payload.terminal || "unknown"}.`;
 }
 
+/** Read a stdout stream line by line; the child's JSONL framing is part of its protocol. */
 function readLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void): Promise<void> {
 	return (async () => {
 		const decoder = new TextDecoder();
@@ -355,28 +337,45 @@ export function childEnvironment(overrides: Record<string, string | undefined> |
 	return env;
 }
 
-/** Launcher suffixes Windows accepts but Bun's PATH lookup for a bare name does not try. */
-const WINDOWS_LAUNCHER_SUFFIXES = [".exe", ".cmd", ".bat", ".com"];
+/** Windows batch shims re-parse arguments through cmd.exe and cannot take the prompt. */
+const BATCH_SHIM_SUFFIXES = [".cmd", ".bat"];
 
 /**
- * Resolve a bare command name against PATH on Windows. `Bun.spawn(["muse", …])`
- * only matches the exact name on PATH and never tries PATHEXT, so a launcher
- * shipped as `muse.cmd` (the Muse installer) stays invisible to the spawn.
- * Anything already carrying a path separator or an extension is left alone.
+ * Muse installs `muse.cmd` next to `muse-bin-<version>.exe` and records the
+ * active version in `.muse-version`, so the shim's own target is resolvable
+ * without running cmd.exe.
  */
-export function resolveCommandPath(command: string, environment: Record<string, string>): string {
-	if (process.platform !== "win32") return command;
-	if (/[\\/]/.test(command) || extname(command)) return command;
-	const searchPath = environment.PATH ?? environment.Path ?? "";
-	for (const entry of searchPath.split(";")) {
-		if (!entry) continue;
-		const base = entry.replace(/[\\/]+$/, "");
-		for (const suffix of WINDOWS_LAUNCHER_SUFFIXES) {
-			const candidate = join(base, `${command}${suffix}`);
-			if (existsSync(candidate)) return candidate;
-		}
+export async function museShimExecutable(shimPath: string): Promise<string | undefined> {
+	const directory = path.dirname(shimPath);
+	const version = await Bun.file(path.join(directory, ".muse-version"))
+		.text()
+		.catch(() => "");
+	const trimmed = version.trim();
+	if (!trimmed) return undefined;
+	const executable = path.join(directory, `muse-bin-${trimmed}.exe`);
+	return (await Bun.file(executable).exists()) ? executable : undefined;
+}
+
+/**
+ * Resolve a command against PATH. A Windows batch shim is never returned: it
+ * cannot receive the prompt safely, so the executable it launches is used
+ * instead, and an unresolvable shim is reported rather than spawned.
+ */
+export async function resolveCommandPath(
+	command: string,
+	environment: Record<string, string | undefined>,
+	shimExecutable: (shimPath: string) => Promise<string | undefined> = museShimExecutable,
+): Promise<string> {
+	const resolved = Bun.which(command, { PATH: environment.PATH ?? process.env.PATH });
+	if (!resolved) {
+		throw new Error(`Command provider cannot find "${command}" on PATH; set the command explicitly.`);
 	}
-	return command;
+	if (!BATCH_SHIM_SUFFIXES.some(suffix => resolved.toLowerCase().endsWith(suffix))) return resolved;
+	const executable = await shimExecutable(resolved);
+	if (executable) return executable;
+	throw new Error(
+		`"${command}" resolves to the Windows batch shim ${resolved}, which cannot receive the prompt; point the command at the executable it launches.`,
+	);
 }
 
 function abortProcess(processHandle: Bun.Subprocess<"pipe", "pipe", "pipe">): void {
@@ -387,16 +386,45 @@ function abortProcess(processHandle: Bun.Subprocess<"pipe", "pipe", "pipe">): vo
 	}
 }
 
+/** Parse `MUSE_EXEC_ARGS`: a JSON string array, otherwise whitespace-separated. */
+export function parseCommandArgs(value: string): string[] {
+	const trimmed = value.trim();
+	if (!trimmed) return [];
+	if (trimmed.startsWith("[")) {
+		const parsed: unknown = JSON.parse(trimmed);
+		if (!Array.isArray(parsed) || parsed.some(entry => typeof entry !== "string")) {
+			throw new Error("Command arguments must be a JSON array of strings.");
+		}
+		return parsed;
+	}
+	return trimmed.split(/\s+/);
+}
+
+/** Write the prompt to a temp file the child reads by path. */
+async function writePromptFile(prompt: string): Promise<string> {
+	const file = path.join(os.tmpdir(), `omp-command-prompt-${crypto.randomUUID()}.txt`);
+	await Bun.write(file, prompt);
+	return file;
+}
+
 export interface DefaultCommandArgsInput {
 	sessionId: string;
 	cwd: string;
 	prompt: string;
 	effort: string;
+	transport?: "prompt-file" | "argv";
+	promptPath?: string;
+	promptFileArgs?: (promptPath: string) => readonly string[];
 	commandArgs?: readonly string[];
 }
 
 /** Default `muse exec` argument layout, with the resolved reasoning effort pinned. */
 export function buildDefaultArgs(input: DefaultCommandArgsInput): string[] {
+	const transport = input.transport ?? "prompt-file";
+	const promptArgs =
+		transport === "argv"
+			? [input.prompt]
+			: (input.promptFileArgs ?? ((promptPath: string) => ["--prompt-file", promptPath]))(input.promptPath ?? "");
 	return [
 		"exec",
 		"--json",
@@ -406,21 +434,23 @@ export function buildDefaultArgs(input: DefaultCommandArgsInput): string[] {
 		input.cwd,
 		"--reasoning-effort",
 		input.effort,
+		...promptArgs,
 		...(input.commandArgs ?? []),
-		input.prompt,
 	];
 }
 
 export function createCommandStreamSimple(config: CommandProviderConfig) {
 	const command = config.command ?? "muse";
+	const transport = config.promptTransport ?? "prompt-file";
 	return (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream => {
-		const stream = new LocalAssistantMessageEventStream() as unknown as AssistantMessageEventStream;
+		const stream = new AssistantMessageEventStream();
 		const startedAt = Date.now();
 		const partial = buildMessage(model, "", startedAt);
 		stream.push({ type: "start", partial });
 
 		void (async () => {
 			let child: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+			let promptPath: string | undefined;
 			let emittedText = "";
 			let textStarted = false;
 			let terminalError: string | undefined;
@@ -439,23 +469,45 @@ export function createCommandStreamSimple(config: CommandProviderConfig) {
 
 			try {
 				if (options?.signal?.aborted) throw new Error("Command provider request was aborted.");
-				const cwd = typeof config.cwd === "function" ? config.cwd(options) : config.cwd;
-				const workingDirectory = options?.cwd ?? cwd ?? process.cwd();
-				const prompt = (config.formatPrompt ?? latestUserPrompt)(context);
+				const configuredCwd = typeof config.cwd === "function" ? config.cwd(options) : config.cwd;
+				const workingDirectory = options?.cwd ?? configuredCwd ?? process.cwd();
 				const sessionId = options?.sessionId ?? crypto.randomUUID();
+				const seed =
+					(config.seedContextOnNewSession ?? true) && markSessionSeeded(sessionId)
+						? (config.formatSeed ?? formatContextSeed)(context)
+						: undefined;
+				const prompt = seed ?? (config.formatPrompt ?? latestUserPrompt)(context);
 				const effort = resolveReasoningEffort(options);
+				const environment = childEnvironment(config.env);
+				const executable = await resolveCommandPath(
+					command,
+					environment,
+					config.shimExecutable ?? museShimExecutable,
+				);
+				if (transport === "prompt-file") promptPath = await writePromptFile(prompt);
 				const args = config.buildArgs
-					? [...config.buildArgs({ sessionId, cwd: workingDirectory, prompt, model, effort })]
+					? [
+							...config.buildArgs({
+								sessionId,
+								cwd: workingDirectory,
+								prompt,
+								promptPath: promptPath ?? "",
+								model,
+								effort,
+							}),
+						]
 					: buildDefaultArgs({
 							sessionId,
 							cwd: workingDirectory,
 							prompt,
 							effort,
+							transport,
+							promptPath,
+							promptFileArgs: config.promptFileArgs,
 							commandArgs: config.commandArgs,
 						});
 
-				const environment = childEnvironment(config.env);
-				child = Bun.spawn([resolveCommandPath(command, environment), ...args], {
+				child = Bun.spawn([executable, ...args], {
 					cwd: workingDirectory,
 					env: environment,
 					stdout: "pipe",
@@ -485,15 +537,13 @@ export function createCommandStreamSimple(config: CommandProviderConfig) {
 					stream.push({ type: "text_delta", contentIndex: 0, delta, partial });
 				});
 
-				let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+				const timeout = Promise.withResolvers<number>();
+				const timeoutHandle: Bun.Timer = setTimeout(
+					() => timeout.reject(new Error(`Command timed out after ${timeoutMs} ms.`)),
+					timeoutMs,
+				);
 				try {
-					const timeout = new Promise<number>((_, reject) => {
-						timeoutHandle = setTimeout(
-							() => reject(new Error(`Command timed out after ${timeoutMs} ms.`)),
-							timeoutMs,
-						);
-					});
-					const exitCode = await Promise.race([child.exited, timeout]);
+					const exitCode = await Promise.race([child.exited, timeout.promise]);
 					await stdoutPromise;
 					const stderr = (await stderrPromise).trim();
 					if (options?.signal?.aborted) throw new Error("Command provider request was aborted.");
@@ -509,7 +559,7 @@ export function createCommandStreamSimple(config: CommandProviderConfig) {
 					}
 					stream.push({ type: "done", reason: "stop", message: partial });
 				} finally {
-					if (timeoutHandle) clearTimeout(timeoutHandle);
+					clearTimeout(timeoutHandle);
 				}
 			} catch (error) {
 				if (child) abortProcess(child);
@@ -518,6 +568,7 @@ export function createCommandStreamSimple(config: CommandProviderConfig) {
 				stream.push({ type: "error", reason: "error", error: errorMessage });
 			} finally {
 				options?.signal?.removeEventListener("abort", abortHandler);
+				if (promptPath) await fs.promises.rm(promptPath, { force: true }).catch(() => {});
 			}
 		})();
 		return stream;
@@ -525,7 +576,7 @@ export function createCommandStreamSimple(config: CommandProviderConfig) {
 }
 
 export function registerCommandProvider(pi: ExtensionAPI, config: CommandProviderConfig): void {
-	const api = config.api ?? COMMAND_PROVIDER_API;
+	const api = config.api ?? commandProviderApiId(config.providerName);
 	const reasoning = config.reasoning ?? true;
 	pi.registerProvider(config.providerName, {
 		baseUrl: "https://command-provider.invalid/",
@@ -560,10 +611,8 @@ export default function museExecProvider(pi: ExtensionAPI): void {
 		providerName: process.env.MUSE_OMP_PROVIDER ?? "muse-exec",
 		modelId: process.env.MUSE_OMP_MODEL ?? "muse-exec",
 		modelName: "Muse Code via muse exec",
-		// Resolve the launcher through PATH; on Windows this also finds
-		// `muse.cmd`, which `Bun.spawn(["muse", …])` alone would miss.
-		command: process.env.MUSE_EXEC_COMMAND ?? resolveCommandPath("muse", childEnvironment(undefined)),
-		commandArgs: process.env.MUSE_EXEC_ARGS ? process.env.MUSE_EXEC_ARGS.split(" ") : [],
+		command: process.env.MUSE_EXEC_COMMAND ?? "muse",
+		commandArgs: process.env.MUSE_EXEC_ARGS ? parseCommandArgs(process.env.MUSE_EXEC_ARGS) : [],
 		// Keep this a Muse session: Muse owns the inner read/write/bash/web loop.
 		// OMP receives only the final text stream. The child environment is
 		// allowlisted, so OMP's PAYG keys cannot leak in; META_API_KEY is pinned
