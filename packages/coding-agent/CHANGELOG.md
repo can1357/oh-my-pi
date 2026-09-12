@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Added Model Hub controls for editing thinking levels on concrete retry fallback rows.
 
 ### Fixed
 
