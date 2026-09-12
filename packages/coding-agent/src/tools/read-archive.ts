@@ -16,6 +16,7 @@ import {
 	decodeUtf8Text,
 	markMarkdownContentType,
 	prependSuffixResolutionNotice,
+	toReadTruncationStats,
 } from "./read-format";
 import {
 	findSuffixMatchCached,
@@ -111,7 +112,7 @@ async function readArchiveDirectory(
 	const resultBuilder = toolResult<ReadToolDetails>(directoryDetails).text(truncation.content);
 	resultBuilder.sourcePath(archivePath).limits({ resultLimit: limitMeta.resultLimit?.reached });
 	if (truncation.truncated) {
-		directoryDetails.truncation = truncation;
+		directoryDetails.truncation = toReadTruncationStats(truncation);
 		resultBuilder.truncation(truncation, { direction: "head" });
 	}
 	return resultBuilder.done();

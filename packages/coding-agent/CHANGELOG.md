@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Read tool results no longer duplicate the body in `details.truncation.content`; use result `content` or `details.displayContent` instead.
+
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
