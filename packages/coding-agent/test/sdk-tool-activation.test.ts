@@ -1197,7 +1197,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
-	it("preserves a deferrable-only write transport across enabled-set reapplication", async () => {
+
+	it("preserves a deferrable-only write transport across reapplication and explicit fullWrite:false", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
@@ -1219,31 +1220,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.setActiveToolsByName(session.getEnabledToolNames());
 
 			await expect(
-				write!.execute("deferrable-transport-after", {
-					path: path.join(tempDir, "after.txt"),
-					content: "x",
-				}),
-			).rejects.toThrow("Filesystem writes are not available");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("keeps deferrable-only transport under explicit fullWrite:false", async () => {
-		const tempDir = makeTempDir();
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			toolNames: ["read", "ast_edit"],
-		});
-
-		try {
-			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "ast_edit", "write"]));
-			expect(session.getMountedXdevToolNames()).toEqual([]);
-			const write = session.getToolByName("write");
-			expect(write).toBeDefined();
-			await expect(
-				write!.execute("deferrable-override-before", {
-					path: path.join(tempDir, "before.txt"),
+				write!.execute("deferrable-transport-after-reapply", {
+					path: path.join(tempDir, "after-reapply.txt"),
 					content: "x",
 				}),
 			).rejects.toThrow("Filesystem writes are not available");
@@ -1251,8 +1229,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.setActiveToolPresentation(session.getEnabledToolNames(), [], { fullWrite: false });
 
 			await expect(
-				write!.execute("deferrable-override-after", {
-					path: path.join(tempDir, "after.txt"),
+				write!.execute("deferrable-transport-after-downgrade", {
+					path: path.join(tempDir, "after-downgrade.txt"),
 					content: "x",
 				}),
 			).rejects.toThrow("Filesystem writes are not available");
