@@ -1745,6 +1745,17 @@ export class MCPCommandController {
 			}
 
 			lines.push("");
+			if (connection) {
+				// Close this temporary test connection before seeding through the
+				// manager: a server that permits only one active client (or holds
+				// a singleton lock) would otherwise see it still open while
+				// `#syncManagerConnection`'s reconnect competes for the same slot,
+				// and every retry in its ladder can fail — reporting success while
+				// leaving a cache-less lazy server tool-less.
+				const testConnection = connection;
+				connection = undefined;
+				await disconnectServer(testConnection);
+			}
 			await this.#syncManagerConnection(name, config);
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
