@@ -21,7 +21,7 @@ import {
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { logger, sanitizeText, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { TRUNCATE_LENGTHS } from "../tools/render-utils";
-import { encodeWav } from "../tts/wav";
+import { concatenatePcm, encodeWav } from "../tts/wav";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
 import { resolveCloudSttModel } from "./cloud-models";
 
@@ -132,7 +132,7 @@ export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHa
 					const signal = options.signal
 						? AbortSignal.any([options.signal, requestAbort.signal])
 						: requestAbort.signal;
-					void transcribeBuffer(fetchImpl, { ...options, signal }, concat(chunks, queuedBytes)).then(
+					void transcribeBuffer(fetchImpl, { ...options, signal }, concatenatePcm(chunks, queuedBytes)).then(
 						text => finish(() => resolve(text)),
 						err => {
 							const msg = err instanceof Error ? err.message : String(err);
@@ -146,16 +146,6 @@ export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHa
 		},
 		cancel: abort,
 	};
-}
-
-function concat(chunks: Float32Array[], total: number): Float32Array {
-	const out = new Float32Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		out.set(chunk, offset);
-		offset += chunk.length;
-	}
-	return out;
 }
 
 async function transcribeBuffer(

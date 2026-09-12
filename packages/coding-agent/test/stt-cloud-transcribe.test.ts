@@ -7,7 +7,7 @@ import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import type { CloudSttCredential } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
-import { encodeWav } from "@oh-my-pi/pi-coding-agent/tts/wav";
+import { concatenatePcm, encodeWav } from "@oh-my-pi/pi-coding-agent/tts/wav";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -419,6 +419,14 @@ describe("cloud STT stream", () => {
 });
 
 describe("dictation WAV payload", () => {
+	it("concatenates PCM chunks without changing sample order", () => {
+		const samples = concatenatePcm(
+			[new Float32Array([0.25, -0.5]), new Float32Array(0), new Float32Array([0.75])],
+			3,
+		);
+		expect([...samples]).toEqual([0.25, -0.5, 0.75]);
+	});
+
 	it("encodes mic audio as a 16 kHz mono PCM16 file through the shared encoder", () => {
 		// The upload's `file.size` assertion above proves the byte count; this
 		// pins the header fields the transcription endpoint parses, at the mic
