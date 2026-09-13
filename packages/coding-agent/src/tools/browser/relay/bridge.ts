@@ -3414,25 +3414,45 @@ export class RelayBridge {
 			let finalizedLoaderId = currentLoaderId;
 			let finalizedFrameLoaderIds = currentDocumentState?.frameLoaderIds;
 			if (script.params?.runImmediately === true && !runImmediately) {
-				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
+				const documentStateAfterRegistration = await this.#frameDocumentState(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
 						tab.forceFreshRootBeforeReplay = true;
 						throw err;
 					}
 					return undefined;
 				});
+				const loaderAfterRegistration = documentStateAfterRegistration?.mainLoaderId;
 				if (loaderAfterRegistration !== undefined) finalizedLoaderId = loaderAfterRegistration;
+				if (documentStateAfterRegistration !== undefined) {
+					finalizedFrameLoaderIds = documentStateAfterRegistration.frameLoaderIds;
+				}
+				const frameNavigationDuringRegistration =
+					currentDocumentState !== undefined &&
+					documentStateAfterRegistration !== undefined &&
+					hasNewFrameDocument(currentDocumentState.frameLoaderIds, documentStateAfterRegistration.frameLoaderIds);
+				const childNavigationDuringRegistration =
+					frameNavigationDuringRegistration &&
+					Object.entries(documentStateAfterRegistration?.frameLoaderIds ?? {}).some(
+						([frameId, loaderId]) =>
+							frameId !== documentStateAfterRegistration?.mainFrameId &&
+							currentDocumentState?.frameLoaderIds[frameId] !== loaderId,
+					);
 				navigationDuringRegistration =
-					currentLoaderId !== undefined &&
-					loaderAfterRegistration !== undefined &&
-					loaderAfterRegistration !== currentLoaderId;
+					frameNavigationDuringRegistration ||
+					(currentLoaderId !== undefined &&
+						loaderAfterRegistration !== undefined &&
+						loaderAfterRegistration !== currentLoaderId);
 				if (navigationDuringRegistration) {
 					// Command replies and Page events travel through separate queues, so
 					// their relay-side order is not application evidence. The probe was
 					// registered after the real script: seeing it in this document proves
 					// the real registration covered the navigation. Otherwise replace the
 					// ambiguous registration with an immediate one for the missed document.
-					if (applicationMarker !== undefined) {
+					// The marker probe below runs in the main frame. It can prove that a
+					// main-frame navigation received the registration, but it says nothing
+					// about a child that navigated in the same RPC window. Conservatively
+					// replay immediately whenever any child document changed.
+					if (applicationMarker !== undefined && !childNavigationDuringRegistration) {
 						try {
 							appliedToCurrentDocument = await this.#preloadApplicationMarker(
 								tab.tabId,

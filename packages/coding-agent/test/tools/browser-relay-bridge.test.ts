@@ -3728,6 +3728,76 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("reruns an immediate preload when only a child frame navigates during registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, url: "https://example.test/same" })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, url: "https://example.test/same", groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-before-child-navigation" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-after" } }],
+			},
+		});
+		await waitFor(() =>
+			ext2
+				.pending("send")
+				.some(
+					rpc =>
+						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
+						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
+				),
+		);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Runtime.evaluate")).toHaveLength(0);
+	});
+
 	it("runs a preload once and clears its marker in every existing frame during handoff", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
