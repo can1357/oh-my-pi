@@ -106,6 +106,7 @@ import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { sanitizeDisplayWarnings } from "./tools/render-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 
@@ -151,6 +152,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
+	"task.agentServiceTierOverrides",
 	"task.agentPrewalk",
 	"task.agentAdvisor",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
@@ -598,6 +600,13 @@ async function runInteractiveMode(
 			mode.showNewVersionNotification(newVersion);
 		}
 	});
+
+	const advisorConfigWarnings = session.getAdvisorConfigWarnings();
+	if (advisorConfigWarnings.length > 0) {
+		// Pulled here, not pushed from SessionAdvisors: the constructor-time
+		// `emitNotice` fired before the UI subscribed and was silently lost.
+		mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
+	}
 
 	for (const notify of notifs) {
 		if (!notify) {
