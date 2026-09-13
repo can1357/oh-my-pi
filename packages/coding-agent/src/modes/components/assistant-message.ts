@@ -257,8 +257,15 @@ export class AssistantMessageComponent extends Container {
 	 *  genuinely streaming tokens right now. Gates the numeric speed badge so the
 	 *  session-wide {@link sharedSpeedTracker} can't surface a previous turn's rate
 	 *  on a fresh block that has no live token throughput of its own. */
-	#thinkingRateLive = false;
-
+#thinkingRateLive = false;
+	/** Live thinking preview: last N lines of thinking shown dimmed above the pulse
+	 *  while hidden thinking streams. Off by default; toggled via settings. */
+	#liveThinkingPreviewEnabled = false;
+	/** Number of thinking lines to show in the live preview. */
+	#liveThinkingPreviewLines = 3;
+	/** Extracted tail lines from the streaming thinking block. Updated on each
+	 *  streaming update so the fast path can update the preview in place. */
+	#liveThinkingPreviewText = "";
 	#textColorTransform?: (text: string) => string;
 	#linkTargets: ReadonlyMap<string, string> = EMPTY_LINK_TARGETS;
 	#markdownTheme: MarkdownTheme | undefined;
@@ -266,7 +273,6 @@ export class AssistantMessageComponent extends Container {
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
-
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
 	}
@@ -423,11 +429,54 @@ export class AssistantMessageComponent extends Container {
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
 	}
+	/** Enable or disable the live thinking preview. When enabled and thinking is
+	 *  hidden, the last N lines of the streaming thinking block are shown dimmed
+	 *  above the pulse so the user can see what the model is reasoning about
+	 *  without the full block flooding the screen. */
+	setLiveThinkingPreview(enabled: boolean, lines?: number): void {
+		this.#liveThinkingPreviewEnabled = enabled;
+		if (lines !== undefined && lines > 0) this.#liveThinkingPreviewLines = lines;
+		if (!enabled) this.#clearLiveThinkingPreview();
+		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+	}
+
+	/** Reset preview state. Called when the block finalizes, the preview is
+	 *  disabled, or the component is disposed. */
+	#clearLiveThinkingPreview(): void {
+		this.#liveThinkingPreviewText = "";
+	}
+
+	/** Extract the last N lines from the streaming thinking block's display text.
+	 *  Called before the fast path so the preview updates even when the shape is
+	 *  stable and the content container is not rebuilt. */
+	#updateLiveThinkingPreviewFromMessage(message: AssistantMessage): void {
+		if (!this.#liveThinkingPreviewEnabled) return;
+		// Find the last visible thinking block in the message.
+		let lastThinking: string | undefined;
+		for (const content of message.content) {
+			if (content.type === "thinking") {
+				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
+				if (display.visible) lastThinking = display.text;
+			}
+		}
+		if (!lastThinking) {
+			this.#clearLiveThinkingPreview();
+			return;
+		}
+		// Extract the last N non-blank lines from the thinking text.
+		const lines = lastThinking.split("\n").filter(l => l.trim().length > 0);
+		const tail = lines.slice(-this.#liveThinkingPreviewLines).join("\n");
+		if (tail !== this.#liveThinkingPreviewText) {
+			this.#liveThinkingPreviewText = tail;
+		}
+	}
 
 	override dispose(): void {
 		this.#stopThinkingAnimation();
+		this.#clearLiveThinkingPreview();
 		super.dispose();
 	}
+
 
 	/**
 	 * Whether to render the animated "thinking" pulse in place of the suppressed
@@ -692,6 +741,7 @@ export class AssistantMessageComponent extends Container {
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
+		this.#clearLiveThinkingPreview();
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
 		if (this.#thinkingDots) {
@@ -922,6 +972,15 @@ export class AssistantMessageComponent extends Container {
 			this.#fastPathItems = undefined;
 			return false;
 		}
+		// When live thinking preview is active with hidden thinking, force a full
+		// rebuild so the preview Text children stay in sync with the updated
+		// preview text. The fast path would skip the content rebuild and leave
+		// stale preview lines on screen.
+		if (this.hideThinkingBlock && this.#liveThinkingPreviewEnabled && this.#liveThinkingPreviewText) {
+			this.#fastPathKey = undefined;
+			this.#fastPathItems = undefined;
+			return false;
+		}
 		const transient = opts?.transient === true;
 		// Shape is identical — setText only on Markdown children whose source changed.
 		this.#applyItemTransience(transient);
@@ -1008,6 +1067,12 @@ export class AssistantMessageComponent extends Container {
 			this.#thinkingRateLive = false;
 		}
 
+		// Update live thinking preview before fast path so it updates even when
+		// the shape is stable and the content container is not rebuilt.
+		if (this.hideThinkingBlock && this.#liveThinkingPreviewEnabled) {
+			this.#updateLiveThinkingPreviewFromMessage(message);
+		}
+
 		// Fast path: reuse Markdown children when shape is stable during streaming
 		if (this.#tryFastPathUpdate(message, opts)) return;
 
@@ -1087,6 +1152,20 @@ export class AssistantMessageComponent extends Container {
 
 		if (this.#shouldAnimateThinking(message)) {
 			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));
+			// Live thinking preview: show the last N lines of the streaming
+			// thinking block dimmed above the pulse so the user can see what
+			// the model is reasoning about without the full block flooding
+			// the screen.
+			if (this.#liveThinkingPreviewEnabled && this.#liveThinkingPreviewText) {
+				const previewText = this.#liveThinkingPreviewText;
+				const previewLines = previewText.split("\n");
+				for (let li = 0; li < previewLines.length; li++) {
+					const line = previewLines[li]!;
+					if (line.trim().length === 0) continue;
+					const styled = theme.fg("thinkingText", line);
+					this.#contentContainer.addChild(new Text(styled, 1, 0));
+				}
+			}
 			this.#thinkingDots = new Text(this.#thinkingDotsLabel(), 1, 0);
 			this.#contentContainer.addChild(this.#thinkingDots);
 			this.#startThinkingAnimation();

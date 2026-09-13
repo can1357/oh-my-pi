@@ -654,6 +654,15 @@ export class SelectorController {
 					}
 				}
 				this.ctx.ui.requestRender(true);
+			break;
+			case "liveThinkingPreview":
+				this.ctx.liveThinkingPreview = value as boolean;
+				for (const child of this.ctx.chatContainer.children) {
+					if (child instanceof AssistantMessageComponent) {
+						child.setLiveThinkingPreview(value as boolean);
+					}
+				}
+				this.ctx.ui.requestRender(true);
 				break;
 			case "omitThinking":
 				this.ctx.session.agent.hideThinkingSummary = value as boolean;
@@ -1326,6 +1335,7 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			liveThinkingPreview: () => this.ctx.liveThinkingPreview,
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
 			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
@@ -1458,6 +1468,7 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			liveThinkingPreview: () => this.ctx.liveThinkingPreview,
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onPick: (content, label) => {
@@ -2394,6 +2405,7 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			liveThinkingPreview: () => this.ctx.liveThinkingPreview,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});

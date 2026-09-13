@@ -1454,6 +1454,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Hide thinking blocks in assistant responses",
 		},
 	},
+	liveThinkingPreview: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Live Thinking Preview",
+			description: "While hidden thinking streams, show the last few lines dimmed above the pulse so you can see what the model is reasoning about",
+		},
+	},
 	proseOnlyThinking: {
 		type: "boolean",
 		default: true,
