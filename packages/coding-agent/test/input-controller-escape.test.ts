@@ -202,6 +202,7 @@ function createContext(): {
 		onInputCallback,
 		addMessageToChat,
 		cancelPendingSubmission,
+		dropQueuedLoopReminders: vi.fn(),
 		ensureLoadingAnimation,
 		finishPendingSubmission: vi.fn(),
 		flushPendingBashComponents: vi.fn(),

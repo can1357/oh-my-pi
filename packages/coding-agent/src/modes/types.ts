@@ -208,6 +208,8 @@ export interface InteractiveModeContext {
 	loopPrompt?: string;
 	loopLimit?: LoopLimitRuntime;
 	loopCondition?: LoopConditionConfig;
+	/** Reminder cadence from `--every`, ms; undefined when the loop has no interval configured. */
+	loopIntervalMs?: number;
 	planModePlanFilePath?: string;
 	hideThinkingBlock: boolean;
 	/**
@@ -537,6 +539,7 @@ export interface InteractiveModeContext {
 	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;
 	setLoopPrompt(prompt: string): void;
+	dropQueuedLoopReminders(): void;
 	disableLoopMode(message?: string): void;
 	cancelGoalContinuation(): void;
 	disableGoalMode(message?: string): void;

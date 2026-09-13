@@ -90,6 +90,8 @@ export interface SegmentContext {
 		state: "waiting" | "running" | "paused";
 		limit?: LoopLimitRuntime;
 		condition?: LoopConditionConfig;
+		/** Reminder cadence from `--every`, ms; shown alongside (not instead of) `limit`. */
+		intervalMs?: number;
 	} | null;
 	goalMode: {
 		enabled: boolean;

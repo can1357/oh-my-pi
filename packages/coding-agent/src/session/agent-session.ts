@@ -8868,6 +8868,21 @@ export class AgentSession {
 		this.#irc.emitRelayObservation(record);
 	}
 
+	/** Whether an aside with the given `customType` is queued for the next step-boundary poll.
+	 *  Non-consuming, like `agent.peekSteeringQueue()`/`peekFollowUpQueue()` — callers scan this
+	 *  live view of the queue `IrcBridge` owns instead of keeping their own mirror. */
+	hasQueuedAside(customType: string): boolean {
+		return this.#irc.peekAsides().some(record => record.role === "custom" && record.customType === customType);
+	}
+
+	/** Drops every queued aside whose `customType` matches, leaving every other queued aside —
+	 *  and the interrupt/deferred-wake queues `IrcBridge` also owns — untouched. `customType`-scoped
+	 *  so a caller can retract only the records it queued itself (e.g. a loop reminder) without
+	 *  discarding an unrelated peer IRC record riding the same aside queue. */
+	dropQueuedAsides(customType: string): AgentMessage[] {
+		return this.#irc.takeAsides(record => record.role === "custom" && record.customType === customType);
+	}
+
 	/**
 	 * Run a single ephemeral side-channel turn against this session's current
 	 * model + system prompt + history. The main turn's tool catalog is sent

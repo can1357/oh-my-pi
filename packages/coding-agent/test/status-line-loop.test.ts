@@ -117,4 +117,25 @@ describe("status line loop mode segment", () => {
 		expect(content.startsWith(withIcon(theme.icon.loop, "Loop running while: bun test x"))).toBe(true);
 		expect(content.length).toBeLessThan(60);
 	});
+
+	it("shows the reminder cadence alongside the remaining budget", () => {
+		const now = Date.parse("2026-07-17T12:00:00Z");
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const rendered = renderSegment(
+			"mode",
+			createContext({
+				state: "running",
+				limit: { kind: "duration", durationMs: 7_200_000, deadlineMs: now + 7_200_000 },
+				intervalMs: 1_800_000,
+			}),
+		);
+
+		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop running 2h left every 30m"));
+	});
+
+	it("shows the cadence alone for an unbounded reminder loop", () => {
+		const rendered = renderSegment("mode", createContext({ state: "running", intervalMs: 1_800_000 }));
+
+		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop running every 30m"));
+	});
 });

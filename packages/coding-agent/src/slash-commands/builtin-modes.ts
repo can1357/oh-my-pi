@@ -289,8 +289,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "loop",
 		icon: "loop",
 		description:
-			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with `--until '<cmd>'` / `--while '<cmd>'` — the command's exit status decides whether the next iteration runs. Esc cancels the current iteration; /loop again to disable.",
-		inlineHint: "[count|duration] [--while|--until '<cmd>'] [prompt]",
+			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, gate it with `--until '<cmd>'` / `--while '<cmd>'` — the command's exit status decides whether the next iteration runs — or add `--every <duration>` to get reminded on that cadence while a turn is still running. Esc cancels the current iteration; /loop again to disable.",
+		inlineHint: "[count|duration] [--while|--until '<cmd>'] [--every <duration>] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			if (!runtime.ctx.loopModeEnabled) return "Loop: off";

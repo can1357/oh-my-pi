@@ -3,6 +3,7 @@ import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
 	isLoopDurationExpired,
+	isLoopLimitExhausted,
 	parseLoopArgs,
 } from "@oh-my-pi/pi-coding-agent/modes/loop-limit";
 import type { BuiltinSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -191,6 +192,64 @@ describe("loop condition parsing", () => {
 	});
 });
 
+describe("loop reminder interval (--every) parsing", () => {
+	test("parses compact and compound durations", () => {
+		expect(parseLoopArgs("--every 30m")).toEqual({ intervalMs: 1_800_000 });
+		expect(parseLoopArgs("--every 90s")).toEqual({ intervalMs: 90_000 });
+		expect(parseLoopArgs("--every 1h30m")).toEqual({ intervalMs: 5_400_000 });
+	});
+
+	test("accepts the = form", () => {
+		expect(parseLoopArgs("--every=30m")).toEqual({ intervalMs: 1_800_000 });
+	});
+
+	test("composes with a leading duration budget and an inline prompt", () => {
+		expect(parseLoopArgs("2h --every 30m fix tests")).toEqual({
+			limit: { kind: "duration", durationMs: 7_200_000 },
+			intervalMs: 1_800_000,
+			prompt: "fix tests",
+		});
+	});
+
+	// Order must not matter: --every is spliced into the same flag loop as
+	// --while/--until, not bolted on before or after it.
+	test("combines with a --while/--until condition in either order", () => {
+		expect(parseLoopArgs("--every 30m --until 'bun test' fix")).toEqual({
+			intervalMs: 1_800_000,
+			condition: { command: "bun test", until: true },
+			prompt: "fix",
+		});
+		expect(parseLoopArgs("--until 'bun test' --every 30m fix")).toEqual({
+			condition: { command: "bun test", until: true },
+			intervalMs: 1_800_000,
+			prompt: "fix",
+		});
+	});
+
+	test("rejects a duplicate --every flag", () => {
+		expect(parseLoopArgs("--every 30m --every 1h")).toBe("Use only one --every flag.");
+	});
+
+	test("rejects a missing or unparseable value, ending with the usage string", () => {
+		expect(parseLoopArgs("--every")).toContain("Usage: /loop");
+		expect(parseLoopArgs("--every soon")).toContain("Usage: /loop");
+		expect(parseLoopArgs("--every soon")).toContain("needs a duration");
+	});
+
+	test("rejects a zero interval", () => {
+		expect(parseLoopArgs("--every 0m")).toBe("Loop duration must be positive.");
+	});
+
+	// A larger value overflows setInterval's signed 32-bit ms delay and fires
+	// immediately instead of after the requested delay.
+	test("rejects an interval beyond Node's max timer delay", () => {
+		const result = parseLoopArgs("--every 1000h");
+		expect(typeof result).toBe("string");
+		expect(result).toContain("2147483647");
+		expect(result).toContain("Node's max timer delay");
+	});
+});
+
 describe("loop limit runtime", () => {
 	test("allows exactly the configured number of auto-submitted iterations", () => {
 		const parsed = parseLoopArgs("3");
@@ -215,5 +274,20 @@ describe("loop limit runtime", () => {
 		expect(isLoopDurationExpired(limit, 600_999)).toBe(false);
 		expect(consumeLoopLimitIteration(limit, 601_000)).toBe(false);
 		expect(isLoopDurationExpired(limit, 601_000)).toBe(true);
+	});
+
+	// Non-breaking proof: a bare leading duration is still a *budget*, not a
+	// reminder cadence — `--every` is the only thing that configures one.
+	test("a bare leading duration still stops the loop at its deadline and configures no interval", () => {
+		const parsed = parseLoopArgs("1h");
+		if (typeof parsed === "string" || !parsed.limit) throw new Error("expected parsed limit");
+		expect(parsed.limit).toEqual({ kind: "duration", durationMs: 3_600_000 });
+		expect(parsed.intervalMs).toBeUndefined();
+
+		const limit = createLoopLimitRuntime(parsed.limit, 0);
+		expect(isLoopDurationExpired(limit, 3_599_999)).toBe(false);
+		expect(isLoopLimitExhausted(limit, 3_599_999)).toBe(false);
+		expect(isLoopDurationExpired(limit, 3_600_000)).toBe(true);
+		expect(isLoopLimitExhausted(limit, 3_600_000)).toBe(true);
 	});
 });

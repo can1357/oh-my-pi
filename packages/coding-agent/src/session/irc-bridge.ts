@@ -111,6 +111,27 @@ export class IrcBridge {
 		this.#asides.push(...records);
 	}
 
+	/** Non-consuming view of the queued asides (insertion order). Mirrors `Agent`'s
+	 *  `peekSteeringQueue`/`peekFollowUpQueue`: the session layer derives aside
+	 *  presence/dedupe checks from this live view instead of keeping a private mirror. */
+	peekAsides(): readonly AgentMessage[] {
+		return this.#asides;
+	}
+
+	/** Removes and returns every queued aside matching `predicate`, in original order, leaving
+	 *  every other queued aside — and `#interrupts`/`#deferredWakes` entirely — untouched. Lets a
+	 *  caller retract only the asides it queued itself (e.g. by `customType`) without discarding
+	 *  an unrelated peer IRC record riding the same aside queue. */
+	takeAsides(predicate: (record: AgentMessage) => boolean): AgentMessage[] {
+		const taken: AgentMessage[] = [];
+		const kept: AgentMessage[] = [];
+		for (const record of this.#asides) {
+			(predicate(record) ? taken : kept).push(record);
+		}
+		this.#asides = kept;
+		return taken;
+	}
+
 	/** Parks wake-intended records while a pooled contract owns the worker. Unlike
 	 *  asides, these are invisible to turn injection (`flushPending`, the loop
 	 *  aside poll) and resume into a monitored wake once the contract clears. */
