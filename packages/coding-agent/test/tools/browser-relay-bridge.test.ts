@@ -82,6 +82,7 @@ function connect(
 		recoverableTabIds?: number[];
 		relayDetachedTabIds?: number[];
 		recoveryLoaderIds?: Record<string, string>;
+		recoveryFrameLoaderIds?: Record<string, Record<string, string>>;
 		freshRootRequiredTabIds?: number[];
 		hardwareConcurrency?: number;
 	} = {},
@@ -99,6 +100,7 @@ function connect(
 			recoverableTabIds: options.recoverableTabIds ?? [],
 			relayDetachedTabIds: options.relayDetachedTabIds,
 			recoveryLoaderIds: options.recoveryLoaderIds,
+			recoveryFrameLoaderIds: options.recoveryFrameLoaderIds,
 			freshRootRequiredTabIds: options.freshRootRequiredTabIds,
 		}),
 	);
@@ -3726,6 +3728,126 @@ describe("RelayBridge tab grouping", () => {
 			source: "window.__relayInjected = true;",
 			runImmediately: true,
 		});
+	});
+
+	it("does not rerun an immediate preload for a child navigation covered before orphan detach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+			recoveryLoaderIds: { "1": "main-loader" },
+			recoveryFrameLoaderIds: {
+				"1": { main: "main-loader", child: "child-after" },
+			},
+		});
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-after" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toMatchObject({ runImmediately: false });
+	});
+
+	it("updates immediate preload baselines for OOPIF navigation events", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before" } }],
+			},
+		});
+		await flush();
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				sessionId: "oopif-session",
+				method: "Page.frameNavigated",
+				params: { frame: { id: "child", parentId: "main", loaderId: "child-after" } },
+			}),
+		);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-after" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toMatchObject({ runImmediately: false });
 	});
 
 	it("reruns an immediate preload when only a child frame navigates during registration", async () => {

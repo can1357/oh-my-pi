@@ -93,20 +93,46 @@ function noteDebuggerDetach(attachmentEpochs, loaderGenerations, tabId) {
   noteAttachmentStateChange(attachmentEpochs, tabId);
   noteAttachmentStateChange(loaderGenerations, tabId);
 }
-function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params) {
+function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params, frameLoaderIds) {
   if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
     return false;
   const frame = params.frame;
   if (!frame || typeof frame !== "object")
     return false;
-  const { loaderId, parentId } = frame;
-  if (parentId !== undefined || typeof loaderId !== "string")
+  const { id, loaderId, parentId } = frame;
+  if (typeof loaderId !== "string")
+    return false;
+  if (parentId !== undefined && !frameLoaderIds)
     return false;
   noteAttachmentStateChange(loaderGenerations, tabId);
-  loaderIds.set(tabId, loaderId);
+  if (parentId === undefined)
+    loaderIds.set(tabId, loaderId);
+  if (typeof id === "string" && frameLoaderIds) {
+    frameLoaderIds.set(tabId, { ...frameLoaderIds.get(tabId), [id]: loaderId });
+  }
   return true;
 }
-async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach, onObservationStarted, onObservedDetachSuccess) {
+function recoveryLoaderState(frameTree) {
+  const frameLoaderIds = {};
+  let mainLoaderId;
+  const visit = (node, main) => {
+    if (!node || typeof node !== "object")
+      return;
+    const { frame, childFrames } = node;
+    if (frame && typeof frame === "object") {
+      if (main && typeof frame.loaderId === "string")
+        mainLoaderId = frame.loaderId;
+      if (typeof frame.id === "string" && typeof frame.loaderId === "string")
+        frameLoaderIds[frame.id] = frame.loaderId;
+    }
+    if (Array.isArray(childFrames))
+      for (const child of childFrames)
+        visit(child, false);
+  };
+  visit(frameTree, true);
+  return { mainLoaderId, frameLoaderIds };
+}
+async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readLoaderState, detach, onObservationStarted, onObservedDetachSuccess, frameLoaderIds) {
   const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
   let observingPage = false;
   try {
@@ -118,11 +144,16 @@ async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations,
       await onObservationStarted();
     } catch {}
   }
-  const loaderId = await readMainFrameLoaderId().catch(() => {
+  const loaderState = await readLoaderState().catch(() => {
     return;
   });
-  if (loaderGeneration === loaderGenerations.get(tabId) && typeof loaderId === "string")
-    loaderIds.set(tabId, loaderId);
+  if (loaderGeneration === loaderGenerations.get(tabId)) {
+    const mainLoaderId = typeof loaderState === "string" ? loaderState : loaderState?.mainLoaderId;
+    if (typeof mainLoaderId === "string")
+      loaderIds.set(tabId, mainLoaderId);
+    if (typeof loaderState === "object" && frameLoaderIds)
+      frameLoaderIds.set(tabId, loaderState.frameLoaderIds);
+  }
   await detach();
   if (observingPage)
     await onObservedDetachSuccess();
@@ -373,10 +404,12 @@ var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 var RELAY_DETACHED_TAB_IDS_KEY = "ompRelayDetachedTabIds";
 var RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
+var RECOVERY_FRAME_LOADER_IDS_KEY = "ompRecoveryFrameLoaderIds";
 var FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
 var recoverableTabIds = new Set;
 var liveOwnedTabIds = new Set;
 var recoveryLoaderIds = new Map;
+var recoveryFrameLoaderIds = new Map;
 var freshRootRequiredTabIds = new Set;
 var recoveryLoaderGenerations = new Map;
 var recoverableUpdateGeneration = 0;
@@ -393,6 +426,7 @@ var loadRecoverableState = createRetryableLoader(() => {
     [LIVE_OWNED_TAB_IDS_KEY]: [],
     [RELAY_DETACHED_TAB_IDS_KEY]: [],
     [RECOVERY_LOADER_IDS_KEY]: {},
+    [RECOVERY_FRAME_LOADER_IDS_KEY]: {},
     [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
     [ORPHAN_SWEEP_DEADLINE_KEY]: null
   }).then((stored) => {
@@ -408,6 +442,15 @@ var loadRecoverableState = createRetryableLoader(() => {
         const parsed = Number(tabId);
         if (Number.isInteger(parsed) && typeof loaderId === "string" && (recoveryLoaderGenerations.get(parsed) ?? 0) === (loaderGenerations.get(parsed) ?? 0))
           recoveryLoaderIds.set(parsed, loaderId);
+      }
+    }
+    const storedFrameLoaderIds = stored[RECOVERY_FRAME_LOADER_IDS_KEY];
+    if (storedFrameLoaderIds && typeof storedFrameLoaderIds === "object") {
+      for (const [tabId, frameLoaderIds] of Object.entries(storedFrameLoaderIds)) {
+        const parsed = Number(tabId);
+        if (Number.isInteger(parsed) && frameLoaderIds && typeof frameLoaderIds === "object" && (recoveryLoaderGenerations.get(parsed) ?? 0) === (loaderGenerations.get(parsed) ?? 0)) {
+          recoveryFrameLoaderIds.set(parsed, Object.fromEntries(Object.entries(frameLoaderIds).filter((entry) => typeof entry[1] === "string")));
+        }
       }
     }
     const deadline = restoreOrphanSweepDeadline(stored[ORPHAN_SWEEP_DEADLINE_KEY], orphanSweepDeadlineGeneration === 0);
@@ -473,6 +516,7 @@ function persistRecoveryState() {
     [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
     [RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
     [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+    [RECOVERY_FRAME_LOADER_IDS_KEY]: Object.fromEntries(recoveryFrameLoaderIds),
     [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
   });
 }
@@ -494,6 +538,7 @@ function forgetRecoverable(tabId, preserveRelayDetach = false) {
     recoverableTabIds.delete(tabId);
     liveOwnedTabIds.delete(tabId);
     recoveryLoaderIds.delete(tabId);
+    recoveryFrameLoaderIds.delete(tabId);
     freshRootRequiredTabIds.delete(tabId);
     if (!preserveRelayDetach)
       relayDetachedTabIds.delete(tabId);
@@ -626,11 +671,11 @@ var attachmentGuard = new AttachmentGuard({
       const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
       guardDetachments.add(tabId);
       recoveryLoaderIds.delete(tabId);
+      recoveryFrameLoaderIds.delete(tabId);
       trackPendingDetach(detachWithRecoveryLoaderObservation(recoveryLoaderIds, recoveryLoaderGenerations, tabId, () => chrome.debugger.sendCommand({ tabId }, "Page.enable"), async () => {
         const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree");
-        const loaderId = frameTree?.frameTree?.frame?.loaderId;
-        return typeof loaderId === "string" ? loaderId : undefined;
-      }, () => chrome.debugger.detach({ tabId }), () => requireFreshRoot(tabId), () => clearFreshRootRequirement(tabId)).catch(async () => {
+        return recoveryLoaderState(frameTree?.frameTree);
+      }, () => chrome.debugger.detach({ tabId }), () => requireFreshRoot(tabId), () => clearFreshRootRequirement(tabId), recoveryFrameLoaderIds).catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
         if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
@@ -789,6 +834,7 @@ function refreshHello(onSent) {
         hello.freshRootRequiredTabIds = filterHelloTabIds(hello.freshRootRequiredTabIds ?? [], hello.tabs);
         const tabIds = new Set(hello.tabs.map((tab) => tab.tabId));
         hello.recoveryLoaderIds = Object.fromEntries(Object.entries(hello.recoveryLoaderIds ?? {}).filter(([tabId]) => tabIds.has(Number(tabId))));
+        hello.recoveryFrameLoaderIds = Object.fromEntries(Object.entries(hello.recoveryFrameLoaderIds ?? {}).filter(([tabId]) => tabIds.has(Number(tabId))));
       };
       applyTabChanges();
       if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
@@ -865,6 +911,7 @@ async function buildHello() {
       String(tabId),
       loaderId
     ])),
+    recoveryFrameLoaderIds: Object.fromEntries([...recoveryFrameLoaderIds].map(([tabId, frameLoaderIds]) => [String(tabId), frameLoaderIds])),
     freshRootRequiredTabIds: [...freshRootRequiredTabIds]
   };
 }
@@ -1084,9 +1131,11 @@ async function connect() {
         if (loaderGeneration !== recoveryLoaderGenerations.get(tabId))
           return;
         recoveryLoaderIds.delete(tabId);
-        const loaderId = frameTree?.frameTree?.frame?.loaderId;
-        if (typeof loaderId === "string")
-          recoveryLoaderIds.set(tabId, loaderId);
+        recoveryFrameLoaderIds.delete(tabId);
+        const loaderState = recoveryLoaderState(frameTree?.frameTree);
+        if (loaderState.mainLoaderId !== undefined)
+          recoveryLoaderIds.set(tabId, loaderState.mainLoaderId);
+        recoveryFrameLoaderIds.set(tabId, loaderState.frameLoaderIds);
       }));
       await persistRecoveryState();
     };
@@ -1111,7 +1160,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
   if (guardDetachments.has(source.tabId))
-    captureRecoveryLoaderNavigation(recoveryLoaderIds, recoveryLoaderGenerations, source.tabId, method, params);
+    captureRecoveryLoaderNavigation(recoveryLoaderIds, recoveryLoaderGenerations, source.tabId, method, params, recoveryFrameLoaderIds);
   post({
     t: "cdpEvent",
     tabId: source.tabId,

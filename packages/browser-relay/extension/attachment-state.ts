@@ -33,19 +33,50 @@ export function captureRecoveryLoaderNavigation(
 	tabId: number,
 	method: string,
 	params: unknown,
+	frameLoaderIds?: Map<number, Record<string, string>>,
 ): boolean {
 	if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
 		return false;
 	const frame = (params as { frame?: unknown }).frame;
 	if (!frame || typeof frame !== "object") return false;
-	const { loaderId, parentId } = frame as {
+	const { id, loaderId, parentId } = frame as {
+		id?: unknown;
 		loaderId?: unknown;
 		parentId?: unknown;
 	};
-	if (parentId !== undefined || typeof loaderId !== "string") return false;
+	if (typeof loaderId !== "string") return false;
+	if (parentId !== undefined && !frameLoaderIds) return false;
 	noteAttachmentStateChange(loaderGenerations, tabId);
-	loaderIds.set(tabId, loaderId);
+	if (parentId === undefined) loaderIds.set(tabId, loaderId);
+	if (typeof id === "string" && frameLoaderIds) {
+		frameLoaderIds.set(tabId, { ...frameLoaderIds.get(tabId), [id]: loaderId });
+	}
 	return true;
+}
+
+export interface RecoveryLoaderState {
+	mainLoaderId?: string;
+	frameLoaderIds: Record<string, string>;
+}
+
+export function recoveryLoaderState(frameTree: unknown): RecoveryLoaderState {
+	const frameLoaderIds: Record<string, string> = {};
+	let mainLoaderId: string | undefined;
+	const visit = (node: unknown, main: boolean): void => {
+		if (!node || typeof node !== "object") return;
+		const { frame, childFrames } = node as {
+			frame?: { id?: unknown; loaderId?: unknown };
+			childFrames?: unknown;
+		};
+		if (frame && typeof frame === "object") {
+			if (main && typeof frame.loaderId === "string") mainLoaderId = frame.loaderId;
+			if (typeof frame.id === "string" && typeof frame.loaderId === "string")
+				frameLoaderIds[frame.id] = frame.loaderId;
+		}
+		if (Array.isArray(childFrames)) for (const child of childFrames) visit(child, false);
+	};
+	visit(frameTree, true);
+	return { mainLoaderId, frameLoaderIds };
 }
 
 export async function detachWithRecoveryLoaderObservation(
@@ -53,10 +84,11 @@ export async function detachWithRecoveryLoaderObservation(
 	loaderGenerations: Map<number, number>,
 	tabId: number,
 	enablePage: () => Promise<unknown>,
-	readMainFrameLoaderId: () => Promise<string | undefined>,
+	readLoaderState: () => Promise<string | RecoveryLoaderState | undefined>,
 	detach: () => Promise<void>,
 	onObservationStarted: () => Promise<void>,
 	onObservedDetachSuccess: () => Promise<void>,
+	frameLoaderIds?: Map<number, Record<string, string>>,
 ): Promise<void> {
 	const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
 	// Page events may have been disabled after recovery. Observe them for the
@@ -76,12 +108,13 @@ export async function detachWithRecoveryLoaderObservation(
 			await onObservationStarted();
 		} catch {}
 	}
-	const loaderId = await readMainFrameLoaderId().catch(() => undefined);
-	if (
-		loaderGeneration === loaderGenerations.get(tabId) &&
-		typeof loaderId === "string"
-	)
-		loaderIds.set(tabId, loaderId);
+	const loaderState = await readLoaderState().catch(() => undefined);
+	if (loaderGeneration === loaderGenerations.get(tabId)) {
+		const mainLoaderId = typeof loaderState === "string" ? loaderState : loaderState?.mainLoaderId;
+		if (typeof mainLoaderId === "string") loaderIds.set(tabId, mainLoaderId);
+		if (typeof loaderState === "object" && frameLoaderIds)
+			frameLoaderIds.set(tabId, loaderState.frameLoaderIds);
+	}
 	await detach();
 	if (observingPage) await onObservedDetachSuccess();
 }

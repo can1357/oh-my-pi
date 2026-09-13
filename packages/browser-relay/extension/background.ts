@@ -29,6 +29,7 @@ import {
 	noteAttachmentStateChange,
 	noteDebuggerDetach,
 	noteRelayDetachOutcome,
+	recoveryLoaderState,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
 	retryFailedStateUpdate,
@@ -108,10 +109,12 @@ const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 const RELAY_DETACHED_TAB_IDS_KEY = "ompRelayDetachedTabIds";
 const RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
+const RECOVERY_FRAME_LOADER_IDS_KEY = "ompRecoveryFrameLoaderIds";
 const FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
 const recoverableTabIds = new Set<number>();
 const liveOwnedTabIds = new Set<number>();
 const recoveryLoaderIds = new Map<number, string>();
+const recoveryFrameLoaderIds = new Map<number, Record<string, string>>();
 const freshRootRequiredTabIds = new Set<number>();
 const recoveryLoaderGenerations = new Map<number, number>();
 let recoverableUpdateGeneration = 0;
@@ -140,6 +143,7 @@ const loadRecoverableState = createRetryableLoader(() => {
 			[LIVE_OWNED_TAB_IDS_KEY]: [],
 			[RELAY_DETACHED_TAB_IDS_KEY]: [],
 			[RECOVERY_LOADER_IDS_KEY]: {},
+			[RECOVERY_FRAME_LOADER_IDS_KEY]: {},
 			[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
 			[ORPHAN_SWEEP_DEADLINE_KEY]: null,
 		})
@@ -179,6 +183,28 @@ const loadRecoverableState = createRetryableLoader(() => {
 							(loaderGenerations.get(parsed) ?? 0)
 					)
 						recoveryLoaderIds.set(parsed, loaderId);
+				}
+			}
+			const storedFrameLoaderIds = stored[RECOVERY_FRAME_LOADER_IDS_KEY];
+			if (storedFrameLoaderIds && typeof storedFrameLoaderIds === "object") {
+				for (const [tabId, frameLoaderIds] of Object.entries(storedFrameLoaderIds)) {
+					const parsed = Number(tabId);
+					if (
+						Number.isInteger(parsed) &&
+						frameLoaderIds &&
+						typeof frameLoaderIds === "object" &&
+						(recoveryLoaderGenerations.get(parsed) ?? 0) ===
+							(loaderGenerations.get(parsed) ?? 0)
+					) {
+						recoveryFrameLoaderIds.set(
+							parsed,
+							Object.fromEntries(
+								Object.entries(frameLoaderIds).filter(
+									(entry): entry is [string, string] => typeof entry[1] === "string",
+								),
+							),
+						);
+					}
 				}
 			}
 			const deadline = restoreOrphanSweepDeadline(
@@ -282,6 +308,7 @@ function persistRecoveryState(): Promise<void> {
 		[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
 		[RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
 		[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+		[RECOVERY_FRAME_LOADER_IDS_KEY]: Object.fromEntries(recoveryFrameLoaderIds),
 		[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds],
 	});
 }
@@ -311,6 +338,7 @@ function forgetRecoverable(
 			recoverableTabIds.delete(tabId);
 			liveOwnedTabIds.delete(tabId);
 			recoveryLoaderIds.delete(tabId);
+			recoveryFrameLoaderIds.delete(tabId);
 			freshRootRequiredTabIds.delete(tabId);
 			if (!preserveRelayDetach) relayDetachedTabIds.delete(tabId);
 		},
@@ -539,6 +567,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 			const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 			guardDetachments.add(tabId);
 			recoveryLoaderIds.delete(tabId);
+			recoveryFrameLoaderIds.delete(tabId);
 			void trackPendingDetach(
 				detachWithRecoveryLoaderObservation(
 					recoveryLoaderIds,
@@ -549,15 +578,13 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						const frameTree = (await chrome.debugger.sendCommand(
 							{ tabId },
 							"Page.getFrameTree",
-						)) as
-							| { frameTree?: { frame?: { loaderId?: unknown } } }
-							| undefined;
-						const loaderId = frameTree?.frameTree?.frame?.loaderId;
-						return typeof loaderId === "string" ? loaderId : undefined;
+						)) as { frameTree?: unknown } | undefined;
+						return recoveryLoaderState(frameTree?.frameTree);
 					},
 					() => chrome.debugger.detach({ tabId }),
 					() => requireFreshRoot(tabId),
 					() => clearFreshRootRequirement(tabId),
+					recoveryFrameLoaderIds,
 				).catch(async () => {
 					guardDetachments.delete(tabId);
 					// The detach rejected. If Chrome still reports the tab attached, the
@@ -869,6 +896,11 @@ function refreshHello(onSent?: () => void): void {
 							tabIds.has(Number(tabId)),
 						),
 					);
+					hello.recoveryFrameLoaderIds = Object.fromEntries(
+						Object.entries(hello.recoveryFrameLoaderIds ?? {}).filter(([tabId]) =>
+							tabIds.has(Number(tabId)),
+						),
+					);
 				};
 				applyTabChanges();
 				// Suppress a hello whose attachment snapshot was invalidated before it
@@ -1048,6 +1080,9 @@ async function buildHello(): Promise<
 				String(tabId),
 				loaderId,
 			]),
+		),
+		recoveryFrameLoaderIds: Object.fromEntries(
+			[...recoveryFrameLoaderIds].map(([tabId, frameLoaderIds]) => [String(tabId), frameLoaderIds]),
 		),
 		freshRootRequiredTabIds: [...freshRootRequiredTabIds],
 	};
@@ -1402,14 +1437,14 @@ async function connect(): Promise<void> {
 					const loaderGeneration = recoveryLoaderGenerations.get(tabId) ?? 0;
 					const frameTree = (await chrome.debugger
 						.sendCommand({ tabId }, "Page.getFrameTree")
-						.catch(() => undefined)) as
-						| { frameTree?: { frame?: { loaderId?: unknown } } }
-						| undefined;
+						.catch(() => undefined)) as { frameTree?: unknown } | undefined;
 					if (loaderGeneration !== recoveryLoaderGenerations.get(tabId)) return;
 					recoveryLoaderIds.delete(tabId);
-					const loaderId = frameTree?.frameTree?.frame?.loaderId;
-					if (typeof loaderId === "string")
-						recoveryLoaderIds.set(tabId, loaderId);
+					recoveryFrameLoaderIds.delete(tabId);
+					const loaderState = recoveryLoaderState(frameTree?.frameTree);
+					if (loaderState.mainLoaderId !== undefined)
+						recoveryLoaderIds.set(tabId, loaderState.mainLoaderId);
+					recoveryFrameLoaderIds.set(tabId, loaderState.frameLoaderIds);
 				}),
 			);
 			await persistRecoveryState();
@@ -1454,6 +1489,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 			source.tabId,
 			method,
 			params,
+			recoveryFrameLoaderIds,
 		);
 	post({
 		t: "cdpEvent",

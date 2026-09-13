@@ -421,6 +421,8 @@ class TabState {
 	recoveryStartUrl: string | null = null;
 	/** Main-frame loader observed by the extension when recovery began. */
 	recoveryStartLoaderId: string | undefined;
+	/** Full frame/loader snapshot observed by the extension before orphan detach. */
+	recoveryStartFrameLoaderIds: Record<string, string> | undefined;
 	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
 	restoring: Promise<void> | null = null;
 	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
@@ -762,6 +764,7 @@ export class RelayBridge {
 			// changed, so the replacement hello restarts the interrupted replay.
 			const sameSocketReplay = tab.restoring !== null && tab.restoringExt === this.#ext;
 			if (!sameSocketReplay) tab.recoveryStartLoaderId = msg.recoveryLoaderIds?.[String(tab.tabId)];
+			if (!sameSocketReplay) tab.recoveryStartFrameLoaderIds = msg.recoveryFrameLoaderIds?.[String(tab.tabId)];
 			if (!sameSocketReplay) tab.restoring = null;
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
@@ -809,6 +812,7 @@ export class RelayBridge {
 				tab.restorePending = false;
 				tab.recoveryStartUrl = null;
 				tab.recoveryStartLoaderId = undefined;
+				tab.recoveryStartFrameLoaderIds = undefined;
 				if (hasRecoveryMetadata && recoverableNow.has(tab.tabId)) {
 					void this.#rpc({ op: "forgetRecovery", tabId: tab.tabId }).catch(err => {
 						this.#log("failed to release unheld recovery marker", {
@@ -2850,6 +2854,21 @@ export class RelayBridge {
 				this.#realSessionTabs.delete(child);
 			}
 		}
+		if (method === "Page.frameNavigated") {
+			const frame = params?.frame;
+			if (frame && typeof frame === "object") {
+				if (!sourceSessionId && !("parentId" in frame)) tab.mainFrameNavigationGeneration++;
+				const frameId = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
+				const loaderId = "loaderId" in frame && typeof frame.loaderId === "string" ? frame.loaderId : undefined;
+				if (frameId !== undefined && loaderId !== undefined) {
+					for (const scripts of tab.preloadScripts.values()) {
+						for (const script of scripts.values()) {
+							if (script.frameLoaderIds) script.frameLoaderIds[frameId] = loaderId;
+						}
+					}
+				}
+			}
+		}
 		if (sourceSessionId) {
 			// Event from a real child session: pass through verbatim to every
 			// connection that observes this tab.
@@ -2902,21 +2921,6 @@ export class RelayBridge {
 		for (const conn of this.#conns.values()) {
 			for (const pageSession of conn.sessionsForTab(tabId, "page")) {
 				conn.socket.send(JSON.stringify({ sessionId: pageSession, method, params }));
-			}
-		}
-		if (method === "Page.frameNavigated") {
-			const frame = params?.frame;
-			if (frame && typeof frame === "object") {
-				if (!("parentId" in frame)) tab.mainFrameNavigationGeneration++;
-				const frameId = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
-				const loaderId = "loaderId" in frame && typeof frame.loaderId === "string" ? frame.loaderId : undefined;
-				if (frameId !== undefined && loaderId !== undefined) {
-					for (const scripts of tab.preloadScripts.values()) {
-						for (const script of scripts.values()) {
-							if (script.frameLoaderIds) script.frameLoaderIds[frameId] = loaderId;
-						}
-					}
-				}
 			}
 		}
 	}
@@ -3123,6 +3127,7 @@ export class RelayBridge {
 								tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRecovery ||
 								tab.url !== urlBeforeRecovery),
 						tab.recoveryStartLoaderId,
+						tab.recoveryStartFrameLoaderIds,
 						navigationGenerationBeforeRecovery,
 					);
 				} catch (err) {
@@ -3148,6 +3153,7 @@ export class RelayBridge {
 				tab.restorePending = false;
 				tab.recoveryStartUrl = null;
 				tab.recoveryStartLoaderId = undefined;
+				tab.recoveryStartFrameLoaderIds = undefined;
 			}
 			// The user can cancel the debugger attachment while the final replay RPC
 			// is in flight: #onTabDetached then bans the tab and retracts its
@@ -3259,6 +3265,7 @@ export class RelayBridge {
 		expectedExt: RelaySocket | null,
 		runImmediatePreloads: boolean,
 		recoveryLoaderId?: string,
+		recoveryFrameLoaderIds?: Record<string, string>,
 		recoveryNavigationGeneration?: number,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
@@ -3342,7 +3349,11 @@ export class RelayBridge {
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
 			const previousLoaderId = recoveryLoaderId ?? script.loaderId;
-			const previousFrameLoaderIds = script.frameLoaderIds ? { ...script.frameLoaderIds } : undefined;
+			const previousFrameLoaderIds = recoveryFrameLoaderIds
+				? { ...script.frameLoaderIds, ...recoveryFrameLoaderIds }
+				: script.frameLoaderIds
+					? { ...script.frameLoaderIds }
+					: undefined;
 			if (recoveryLoaderId !== undefined && previousFrameLoaderIds && currentDocumentState?.mainFrameId) {
 				previousFrameLoaderIds[currentDocumentState.mainFrameId] = recoveryLoaderId;
 			}

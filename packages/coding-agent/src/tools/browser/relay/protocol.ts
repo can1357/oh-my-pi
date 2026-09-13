@@ -59,6 +59,8 @@ export type ExtToRelayMessage =
 			relayDetachedTabIds?: number[];
 			/** Main-frame loader observed when recovery began, keyed by tab id. */
 			recoveryLoaderIds?: Record<string, string>;
+			/** Full frame/loader snapshot observed before orphan detach, keyed by tab id. */
+			recoveryFrameLoaderIds?: Record<string, Record<string, string>>;
 			/** Attached roots dirtied by guard-only CDP state and requiring detach + replay before reuse. */
 			freshRootRequiredTabIds?: number[];
 	  }
