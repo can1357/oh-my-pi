@@ -95,7 +95,9 @@ export function splitMemoryGlobPattern(input: string): MemoryGlobPattern {
 	const url = parseInternalUrl(urlMatch[1]);
 	const namespace = url.rawHost || url.hostname;
 	if (url.protocol !== "memory:" || namespace !== MEMORY_NAMESPACE) {
-		throw new Error(`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace: ${input}`);
+		throw new Error(
+			`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace (e.g. memory://${MEMORY_NAMESPACE}/**); got: ${input}`,
+		);
 	}
 
 	const rawPathname = urlMatch[2] ?? "";
@@ -320,6 +322,31 @@ function unknownNamespaceError(namespace: string): Error {
 }
 
 /**
+ * Error for the file-backed `memory://root` namespace when no artifacts exist.
+ * Only `memory.backend=local` ever populates the on-disk root; hindsight keeps
+ * memory server-side and mnemopi in SQLite banks, so on those backends the root
+ * is permanently absent. The message is backend-aware so it never prescribes
+ * "enable memories" to a caller whose backend is already healthy — it points at
+ * the tools that can actually answer instead.
+ */
+function fileBackedRootUnavailableError(backend: string | undefined): Error {
+	if (backend === undefined || backend === "local") {
+		return new Error(
+			"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
+		);
+	}
+	const searchHint =
+		backend === "mnemopi"
+			? " Use `recall`/`reflect` to search Mnemopi memories, or `read memory://<memory-id>` for a full row."
+			: backend === "hindsight"
+				? " Use `recall`/`reflect` to search Hindsight memories."
+				: "";
+	return new Error(
+		`File-backed memory artifacts only exist with memory.backend=local (active backend: ${backend}).${searchHint}`,
+	);
+}
+
+/**
  * Look up a mnemopi memory row by id across every live session's scoped banks.
  * First hit wins; returns `null` when the id is not stored anywhere in scope.
  */
@@ -426,9 +453,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 
 		const roots = memoryRootsForContext(context, caller.session);
 		if (roots.length === 0) {
-			throw new Error(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			throw fileBackedRootUnavailableError(backend);
 		}
 
 		let anyExists = false;
@@ -445,9 +470,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		}
 
 		if (!anyExists) {
-			throw new Error(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			throw fileBackedRootUnavailableError(backend);
 		}
 
 		throw new Error(`Memory file not found: ${url.href}`);
@@ -457,7 +480,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		const caller = resolveMemoryCaller(context);
 		if (caller.backend === "off") return [];
 		const completions: UrlCompletion[] = [];
-		if (memoryRootsForContext(context, caller.session).length > 0) {
+		if (caller.backend === "local") {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
 		const mnemopiAvailable = caller.legacy
