@@ -1,5 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolSpeculationPolicy,
+} from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
@@ -15,6 +21,8 @@ import { IdleTimeout } from "../eval/idle-timeout";
 import { getEnabledEvalPreludes } from "../eval/preludes";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
+import { EvalShadowCellSession } from "../eval/speculation/cell-session";
+import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
 import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
@@ -370,10 +378,33 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return title || `running ${language}`;
 	};
 
+	readonly speculation: ToolSpeculationPolicy = {
+		stream: {
+			open: async context => {
+				if (!this.session) return undefined;
+				if (this.session.settings.get("eval.autoBackground.enabled")) return undefined;
+				const parentToolCallId = context.parentToolCallId;
+				const cell = new EvalShadowCellSession({
+					coordinator: context.coordinator,
+					parentToolCallId,
+					session: this.session,
+					cwd: this.session.cwd,
+					sessionId: this.session.getEvalSessionId?.() ?? defaultEvalSessionId(this.session),
+					kernelOwnerId: this.session.getEvalKernelOwnerId?.() ?? undefined,
+					onDiscard: () => {
+						if (this.#shadowCells.get(parentToolCallId) === cell) this.#shadowCells.delete(parentToolCallId);
+					},
+				});
+				this.#shadowCells.set(parentToolCallId, cell);
+				return cell;
+			},
+		},
+	};
 	readonly #proxyExecutor?: EvalProxyExecutor;
 
 	#paramsKey?: string;
 	#cachedParams?: typeof evalSchema;
+	readonly #shadowCells = new Map<string, EvalShadowCellSession>();
 
 	/**
 	 * Languages enabled for this session, in display order. Detached tools (no
@@ -397,6 +428,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		onUpdate?: AgentToolUpdateCallback,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
+		const shadowCell = this.#shadowCells.get(_toolCallId);
+		this.#shadowCells.delete(_toolCallId);
 		if (this.#proxyExecutor) {
 			return this.#proxyExecutor(params, signal);
 		}
@@ -434,20 +467,40 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					onUpdate({ content: [{ type: "text", text }], details });
 				}
 			: undefined;
-		const run = (
+		const run = async (
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
 		): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
-			const execution = this.#runCells({
-				session,
-				cells,
-				languages,
-				notice,
-				excludeWebP,
-				signal: runSignal,
-				sessionAbortController,
-				emitUpdate,
-			});
+			// Re-check the retained namespace against the streamed planning snapshot:
+			// timers, background work, or concurrent session users may have changed
+			// it after the speculative children started. On mismatch the children
+			// were projected from stale state, so discard the session and run the
+			// cell without it (claims then miss and execution is ordinary).
+			let activeShadowCell = shadowCell;
+			const snapshotToken = shadowCell?.snapshotToken;
+			if (shadowCell && snapshotToken) {
+				const tokenIsPython = snapshotToken.language === "py";
+				let current = tokenIsPython === (cellLanguage === "python");
+				if (current) {
+					current = await shadowCell.verifySnapshotCurrent().catch(() => false);
+				}
+				if (!current) {
+					await shadowCell.discard("retained eval state changed after shadow planning").catch(() => undefined);
+					activeShadowCell = undefined;
+				}
+			}
+			const execution = runWithEvalShadowCell(activeShadowCell, () =>
+				this.#runCells({
+					session,
+					cells,
+					languages,
+					notice,
+					excludeWebP,
+					signal: runSignal,
+					sessionAbortController,
+					emitUpdate,
+				}),
+			);
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
 		};
 

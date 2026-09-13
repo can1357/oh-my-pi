@@ -37648,7 +37648,7 @@
 			"cost": {
 				"input": 10,
 				"output": 50,
-				"cacheRead": 1,
+				"cacheRead": 0.25,
 				"cacheWrite": 12.5
 			},
 			"contextWindow": 1000000,
