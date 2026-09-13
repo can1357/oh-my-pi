@@ -698,6 +698,44 @@ describe("computer prelude", () => {
 		]);
 	});
 
+	it("treats text-only Python host responses as unavailable capabilities", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = {
+			...toolSession(),
+			getEvalPreludes: () => definitions,
+		};
+		const shipped = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		definitions = [
+			{
+				...shipped,
+				async invoke(parameters) {
+					calls.push(parameters);
+					return { content: [{ type: "text", text: "Computer capabilities unavailable" }] };
+				},
+			},
+		];
+
+		const result = await executePython("print(await computer.capabilities())", {
+			cwd: process.cwd(),
+			sessionId: `computer-unavailable-py-${crypto.randomUUID()}`,
+			toolSession: session,
+			kernelMode: "per-call",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("None");
+		expect(calls).toEqual([{ action: "capabilities" }]);
+	});
+
 	it("reflects the live enabled setting", () => {
 		const session = toolSession();
 		const prelude = createComputerPrelude(session, () => ({
