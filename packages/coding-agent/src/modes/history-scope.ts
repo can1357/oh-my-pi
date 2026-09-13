@@ -1,3 +1,4 @@
+import { normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
 	HISTORY_SCOPE_KINDS,
 	type HistoryScope,
@@ -41,9 +42,15 @@ export function resolveHistoryScope(kind: HistoryScopeKind, context: HistoryScop
  * Identity of a resolved scope. The editor compares it to detect that its backing data set
  * changed; it is never parsed, so only distinctness matters. The kind is part of the key:
  * at a repository root, `cwd` and `repo` carry the same value but read different sets.
+ *
+ * Directory-valued scopes are keyed by their normalized spelling, so the same folder reached
+ * through a symlink (or with different Windows casing) does not look like a new data set —
+ * which would re-seed the editor and drop recalled drafts for no reason.
  */
 export function historyScopeKey(scope: HistoryScope): string {
-	return `${scope.kind}\u0000${scope.value ?? ""}`;
+	const directoryScoped = scope.kind === "cwd" || scope.kind === "repo";
+	const value = directoryScoped && scope.value ? normalizePathForComparison(scope.value) : (scope.value ?? "");
+	return `${scope.kind}\u0000${value}`;
 }
 
 /**

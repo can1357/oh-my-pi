@@ -127,4 +127,20 @@ describe("historyScopeKey", () => {
 			historyScopeKey({ kind: "session", value: "b" }),
 		);
 	});
+
+	it("treats two spellings of one directory as the same data set", () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		const link = dir.join("repo-link");
+		fs.mkdirSync(repo, { recursive: true });
+		fs.symlinkSync(repo, link, "dir");
+
+		// A different spelling must not look like a new scope: the editor would re-seed and
+		// drop recalled drafts even though the rows read back are identical.
+		expect(historyScopeKey({ kind: "cwd", value: link })).toBe(historyScopeKey({ kind: "cwd", value: repo }));
+		expect(historyScopeKey({ kind: "repo", value: link })).toBe(historyScopeKey({ kind: "repo", value: repo }));
+		// An empty value stays itself instead of resolving to the process directory.
+		expect(historyScopeKey({ kind: "cwd", value: "" })).toBe("cwd\u0000");
+		expect(historyScopeKey({ kind: "global" })).toBe("global\u0000");
+	});
 });
