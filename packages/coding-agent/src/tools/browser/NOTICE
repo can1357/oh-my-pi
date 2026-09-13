@@ -1,0 +1,51 @@
+Portions of the omp browser tool's security layer are adapted from
+hermes-agent (https://github.com/NousResearch/hermes-agent), used under the
+MIT License. This attribution covers the URL/SSRF navigation guard and the
+browser-output redaction pass.
+
+  Copyright (c) 2025 Nous Research
+
+Adapted from hermes-agent:
+- `tools/url_safety.py` — IP classification, private/metadata/link-local
+  blocking, metadata floor, DNS-rebind posture → `url-guard.ts`.
+- `tools/browser_tool.py` (SSRF guard, `_url_is_private`) → `url-guard.ts`.
+- `agent/redact.py` — secret-shape masking → `output-redact.ts`.
+
+TypeScript deltas vs hermes (recorded in detail in the port receipt):
+- Guard resolves hostnames through Node `node:dns` instead of Python
+  socket/httpx; fail-closed on DNS failure (hermes fails open behind a proxy).
+- No connection pinning over CDP: TOCTOU/DNS-rebind checked at pre-navigation
+  (resolved IPs) and post-commit (DNS-free literal fast path), documented.
+- Config-driven allowlist (settings + env + configured relay endpoint
+  hostnames); `127.0.0.1:9224` relay preserves its loopback exemption.
+- Userinfo (`user:pass@`) masked unconditionally; added `Cookie:`/`Set-Cookie:`
+  and AWS STS (`ASIA…`) passes; redaction is force-on with no opt-out.
+
+Not ported (omp already masks at egress, or out of scope):
+- sensitive-query-param navigation *block* (omp masks secret-shaped values at
+  final output instead); `_auto_local_for_private_urls` sidecar routing;
+  `check_website_access`; QQ `_TRUSTED_PRIVATE_IP_HOSTS`; E.164 phone masking;
+  `_redact_http_request_target_query_params`; `file_read` sentinel; `code_file`
+  toggle; redaction opt-out toggle (force-on per contract); supervisor
+  `_redact_cdp_error_text`; `_JS_URL_LITERAL_RE` / `_RISKY_BROWSER_EVAL_PATTERNS`
+  eval pre-screen; `document.cookie` eval denylist; httpx IP pinning.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

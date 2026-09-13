@@ -11,6 +11,7 @@ import browserDeclarations from "./browser/declarations.d.ts" with { type: "text
 import browserJavascript from "./browser/prelude.js" with { type: "text" };
 import browserPython from "./browser/prelude.py" with { type: "text" };
 import { resolveCmuxKind } from "./browser/cmux/rpc";
+import { redactBrowserOutput } from "./browser/output-redact";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -28,6 +29,7 @@ import {
 	cancelIdleCloseForOwner,
 	dropHeadlessTabs,
 	getTab,
+	navigationSettingsForSession,
 	releaseAllTabs,
 	releaseIdleTabsForOwner,
 	releaseTab,
@@ -289,6 +291,7 @@ async function openBrowser(
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
 					dialogs: params.dialogs,
+					navigation: navigationSettingsForSession(session, kind),
 					signal: openSignal,
 					ownerSessionId: session.getSessionId?.() ?? undefined,
 					// Omitted stays undefined: creation defaults it to false
@@ -387,7 +390,10 @@ async function runBrowser(
 
 	if (screenshots.length) details.screenshots = screenshots;
 
-	if (returnValue !== undefined) details.value = returnValue;
+	// Final egress net: worker/cmux already redact, but the run's return
+	// value crosses one more seam here — `details.value` is handed back to
+	// the prelude sandbox (`tab.run()` result) before reaching the model.
+	if (returnValue !== undefined) details.value = redactBrowserOutput(returnValue);
 	const content = [...displays];
 	const textOnly = content
 		.filter((part): part is { type: "text"; text: string } => part.type === "text")
