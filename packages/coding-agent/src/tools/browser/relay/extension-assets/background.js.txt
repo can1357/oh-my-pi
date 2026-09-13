@@ -134,6 +134,8 @@ function recoveryLoaderState(frameTree) {
 }
 async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readLoaderState, detach, onObservationStarted, onObservedDetachSuccess, frameLoaderIds) {
   const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
+  const mainLoaderIdBeforeObservation = loaderIds.get(tabId);
+  const frameLoaderIdsBeforeObservation = frameLoaderIds ? { ...frameLoaderIds.get(tabId) } : undefined;
   let observingPage = false;
   try {
     await enablePage();
@@ -147,12 +149,21 @@ async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations,
   const loaderState = await readLoaderState().catch(() => {
     return;
   });
-  if (loaderGeneration === loaderGenerations.get(tabId)) {
-    const mainLoaderId = typeof loaderState === "string" ? loaderState : loaderState?.mainLoaderId;
-    if (typeof mainLoaderId === "string")
+  const mainLoaderId = typeof loaderState === "string" ? loaderState : loaderState?.mainLoaderId;
+  const loaderStateChanged = loaderGeneration !== loaderGenerations.get(tabId);
+  if (typeof mainLoaderId === "string") {
+    const observedMainLoaderId = loaderIds.get(tabId);
+    if (!loaderStateChanged || observedMainLoaderId === mainLoaderIdBeforeObservation)
       loaderIds.set(tabId, mainLoaderId);
-    if (typeof loaderState === "object" && frameLoaderIds)
+  }
+  if (typeof loaderState === "object" && frameLoaderIds) {
+    if (!loaderStateChanged) {
       frameLoaderIds.set(tabId, loaderState.frameLoaderIds);
+    } else {
+      const observedFrameLoaderIds = frameLoaderIds.get(tabId) ?? {};
+      const navigationDeltas = Object.fromEntries(Object.entries(observedFrameLoaderIds).filter(([frameId, loaderId]) => frameLoaderIdsBeforeObservation?.[frameId] !== loaderId));
+      frameLoaderIds.set(tabId, { ...loaderState.frameLoaderIds, ...navigationDeltas });
+    }
   }
   await detach();
   if (observingPage)
