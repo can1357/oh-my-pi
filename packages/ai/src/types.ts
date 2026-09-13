@@ -1049,6 +1049,8 @@ export interface AssistantMessage {
 	errorMessage?: string;
 	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
 	errorClassificationMessage?: string;
+	/** True only when an exact request-body-read timeout failed on a full Responses replay, not a previous-response delta. */
+	requestBodyReadTimeoutFullReplay?: boolean;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 	toolCallAbortMessages?: Record<string, string>;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed full OpenAI Responses request-body timeout recovery so the exact HTTP 408 is surfaced for a changed-request recovery instead of repeated unchanged transport retries when eligible tool-result history can be safely elided ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

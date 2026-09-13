@@ -422,6 +422,7 @@ const streamOpenAIResponsesOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let chainState: OpenAIResponsesChainState | undefined;
 		let sentPreviousResponseId: string | undefined;
+		let lastSubmittedRequestWasFullReplay: boolean | undefined;
 		const abortTracker = createAbortSourceTracker(options?.signal);
 		const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE);
 		const { requestAbortController, requestSignal } = abortTracker;
@@ -552,6 +553,7 @@ const streamOpenAIResponsesOnce = (
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
 				);
 				activeRequestParams = requestParams;
+				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
 				let requestTimeout: NodeJS.Timeout | undefined;
 				if (requestTimeoutMs !== undefined) {
 					requestTimeout = setTimeout(
@@ -576,6 +578,9 @@ const streamOpenAIResponsesOnce = (
 							copilotCacheKey,
 							copilotCacheSnapshot,
 						),
+						shouldRetryResponse: (response, bodyText) =>
+							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+							lastSubmittedRequestWasFullReplay !== true,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -926,6 +931,9 @@ const streamOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
+				output.requestBodyReadTimeoutFullReplay = true;
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

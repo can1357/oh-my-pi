@@ -168,6 +168,8 @@ export interface RecoveryCompactionResult {
 	historyRewritten?: boolean;
 }
 
+type RequestBodyReadTimeoutRecovery = "not-applicable" | "handled-retry" | "handled-terminal";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface TurnRecoveryHost {
 	agent: Agent;
@@ -196,6 +198,7 @@ export interface TurnRecoveryHost {
 	abortInProgress(): boolean;
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
+	promptSequence(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: {
@@ -232,6 +235,7 @@ export interface TurnRecoveryHost {
 			terminalTextAnswer?: boolean;
 		},
 	): Promise<RecoveryCompactionResult>;
+	shakeForRequestBodyReadTimeout(generation: number): Promise<boolean>;
 	withBashBranchTransition<T>(operation: () => T): T;
 }
 
@@ -263,6 +267,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -1227,6 +1232,47 @@ export class TurnRecovery {
 	}
 
 	/**
+	 * Own the exact Responses request-body-read timeout so terminal special outcomes
+	 * cannot fall through to the generic 408 replay path.
+	 */
+	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
+		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
+			return "not-applicable";
+		}
+		const generation = this.#host.promptGeneration();
+		const promptSequence = this.#host.promptSequence();
+		const replayUnsafe = this.#hasReplayUnsafeOutput(message);
+		const terminal = (): RequestBodyReadTimeoutRecovery => {
+			if (!replayUnsafe) this.removeAssistantMessageFromActiveContext(message, "request-body-timeout-terminal");
+			return "handled-terminal";
+		};
+		const retrySettings = this.#host.settings.getGroup("retry");
+		if (
+			this.#requestBodyReadTimeoutRecoveryPromptSequence === promptSequence ||
+			!retrySettings.enabled ||
+			retrySettings.maxRetries <= this.#retryAttempt ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress() ||
+			this.#host.isCompacting() ||
+			replayUnsafe
+		) {
+			return terminal();
+		}
+
+		this.#requestBodyReadTimeoutRecoveryPromptSequence = promptSequence;
+		const shook = await this.#host.shakeForRequestBodyReadTimeout(generation);
+		if (
+			!shook ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress()
+		) {
+			return terminal();
+		}
+		return (await this.#handleRetryableError(message, { allowModelFallback: false })) ? "handled-retry" : terminal();
+	}
+
+	/**
 	 * Check if an error is retryable (transient errors, usage limits, or
 	 * account-scoped policy denials that can rotate credentials).
 	 * Context overflow is NOT retryable (handled by compaction instead).
@@ -1234,6 +1280,7 @@ export class TurnRecovery {
 	isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
+		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
 		const model = this.#host.model();
 		const immutableAnthropicThinkingError =
 			model?.api === "anthropic-messages" &&

@@ -59,8 +59,14 @@ function createHost(
 			settings.setModelRole(role, selector);
 		}
 	}
+	const agentState = { messages: options.messages ?? [] };
 	return {
-		agent: { state: { messages: options.messages ?? [] } } as never,
+		agent: {
+			state: agentState,
+			replaceMessages(messages: AgentMessage[]) {
+				agentState.messages = messages;
+			},
+		} as never,
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
 		} as never,
@@ -81,6 +87,7 @@ function createHost(
 		abortInProgress: () => false,
 		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
+		promptSequence: () => 0,
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {},
@@ -92,6 +99,7 @@ function createHost(
 		maybeAutoRedeemCodexReset: async () => false,
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
+		shakeForRequestBodyReadTimeout: async () => false,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
 	};
 }
@@ -110,7 +118,8 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		// Live-role resolution (#liveRetryRoleHint) filters by provider auth;
 		// pin a runtime key so the test does not depend on host env credentials.
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const modelRegistrySettings = Settings.isolated();
+		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: modelRegistrySettings });
 	});
 
 	afterAll(() => {
@@ -268,6 +277,47 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }], model);
 		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("keeps visible partial output when the full-replay timeout recovery is vetoed", async () => {
+		const message = {
+			...makeMessage([{ type: "text", text: "Visible partial answer" }], model),
+			api: "openai-responses" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		const host = createHost(model, modelRegistry, { messages: [message] });
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("handled-terminal");
+		expect(host.agent.state.messages).toContain(message);
+	});
+
+	it("keeps tool-call output when the full-replay timeout recovery is vetoed", async () => {
+		const message = {
+			...makeMessage([{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }], model),
+			api: "openai-responses" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		const host = createHost(model, modelRegistry, { messages: [message] });
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("handled-terminal");
+		expect(host.agent.state.messages).toContain(message);
+	});
+
+	it("ignores a stale full-replay marker on an aborted turn", async () => {
+		const message = {
+			...makeMessage([], model),
+			api: "openai-responses" as const,
+			stopReason: "aborted" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { messages: [message] }));
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("not-applicable");
 	});
 
 	it("does not replay a long OpenCode Go usage limit after committed text", () => {
