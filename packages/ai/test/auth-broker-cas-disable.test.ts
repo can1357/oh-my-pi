@@ -338,9 +338,11 @@ describe("credential disable bearer CAS", () => {
 			const remoteStore = await openRemote();
 			storage.upsertCredential("anthropic", rotated);
 			const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
-			const snapshotSpy = vi.spyOn(remoteStore, "refreshSnapshot").mockRejectedValueOnce(
-				new AuthBrokerError('HTTP 503 {"refresh_token":"RTSECRET","error":"temporarily unavailable"}'),
-			);
+			const snapshotSpy = vi
+				.spyOn(remoteStore, "refreshSnapshot")
+				.mockRejectedValueOnce(
+					new AuthBrokerError('HTTP 503 {"refresh_token":"RTSECRET","error":"temporarily unavailable"}'),
+				);
 			try {
 				expect(await remoteStore.deleteAuthCredentialRemote(id, cause, staleFingerprint)).toBe(false);
 				expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
@@ -360,9 +362,11 @@ describe("credential disable bearer CAS", () => {
 			storage.upsertCredential(provider, credential);
 			const remoteStore = await openRemote();
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-			const disableSpy = vi.spyOn(client, "disableCredential").mockRejectedValue(
-				new AuthBrokerError('HTTP 503 {"refresh_token":"RTSECRET","error":"temporarily unavailable"}'),
-			);
+			const disableSpy = vi
+				.spyOn(client, "disableCredential")
+				.mockRejectedValue(
+					new AuthBrokerError('HTTP 503 {"refresh_token":"RTSECRET","error":"temporarily unavailable"}'),
+				);
 			try {
 				await remoteStore.deleteAuthCredentialsRemote(provider, "deleted by user");
 				const diagnostics = warnSpy.mock.calls.map(([, meta]) => meta);

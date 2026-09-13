@@ -777,7 +777,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			await this.refreshSnapshot();
 		} catch (error) {
-
 			logger.debug("auth-broker snapshot refresh after rejected disable failed", {
 				error: redactSecrets(String(error)),
 			});
