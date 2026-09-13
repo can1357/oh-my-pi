@@ -111,7 +111,7 @@ export const SECRET_NAME = /auth|bearer|cookie|secret|passw(?:or)?d|pwd|token|cr
  * `"apiKey":`, and `authCode=` lose theirs.
  */
 const SECRET_NAME_IN_PROSE =
-	/(?:authorization|bearer|cookie|secret|passw(?:or)?d|pwd|token|credential|api[-_]?key|private[-_]?key|access[-_]?key|signature|\bauth(?:[-_]?(?:code|token|key))?)/i;
+	/(?:authorization|bearer|cookie|secret|passw(?:or)?d|pwd|token|credential|api[\s_-]*key|private[\s_-]*key|access[\s_-]*key|signature|\bauth(?:[\s_-]*(?:code|token|key))?)/i;
 
 /** A JWT: three base64url segments. */
 const JWT_VALUE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;

@@ -14,12 +14,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { withEnv } from "../../ai/test/helpers";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-
-const SUPPRESS_ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
-const savedEnv: Partial<Record<(typeof SUPPRESS_ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 const oauthCredential = (expires: number) => ({
 	type: "oauth" as const,
@@ -80,10 +78,6 @@ describe("credential sign-out notices", () => {
 	let authStorage: AuthStorage | undefined;
 
 	beforeEach(() => {
-		for (const key of SUPPRESS_ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-notices-"));
 	});
 
@@ -91,10 +85,6 @@ describe("credential sign-out notices", () => {
 		vi.restoreAllMocks();
 		authStorage?.close();
 		fs.rmSync(tempDir, { recursive: true, force: true });
-		for (const key of SUPPRESS_ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	it("replays an automatic sign-out at startup until the account signs in again", async () => {
@@ -103,7 +93,9 @@ describe("credential sign-out notices", () => {
 		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
 			throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant","error_description":"grant revoked"}');
 		});
-		expect(await authStorage.getApiKey("anthropic", "session")).toBeUndefined();
+		await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+			expect(await authStorage!.getApiKey("anthropic", "session")).toBeUndefined();
+		});
 
 		const notices = await collectDisabledCredentialNotices(authStorage, Date.now());
 		expect(notices).toHaveLength(1);
@@ -149,6 +141,42 @@ describe("credential sign-out notices", () => {
 		const startedAt = Date.now();
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
 		expect(Date.now() - startedAt).toBeLessThan(5_000);
+	});
+
+	it("shares one replay deadline between tombstones and retained-event recovery", async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		const session = new AgentSession({
+			agent: new Agent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+		});
+		try {
+			session.announceCredentialDisabled({
+				provider: "anthropic",
+				credentialId: 99,
+				credentialType: "oauth",
+				email: "retained@example.com",
+				disabledCause: "invalid_grant",
+			});
+			vi.spyOn(authStorage, "listActionableDisabledCredentials").mockImplementation(async () => {
+				await Bun.sleep(1_000);
+				return [];
+			});
+			vi.spyOn(authStorage, "revalidateCredentials").mockImplementation(signal => {
+				const { promise, reject } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+				return promise;
+			});
+			const startedAt = performance.now();
+			const notices = await session.getDisabledCredentialNotices();
+			expect(performance.now() - startedAt).toBeLessThan(2_700);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("retained@example.com");
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	it("names at most a screenful of signed-out accounts at startup and counts the rest", async () => {
@@ -208,7 +236,9 @@ describe("credential sign-out notices", () => {
 				'HTTP 400 invalid_grant {"error":"invalid_grant","error_description":"grant\trevoked\x1b[31m!"}',
 			);
 		});
-		expect(await authStorage.getApiKey("anthropic", "session")).toBeUndefined();
+		await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+			expect(await authStorage!.getApiKey("anthropic", "session")).toBeUndefined();
+		});
 
 		const [notice] = await collectDisabledCredentialNotices(authStorage, Date.now());
 		expect(notice).toContain("whoami@example.com was signed out");

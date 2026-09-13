@@ -14,9 +14,11 @@
  */
 import {
 	type AuthStorage,
+	type CredentialAccountIdentity,
 	type CredentialDisabledEvent,
 	credentialAccountLabel,
 	type DisabledCredentialSummary,
+	isActionableCredentialDisable,
 	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
@@ -98,38 +100,96 @@ export function formatDisabledCredentialReplayNotice(summary: DisabledCredential
 	return sanitizeDisplayWarning(`${subject} was signed out${ago}: ${causeSummary(summary.cause)}. ${remedy}`);
 }
 
+export interface RetainedCredentialDisable {
+	event: CredentialDisabledEvent;
+	disabledAtMs: number;
+}
+
 /**
- * Notices for accounts that were signed out automatically and have not been
- * signed in again, replayed once when a session starts. `announced` answers,
- * once the lookup has settled, whether a live `notice` already reached the
- * caller's listener for a credential — a teardown racing the lookup itself is
- * still told only once. Best-effort and bounded in time
- * and size: a broker that predates the tombstone endpoint, is unreachable, or
- * does not answer within {@link REPLAY_LOOKUP_BUDGET_MS} yields no notices
- * instead of delaying or breaking startup, and at most
- * {@link PREVIEW_LIMITS.COLLAPSED_ITEMS} accounts are named.
+ * Merge actionable tombstones and retained events by credential id before applying
+ * the shared newest-first preview limit. Read live announcement membership after
+ * both lookups settle, so a disable racing replay is still told only once.
+ * Tombstone lookup and fallback recovery share one startup deadline; unreachable
+ * or older stores still allow retained events to be replayed.
  */
 export async function collectDisabledCredentialNotices(
 	authStorage: AuthStorage,
 	nowMs: number,
 	announced: (credentialId: number) => boolean = () => false,
+	retained?: Map<number, RetainedCredentialDisable>,
 ): Promise<string[]> {
+	const deadline = performance.now() + REPLAY_LOOKUP_BUDGET_MS;
+	const disabled = new Map<number, DisabledCredentialSummary | RetainedCredentialDisable>();
 	try {
-		const disabled = (
-			await authStorage.listActionableDisabledCredentials(undefined, AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS))
-		).filter(summary => !announced(summary.id));
-		// Newest sign-out first, then bounded like other collapsed lists: the
-		// account that just dropped out must be named, not the oldest leftovers;
-		// `omp usage` has the full set.
-		const notices = disabled
-			.toSorted((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
-			.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
-			.map(summary => formatDisabledCredentialReplayNotice(summary, nowMs));
-		const hidden = disabled.length - notices.length;
-		if (hidden > 0) notices.push(`… ${hidden} more signed-out ${pluralize("account", hidden)}; see omp usage.`);
-		return notices;
+		for (const summary of await authStorage.listActionableDisabledCredentials(
+			undefined,
+			AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS),
+		)) {
+			disabled.set(summary.id, summary);
+		}
 	} catch (error) {
 		logger.debug("Disabled credential replay skipped", { error: redactSecrets(String(error)) });
-		return [];
 	}
+	let needsFallback = false;
+	if (retained) {
+		for (const id of retained.keys()) {
+			if (!disabled.has(id) && !announced(id)) {
+				needsFallback = true;
+				break;
+			}
+		}
+	}
+	if (retained && needsFallback) {
+		// Empty tombstone listings skip revalidation. A sibling login can still
+		// recover retained events; failed refresh cannot prove recovery from cache.
+		const activeAccounts: CredentialAccountIdentity[] = [];
+		const remainingMs = Math.ceil(deadline - performance.now());
+		if (remainingMs > 0) {
+			try {
+				await authStorage.revalidateCredentials(AbortSignal.timeout(remainingMs));
+				for (const [provider, value] of Object.entries(authStorage.getAll())) {
+					for (const credential of Array.isArray(value) ? value : [value]) {
+						if (credential.type !== "oauth") continue;
+						const { type, email, accountId, projectId, orgId } = credential;
+						activeAccounts.push({ provider, type, email, accountId, projectId, orgId });
+					}
+				}
+			} catch {
+				// Retain warnings rather than infer recovery from an unreachable store.
+			}
+		}
+		for (const [id, notice] of retained) {
+			if (disabled.has(id) || announced(id)) continue;
+			disabled.set(id, notice);
+		}
+		// This refresh is newer than the tombstone lookup: a sibling login can
+		// recover either source, including an account already in the stored set.
+		for (const [id, notice] of disabled) {
+			const summary =
+				"event" in notice
+					? { ...notice.event, id, type: notice.event.credentialType, cause: notice.event.disabledCause }
+					: notice;
+			if (!isActionableCredentialDisable(summary, activeAccounts)) {
+				disabled.delete(id);
+				retained.delete(id);
+			}
+		}
+	}
+	for (const id of disabled.keys()) {
+		if (announced(id)) disabled.delete(id);
+	}
+	// Reverse insertion order breaks equal-timestamp ties in favor of the
+	// latest retained event. Format only the accounts that will be displayed.
+	const notices = [...disabled.values()]
+		.reverse()
+		.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
+		.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
+		.map(notice =>
+			"event" in notice
+				? formatCredentialDisabledNotice(notice.event)
+				: formatDisabledCredentialReplayNotice(notice, nowMs),
+		);
+	const hidden = disabled.size - notices.length;
+	if (hidden > 0) notices.push(`… ${hidden} more signed-out ${pluralize("account", hidden)}; see omp usage.`);
+	return notices;
 }

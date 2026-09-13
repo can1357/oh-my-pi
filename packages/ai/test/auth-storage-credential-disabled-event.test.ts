@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,11 +17,10 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
+import { withEnv } from "./helpers";
 
-// Env vars short-circuit AuthStorage.getApiKey before the OAuth refresh path runs; suppress
-// them for every test in this file so the credential-disable code path can be exercised.
-const SUPPRESS_ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
-const savedEnv: Partial<Record<(typeof SUPPRESS_ANTHROPIC_ENV)[number], string | undefined>> = {};
+// Suppress ambient shortcuts only while exercising credential resolution.
+const SUPPRESS_ANTHROPIC_ENV = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined };
 
 const expiredOAuth = () =>
 	({
@@ -131,25 +130,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 		return new AuthStorage(store, options);
 	};
 
-	beforeEach(() => {
-		for (const key of SUPPRESS_ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
-	});
-
 	afterEach(() => {
 		vi.restoreAllMocks();
 		for (const store of stores.splice(0)) {
 			store.close();
-		}
-		for (const key of SUPPRESS_ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) {
-				delete process.env[key];
-			} else {
-				process.env[key] = savedEnv[key];
-			}
-			delete savedEnv[key];
 		}
 	});
 
@@ -164,7 +148,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await authStorage.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
 
-			const apiKey = await authStorage.getApiKey("anthropic", "session-disabled-event");
+			let apiKey: string | undefined;
+			await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+				apiKey = await authStorage.getApiKey("anthropic", "session-disabled-event");
+			});
 
 			expect(apiKey).toBeUndefined();
 			expect(events).toHaveLength(1);
@@ -182,7 +169,9 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await authStorage.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh("fetch failed: ECONNRESET");
 
-			await authStorage.getApiKey("anthropic", "session-transient-failure");
+			await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+				await authStorage.getApiKey("anthropic", "session-transient-failure");
+			});
 			expect(events).toHaveLength(0);
 		});
 
@@ -454,7 +443,9 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await authStorage.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
 
-			await authStorage.getApiKey("anthropic", "session-identity");
+			await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+				await authStorage.getApiKey("anthropic", "session-identity");
+			});
 
 			const expected = expect.objectContaining({
 				provider: "anthropic",
@@ -548,7 +539,9 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				);
 			});
 
-			await authStorage.getApiKey("anthropic", "session-echo");
+			await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+				await authStorage.getApiKey("anthropic", "session-echo");
+			});
 
 			const [event] = events;
 			if (!event) throw new Error("expected a disable event");

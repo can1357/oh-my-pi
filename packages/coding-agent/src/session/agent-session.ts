@@ -54,7 +54,6 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
-	CredentialAccountIdentity,
 	CredentialDisabledEvent,
 	ImageContent,
 	Message,
@@ -76,7 +75,7 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, isActionableCredentialDisable, streamSimple } from "@oh-my-pi/pi-ai";
+import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -106,7 +105,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import {
 	collectDisabledCredentialNotices,
 	formatCredentialDisabledNotice,
-	REPLAY_LOOKUP_BUDGET_MS,
+	type RetainedCredentialDisable,
 } from "../config/credential-notices";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
@@ -628,7 +627,7 @@ export class AgentSession {
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
 	/** Recent sign-outs survive even when the store cannot replay tombstones. */
-	readonly #disabledCredentialNotices = new Map<number, { event: CredentialDisabledEvent; announcedAt?: number }>();
+	readonly #disabledCredentialNotices = new Map<number, RetainedCredentialDisable & { announcedAt?: number }>();
 	#disabledCredentialNoticeCount = 0;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
@@ -10832,6 +10831,7 @@ export class AgentSession {
 		this.#disabledCredentialNotices.delete(event.credentialId);
 		this.#disabledCredentialNotices.set(event.credentialId, {
 			event,
+			disabledAtMs: Date.now(),
 			announcedAt: this.#eventListeners.length > 0 ? position : undefined,
 		});
 		if (this.#disabledCredentialNotices.size > MAX_DISABLED_CREDENTIAL_NOTICES) {
@@ -10866,60 +10866,16 @@ export class AgentSession {
 	 * best-effort: an unreachable broker still permits retained event replay.
 	 */
 	async getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
-		const deadline = performance.now() + REPLAY_LOOKUP_BUDGET_MS;
 		const announcedAfter = options?.announcedAfter;
-		const storedIds = new Set<number>();
-		const announced = (id: number): boolean => {
-			const position = this.#disabledCredentialNotices.get(id)?.announcedAt;
-			return announcedAfter !== undefined && position !== undefined && position >= announcedAfter;
-		};
-		const authStorage = this.#modelRegistry.authStorage;
-		// Membership is read when the lookup settles, not when it starts.
-		const notices = await collectDisabledCredentialNotices(authStorage, options?.nowMs ?? Date.now(), id => {
-			storedIds.add(id);
-			return announced(id);
-		});
-		let needsFallback = false;
-		for (const id of this.#disabledCredentialNotices.keys()) {
-			if (!storedIds.has(id) && !announced(id)) {
-				needsFallback = true;
-				break;
-			}
-		}
-		if (!needsFallback) return notices;
-		// Empty tombstone listings skip revalidation. A sibling login can still
-		// recover retained events, so refresh within the original replay budget.
-		// A failed refresh cannot prove recovery from stale cached identities.
-		const activeAccounts: CredentialAccountIdentity[] = [];
-		const remainingMs = Math.ceil(deadline - performance.now());
-		if (remainingMs > 0) {
-			try {
-				await authStorage.revalidateCredentials(AbortSignal.timeout(remainingMs));
-				for (const [provider, value] of Object.entries(authStorage.getAll())) {
-					for (const credential of Array.isArray(value) ? value : [value]) {
-						if (credential.type !== "oauth") continue;
-						const { type, email, accountId, projectId, orgId } = credential;
-						activeAccounts.push({ provider, type, email, accountId, projectId, orgId });
-					}
-				}
-			} catch {
-				// Retain warnings rather than infer recovery from an unreachable store.
-			}
-		}
-		for (const [id, { event }] of this.#disabledCredentialNotices) {
-			if (storedIds.has(id) || announced(id)) continue;
-			if (
-				!isActionableCredentialDisable(
-					{ ...event, id, type: event.credentialType, cause: event.disabledCause },
-					activeAccounts,
-				)
-			) {
-				this.#disabledCredentialNotices.delete(id);
-				continue;
-			}
-			notices.push(formatCredentialDisabledNotice(event));
-		}
-		return notices;
+		return collectDisabledCredentialNotices(
+			this.#modelRegistry.authStorage,
+			options?.nowMs ?? Date.now(),
+			id => {
+				const position = this.#disabledCredentialNotices.get(id)?.announcedAt;
+				return announcedAfter !== undefined && position !== undefined && position >= announcedAfter;
+			},
+			this.#disabledCredentialNotices,
+		);
 	}
 
 	/**

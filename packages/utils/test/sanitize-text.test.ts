@@ -100,6 +100,12 @@ describe("redactUrlSecrets", () => {
 });
 
 describe("redactSecrets", () => {
+	it("redacts compound key labels separated by whitespace", () => {
+		for (const label of ["Invalid API key", "private key", "access\tkey", "auth code"]) {
+			const output = redactSecrets(`${label}: opaque-secret`);
+			expect(output).not.toContain("opaque-secret");
+		}
+	});
 	it("keeps bearer-named structured credentials redacted", () => {
 		expect(
 			JSON.parse(redactSecrets(JSON.stringify({ bearer: "opaque-one", bearerValue: "opaque-two", status: "keep" }))),

@@ -1374,405 +1374,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// The session retains undelivered notices for pull-after-subscribe replay,
 	// including stores and older brokers that cannot supply tombstones.
 	let credentialDisabledNoticeTarget: AgentSession | undefined;
-	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
-		if (credentialDisabledNoticeTarget) {
-			credentialDisabledNoticeTarget.announceCredentialDisabled(event);
-		} else {
-			startupCredentialDisabledEvents.push(event);
-		}
-		if (credentialDisabledTarget) {
-			// Discard return: any handler error is routed through runner.onError listeners.
-			void credentialDisabledTarget.emitCredentialDisabled(event);
-		}
-	});
-	await modelRegistry.hydrateCredentialScopedModelCaches();
-	if (!options.modelRegistry) {
-		modelRegistry.refreshInBackground();
-	}
-	// Kick off workspace tree discovery early. The native workspace scan returns
-	// both the rendered-tree input and the AGENTS.md directory-context index, so
-	// startup does not perform a second recursive filesystem search. Subagents
-	// inherit the parent's resolved values via options.
-	const STARTUP_SCAN_DEADLINE_MS = 5000;
-	const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
-	const workspaceTreePromise: Promise<WorkspaceTree> = options.workspaceTree
-		? Promise.resolve(options.workspaceTree)
-		: includeWorkspaceTree
-			? logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
-			: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] });
-	workspaceTreePromise.catch(() => {});
-
-	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
-	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
-	// session-context build, tool creation, MCP discovery, and extension discovery.
-	const contextFilesPromise = options.contextFiles
-		? Promise.resolve(options.contextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
-	contextFilesPromise.catch(() => {});
-	const resolveRepoContext = async (repoCwd: string) => {
-		try {
-			return await resolveActiveRepoContext(repoCwd);
-		} catch (err) {
-			logger.debug("Failed to resolve active repo context", { err: String(err) });
-			return null;
-		}
-	};
-	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", resolveRepoContext, cwd);
-	activeRepoContextPromise.catch(() => {});
-	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
-	watchdogFilesPromise.catch(() => {});
-	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
-	advisorConfigsPromise.catch(() => {});
-	const promptTemplatesPromise = options.promptTemplates
-		? Promise.resolve(options.promptTemplates)
-		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
-	promptTemplatesPromise.catch(() => {});
-	const slashCommandsPromise = options.slashCommands
-		? Promise.resolve(options.slashCommands)
-		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
-	slashCommandsPromise.catch(() => {});
-	const customCommandsPromise =
-		options.disableExtensionDiscovery || options.restrictToolNames === true
-			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
-			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
-	customCommandsPromise.catch(() => {});
-	const skillsSettings = settings.getGroup("skills");
-	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
-	const discoveredSkillsPromise =
-		options.skills === undefined
-			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
-					...skillsSettings,
-					disabledExtensions: disabledExtensionIds,
-				})
-			: undefined;
-	discoveredSkillsPromise?.catch(() => {});
-
-	// Initialize provider preferences from settings
-	applyProviderGlobalsFromSettings(settings);
-
-	const sessionManager =
-		options.sessionManager ??
-		logger.time("sessionManager", () =>
-			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
-		);
-	const configuredDirs = options.additionalDirectories
-		? options.additionalDirectories
-		: settings.get("workspace.additionalDirectories");
-	if (configuredDirs.length > 0) {
-		// Merge with any roots restored from the session header (resume/fork), not replace.
-		const existing = sessionManager.getAdditionalDirectories();
-		const merged = [...new Set([...existing, ...configuredDirs])];
-		await sessionManager.setAdditionalDirectories(merged);
-	}
-	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
-	const forkCacheShapeChanged =
-		options.model !== undefined ||
-		options.modelPattern !== undefined ||
-		options.thinkingLevel !== undefined ||
-		options.systemPrompt !== undefined ||
-		options.customSystemPrompt !== undefined ||
-		options.appendSystemPrompt !== undefined ||
-		options.toolNames !== undefined ||
-		options.customTools !== undefined;
-	const inheritedPromptCacheKey = forkCacheShapeChanged
-		? undefined
-		: sessionManager.getHeader()?.providerPromptCacheKey;
-	const providerPromptCacheKey = options.providerPromptCacheKey ?? inheritedPromptCacheKey;
-	const providerPromptCacheKeySource =
-		options.providerPromptCacheKey !== undefined
-			? (options.providerPromptCacheKeySource ?? "explicit")
-			: providerPromptCacheKey !== undefined
-				? "fork"
-				: undefined;
-	// Startup model *selection* only needs to know whether auth is configured for
-	// a candidate's provider — never the resolved key bytes. Use the synchronous,
-	// side-effect-free probe (`hasConfiguredAuth`): it refreshes no OAuth tokens,
-	// executes no `!command` keys, and issues no auth-broker requests. Resolving the
-	// real key here (`getApiKey`) blocks resume on those network paths — a slow or
-	// unreachable OAuth/broker endpoint stalls startup for the full ~10s refresh
-	// timeout per candidate (observed as a hang in `restoreSessionModel`). The real
-	// key is resolved lazily per request via ModelRegistry.resolver.
-	const hasModelAuth = (candidate: Model): boolean => modelRegistry.hasConfiguredAuth(candidate);
-
-	// Load and create secret obfuscator early so resumed session state and prompt warnings
-	// reflect actual loaded secrets, not just the setting toggle.
-	const obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
-		? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
-		: undefined;
-	const secretsEnabled = obfuscator?.hasSecrets() === true;
-
-	// An abnormal process exit after a non-terminal message tail is durable
-	// evidence that the old process can no longer finish that turn. Preserve the
-	// partial transcript and append one terminal aborted assistant record before
-	// rebuilding runtime context. The helper is idempotent once that record exists.
-	let existingBranch = logger.time("getSessionBranch", () => sessionManager.getBranch());
-	const interruptedTurnAbort = createInterruptedTurnAbortMessage(existingBranch);
-	if (interruptedTurnAbort) {
-		sessionManager.appendMessage(interruptedTurnAbort);
-		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
-	}
-	let existingSession = logger.time("loadSessionContext", () =>
-		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
-	);
-	const hasExistingSession = existingBranch.length > 0;
-	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
-	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
-
-	const deferredModelPatterns = Array.isArray(options.modelPattern)
-		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
-		: options.modelPattern?.trim()
-			? [options.modelPattern.trim()]
-			: [];
-	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
-	const modelMatchPreferences = getModelMatchPreferences(settings);
-	const defaultRoleValue = settings.getModelRole("default");
-	let explicitDefaultProviders: Set<string> | undefined;
-	if ((settings.get("enabledModels")?.length ?? 0) === 0) {
-		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
-		if (patterns && patterns.length > 0) {
-			const providers = new Set<string>();
-			for (const pattern of patterns) {
-				const slash = pattern.indexOf("/");
-				const provider = slash > 0 ? pattern.slice(0, slash).trim() : "";
-				if (!provider || /[*?[\]{}]/.test(provider)) {
-					providers.clear();
-					break;
-				}
-				providers.add(provider);
-			}
-			if (providers.size > 0) explicitDefaultProviders = providers;
-		}
-	}
-	const allowedModels = await logger.time("resolveAllowedModels", () =>
-		explicitDefaultProviders
-			? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
-			: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
-	);
-	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
-		resolveModelRoleValue(defaultRoleValue, allowedModels, {
-			settings,
-			matchPreferences: modelMatchPreferences,
-		}),
-	);
-	let model = options.model;
-	let modelFallbackMessage: string | undefined;
-	let initialRetryFallback: InitialRetryFallbackState | undefined;
-	// Identify session model strings to restore in fallback order. We do an
-	// initial pass here so model-dependent setup (thinking-level resolution,
-	// host preconnect) can use the restored model; extension-registered
-	// providers aren't visible yet, so we retry the preferred candidates once
-	// extensions register below.
-	const sessionModelStrings =
-		!hasExplicitModel && hasExistingSession
-			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
-			: [];
-	let restoredSessionModelIndex = -1;
-	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
-	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
-		logger.time("restoreSessionModel", () => {
-			let failedSessionModel: string | undefined;
-			for (let i = 0; i < sessionModelStrings.length; i++) {
-				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) {
-					failedSessionModel ??= sessionModelStr;
-					continue;
-				}
-
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
-					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
-					break;
-				}
-				failedSessionModel ??= sessionModelStr;
-			}
-			if (failedSessionModel) {
-				modelFallbackMessage = `Could not restore model ${failedSessionModel}`;
-			}
-		});
-	}
-
-	// If still no model, try settings default.
-	// Skip settings fallback when an explicit model was requested.
-	if (!hasExplicitModel && !model && defaultRoleSpec.model) {
-		const settingsDefaultModel = defaultRoleSpec.model;
-		logger.time("resolveSettingsDefaultModel", () => {
-			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
-			// so re-validating auth here just repeats the expensive lookup path.
-			model = settingsDefaultModel;
-		});
-	}
-
-	const taskDepth = options.taskDepth ?? 0;
-
-	// Resolves the session/agent thinking level using the same precedence we
-	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
-	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
-		let level = options.thinkingLevel;
-		if (level === undefined && hasExistingSession && hasThinkingEntry) {
-			level =
-				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
-				parseThinkingLevel(existingSession.thinkingLevel);
-		}
-		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
-			level = restoredSessionThinkingLevel;
-		}
-		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
-			level = defaultRoleSpec.thinkingLevel;
-		}
-		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
-			level = selectedModel.thinking.defaultLevel;
-		}
-		if (level === undefined) {
-			level = parseConfiguredThinkingLevel(settings.get("defaultThinkingLevel"));
-		}
-		return level;
-	};
-	let thinkingLevel = pickInitialThinkingLevel(model);
-	let autoThinking = thinkingLevel === AUTO_THINKING;
-	// Concrete level the agent/session start with. With `auto` this is the
-	// provisional level shown until the first per-turn classification resolves;
-	// `auto` itself stays a session-only concept handled by AgentSession.
-	let effectiveThinkingLevel: ThinkingLevel | undefined = concreteThinkingLevel(thinkingLevel);
-	if (model) {
-		const resolvedModel = model;
-		effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-			autoThinking
-				? resolveProvisionalAutoLevel(resolvedModel)
-				: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
-		);
-		// Fire-and-forget TLS+H2 handshake to the model's host so it overlaps
-		// with the rest of session setup (extension/skill load, tool registry,
-		// system prompt build). Without this, the first `fetch(...)` pays the
-		// full handshake serially — 100–300 ms transcontinental for
-		// api.anthropic.com from a residential IP. Every mode benefits
-		// (interactive, print, rpc, acp).
-		preconnectModelHost(model.baseUrl);
-	}
-
-	let skills: Skill[];
-	let skillWarnings: SkillWarning[];
-	if (options.skills !== undefined) {
-		skills = options.skills;
-		skillWarnings = [];
-	} else {
-		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
-		skills = discovered.skills;
-		skillWarnings = discovered.warnings;
-	}
-
-	// Agent identity must resolve before rule discovery: `agents` frontmatter decides
-	// which rules are bucketed into this session at all.
-	const isSubagentSession = (options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix);
-	const agentKind: AgentKind = isSubagentSession ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME;
-	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
-
-	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
-
-	// Resolve contextFiles up-front (it's needed before tool creation). The
-	// workspace tree scan is slow on large repos and we MUST NOT block startup on
-	// it. On timeout we forward `undefined` to ToolSession; buildSystemPromptInternal
-	// will re-race the same promise through its own withDeadline path. Background
-	// work continues so caches still warm.
-	const raceWithDeadline = async <T>(name: string, work: Promise<T>): Promise<T | undefined> => {
-		let timedOut = false;
-		const result = await Promise.race([
-			work,
-			Bun.sleep(STARTUP_SCAN_DEADLINE_MS).then(() => {
-				timedOut = true;
-				return undefined;
-			}),
-		]);
-		if (timedOut) {
-			logger.warn("Startup scan exceeded deadline; deferring to system prompt fallback", {
-				name,
-				timeoutMs: STARTUP_SCAN_DEADLINE_MS,
-				cwd,
-			});
-		}
-		return result;
-	};
-	const [initialContextFiles, resolvedWorkspaceTree, watchdogFiles, initialActiveRepoContext, discoveredAdvisors] =
-		await Promise.all([
-			contextFilesPromise,
-			raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
-			watchdogFilesPromise,
-			activeRepoContextPromise,
-			advisorConfigsPromise,
-		]);
-	let contextFiles = initialContextFiles;
-
+	let unsubscribeCredentialDisabled: (() => void) | undefined;
 	let agent: Agent;
 	let session!: AgentSession;
 	let hasSession = false;
 	let hasRegistered = false;
-	const restrictToolNames = options.restrictToolNames === true;
-	const enableLsp = options.enableLsp ?? !restrictToolNames;
-	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
-	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
-	// Only the first top-level session in a process owns an AsyncJobManager.
-	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
-	// (set below), and any additional top-level session spun up in-process
-	// (e.g. the agent-creation architect in `agents-hub.ts`) must share
-	// the live singleton — otherwise its dispose path would clobber the
-	// owning session's manager and break the `task`/`bash` async paths
-	// (issue #1923). The `instance()` guard means later sessions also skip
-	// constructing an orphaned manager that nothing would ever route to.
-	// Delivery is owner-routed: every AgentSession registers its own sink
-	// (see session/async-job-delivery.ts), so the manager takes no default
-	// onJobComplete here.
-	const asyncJobManager =
-		!options.parentTaskPrefix && !AsyncJobManager.instance()
-			? new AsyncJobManager({ maxRunningJobs: asyncMaxJobs })
-			: undefined;
-
-	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
-
+	let asyncJobManager: AsyncJobManager | undefined;
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	const resolvedAgentDisplayName = options.agentDisplayName ?? agentKind;
 	let registeredAgentRef: AgentRef | undefined;
-	/**
-	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
-	 * Parking disposes the session but keeps the ref addressable (history://,
-	 * revive); a hard kill leaves it as a terminal `aborted` tombstone. Both are
-	 * detached (session === null) by the time dispose runs, per the AgentRef
-	 * invariant, so preserving them never keeps a disposed session reachable — an
-	 * aborted ref that still holds a live session is a bug and is unregistered
-	 * rather than handed to ensureLive. Only process teardown / a plain release
-	 * unregisters.
-	 */
+	/** Preserve retained terminal refs, but release live session ownership on failure. */
 	const unregisterUnlessParked = (): void => {
 		const ref = registeredAgentRef;
 		if (!ref || agentRegistry.get(resolvedAgentId) !== ref) return;
@@ -1783,6 +1394,389 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
 
 	try {
+		unsubscribeCredentialDisabled = authStorage.onCredentialDisabled(event => {
+			if (credentialDisabledNoticeTarget) {
+				credentialDisabledNoticeTarget.announceCredentialDisabled(event);
+			} else {
+				startupCredentialDisabledEvents.push(event);
+			}
+			if (credentialDisabledTarget) {
+				// Discard return: any handler error is routed through runner.onError listeners.
+				void credentialDisabledTarget.emitCredentialDisabled(event);
+			}
+		});
+		await modelRegistry.hydrateCredentialScopedModelCaches();
+		if (!options.modelRegistry) {
+			modelRegistry.refreshInBackground();
+		}
+		// Kick off workspace tree discovery early. The native workspace scan returns
+		// both the rendered-tree input and the AGENTS.md directory-context index, so
+		// startup does not perform a second recursive filesystem search. Subagents
+		// inherit the parent's resolved values via options.
+		const STARTUP_SCAN_DEADLINE_MS = 5000;
+		const includeStartupWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		const workspaceTreePromise: Promise<WorkspaceTree> = options.workspaceTree
+			? Promise.resolve(options.workspaceTree)
+			: includeStartupWorkspaceTree
+				? logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
+				: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] });
+		workspaceTreePromise.catch(() => {});
+
+		// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
+		// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
+		// session-context build, tool creation, MCP discovery, and extension discovery.
+		const contextFilesPromise = options.contextFiles
+			? Promise.resolve(options.contextFiles)
+			: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		contextFilesPromise.catch(() => {});
+		const resolveRepoContext = async (repoCwd: string) => {
+			try {
+				return await resolveActiveRepoContext(repoCwd);
+			} catch (err) {
+				logger.debug("Failed to resolve active repo context", { err: String(err) });
+				return null;
+			}
+		};
+		const activeRepoContextPromise = logger.time("resolveActiveRepoContext", resolveRepoContext, cwd);
+		activeRepoContextPromise.catch(() => {});
+		const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
+		watchdogFilesPromise.catch(() => {});
+		const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
+		advisorConfigsPromise.catch(() => {});
+		const promptTemplatesPromise = options.promptTemplates
+			? Promise.resolve(options.promptTemplates)
+			: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
+		promptTemplatesPromise.catch(() => {});
+		const slashCommandsPromise = options.slashCommands
+			? Promise.resolve(options.slashCommands)
+			: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
+		slashCommandsPromise.catch(() => {});
+		const customCommandsPromise =
+			options.disableExtensionDiscovery || options.restrictToolNames === true
+				? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
+				: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
+		customCommandsPromise.catch(() => {});
+		const skillsSettings = settings.getGroup("skills");
+		const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
+		const discoveredSkillsPromise =
+			options.skills === undefined
+				? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
+						...skillsSettings,
+						disabledExtensions: disabledExtensionIds,
+					})
+				: undefined;
+		discoveredSkillsPromise?.catch(() => {});
+
+		// Initialize provider preferences from settings
+		applyProviderGlobalsFromSettings(settings);
+
+		const sessionManager =
+			options.sessionManager ??
+			logger.time("sessionManager", () =>
+				SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
+			);
+		const configuredDirs = options.additionalDirectories
+			? options.additionalDirectories
+			: settings.get("workspace.additionalDirectories");
+		if (configuredDirs.length > 0) {
+			// Merge with any roots restored from the session header (resume/fork), not replace.
+			const existing = sessionManager.getAdditionalDirectories();
+			const merged = [...new Set([...existing, ...configuredDirs])];
+			await sessionManager.setAdditionalDirectories(merged);
+		}
+		const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+		const forkCacheShapeChanged =
+			options.model !== undefined ||
+			options.modelPattern !== undefined ||
+			options.thinkingLevel !== undefined ||
+			options.systemPrompt !== undefined ||
+			options.customSystemPrompt !== undefined ||
+			options.appendSystemPrompt !== undefined ||
+			options.toolNames !== undefined ||
+			options.customTools !== undefined;
+		const inheritedPromptCacheKey = forkCacheShapeChanged
+			? undefined
+			: sessionManager.getHeader()?.providerPromptCacheKey;
+		const providerPromptCacheKey = options.providerPromptCacheKey ?? inheritedPromptCacheKey;
+		const providerPromptCacheKeySource =
+			options.providerPromptCacheKey !== undefined
+				? (options.providerPromptCacheKeySource ?? "explicit")
+				: providerPromptCacheKey !== undefined
+					? "fork"
+					: undefined;
+		// Startup model *selection* only needs to know whether auth is configured for
+		// a candidate's provider — never the resolved key bytes. Use the synchronous,
+		// side-effect-free probe (`hasConfiguredAuth`): it refreshes no OAuth tokens,
+		// executes no `!command` keys, and issues no auth-broker requests. Resolving the
+		// real key here (`getApiKey`) blocks resume on those network paths — a slow or
+		// unreachable OAuth/broker endpoint stalls startup for the full ~10s refresh
+		// timeout per candidate (observed as a hang in `restoreSessionModel`). The real
+		// key is resolved lazily per request via ModelRegistry.resolver.
+		const hasModelAuth = (candidate: Model): boolean => modelRegistry.hasConfiguredAuth(candidate);
+
+		// Load and create secret obfuscator early so resumed session state and prompt warnings
+		// reflect actual loaded secrets, not just the setting toggle.
+		const obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
+			? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
+			: undefined;
+		const secretsEnabled = obfuscator?.hasSecrets() === true;
+
+		// An abnormal process exit after a non-terminal message tail is durable
+		// evidence that the old process can no longer finish that turn. Preserve the
+		// partial transcript and append one terminal aborted assistant record before
+		// rebuilding runtime context. The helper is idempotent once that record exists.
+		let existingBranch = logger.time("getSessionBranch", () => sessionManager.getBranch());
+		const interruptedTurnAbort = createInterruptedTurnAbortMessage(existingBranch);
+		if (interruptedTurnAbort) {
+			sessionManager.appendMessage(interruptedTurnAbort);
+			existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
+		}
+		let existingSession = logger.time("loadSessionContext", () =>
+			deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
+		);
+		const hasExistingSession = existingBranch.length > 0;
+		const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
+		const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
+
+		const deferredModelPatterns = Array.isArray(options.modelPattern)
+			? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
+			: options.modelPattern?.trim()
+				? [options.modelPattern.trim()]
+				: [];
+		const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
+		const modelMatchPreferences = getModelMatchPreferences(settings);
+		const defaultRoleValue = settings.getModelRole("default");
+		let explicitDefaultProviders: Set<string> | undefined;
+		if ((settings.get("enabledModels")?.length ?? 0) === 0) {
+			const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
+			if (patterns && patterns.length > 0) {
+				const providers = new Set<string>();
+				for (const pattern of patterns) {
+					const slash = pattern.indexOf("/");
+					const provider = slash > 0 ? pattern.slice(0, slash).trim() : "";
+					if (!provider || /[*?[\]{}]/.test(provider)) {
+						providers.clear();
+						break;
+					}
+					providers.add(provider);
+				}
+				if (providers.size > 0) explicitDefaultProviders = providers;
+			}
+		}
+		const allowedModels = await logger.time("resolveAllowedModels", () =>
+			explicitDefaultProviders
+				? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
+				: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
+		);
+		let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
+			resolveModelRoleValue(defaultRoleValue, allowedModels, {
+				settings,
+				matchPreferences: modelMatchPreferences,
+			}),
+		);
+		let model = options.model;
+		let modelFallbackMessage: string | undefined;
+		let initialRetryFallback: InitialRetryFallbackState | undefined;
+		// Identify session model strings to restore in fallback order. We do an
+		// initial pass here so model-dependent setup (thinking-level resolution,
+		// host preconnect) can use the restored model; extension-registered
+		// providers aren't visible yet, so we retry the preferred candidates once
+		// extensions register below.
+		const sessionModelStrings =
+			!hasExplicitModel && hasExistingSession
+				? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
+				: [];
+		let restoredSessionModelIndex = -1;
+		let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+		if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
+			logger.time("restoreSessionModel", () => {
+				let failedSessionModel: string | undefined;
+				for (let i = 0; i < sessionModelStrings.length; i++) {
+					const sessionModelStr = sessionModelStrings[i];
+					const parsedModel = parseModelString(sessionModelStr, {
+						allowMaxSuffix: true,
+						allowAutoAlias: true,
+						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+					});
+					if (!parsedModel) {
+						failedSessionModel ??= sessionModelStr;
+						continue;
+					}
+
+					const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
+					if (restoredModel && hasModelAuth(restoredModel)) {
+						model = restoredModel;
+						restoredSessionModelIndex = i;
+						restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+						break;
+					}
+					failedSessionModel ??= sessionModelStr;
+				}
+				if (failedSessionModel) {
+					modelFallbackMessage = `Could not restore model ${failedSessionModel}`;
+				}
+			});
+		}
+
+		// If still no model, try settings default.
+		// Skip settings fallback when an explicit model was requested.
+		if (!hasExplicitModel && !model && defaultRoleSpec.model) {
+			const settingsDefaultModel = defaultRoleSpec.model;
+			logger.time("resolveSettingsDefaultModel", () => {
+				// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
+				// so re-validating auth here just repeats the expensive lookup path.
+				model = settingsDefaultModel;
+			});
+		}
+
+		const taskDepth = options.taskDepth ?? 0;
+
+		// Resolves the session/agent thinking level using the same precedence we
+		// apply at startup: explicit option → persisted session entry → restored
+		// model selector suffix → default role's explicit selector → selected
+		// model's defaultLevel → global settings default. Run again after extension
+		// role reclaim so the final model's own defaults aren't masked by an earlier
+		// fallback model's.
+		const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
+			let level = options.thinkingLevel;
+			if (level === undefined && hasExistingSession && hasThinkingEntry) {
+				level =
+					parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
+					parseThinkingLevel(existingSession.thinkingLevel);
+			}
+			if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
+				level = restoredSessionThinkingLevel;
+			}
+			if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
+				level = defaultRoleSpec.thinkingLevel;
+			}
+			if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
+				level = selectedModel.thinking.defaultLevel;
+			}
+			if (level === undefined) {
+				level = parseConfiguredThinkingLevel(settings.get("defaultThinkingLevel"));
+			}
+			return level;
+		};
+		let thinkingLevel = pickInitialThinkingLevel(model);
+		let autoThinking = thinkingLevel === AUTO_THINKING;
+		// Concrete level the agent/session start with. With `auto` this is the
+		// provisional level shown until the first per-turn classification resolves;
+		// `auto` itself stays a session-only concept handled by AgentSession.
+		let effectiveThinkingLevel: ThinkingLevel | undefined = concreteThinkingLevel(thinkingLevel);
+		if (model) {
+			const resolvedModel = model;
+			effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+				autoThinking
+					? resolveProvisionalAutoLevel(resolvedModel)
+					: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
+			);
+			// Fire-and-forget TLS+H2 handshake to the model's host so it overlaps
+			// with the rest of session setup (extension/skill load, tool registry,
+			// system prompt build). Without this, the first `fetch(...)` pays the
+			// full handshake serially — 100–300 ms transcontinental for
+			// api.anthropic.com from a residential IP. Every mode benefits
+			// (interactive, print, rpc, acp).
+			preconnectModelHost(model.baseUrl);
+		}
+
+		let skills: Skill[];
+		let skillWarnings: SkillWarning[];
+		if (options.skills !== undefined) {
+			skills = options.skills;
+			skillWarnings = [];
+		} else {
+			const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
+			skills = discovered.skills;
+			skillWarnings = discovered.warnings;
+		}
+
+		// Agent identity must resolve before rule discovery: `agents` frontmatter decides
+		// which rules are bucketed into this session at all.
+		const isSubagentSession = (options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix);
+		const agentKind: AgentKind = isSubagentSession ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME;
+		const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
+
+		// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
+		const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
+			"discoverTtsrRules",
+			async () => {
+				const { TtsrManager } = await import("./export/ttsr");
+				const ttsrSettings = settings.getGroup("ttsr");
+				const ttsrManager = new TtsrManager(ttsrSettings);
+				const rulesResult =
+					options.rules !== undefined
+						? { items: options.rules, warnings: undefined }
+						: await loadCapability<Rule>(ruleCapability.id, { cwd });
+				const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+					builtinRules: ttsrSettings.builtinRules,
+					disabledRules: ttsrSettings.disabledRules,
+					agentName: resolvedAgentName,
+				});
+				if (existingSession.injectedTtsrRules.length > 0) {
+					ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+				}
+				return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+			},
+		);
+
+		// Resolve contextFiles up-front (it's needed before tool creation). The
+		// workspace tree scan is slow on large repos and we MUST NOT block startup on
+		// it. On timeout we forward `undefined` to ToolSession; buildSystemPromptInternal
+		// will re-race the same promise through its own withDeadline path. Background
+		// work continues so caches still warm.
+		const raceWithDeadline = async <T>(name: string, work: Promise<T>): Promise<T | undefined> => {
+			let timedOut = false;
+			const result = await Promise.race([
+				work,
+				Bun.sleep(STARTUP_SCAN_DEADLINE_MS).then(() => {
+					timedOut = true;
+					return undefined;
+				}),
+			]);
+			if (timedOut) {
+				logger.warn("Startup scan exceeded deadline; deferring to system prompt fallback", {
+					name,
+					timeoutMs: STARTUP_SCAN_DEADLINE_MS,
+					cwd,
+				});
+			}
+			return result;
+		};
+		const [initialContextFiles, resolvedWorkspaceTree, watchdogFiles, initialActiveRepoContext, discoveredAdvisors] =
+			await Promise.all([
+				contextFilesPromise,
+				raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
+				watchdogFilesPromise,
+				activeRepoContextPromise,
+				advisorConfigsPromise,
+			]);
+		let contextFiles = initialContextFiles;
+
+		const restrictToolNames = options.restrictToolNames === true;
+		const enableLsp = options.enableLsp ?? !restrictToolNames;
+		const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
+		const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
+		// Only the first top-level session in a process owns an AsyncJobManager.
+		// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
+		// (set below), and any additional top-level session spun up in-process
+		// (e.g. the agent-creation architect in `agents-hub.ts`) must share
+		// the live singleton — otherwise its dispose path would clobber the
+		// owning session's manager and break the `task`/`bash` async paths
+		// (issue #1923). The `instance()` guard means later sessions also skip
+		// constructing an orphaned manager that nothing would ever route to.
+		// Delivery is owner-routed: every AgentSession registers its own sink
+		// (see session/async-job-delivery.ts), so the manager takes no default
+		// onJobComplete here.
+		asyncJobManager =
+			!options.parentTaskPrefix && !AsyncJobManager.instance()
+				? new AsyncJobManager({ maxRunningJobs: asyncMaxJobs })
+				: undefined;
+
+		const scopedAsyncJobManager =
+			asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
+
+		const resolvedAgentDisplayName = options.agentDisplayName ?? agentKind;
 		const getActiveModelString = (): string | undefined => {
 			const activeModel = agent?.state.model;
 			if (activeModel) return formatModelString(activeModel);

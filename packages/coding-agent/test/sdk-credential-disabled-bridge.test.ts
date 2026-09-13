@@ -17,6 +17,7 @@ import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extens
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { withEnv } from "../../ai/test/helpers";
 
 interface SessionDirs {
 	cwd: string;
@@ -432,6 +433,138 @@ describe("createAgentSession credential_disabled subscription", () => {
 			}
 		},
 	);
+
+	it("releases the subscription when initialization fails before tool startup", async () => {
+		const dirs = makeDirs("early-startup-failure");
+		const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(path.join(dirs.agentDir, "agent.db"));
+		store.listDisabledCredentials = undefined;
+		const authStorage = new AuthStorage(store);
+		const options = baseOptions(dirs, authStorage);
+		vi.spyOn(options.modelRegistry, "hydrateCredentialScopedModelCaches").mockRejectedValueOnce(
+			new Error("early initialization failed"),
+		);
+		try {
+			await expect(createAgentSession(options)).rejects.toThrow("early initialization failed");
+			failOAuthRefresh();
+			await authStorage.set("anthropic", [expiredOAuth()]);
+			await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+				await authStorage.getApiKey("anthropic", "after-early-failure");
+			});
+			// No tombstone endpoint: an orphan listener would consume the disable
+			// instead of allowing AuthStorage to buffer it for the next session.
+			const { session } = await createAgentSession(options);
+			try {
+				const notices = await session.getDisabledCredentialNotices();
+				expect(notices).toHaveLength(1);
+				expect(notices[0]).toContain("signed-out@example.com");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it.each(["missing", "mixed"] as const)(
+		"caps %s stored and retained sign-outs together, newest first",
+		async tombstones => {
+			const dirs = makeDirs("replay-cap");
+			const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(path.join(dirs.agentDir, "agent.db"));
+			if (tombstones === "missing") store.listDisabledCredentials = undefined;
+			// An embedder consumes pre-session events; only tombstones can replay them.
+			const authStorage = new AuthStorage(store, { onCredentialDisabled: () => {} });
+			failOAuthRefresh();
+			const disable = async (index: number): Promise<void> => {
+				await authStorage.set("anthropic", [{ ...expiredOAuth(), email: "account" + index + "@example.com" }]);
+				await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+					await authStorage.getApiKey("anthropic", "cap-" + index);
+				});
+			};
+			if (tombstones === "mixed") {
+				for (let index = 1; index <= 6; index++) await disable(index);
+			}
+			const { session } = await createAgentSession(baseOptions(dirs, authStorage));
+			try {
+				for (let index = tombstones === "mixed" ? 7 : 1; index <= 12; index++) await disable(index);
+				if (tombstones === "mixed") {
+					const list = authStorage.listActionableDisabledCredentials.bind(authStorage);
+					const nowMs = Date.now();
+					vi.spyOn(authStorage, "listActionableDisabledCredentials").mockImplementation(async (...args) =>
+						(await list(...args)).flatMap(summary => {
+							const index = Number(summary.email?.match(/^account(\d+)@/)?.[1]);
+							return index <= 9 ? [{ ...summary, disabledAtMs: nowMs - (13 - index) * 1_000 }] : [];
+						}),
+					);
+				}
+				const mark = session.disabledCredentialNoticeMark;
+				const live: string[] = [];
+				const unsubscribe = session.subscribe(event => {
+					if (event.type === "notice" && event.source === "auth") live.push(event.message);
+				});
+				try {
+					await disable(13);
+					const notices = await session.getDisabledCredentialNotices({ announcedAfter: mark });
+					expect(live).toHaveLength(1);
+					expect(live[0]).toContain("account13@example.com");
+					expect(notices).toHaveLength(9);
+					for (let index = 0; index < 8; index++) {
+						expect(notices[index]).toContain("account" + (12 - index) + "@example.com");
+					}
+					expect(notices[8]).toContain("4 more signed-out accounts");
+				} finally {
+					unsubscribe();
+				}
+			} finally {
+				await session.dispose();
+				authStorage.close();
+			}
+		},
+	);
+
+	it("rechecks stored notices when fallback recovery observes a newer sibling login", async () => {
+		const dirs = makeDirs("mixed-recovery");
+		const databasePath = path.join(dirs.agentDir, "agent.db");
+		const authStorage = await AuthStorage.create(databasePath, { onCredentialDisabled: () => {} });
+		failOAuthRefresh();
+		const disable = async (email: string): Promise<void> => {
+			await authStorage.set("anthropic", [{ ...expiredOAuth(), email }]);
+			await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+				await authStorage.getApiKey("anthropic", email);
+			});
+		};
+		await disable("stored@example.com");
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage));
+		const sibling = await AuthStorage.create(databasePath);
+		try {
+			await disable("retained@example.com");
+			const list = authStorage.listActionableDisabledCredentials.bind(authStorage);
+			vi.spyOn(authStorage, "listActionableDisabledCredentials").mockImplementation(async (...args) =>
+				(await list(...args)).filter(summary => summary.email === "stored@example.com"),
+			);
+			const revalidate = authStorage.revalidateCredentials.bind(authStorage);
+			vi.spyOn(authStorage, "revalidateCredentials")
+				.mockImplementationOnce(revalidate)
+				.mockImplementationOnce(async signal => {
+					// A was actionable during tombstone lookup; the refresh needed
+					// for fallback B is the first one that observes A's recovery.
+					await sibling.set("anthropic", [
+						{
+							...expiredOAuth(),
+							email: "stored@example.com",
+							expires: Date.now() + 3_600_000,
+						},
+					]);
+					await revalidate(signal);
+				});
+			const notices = await session.getDisabledCredentialNotices();
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("retained@example.com");
+		} finally {
+			await session.dispose();
+			sibling.close();
+			authStorage.close();
+		}
+	});
 
 	it("releases the session subscription if createAgentSession throws mid-startup", async () => {
 		const dirs = makeDirs("startup-failure");
