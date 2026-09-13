@@ -98,6 +98,16 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
+	test("treats a malformed tools value as absent rather than an empty toolset", () => {
+		// Only the `[]` literal means "present but empty". A blank CSV or an
+		// array holding no strings carries no tool names, so it must degrade to
+		// the absent-field default (unrestricted); parsing it as `[]` would
+		// silently strip every tool down to `yield`.
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "" })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "   " })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [1, 2] })?.tools).toBeUndefined();
+	});
+
 	test("maps legacy search and find tool names", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",

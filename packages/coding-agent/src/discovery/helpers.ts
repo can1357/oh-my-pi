@@ -191,19 +191,19 @@ export function parseCSV(value: string): string[] {
 /**
  * Parse a value that may be an array of strings or a comma-separated string.
  * Returns undefined if the result would be empty, unless `options.keepEmpty`
- * preserves an explicitly empty value as `[]` (fields where "present but
- * empty" is distinct from absent; a CSV string yields `[]` only when every
- * entry is blank or the string is empty).
+ * preserves the explicit `[]` literal as `[]` (fields where "present but
+ * empty" is distinct from absent). Only `[]` counts as explicit: a blank or
+ * non-string CSV yields undefined, so a malformed value degrades to the
+ * field's "absent" behavior instead of silently becoming an empty list.
  */
 export function parseArrayOrCSV(value: unknown, options?: { keepEmpty?: boolean }): string[] | undefined {
-	let parsed: string[] | undefined;
-	if (Array.isArray(value)) {
-		parsed = value.filter((item): item is string => typeof item === "string");
-	} else if (typeof value === "string") {
-		parsed = parseCSV(value);
-	}
-	if (!parsed) return undefined;
-	return options?.keepEmpty || parsed.length > 0 ? parsed : undefined;
+	const parsed = Array.isArray(value)
+		? value.filter((item): item is string => typeof item === "string")
+		: typeof value === "string"
+			? parseCSV(value)
+			: undefined;
+	if (!parsed || parsed.length > 0) return parsed;
+	return options?.keepEmpty && Array.isArray(value) && value.length === 0 ? parsed : undefined;
 }
 
 interface RuleMarkdownOptions {
