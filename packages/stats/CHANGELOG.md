@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added a redesigned /stats overview: an instrument-panel layout with per-section show/hide (localStorage persistence + presets), a `today` range anchored to local midnight with hourly buckets, and correct day/bucket accounting across DST transitions.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed
