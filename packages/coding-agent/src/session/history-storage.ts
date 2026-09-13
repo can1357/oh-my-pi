@@ -120,8 +120,10 @@ export class HistoryStorage {
 	#stmts = new Map<string, Statement>();
 	// Directory scopes resolve stored `cwd` spellings per read. Repository topology and stored
 	// spellings can change while the process runs (a nested `git init`, a moved worktree, a new
-	// prompt), so every memo is dropped on every write and rebuilt by the next read. `cwd` needs
-	// only the physical spelling; the repository root is resolved on demand, for `repo` only.
+	// prompt from another session), so every memo is dropped on any write: ours in `#insertBatch`,
+	// or another connection's commit, seen through `PRAGMA data_version`. A change that commits
+	// nothing — a bare `git init` run by another process — stays invisible until the next write.
+	// `cwd` needs only the physical spelling; the repository root is resolved on demand, `repo` only.
 	#physicalByStored = new Map<string, string>();
 	#rootByPhysical = new Map<string, string>();
 	#dirsByTarget = new Map<string, string[]>();
@@ -459,12 +461,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * `cwd` holds the raw submission directory, so neither a plain equality nor a path prefix
 	 * works: a subdirectory or a linked worktree shares only its primary root with the
 	 * repository, and the same directory can be stored under two spellings (a symlinked
-	 * checkout keeps its symlink spelling, since `setProjectDir` resolves lexically). Rows are
-	 * therefore resolved per read, comparing normalized spellings on both sides.
+	 * checkout keeps its symlink spelling, since `setProjectDir` resolves lexically). Each read
+	 * therefore filters the stored set, comparing normalized spellings on both sides — off the
+	 * memo described above, which the next write rebuilds.
 	 */
 	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
 		if (!target) return [];
-		this.#dropDirSetsIfExternallyChanged();
+		this.#dropMemosIfExternallyChanged();
 		const normalized = normalizePathForComparison(target);
 		const cacheKey = `${kind}\u0000${normalized}`;
 		const cached = this.#dirsByTarget.get(cacheKey);
@@ -492,17 +495,21 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Drop the stored-directory memo when another process committed to the shared database.
+	 * Drop every scope memo when another process committed to the shared database.
 	 *
 	 * `PRAGMA data_version` moves only for foreign commits, so this complements — never replaces
-	 * — the unconditional clear in `#insertBatch`, which covers our own writes. Only the
-	 * directory list depends on the row set; the path-derived memos describe the filesystem and
-	 * are deliberately left alone, since rebuilding them costs an order of magnitude more.
+	 * — the unconditional clear in `#insertBatch`, which covers our own writes. All three memos
+	 * go: a commit by another process is the only signal that both the stored set and the tree it
+	 * was resolved against may have moved, and one rebuild per foreign commit — measured 1-4 ms
+	 * for 73 stored directories against ~0.4 ms memoized — is cheaper than serving a scope that
+	 * another process just changed.
 	 */
-	#dropDirSetsIfExternallyChanged(): void {
+	#dropMemosIfExternallyChanged(): void {
 		const version = this.#readDataVersion();
 		if (version === this.#dataVersion) return;
 		this.#dataVersion = version;
+		this.#physicalByStored.clear();
+		this.#rootByPhysical.clear();
 		this.#dirsByTarget.clear();
 	}
 

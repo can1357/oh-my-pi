@@ -128,6 +128,19 @@ describe("HistoryStorage scope filtering", () => {
 		expect(storage.getRecent(100, { kind: "repo", value: emptyRepo })).toEqual([]);
 	});
 
+	it("reads nothing for a scope kind it does not recognize, never the whole history", async () => {
+		const dir = tempDir!;
+		const fixtures = createFixtures(dir.path());
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
+
+		// A kind outside the union reaches storage only from a caller that bypassed the resolver;
+		// answering it with the full table would leak every project.
+		const unknown = { kind: "nonsense" } as unknown as HistoryScope;
+		expect(storage.getRecent(100, unknown)).toEqual([]);
+		expect(storage.search("deploy", 100, unknown)).toEqual([]);
+	});
+
 	it("keeps a stored directory outside any repository readable and scoped to itself", async () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
@@ -256,6 +269,32 @@ describe("HistoryStorage scope filtering", () => {
 		);
 		expect(new Set(promptsOf(storage, { kind: "cwd", value: fixtures.repoA }))).toEqual(
 			new Set(["gamma external link", "alpha local"]),
+		);
+	});
+
+	it("re-resolves repository roots after another connection commits", async () => {
+		const dir = tempDir!;
+		const outer = dir.join("outer");
+		const inner = path.join(outer, "inner");
+		fs.mkdirSync(inner, { recursive: true });
+		runGit(outer, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("alpha inner", inner, "s1");
+		// Warm the cached root of `inner`: inside outer's repository.
+		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual(["alpha inner"]);
+
+		// Another process makes `inner` its own repository and commits a row, with no local write.
+		runGit(inner, "init", "--quiet");
+		const external = new Database(dir.join("history.db"));
+		external
+			.prepare("INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, strftime('%s','now'), ?, ?)")
+			.run("beta inner", inner, "s2");
+		external.close();
+
+		// The cached root must not keep claiming outer: `inner` left that repository.
+		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
+		expect(new Set(promptsOf(storage, { kind: "repo", value: inner }))).toEqual(
+			new Set(["beta inner", "alpha inner"]),
 		);
 	});
 
