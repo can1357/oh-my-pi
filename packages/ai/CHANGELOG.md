@@ -90,6 +90,7 @@
 ### Fixed
 
 - 400-request debug dumps now redact provider-specific auth headers (`x-goog-api-key`, `x-amz-security-token`, and any header whose name carries a key/token/secret), not just a fixed allow-list, so a shared dump can no longer leak a live API key ([#12007](https://github.com/can1357/oh-my-pi/issues/12007)).
+- Fixed google-antigravity agent requests failing with a synthetic 429 RESOURCE_EXHAUSTED by adding a channel-level fallback to fold system instructions into user turns and dynamic nonce tagging to avoid server-side prompt fingerprinting ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
 
 ## [18.1.20] - 2026-09-13
 
