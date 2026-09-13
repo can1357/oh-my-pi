@@ -304,7 +304,7 @@ const ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX = 8;
  * emoji count double) and cut at a code point, never inside a surrogate pair.
  */
 function boundedDiagnostic(text: string, maxColumns: number): string {
-	const clean = sanitizeText(text).replace(/\s+/g, " ").trim();
+	const clean = sanitizeText(redactSecrets(text)).replace(/\s+/g, " ").trim();
 	if (Bun.stringWidth(clean) <= maxColumns) return clean;
 	let kept = "";
 	let width = 0;

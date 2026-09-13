@@ -621,6 +621,27 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		).toBe("daybreak-denied");
 	});
 
+	test("Cursor entitlement output redacts echoed secrets before bounding", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await storage.set(CURSOR_PROVIDER, [
+			{ type: "oauth", access: "cursor-only", refresh: "ref", expires: farExpiry(), email: "cursor@example.com" },
+		]);
+		const error = new Error("refresh_token=opaque-secret; " + CURSOR_PLAN_DENIAL);
+		await storage.rotateSessionCredential(CURSOR_PROVIDER, "cursor-secret", {
+			error,
+			modelId: CURSOR_MODEL,
+			apiKey: "cursor-only",
+		});
+		const verdict = await storage.modelEntitlementError(CURSOR_PROVIDER, CURSOR_MODEL, error, {
+			apiKey: "cursor-only",
+		});
+		if (!verdict) throw new Error("Expected exhausted verdict");
+		expect(verdict.message).not.toContain("opaque-secret");
+		expect(verdict.provider).toBe(CURSOR_PROVIDER);
+		expect(verdict.message).toContain("/login cursor");
+	});
+
 	test("Cursor plan denial blocks only that model and rotates to a sibling", async () => {
 		if (!store) throw new Error("test setup failed");
 		const cursorStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
