@@ -903,6 +903,45 @@ describe("auth-broker wire surface", () => {
 			dummy.stop(true);
 		}
 	});
+
+	const removedEvent = JSON.stringify({
+		kind: "removed",
+		generation: 2,
+		serverNowMs: 0,
+		refresher: { enabled: false, intervalMs: 60_000, skewMs: 300_000, nextSweepInMs: 60_000 },
+		id: 1,
+	});
+	test.each([
+		["malformed JSON", "data: {not json\n\n", /malformed JSON/],
+		["a schema-invalid event", 'data: {"kind":"snapshot"}\n\n', /schema validation/],
+		["a non-snapshot first event", `data: ${removedEvent}\n\n`, /did not start with snapshot/],
+	])("openSnapshotStream classifies a 200 stream with %s as a response failure", async (_label, body, message) => {
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+		});
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			const iter = client.openSnapshotStream();
+			const error = await iter.next().catch(cause => cause);
+			expect(error).toBeInstanceOf(AuthBrokerError);
+			expect(error.message).toMatch(message);
+			// The broker answered; a transport classification would tell startup
+			// callers the broker is unreachable.
+			expect(error).toMatchObject({ status: 200, kind: "response" });
+		} finally {
+			dummy.stop(true);
+		}
+	});
+
+	test("AuthBrokerError derives kind from status unless given explicitly", () => {
+		expect(new AuthBrokerError("no response").kind).toBe("transport");
+		expect(new AuthBrokerError("rejected", { status: 401 }).kind).toBe("unauthorized");
+		expect(new AuthBrokerError("rejected", { status: 403 }).kind).toBe("unauthorized");
+		expect(new AuthBrokerError("unusable", { status: 503 }).kind).toBe("response");
+		expect(new AuthBrokerError("unusable", { kind: "response" }).kind).toBe("response");
+	});
 });
 
 describe("client_usage app column migration", () => {
