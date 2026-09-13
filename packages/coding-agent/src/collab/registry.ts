@@ -25,7 +25,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
-import { getBaseConfigRoot, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getBaseConfigRoot, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** Discovery metadata / IPC protocol version. Mixed omp versions fail safely. */
 export const COLLAB_REGISTRY_VERSION = 1;
@@ -640,8 +640,7 @@ async function listLiveEntries(options?: CollabListOptions): Promise<LiveEntry[]
 		names = await fs.promises.readdir(dir);
 	} catch (err) {
 		if (isEnoent(err)) return [];
-		logger.warn("Collab registry listing failed", { error: String(err) });
-		return [];
+		throw err;
 	}
 	const entries = names.filter(name => name.endsWith(".json")).sort();
 	const live: LiveEntry[] = [];

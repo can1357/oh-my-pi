@@ -144,6 +144,49 @@ afterEach(async () => {
 });
 
 describe("collab host registry lifecycle (#6099)", () => {
+	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
+		const { ctx, state } = makeHostContext();
+		const originalConnect = CollabSocket.prototype.connect;
+		let transport: CollabSocket | undefined;
+		const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			transport = this;
+			return originalConnect.call(this);
+		});
+		host = new CollabHost(ctx);
+		try {
+			await host.start(RELAY_URL, WEB_URL);
+		} finally {
+			capture.mockRestore();
+		}
+		if (!transport) throw new Error("host transport missing");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+		transport.onFrame!(
+			{
+				t: "hello",
+				proto: COLLAB_PROTO,
+				name: "writer",
+				writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+			},
+			1,
+		);
+		const send = spyOn(transport, "send");
+		try {
+			const abort = new AbortController();
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
+			expect(send.mock.calls.filter(([frame]) => frame.t === "ui-request")).toHaveLength(1);
+			const original = state.sessionId;
+			state.sessionId = "provisional";
+			send.mockClear();
+			abort.abort();
+			expect(await answer).toEqual({ kind: "unavailable" });
+			expect(send.mock.calls).toEqual([[{ t: "ui-request-end", reqId: 1 }, 1]]);
+			state.sessionId = original;
+			expect((await registry.listCollabHosts({ dir: tmp }))[0]?.inputRequired).toBe(false);
+		} finally {
+			send.mockRestore();
+		}
+	});
 	for (const transition of ["suspend", "stop", "fatal close"] as const) {
 		it(`closes guest traffic and deferred replies on ${transition}`, async () => {
 			const { ctx, state } = makeHostContext();

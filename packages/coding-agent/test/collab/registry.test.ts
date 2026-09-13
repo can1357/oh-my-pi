@@ -660,7 +660,7 @@ describe("collab registry", () => {
 			const link = path.join(await tempDir(), "collab-hosts");
 			await fs.symlink(target, link);
 
-			expect(await listCollabHosts({ dir: link })).toEqual([]);
+			await expect(listCollabHosts({ dir: link })).rejects.toThrow();
 			expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
 			await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
 			expect(await fs.readdir(target)).toEqual(["important.json"]);

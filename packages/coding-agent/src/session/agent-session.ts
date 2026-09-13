@@ -8044,6 +8044,9 @@ export class AgentSession {
 			// Fork the session (creates new session file with same entries)
 			let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
 			try {
+				// No file means fork() is a no-op. Otherwise invalidate admitted
+				// prompt setup before the asynchronous identity rewrite begins.
+				if (previousSessionFile) this.#promptGeneration++;
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
@@ -9452,6 +9455,8 @@ export class AgentSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				// Pending prompt setup belongs to the history being replaced.
+				this.#promptGeneration++;
 				if (!selectedEntry.parentId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -9584,6 +9589,9 @@ export class AgentSession {
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
+				// A prompt may have been admitted during the flush/drain awaits
+				// after the idle check. It still belongs to the pre-branch context.
+				this.#promptGeneration++;
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -9847,6 +9855,10 @@ export class AgentSession {
 			summaryText = hookSummary.summary;
 			summaryDetails = hookSummary.details;
 		}
+
+		// All cancellation/no-op exits are behind us. Invalidate prompt setup
+		// admitted on the abandoned branch before committing any tree changes.
+		this.#promptGeneration++;
 
 		// Determine the new leaf position based on target type
 		let newLeafId: string | null;

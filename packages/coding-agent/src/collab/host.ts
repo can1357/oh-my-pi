@@ -591,7 +591,10 @@ export class CollabHost {
 
 	/** Only outbound path; stop() deliberately bypasses it for the final goodbye. */
 	#send(frame: CollabFrame, toPeer = 0): void {
-		if (!this.#guestTrafficAllowed()) return;
+		// Ending an existing dialog contains only its old-room request ID, never
+		// current-session data. Do not strand guests if it settles during a
+		// provisional /resume that later rolls back. All other traffic stays gated.
+		if (this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end")) return;
 		this.#socket?.send(frame, toPeer);
 	}
 

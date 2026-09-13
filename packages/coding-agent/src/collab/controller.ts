@@ -100,10 +100,27 @@ export class CollabController {
 	 * control is requested.
 	 */
 	async start(options: CollabStartOptions): Promise<CollabHost> {
+		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		const existing = this.host;
 		if (existing && (existing.access === "control" || options.access === "view")) return existing;
-		if (existing) await existing.stop("restarting with control access");
-		return this.#launch(options.access, options.relay);
+		// Abort an in-flight view connection before queuing behind its startup.
+		const stopping = existing?.stop("restarting with control access");
+		const started = this.#ops.then(async () => {
+			await stopping;
+			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+			// A preceding manual start or rotation may have installed a room while
+			// this request waited. Reuse or upgrade it rather than racing its launch.
+			const current = this.host;
+			if (current && (current.access === "control" || options.access === "view")) return current;
+			if (current) await current.stop("restarting with control access");
+			return this.#launch(options.access, options.relay);
+		});
+		// Report manual failures to the caller without poisoning later rotations.
+		this.#ops = started.then(
+			() => {},
+			() => {},
+		);
+		return started;
 	}
 
 	/** Stop the current room; also awaits a stop that is already in flight. */

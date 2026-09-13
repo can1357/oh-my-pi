@@ -826,6 +826,62 @@ function makeAskHostContext(): InteractiveModeContext {
 	return stub as unknown as InteractiveModeContext;
 }
 
+describe("guest ask room ownership", () => {
+	it.each(["next question", "custom answer"])("does not mirror a %s to a successor room", async followup => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const successor = new CollabHost(ctx);
+		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		const abort = new AbortController();
+		const replaced = Promise.withResolvers<void>();
+		const requestGuestUi = host.requestGuestUi.bind(host);
+		const requestSpy = spyOn(host, "requestGuestUi").mockImplementation((request, signal) => {
+			const response = requestGuestUi(request, signal);
+			// Exercise the settled-answer / suspended-loop boundary. Ending the old
+			// room cannot change this already answered promise to unavailable.
+			void response?.then(() => {
+				void host.stop("replaced");
+				ctx.collabHost = successor;
+				replaced.resolve();
+			});
+			return response;
+		});
+		try {
+			expect((await guest.nextFrame()).t).toBe("welcome");
+			const questions: ExtensionAskDialogQuestion[] = [
+				{ id: "first", question: "Original room question?", options: [{ label: "Alpha" }] },
+			];
+			if (followup === "next question") {
+				questions.push({ id: "second", question: "Private next question?", options: [{ label: "Beta" }] });
+			}
+			const controller = new ExtensionUiController(ctx);
+			const result = controller.showAskDialog(questions, { signal: abort.signal });
+			const request = await guest.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			guest.socket.send({
+				t: "ui-response",
+				reqId: request.request.reqId,
+				value: followup === "next question" ? "Alpha" : "Other (type your own)",
+			});
+			await replaced.promise;
+			await Bun.sleep(0);
+			// Pending requests are replayed to the next writer even before start().
+			// The successor must have no retained question from the original ask.
+			expect(successor.inputRequired).toBe(false);
+			abort.abort();
+			expect(await result).toBeUndefined();
+		} finally {
+			abort.abort();
+			requestSpy.mockRestore();
+			guest.socket.close();
+			await host.stop("test done");
+			await successor.stop("test done");
+		}
+	});
+});
+
 describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () => {
 	/** Skip ui-request-end dismissal frames, wait for the next ui-request. */
 	async function nextUiRequest(guest: {

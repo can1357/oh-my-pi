@@ -86,6 +86,14 @@ function mockStartedHostLinks() {
 }
 
 describe("/collab slash command QR code rendering", () => {
+	it("status preserves a view-only room's published access", async () => {
+		const harness = createRuntimeHarness({ collabHost: fakeHost({ access: "view" }) });
+		await executeBuiltinSlashCommand("/collab status", harness.runtime);
+		const text = harness.showStatus.mock.calls[0]?.[0] as string;
+		expect(text).toContain("my.omp.sh/#read-only");
+		expect(text).not.toContain("my.omp.sh/#full-control");
+	});
+
 	it("starts hosting and prints a one-shot full-control QR", async () => {
 		const startSpy = mockStartedHostLinks();
 		const harness = createRuntimeHarness();

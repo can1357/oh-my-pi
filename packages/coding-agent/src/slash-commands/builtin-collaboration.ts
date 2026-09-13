@@ -320,7 +320,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					const names = ctx.collabHost.participants.map(p =>
 						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
 					);
-					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(ctx.collabHost.webLink)}`);
+					const link = ctx.collabHost.access === "view" ? ctx.collabHost.webViewLink : ctx.collabHost.webLink;
+					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(link)}`);
 				} else if (ctx.collabGuest) {
 					ctx.showStatus(
 						ctx.collabGuest.readOnly

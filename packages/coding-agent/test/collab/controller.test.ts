@@ -419,6 +419,45 @@ describe("CollabController", () => {
 		});
 	}
 
+	it("keeps a manual control upgrade when a session rotation overlaps its predecessor stop", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "view" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await controller.idle();
+		const drain = Promise.withResolvers<void>();
+		const transition = Promise.withResolvers<void>();
+		const waiting = Promise.withResolvers<void>();
+		const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
+		const upgrade = controller.start({ access: "control" });
+		// Observe the rejection later, after the transition and rotation have settled.
+		upgrade.catch(() => {});
+		try {
+			state.transition = transition.promise;
+			state.transitionWaited = waiting.resolve;
+			drain.resolve();
+			await waiting.promise;
+			// The upgrade is waiting for session hooks when identity cleanup queues
+			// auto-start view. That later policy must not supersede manual control.
+			switchSession(state, "upgraded-session");
+			expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		} finally {
+			drain.resolve();
+			flush.mockRestore();
+			state.transition = undefined;
+			transition.resolve();
+		}
+		const room = await upgrade;
+		await controller.idle();
+		expect(controller.host).toBe(room);
+		expect(room.ending).toBe(false);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ sessionId: "upgraded-session", access: "control" },
+		]);
+		expect((await registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp })).url).toBe(
+			room.webLink,
+		);
+	});
+
 	it("shutdown cancels a rotation waiting for unfinished session hooks", async () => {
 		const { ctx, state } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);
