@@ -690,6 +690,16 @@ export class RpcClient {
 		});
 		return this.#getData<RpcSubagentMessagesResult>(response);
 	}
+	/**
+	 * Cancel a running background subagent spawned via the task tool. Routes its run
+	 * signal through the abort path so the subagent finalizes as aborted. Idempotent:
+	 * resolves to `false` for an unknown or already-finished subagent, or one owned by
+	 * a different agent.
+	 */
+	async cancelSubagent(subagentId: string): Promise<boolean> {
+		const response = await this.#send({ type: "cancel_subagent", subagentId });
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
 
 	/**
 	 * Set model by provider and ID.
