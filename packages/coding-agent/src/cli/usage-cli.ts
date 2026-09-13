@@ -10,8 +10,11 @@
 import {
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 	type AuthStorage,
+	credentialAccountLabel,
 	type DisabledCredentialSummary,
+	isActionableCredentialDisable,
 	resolveUsedFraction,
+	summarizeDisableCause,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
@@ -19,7 +22,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, redactSecrets, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
@@ -166,6 +169,7 @@ function collectIdentityStrings(
 	for (const summary of disabled) {
 		add(summary.email);
 		add(summary.accountId);
+		add(summary.projectId);
 		add(summary.orgId);
 		add(summary.orgName);
 	}
@@ -200,7 +204,7 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
 }
 
 function formatProviderName(provider: string): string {
-	return provider
+	return sanitizeText(redactSecrets(provider))
 		.split(/[-_]/g)
 		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
 		.join(" ");
@@ -383,13 +387,13 @@ export function collectUnreportedAccounts(
 function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
 	if (account.type === "api_key") return "API key";
 	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
-	const masked = redaction?.get(base) ?? base;
+	const masked = sanitizeText(redactSecrets(redaction?.get(base) ?? base));
 	// orgId fallback: the uuid is the actual scoped identity; a token response
 	// can carry it without a display name, and two same-email rows must still
 	// be tellable apart.
 	const org = account.orgName ?? account.orgId;
 	if (!org || org === base) return masked;
-	return `${masked} · ${redaction?.get(org) ?? org}`;
+	return `${masked} · ${sanitizeText(redactSecrets(redaction?.get(org) ?? org))}`;
 }
 
 function formatAccountHeader(
@@ -401,12 +405,12 @@ function formatAccountHeader(
 	const status = aggregateStatus(report.limits);
 	const icon = STATUS_COLOR[status]("●");
 	const label = reportAccountLabel(report, index);
-	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
+	let header = `${icon} ${chalk.bold(sanitizeText(redactSecrets(redaction?.get(label) ?? label)))}`;
 	const metaOrgName = report.metadata?.orgName;
 	const metaOrgId = report.metadata?.orgId;
 	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
 	if (typeof org === "string" && org && org !== label) {
-		header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+		header += chalk.dim(` · ${sanitizeText(redactSecrets(redaction?.get(org) ?? org))}`);
 	}
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
@@ -575,62 +579,11 @@ function formatReloginDeadline(
 }
 
 /**
- * Tombstones worth a row in `omp usage`: OAuth credentials torn down
- * automatically (refresh failure, upstream invalidation). Rows the user
- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
- */
-function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
-	if (summary.type !== "oauth") return false;
-	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
-
-	// Do not display tombstone if there is an active account for the same provider
-	// matching the same identity (email, accountId, or org).
-	const summaryEmail = summary.email?.toLowerCase();
-	const summaryAccountId = summary.accountId?.toLowerCase();
-	const summaryOrgId = summary.orgId?.toLowerCase();
-
-	const matchesActive = activeAccounts.some(account => {
-		if (account.provider !== summary.provider) return false;
-
-		const accountEmail = account.email?.toLowerCase();
-		const accountAccountId = account.accountId?.toLowerCase();
-		const accountOrgId = account.orgId?.toLowerCase();
-
-		// If email or accountId match, it's the same identity
-		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
-		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
-
-		// Fallback: if orgId matches and neither email nor accountId contradicts
-		if (summaryOrgId && accountOrgId && summaryOrgId === accountOrgId) return true;
-
-		return false;
-	});
-
-	return !matchesActive;
-}
-
-/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
-function shortDisableCause(cause: string): string {
-	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
-	if (description) return description;
-	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
-	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
-	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
-}
-
-/** Label for a disabled tombstone, masking each identity part under `--redact`. */
-function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
-	const base = summary.email ?? summary.accountId ?? "OAuth account";
-	const masked = redaction?.get(base) ?? base;
-	const org = summary.orgName ?? summary.orgId;
-	if (!org || org === base) return masked;
-	return `${masked} · ${redaction?.get(org) ?? org}`;
-}
-
-/**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
  * each provider section as "no usage data" rows.
+ * Pass tombstones from `AuthStorage.listActionableDisabledCredentials`: usage
+ * account rows may be stale and cannot establish that a sign-out recovered.
  */
 export function formatUsageBreakdown(
 	reports: UsageReport[],
@@ -654,7 +607,9 @@ export function formatUsageBreakdown(
 	}
 	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
 	for (const summary of disabled) {
-		if (!isActionableDisable(summary, accounts)) continue;
+		// Recovery is resolved by AuthStorage against a revalidated snapshot, not
+		// these usage rows, which may intentionally survive an offline broker.
+		if (!isActionableCredentialDisable(summary, [])) continue;
 		const list = disabledByProvider.get(summary.provider) ?? [];
 		list.push(summary);
 		disabledByProvider.set(summary.provider, list);
@@ -709,10 +664,14 @@ export function formatUsageBreakdown(
 		}
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
-			const label = disabledIdentityLabel(summary, redaction);
+			const label = sanitizeText(
+				redactSecrets(credentialAccountLabel(summary, part => redaction?.get(part) ?? part)),
+			);
+			// Mask before summarizing: truncation must not leave a partial identity behind.
+			const cause = redaction ? maskDiagnosticIdentities(summary.cause, redaction) : summary.cause;
 			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
 			lines.push(
-				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
+				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(summarizeDisableCause(cause))}`)} ${chalk.dim("(re-login to restore)")}`,
 			);
 		}
 
@@ -849,7 +808,7 @@ export function formatUsageHistory(
 		);
 		const sortedAccounts = [...accounts.values()].sort((a, b) => a.label.localeCompare(b.label));
 		for (const account of sortedAccounts) {
-			lines.push(`  ${chalk.bold(redaction?.get(account.label) ?? account.label)}`);
+			lines.push(`  ${chalk.bold(sanitizeText(redactSecrets(redaction?.get(account.label) ?? account.label)))}`);
 			const labelWidth = [...account.series.values()].reduce((max, series) => Math.max(max, series.title.length), 0);
 			const sortedSeries = [...account.series.values()].sort((a, b) => a.title.localeCompare(b.title));
 			for (const series of sortedSeries) {
@@ -923,36 +882,56 @@ export function selectReportableAccounts(
 	return accounts.filter(account => hasUsageProvider(account.provider));
 }
 
-/** Apply a redaction mask to an optional identity field. */
-function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
-	return value === undefined ? undefined : (redaction.get(value) ?? value);
+/** Error bodies can echo identities as well as credential-shaped secrets. */
+function maskDiagnosticIdentities(text: string, redaction: Map<string, string>): string {
+	const identities = [...redaction.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
+	if (identities.length === 0) return text;
+	const emailMasks = new Map<string, string>();
+	const pattern = identities.map(identity => {
+		const literal = RegExp.escape(identity);
+		if (!/^[^\s@]+@[^\s@]+$/.test(identity)) return literal;
+		emailMasks.set(identity.toLowerCase(), redaction.get(identity)!);
+		// Only email identities are case-insensitive; project/account IDs stay exact.
+		return `(?i:${literal})`;
+	});
+	// Match the longest identity once; do not re-mask replacements or interpret `$&` in a mask.
+	return text.replace(
+		new RegExp(pattern.join("|"), "g"),
+		identity => redaction.get(identity) ?? emailMasks.get(identity.toLowerCase())!,
+	);
+}
+
+/** Mask identities when requested; credential-shaped secrets never belong in output. */
+function maskIdentity(redaction: Map<string, string> | undefined, value: string | undefined): string | undefined {
+	return value === undefined ? undefined : redactSecrets(redaction?.get(value) ?? value);
 }
 
 const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
 
-/** Mask identity fields in a raw-stripped report for `--redact --json`. */
+/** Redact identity fields in a raw-stripped report, with optional privacy masks. */
 function redactReportForJson(
 	report: Omit<UsageReport, "raw">,
-	redaction: Map<string, string>,
+	redaction: Map<string, string> | undefined,
 ): Omit<UsageReport, "raw"> {
 	let metadata = report.metadata;
 	if (metadata) {
 		metadata = { ...metadata };
 		for (const key of IDENTITY_METADATA_KEYS) {
 			const value = metadata[key];
-			if (typeof value === "string") metadata[key] = redaction.get(value) ?? value;
+			if (typeof value === "string") metadata[key] = maskIdentity(redaction, value);
 		}
 	}
 	const limits = report.limits.map(limit => ({
 		...limit,
 		scope: {
 			...limit.scope,
+			provider: redactSecrets(limit.scope.provider),
 			accountId: maskIdentity(redaction, limit.scope.accountId),
 			projectId: maskIdentity(redaction, limit.scope.projectId),
 			orgId: maskIdentity(redaction, limit.scope.orgId),
 		},
 	}));
-	return { ...report, metadata, limits };
+	return { ...report, provider: redactSecrets(report.provider), metadata, limits };
 }
 
 /** Compact token count for burn tables: 1234 → "1.2k", 4_500_000_000 → "4.50B". */
@@ -1033,7 +1012,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const provider = cmd.provider?.toLowerCase();
 			await authStorage.invalidateUsageCache(provider);
 			if (provider) {
-				process.stdout.write(`Invalidated cached usage reports for provider "${provider}".\n`);
+				process.stdout.write(`Invalidated cached usage reports for provider "${redactSecrets(provider)}".\n`);
 			} else {
 				process.stdout.write("Invalidated cached usage reports for all providers.\n");
 			}
@@ -1076,19 +1055,18 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const entries = authStorage.listUsageHistory({ sinceMs, provider: cmd.provider?.toLowerCase() });
 			const redaction = cmd.redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
 			if (cmd.json) {
-				const masked = redaction
-					? entries.map(entry => ({
-							...entry,
-							accountKey: redaction.get(entry.accountKey) ?? entry.accountKey,
-							email: maskIdentity(redaction, entry.email),
-							accountId: maskIdentity(redaction, entry.accountId),
-						}))
-					: entries;
+				const masked = entries.map(entry => ({
+					...entry,
+					provider: redactSecrets(entry.provider),
+					accountKey: maskIdentity(redaction, entry.accountKey),
+					email: maskIdentity(redaction, entry.email),
+					accountId: maskIdentity(redaction, entry.accountId),
+				}));
 				process.stdout.write(`${JSON.stringify({ generatedAt: nowMs, sinceMs, entries: masked }, null, 2)}\n`);
 				return;
 			}
 			if (entries.length === 0) {
-				const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+				const scope = cmd.provider ? ` for provider "${redactSecrets(cmd.provider)}"` : "";
 				process.stderr.write(
 					chalk.yellow(
 						`No usage history recorded${scope} yet. Snapshots accumulate whenever usage is fetched (TUI footer, /usage, omp usage).\n`,
@@ -1114,21 +1092,23 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		} catch {
 			// Stale identities beat no output.
 		}
+		// Tombstones ride alongside the live pool so an auto-disabled account
+		// (e.g. an expired Anthropic grant) is loudly visible instead of just
+		// missing. Best-effort: a broker predating the endpoint yields [].
+		let disabled: DisabledCredentialSummary[] = [];
+		try {
+			disabled = await authStorage.listActionableDisabledCredentials();
+		} catch {
+			// Usage output must not fail because tombstone listing did.
+		}
+		// Read after the actionable lookup: it may observe a disable or re-login
+		// newer than the refresh above. Usage support never decides recovery.
 		const storedAccounts = collectStoredAccounts(authStorage);
 		let accounts = selectReportableAccounts(
 			storedAccounts,
 			provider => authStorage.usageProviderFor(provider) !== undefined,
 			cmd.provider,
 		);
-		// Tombstones ride alongside the live pool so an auto-disabled account
-		// (e.g. an expired Anthropic grant) is loudly visible instead of just
-		// missing. Best-effort: a broker predating the endpoint yields [].
-		let disabled: DisabledCredentialSummary[] = [];
-		try {
-			disabled = await authStorage.listDisabledCredentials();
-		} catch {
-			// Usage output must not fail because tombstone listing did.
-		}
 		let filteredReports = reports;
 		if (cmd.provider) {
 			const wanted = cmd.provider.toLowerCase();
@@ -1144,36 +1124,34 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		if (cmd.json) {
 			// Drop the heavy provider-specific `raw` payload — same shape as the
 			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
-			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
-			if (redaction) {
-				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
-				unreportedAccounts = unreportedAccounts.map(account => ({
-					...account,
-					email: maskIdentity(redaction, account.email),
-					accountId: maskIdentity(redaction, account.accountId),
-					projectId: maskIdentity(redaction, account.projectId),
-					enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
-					orgId: maskIdentity(redaction, account.orgId),
-					orgName: maskIdentity(redaction, account.orgName),
-				}));
-			}
+			const trimmed = filteredReports.map(({ raw: _raw, ...rest }) => redactReportForJson(rest, redaction));
+			const unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts).map(account => ({
+				...account,
+				provider: redactSecrets(account.provider),
+				email: maskIdentity(redaction, account.email),
+				accountId: maskIdentity(redaction, account.accountId),
+				projectId: maskIdentity(redaction, account.projectId),
+				enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
+				orgId: maskIdentity(redaction, account.orgId),
+				orgName: maskIdentity(redaction, account.orgName),
+			}));
 			const capacity: Record<string, ProviderWindowStat[]> = {};
 			for (const report of filteredReports) {
-				if (capacity[report.provider]) continue;
+				const provider = redactSecrets(report.provider);
+				if (capacity[provider]) continue;
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
-				if (stats.length > 0) capacity[report.provider] = stats;
+				if (stats.length > 0) capacity[provider] = stats;
 			}
-			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
-			if (redaction) {
-				disabledForJson = disabledForJson.map(summary => ({
-					...summary,
-					email: maskIdentity(redaction, summary.email),
-					accountId: maskIdentity(redaction, summary.accountId),
-					orgId: maskIdentity(redaction, summary.orgId),
-					orgName: maskIdentity(redaction, summary.orgName),
-				}));
-			}
+			const disabledForJson = disabled.map(summary => ({
+				...summary,
+				provider: redactSecrets(summary.provider),
+				email: maskIdentity(redaction, summary.email),
+				accountId: maskIdentity(redaction, summary.accountId),
+				projectId: maskIdentity(redaction, summary.projectId),
+				cause: redactSecrets(redaction ? maskDiagnosticIdentities(summary.cause, redaction) : summary.cause),
+				orgId: maskIdentity(redaction, summary.orgId),
+				orgName: maskIdentity(redaction, summary.orgName),
+			}));
 			const payload = {
 				generatedAt: Date.now(),
 				reports: trimmed,
@@ -1185,8 +1163,8 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		if (filteredReports.length === 0 && accounts.length === 0) {
-			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+		if (filteredReports.length === 0 && accounts.length === 0 && disabled.length === 0) {
+			const scope = cmd.provider ? ` for provider "${redactSecrets(cmd.provider)}"` : "";
 			// Credentials exist but every one is for a provider without a usage
 			// endpoint — say so rather than implying nothing is logged in.
 			const message =

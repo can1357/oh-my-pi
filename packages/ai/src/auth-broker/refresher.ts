@@ -10,7 +10,7 @@
  * compare-and-set disable — only when no peer/login rotated the row first — so
  * the next snapshot pull surfaces a clean delete on the client.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, redactSecrets } from "@oh-my-pi/pi-utils";
 import { type AuthStorage, isDefinitiveOAuthFailure } from "../auth-storage";
 import { DEFAULT_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_SKEW_MS } from "./types";
 
@@ -108,9 +108,9 @@ export class AuthBrokerRefresher {
 				// AuthStorage.refreshCredentialById already CAS-disabled the row
 				// (unless a peer/login rotated it first, in which case the live
 				// credential is intentionally kept). Nothing to do here but record it.
-				logger.warn("auth-broker refresh failed definitively", { id, error: errorMsg });
+				logger.warn("auth-broker refresh failed definitively", { id, error: redactSecrets(errorMsg) });
 			} else {
-				logger.debug("auth-broker refresh failed (transient)", { id, error: errorMsg });
+				logger.debug("auth-broker refresh failed (transient)", { id, error: redactSecrets(errorMsg) });
 			}
 		}
 	}

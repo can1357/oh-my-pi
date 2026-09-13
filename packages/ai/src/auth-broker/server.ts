@@ -11,7 +11,7 @@
  */
 
 import { type Type, type } from "@oh-my-pi/omptype";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
@@ -128,8 +128,8 @@ async function parseBody<t>(
 	let raw: string;
 	try {
 		raw = await req.text();
-	} catch (error) {
-		return { ok: false, response: json(400, { error: `Invalid request body: ${String(error)}` }) };
+	} catch {
+		return { ok: false, response: json(400, { error: "Invalid request body" }) };
 	}
 	if (raw.length === 0 && !options.allowEmpty) {
 		return { ok: false, response: json(400, { error: "Request body required" }) };
@@ -137,12 +137,13 @@ async function parseBody<t>(
 	let parsed: unknown;
 	try {
 		parsed = raw.length === 0 ? {} : JSON.parse(raw);
-	} catch (error) {
-		return { ok: false, response: json(400, { error: `Invalid JSON body: ${String(error)}` }) };
+	} catch {
+		return { ok: false, response: json(400, { error: "Invalid JSON body" }) };
 	}
 	const result = schema(parsed);
 	if (result instanceof type.errors) {
-		return { ok: false, response: json(400, { error: result.summary }) };
+		// Schema summaries may echo rejected credentials without a secret-labelled boundary.
+		return { ok: false, response: json(400, { error: "Invalid request body" }) };
 	}
 	return { ok: true, data: result };
 }
@@ -253,7 +254,7 @@ class GenerationGate {
 		try {
 			await this.#storage.pollExternalChanges();
 		} catch (error) {
-			logger.debug("Auth broker external store change poll failed", { error: String(error) });
+			logger.debug("Auth broker external store change poll failed", { error: redactSecrets(String(error)) });
 		} finally {
 			this.#pollInFlight = false;
 		}
@@ -538,7 +539,7 @@ function serveSnapshotStream(
 			controller.enqueue(encoder.encode(chunk));
 			return true;
 		} catch (err) {
-			logger.debug("auth-broker stream enqueue failed", { peer, error: String(err) });
+			logger.debug("auth-broker stream enqueue failed", { peer, error: redactSecrets(String(err)) });
 			cleanup();
 			return false;
 		}
@@ -584,7 +585,7 @@ function serveSnapshotStream(
 					logger.debug("auth-broker stream entry", {
 						peer,
 						id: entry.id,
-						provider: entry.provider,
+						provider: redactSecrets(redactUrlSecrets(entry.provider)),
 						generation: snapshot.generation,
 					});
 				}
@@ -669,15 +670,20 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 		fetch: async (req): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
-			const peer =
-				req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
+			const peer = redactSecrets(
+				req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown",
+			);
 			try {
 				if (req.method === "GET" && pathname === "/v1/healthz") {
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
 				}
 				if (!isAuthorized(req, tokens)) {
-					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
+					logger.info("auth-broker request unauthorized", {
+						method: req.method,
+						path: redactSecrets(pathname),
+						peer,
+					});
 					return json(401, { error: "unauthorized" });
 				}
 				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
@@ -702,8 +708,8 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, { generatedAt: Date.now(), reports: trimmed });
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker usage fetch failed", { peer, error: message });
-						return json(502, { error: message });
+						logger.warn("auth-broker usage fetch failed", { peer, error: redactSecrets(message) });
+						return json(502, { error: redactSecrets(message) });
 					}
 				}
 				if (req.method === "GET" && pathname === "/v1/usage/history") {
@@ -713,7 +719,12 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						sinceMsParsed !== undefined && Number.isFinite(sinceMsParsed) ? sinceMsParsed : undefined;
 					const provider = url.searchParams.get("provider") ?? undefined;
 					const entries = opts.storage.listUsageHistory({ sinceMs, provider });
-					logger.info("auth-broker usage history served", { peer, entries: entries.length, sinceMs, provider });
+					logger.info("auth-broker usage history served", {
+						peer,
+						entries: entries.length,
+						sinceMs,
+						provider: provider === undefined ? undefined : redactSecrets(redactUrlSecrets(provider)),
+					});
 					return json(200, { generatedAt: Date.now(), entries });
 				}
 				if (req.method === "POST" && pathname === "/v1/usage/observed") {
@@ -727,15 +738,15 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						if (!recorded) return json(501, { error: "broker store does not persist client usage" });
 						logger.debug("auth-broker client usage recorded", {
 							peer,
-							installId: report.installId,
-							hostname: report.hostname,
+							installId: redactSecrets(report.installId),
+							hostname: report.hostname === undefined ? undefined : redactSecrets(report.hostname),
 							entries: report.entries.length,
 						});
 						return json(200, { ok: true });
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker client usage record failed", { peer, error: message });
-						return json(500, { error: message });
+						logger.warn("auth-broker client usage record failed", { peer, error: redactSecrets(message) });
+						return json(500, { error: redactSecrets(message) });
 					}
 				}
 				if (req.method === "GET" && pathname === "/v1/usage/clients") {
@@ -751,8 +762,8 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, { ok: true });
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker usage cache invalidation failed", { peer, error: message });
-						return json(500, { error: message });
+						logger.warn("auth-broker usage cache invalidation failed", { peer, error: redactSecrets(message) });
+						return json(500, { error: redactSecrets(message) });
 					}
 				}
 				if (req.method === "GET" && pathname === "/v1/credentials/disabled") {
@@ -769,16 +780,16 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						const body: CredentialRefreshResponse = { entry };
 						logger.info("auth-broker credential refreshed", {
 							id,
-							provider: entry.provider,
+							provider: redactSecrets(redactUrlSecrets(entry.provider)),
 							peer,
 							expires: entry.credential.type === "oauth" ? entry.credential.expires : undefined,
 						});
 						return json(200, body);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker refresh failed", { id, peer, error: message });
+						logger.warn("auth-broker refresh failed", { id, peer, error: redactSecrets(message) });
 						const status = message.includes("No credential with id") ? 404 : 500;
-						return json(status, { error: message });
+						return json(status, { error: redactSecrets(message) });
 					}
 				}
 				const disableMatch = req.method === "POST" ? pathname.match(DISABLE_ROUTE) : null;
@@ -790,12 +801,28 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const cause =
 						parsed.data.cause && parsed.data.cause.length > 0 ? parsed.data.cause : "disabled via auth-broker";
-					const ok = opts.storage.disableCredentialById(id, cause);
-					if (!ok) {
-						logger.info("auth-broker disable miss", { id, peer, cause });
+					const ifMatch = req.headers.get("if-match");
+					let outcome: "disabled" | "stale" | "missing";
+					if (ifMatch !== null) {
+						let fingerprint = ifMatch.trim();
+						if (fingerprint.startsWith('"') && fingerprint.endsWith('"') && fingerprint.length >= 2) {
+							fingerprint = fingerprint.slice(1, -1);
+						}
+						outcome = await opts.storage.disableCredentialIfFingerprintMatches(id, fingerprint, cause);
+					} else {
+						// Old clients stay unconditional. Old brokers ignore If-Match, so a
+						// new client against an old broker retains the old unconditional behavior.
+						outcome = opts.storage.disableCredentialById(id, cause) ? "disabled" : "missing";
+					}
+					if (outcome === "missing") {
+						logger.info("auth-broker disable miss", { id, peer, cause: redactSecrets(cause) });
 						return json(404, { error: `No credential with id=${id}` });
 					}
-					logger.info("auth-broker credential disabled", { id, peer, cause });
+					if (outcome === "stale") {
+						logger.info("auth-broker disable rejected: bearer rotated", { id, peer });
+						return json(412, { error: "credential bearer no longer matches; a peer rotated it" });
+					}
+					logger.info("auth-broker credential disabled", { id, peer, cause: redactSecrets(cause) });
 					const response: CredentialDisableResponse = { ok: true };
 					return json(200, response);
 				}
@@ -820,16 +847,20 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						logger.info("auth-broker credential block upserted", {
 							id,
 							peer,
-							providerKey: block.providerKey,
-							blockScope: block.blockScope,
+							providerKey: redactSecrets(block.providerKey),
+							blockScope: redactSecrets(block.blockScope),
 							blockedUntilMs: block.blockedUntilMs,
 						});
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker credential block upsert failed", { id, peer, error: message });
+						logger.warn("auth-broker credential block upsert failed", {
+							id,
+							peer,
+							error: redactSecrets(message),
+						});
 						const status = message.includes("No credential with id") ? 404 : 500;
-						return json(status, { error: message });
+						return json(status, { error: redactSecrets(message) });
 					}
 				}
 				const blocksDeleteMatch = req.method === "DELETE" ? pathname.match(BLOCKS_ROUTE) : null;
@@ -846,9 +877,13 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker credential blocks delete failed", { id, peer, error: message });
+						logger.warn("auth-broker credential blocks delete failed", {
+							id,
+							peer,
+							error: redactSecrets(message),
+						});
 						const status = message.includes("No credential with id") ? 404 : 500;
-						return json(status, { error: message });
+						return json(status, { error: redactSecrets(message) });
 					}
 				}
 				if (req.method === "POST" && pathname === "/v1/credential") {
@@ -862,9 +897,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 								? (credential.email ?? credential.accountId ?? credential.projectId ?? "(no identity)")
 								: "(api key)";
 						logger.info("auth-broker credential upserted", {
-							provider,
+							provider: redactSecrets(redactUrlSecrets(provider)),
 							type: credential.type,
-							identity,
+							identity: redactSecrets(identity),
 							peer,
 							providerTotal: entries.length,
 						});
@@ -872,16 +907,20 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker upload failed", { provider, peer, error: message });
-						return json(500, { error: message });
+						logger.warn("auth-broker upload failed", {
+							provider: redactSecrets(redactUrlSecrets(provider)),
+							peer,
+							error: redactSecrets(message),
+						});
+						return json(500, { error: redactSecrets(message) });
 					}
 				}
-				return json(404, { error: `No route: ${req.method} ${pathname}` });
+				return json(404, { error: redactSecrets(`No route: ${req.method} ${pathname}`) });
 			} catch (error) {
 				logger.error("auth-broker handler crashed", {
 					method: req.method,
-					path: pathname,
-					error: String(error),
+					path: redactSecrets(pathname),
+					error: redactSecrets(String(error)),
 				});
 				return json(500, { error: "internal error" });
 			}

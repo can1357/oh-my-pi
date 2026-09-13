@@ -607,6 +607,10 @@ async function runInteractiveMode(
 		// `emitNotice` fired before the UI subscribed and was silently lost.
 		mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
 	}
+	// Same pull-after-subscribe shape: an account torn down while no session was
+	// watching (background refresh, a sibling process) is only recorded as a
+	// tombstone, so announce it here until the user signs in again.
+	await mode.announceDisabledCredentials();
 
 	for (const notify of notifs) {
 		if (!notify) {
@@ -2050,6 +2054,14 @@ export async function runRootCommand(
 			}
 
 			if (!isInteractive && !session.model) {
+				// A silently signed-out account is exactly what empties a scripted
+				// run's pool, and this exit is the only thing the user would
+				// otherwise see; a run that proceeds announces it after subscribing.
+				if (mode !== "rpc" && mode !== "rpc-ui") {
+					for (const notice of await session.getDisabledCredentialNotices()) {
+						process.stderr.write(`${notice}\n`);
+					}
+				}
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}

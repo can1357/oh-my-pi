@@ -4,29 +4,11 @@
  * Lightweight utilities for calling MCP servers directly via HTTP
  * without maintaining persistent connections.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
+import { serializeMCPDiagnosticData } from "./errors";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
-
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
-
-/**
- * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
- * requests never write secrets to the persistent log file.
- */
-export function redactUrlForLog(url: string): string {
-	try {
-		const parsed = new URL(url);
-		for (const name of parsed.searchParams.keys()) {
-			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
-		}
-		return parsed.toString();
-	} catch {
-		// Unparseable URL — drop the query string entirely rather than risk leaking it.
-		return url.split("?")[0];
-	}
-}
 
 /** Parse SSE response format (lines starting with "data: ") */
 export function parseSSE(text: string): unknown {
@@ -101,8 +83,12 @@ export async function callMCP<T = unknown>(
 	});
 
 	if (!response.ok) {
-		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
-		logger.error(errorMsg, { url: redactUrlForLog(url), method, params });
+		const errorMsg = `MCP request failed: ${response.status} ${redactSecrets(response.statusText)}`;
+		logger.error(errorMsg, {
+			url: redactUrlSecrets(url),
+			method: redactSecrets(method),
+			params: serializeMCPDiagnosticData(params),
+		});
 		throw new Error(errorMsg);
 	}
 
@@ -111,9 +97,9 @@ export async function callMCP<T = unknown>(
 
 	if (!result) {
 		logger.error("Failed to parse MCP response", {
-			url: redactUrlForLog(url),
-			method,
-			responseText: text.slice(0, 500),
+			url: redactUrlSecrets(url),
+			method: redactSecrets(method),
+			responseText: redactSecrets(text).slice(0, 500),
 		});
 		throw new Error("Failed to parse MCP response");
 	}

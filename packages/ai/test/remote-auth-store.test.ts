@@ -3,7 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type CredentialDisabledEvent,
+	REMOTE_REFRESH_SENTINEL,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
 	type AuthBrokerServerHandle,
@@ -183,7 +188,12 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			client: brokerClient,
 			initialSnapshot: initialResult.snapshot,
 		});
-		const clientStorage = new AuthStorage(remoteStore);
+		const clientEvents: CredentialDisabledEvent[] = [];
+		const clientStorage = new AuthStorage(remoteStore, {
+			onCredentialDisabled: event => {
+				clientEvents.push(event);
+			},
+		});
 		const first = {
 			accessToken: failedRow.credential.access,
 			credentialId: failedRow.id,
@@ -197,6 +207,17 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 		expect(rotated).toBe(true);
 		expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).not.toContain(first.credentialId);
+		// The broker tombstones the row on its host; the session that observed the
+		// invalidation still announces the sign-out to its own subscribers.
+		expect(clientEvents).toEqual([
+			expect.objectContaining({
+				provider: "anthropic",
+				credentialId: first.credentialId,
+				credentialType: "oauth",
+				email: failedRow.credential.email,
+				disabledCause: expect.stringContaining("invalidated oauth token"),
+			}),
+		]);
 		const next = await clientStorage.getOAuthAccess("anthropic", "invalidated-session");
 		expect(next?.credentialId).not.toBe(first.credentialId);
 		clientStorage.close();

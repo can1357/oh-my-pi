@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity. Actionable summaries use canonical claims and fresh recovery state, respect broker account pools, and redact diagnostic causes while protected forensic data remains intact ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic credential disables now compare the failed credential locally and through the auth broker, preserving a peer's refreshed OAuth token or replacement API key and reconciling rejected disables before returning. API-key conditions hash the stored key representation and cannot match an OAuth replacement with identical access bytes. Only accepted automatic disables announce the account removal, and remote disable diagnostics redact provider URL secrets and echoed credentials ([#11912](https://github.com/can1357/oh-my-pi/pull/11912) by [@alphastorm](https://github.com/alphastorm)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

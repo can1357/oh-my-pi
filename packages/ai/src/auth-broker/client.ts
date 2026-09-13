@@ -333,12 +333,27 @@ export class AuthBrokerClient {
 		});
 	}
 
-	async disableCredential(id: number, cause: string, signal?: AbortSignal): Promise<CredentialDisableResponse> {
+	/**
+	 * `POST /v1/credential/:id/disable`. With `expectedAccessFingerprint` the
+	 * disable is conditional (`If-Match`): pass `fingerprintCredentialForDisable`
+	 * for an OAuth bearer or stored API key. A different credential answers 412.
+	 * The bare `AbortSignal` form predates the options object and is still honoured.
+	 */
+	async disableCredential(
+		id: number,
+		cause: string,
+		opts: AbortSignal | { signal?: AbortSignal; expectedAccessFingerprint?: string } = {},
+	): Promise<CredentialDisableResponse> {
+		const options = opts instanceof AbortSignal ? { signal: opts } : opts;
 		const body: CredentialDisableRequest = { cause };
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: "credentialDisableResponseSchema",
-			signal,
+			headers:
+				options.expectedAccessFingerprint !== undefined
+					? { "If-Match": `"${options.expectedAccessFingerprint}"` }
+					: undefined,
+			signal: options.signal,
 		});
 	}
 
@@ -404,6 +419,7 @@ export class AuthBrokerClient {
 			auth?: boolean;
 			body?: unknown;
 			signal?: AbortSignal;
+			headers?: Record<string, string>;
 			timeoutMs?: number;
 		},
 	): Promise<t> {

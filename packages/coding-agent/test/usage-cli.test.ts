@@ -1,14 +1,40 @@
-import { describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import { describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type DisabledCredentialSummary,
+	SqliteAuthCredentialStore,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	runUsageCommand,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import { getAgentDir, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+
+it("sanitizes provider-controlled disabled account labels before terminal output", () => {
+	const output = formatUsageBreakdown([], [], Date.now(), undefined, [
+		{
+			id: 1,
+			provider: "bearer=PROVIDERSECRET",
+			type: "oauth",
+			email: "who\x1b[2Jami@example.com",
+			orgName: "bearer=opaque-secret",
+			cause: "invalid_grant",
+		},
+	]);
+	expect(output).not.toContain("\x1b[2J");
+	expect(output).not.toContain("opaque-secret");
+	expect(output).not.toContain("PROVIDERSECRET");
+	expect(output).toContain("whoami@example.com");
+});
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -45,6 +71,256 @@ function makeLimit(opts: {
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
+
+describe("runUsageCommand disabled credential output", () => {
+	for (const transition of ["revalidation fails", "disable during tombstone lookup"]) {
+		for (const json of [false, true]) {
+			it(`retains a real tombstone when ${transition} in ${json ? "JSON" : "text"}`, async () => {
+				const profile = TempDir.createSync("@omp-usage-stale-");
+				const originalAgentDir = getAgentDir();
+				const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+				const originalExitCode = process.exitCode;
+				setAgentDir(profile.path());
+				const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+				const authority = new AuthStorage(store);
+				let authStorage: AuthStorage | undefined;
+				try {
+					await authority.reload();
+					await authority.set("anthropic", {
+						type: "oauth",
+						access: "old-access",
+						refresh: "old-refresh",
+						expires: Date.now() + HOUR,
+						email: "stale@example.test",
+					});
+					const id = authority.exportSnapshot().credentials[0]!.id;
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					if (transition === "revalidation fails") {
+						expect(authority.disableCredentialById(id, "invalid_grant")).toBe(true);
+						Object.assign(store, {
+							refreshSnapshot: async () => {
+								throw new Error("broker offline");
+							},
+						});
+					} else {
+						const list = store.listDisabledCredentials.bind(store);
+						vi.spyOn(store, "listDisabledCredentials").mockImplementationOnce(async provider => {
+							expect(authority.disableCredentialById(id, "invalid_grant")).toBe(true);
+							return list(provider);
+						});
+					}
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					await runUsageCommand({ json });
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					if (json)
+						expect(JSON.parse(output).disabledCredentials).toEqual([
+							expect.objectContaining({ id, email: "stale@example.test" }),
+						]);
+					else {
+						expect(output).toContain("invalid_grant");
+						expect(output).toContain("stale@example.test");
+					}
+				} finally {
+					authStorage?.close();
+					authority.close();
+					vi.restoreAllMocks();
+					process.exitCode = originalExitCode;
+					setAgentDir(originalAgentDir);
+					if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+					else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+					await profile.remove();
+				}
+			});
+		}
+	}
+	for (const json of [false, true]) {
+		it(`keeps secrets out of ${json ? "JSON" : "text"} and masks echoed identities only with --redact`, async () => {
+			const profile = TempDir.createSync("@omp-usage-redaction-");
+			const originalAgentDir = getAgentDir();
+			const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+			const originalExitCode = process.exitCode;
+			setAgentDir(profile.path());
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
+			const projectId = "private-project-42";
+			const email = "Person@Example.test";
+			const accountId = "AcCt";
+			const cause = `oauth refresh failed: HTTP 400 ${JSON.stringify({
+				error: "invalid_grant",
+				refresh_token: "BODYSECRET",
+				error_description: `${email.toUpperCase()} ${projectId} ${projectId.toUpperCase()} ${accountId} ${accountId.toLowerCase()} denied; client_secret=ECHOSECRET`,
+			})}`;
+			let authStorage: AuthStorage | undefined;
+			try {
+				for (const redact of [false, true]) {
+					const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await authStorage.set(provider, {
+						type: "oauth",
+						access: "SYNTHETICACCESS",
+						refresh: "SYNTHETICREFRESH",
+						expires: 1,
+						projectId,
+						email,
+						accountId,
+						orgId: "bearer=ORGIDSECRET",
+						orgName: "client_secret=ORGNAMESECRET",
+					});
+					const id = authStorage.exportSnapshot().credentials[0]!.id;
+					expect(authStorage.disableCredentialById(id, cause)).toBe(true);
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					let forensic: Promise<DisabledCredentialSummary[]> | undefined;
+					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						forensic = store.listDisabledCredentials();
+						return true;
+					});
+					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					await runUsageCommand({ json, redact });
+					authStorage = undefined; // The command closes its real in-memory store.
+					stdout.mockRestore();
+					expect(stderr.mock.calls).toEqual([]);
+					stderr.mockRestore();
+					expect(await forensic).toEqual([expect.objectContaining({ provider, projectId, cause })]);
+					const text = stripVTControlCharacters(output);
+					for (const secret of [
+						"QUERYSECRET",
+						"BODYSECRET",
+						"ECHOSECRET",
+						"SYNTHETICACCESS",
+						"SYNTHETICREFRESH",
+						"ORGIDSECRET",
+						"ORGNAMESECRET",
+					]) {
+						expect(text).not.toContain(secret);
+					}
+					expect(text).toContain("region=west");
+					expect(text).toContain("denied");
+					if (redact) {
+						expect(text).not.toContain(projectId);
+						expect(text).not.toContain(email);
+						expect(text).not.toContain(email.toUpperCase());
+						expect(text).not.toContain(accountId);
+						expect(text).toContain("Pe*");
+						expect(text).toContain("pr*");
+					} else {
+						expect(text).toContain(`${email.toUpperCase()} ${projectId}`);
+					}
+					expect(text).toContain(projectId.toUpperCase());
+					expect(text).toContain(`${accountId.toLowerCase()} denied`);
+					if (json) {
+						const payload = JSON.parse(output) as { disabledCredentials: DisabledCredentialSummary[] };
+						expect(payload.disabledCredentials).toHaveLength(1);
+						expect(payload.disabledCredentials[0]).toMatchObject({ id, projectId: redact ? "pr*" : projectId });
+						expect(payload.disabledCredentials[0]!.cause).toContain("invalid_grant");
+					} else {
+						expect(text).toContain("disabled");
+						expect(text).not.toContain("No credentials found");
+					}
+					vi.restoreAllMocks();
+				}
+			} finally {
+				authStorage?.close();
+				vi.restoreAllMocks();
+				process.exitCode = originalExitCode;
+				setAgentDir(originalAgentDir);
+				if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+				await profile.remove();
+			}
+		});
+
+		it(`recovers retained managed MCP tombstones without adding usage rows in ${json ? "JSON" : "text"}`, async () => {
+			const profile = TempDir.createSync("@omp-usage-recovery-");
+			const originalAgentDir = getAgentDir();
+			const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+			const originalExitCode = process.exitCode;
+			setAgentDir(profile.path());
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp";
+			const email = "Recovered@Example.test";
+			const cause = "oauth refresh failed: invalid_grant";
+			let retained: DisabledCredentialSummary[] = [];
+			let authStorage: AuthStorage | undefined;
+			try {
+				for (const recovered of [false, true]) {
+					const store = new SqliteAuthCredentialStore(new Database(profile.join("auth.db")));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await authStorage.set(provider, {
+						type: "oauth",
+						access: recovered ? "REAUTHORIZEDACCESS" : "DISABLEDACCESS",
+						refresh: recovered ? "REAUTHORIZEDREFRESH" : "DISABLEDREFRESH",
+						expires: Date.now() + HOUR,
+						email: recovered ? email.toLowerCase() : email,
+					});
+					if (!recovered) {
+						const id = authStorage.exportSnapshot().credentials[0]!.id;
+						expect(authStorage.disableCredentialById(id, cause)).toBe(true);
+						retained = await store.listDisabledCredentials();
+						expect(retained).toEqual([expect.objectContaining({ id, provider, email, cause })]);
+					}
+					// SQLite prunes recovered rows; a broker may retain the original forensic listing.
+					vi.spyOn(store, "listDisabledCredentials").mockResolvedValue(retained);
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					let errors = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+						errors += String(chunk);
+						return true;
+					});
+					process.exitCode = 0;
+					await runUsageCommand({ json });
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					if (json) {
+						const payload = JSON.parse(output) as {
+							disabledCredentials: DisabledCredentialSummary[];
+							accountsWithoutUsage: UsageAccountIdentity[];
+						};
+						expect(payload.disabledCredentials).toEqual(recovered ? [] : retained);
+						expect(payload.accountsWithoutUsage).toEqual([]);
+						expect(errors).toBe("");
+					} else if (recovered) {
+						expect(output).toBe("");
+						expect(errors).toContain("providers without a usage endpoint");
+						expect(errors).not.toContain("No credentials found");
+						expect(process.exitCode).toBe(1);
+					} else {
+						expect(output).toContain(email);
+						expect(output).toContain("re-login to restore");
+						expect(errors).toBe("");
+					}
+				}
+			} finally {
+				authStorage?.close();
+				vi.restoreAllMocks();
+				process.exitCode = originalExitCode ?? 0;
+				setAgentDir(originalAgentDir);
+				if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+				await profile.remove();
+			}
+		});
+	}
+});
 
 describe("buildRedactionMap", () => {
 	it("masks everything past a two-char anchor when the anchor is unique", () => {
@@ -396,81 +672,25 @@ describe("formatUsageBreakdown", () => {
 		for (const mask of redaction.values()) expect(text).toContain(mask);
 	});
 
-	it("renders auto-disabled tombstones with the upstream error_description and hides lifecycle noise", () => {
-		const now = Date.now();
-		const disabled = [
+	it("masks overlapping diagnostic identities literally before truncating the cause", () => {
+		const projectId = "private-project";
+		const orgName = "private-project-confidential-organization";
+		const longIdentity = "$&-" + "private".repeat(20);
+		const redaction = buildRedactionMap([projectId, orgName, longIdentity]);
+		const disabled: DisabledCredentialSummary[] = [
 			{
-				id: 26,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "dead@example.test",
-				cause: 'oauth refresh failed: OAuthError: refresh request failed; body={"error": "invalid_grant", "error_description": "Refresh token expired"}',
-				disabledAtMs: now - 4 * HOUR,
-			},
-			{
-				id: 27,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "rotated@example.test",
-				cause: "replaced by newer credential",
-			},
-			{
-				id: 28,
-				provider: "fireworks",
-				type: "api_key" as const,
-				cause: "oauth refresh failed: whatever",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, now, undefined, disabled));
-		// Auto-disabled OAuth row: identity, age, shortened upstream cause, and the fix.
-		expect(text).toContain("✗ dead@example.test — disabled 4h ago: Refresh token expired (re-login to restore)");
-		// User-driven replacement and api_key tombstones are lifecycle noise, not lost capacity.
-		expect(text).not.toContain("rotated@example.test");
-		expect(text).not.toContain("Fireworks");
-	});
-	it("suppresses auto-disabled tombstones when an active account exists with the same identity", () => {
-		const now = Date.now();
-		const activeAccounts: UsageAccountIdentity[] = [
-			{
-				provider: "anthropic",
+				id: 51,
+				provider: "google-gemini-cli",
 				type: "oauth",
-				email: "active@example.test",
+				projectId,
+				orgName,
+				cause: `oauth refresh failed: ${orgName} ${longIdentity} denied`,
 			},
 		];
-		const disabled = [
-			{
-				id: 30,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "active@example.test",
-				cause: "oauth refresh failed: Refresh token expired",
-			},
-			{
-				id: 31,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "truly-dead@example.test",
-				cause: "oauth refresh failed: Refresh token expired",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
-		expect(text).not.toContain("active@example.test — disabled");
-		expect(text).toContain("✗ truly-dead@example.test — disabled");
-	});
-
-	it("renders a tombstone-only provider section even when no active credential remains", () => {
-		const disabled = [
-			{
-				id: 50,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "last@example.test",
-				cause: "oauth refresh failed: token endpoint said no",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
-		expect(text).toContain("Anthropic");
-		expect(text).toContain("✗ last@example.test — disabled: token endpoint said no (re-login to restore)");
+		const text = stripVTControlCharacters(formatUsageBreakdown([], [], 1000, redaction, disabled));
+		expect(text).toContain(`${redaction.get(orgName)} ${redaction.get(longIdentity)} denied`);
+		expect(text).not.toContain("confidential-organization");
+		expect(text).not.toContain("private");
 	});
 
 	it("warns about Anthropic's ~30d grant lifetime only inside the final week", () => {

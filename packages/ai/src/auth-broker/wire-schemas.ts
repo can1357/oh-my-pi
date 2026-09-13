@@ -361,6 +361,7 @@ export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSumma
 	type: "'oauth' | 'api_key'",
 	"email?": "string",
 	"accountId?": "string",
+	"projectId?": "string",
 	"orgId?": "string",
 	"orgName?": "string",
 	cause: "string",

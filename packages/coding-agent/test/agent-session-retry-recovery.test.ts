@@ -221,6 +221,99 @@ describe("AgentSession retry recovery", () => {
 		return { session, sessionManager, retryEndEvents, requestedKeys };
 	}
 
+	it("preserves refreshed and peer Copilot credentials after an unattributed late auth error", async () => {
+		const provider = "github-copilot";
+		const model = getBundledModel(provider, "gpt-5-mini");
+		if (!model) throw new Error("Expected bundled Copilot test model to exist");
+		const credentials = await AuthStorage.create(path.join(tempDir.path(), "copilot.db"), {
+			usageProviderResolver: () => undefined,
+		});
+		const registry = new ModelRegistry(credentials, path.join(tempDir.path(), "copilot-models.yml"));
+		const manager = SessionManager.inMemory();
+		const requestedTokens: string[] = [];
+		const mock = createMockModel({
+			provider,
+			id: model.id,
+			responses: [
+				(_context, options) => {
+					const { token } = JSON.parse(resolveInitialApiKey(options?.apiKey)) as { token: string };
+					requestedTokens.push(token);
+					const failed = credentials
+						.listStoredCredentials(provider)
+						.find(row => row.credential.type === "oauth" && row.credential.access === token);
+					if (failed?.credential.type !== "oauth") throw new Error("Expected failed stored OAuth credential");
+					// A re-login wins while the old request is still in flight. Its late
+					// terminal error carries no credential identity or failed bearer.
+					credentials.upsertCredential(provider, {
+						...failed.credential,
+						access: "refreshed-copilot",
+						refresh: "refreshed-copilot",
+					});
+					return { throw: "401 unauthorized" };
+				},
+				(_context, options) => {
+					const { token } = JSON.parse(resolveInitialApiKey(options?.apiKey)) as { token: string };
+					requestedTokens.push(token);
+					return { content: ["still authenticated"], stopReason: "stop" };
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => registry.resolver(requestedModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": 0,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${provider}/${model.id}`);
+		const session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry: registry });
+		try {
+			await credentials.set(provider, [
+				{
+					type: "oauth",
+					access: "copilot-a",
+					refresh: "copilot-a",
+					email: "a@example.test",
+					expires: Date.now() + 3_600_000,
+				},
+				{
+					type: "oauth",
+					access: "copilot-b",
+					refresh: "copilot-b",
+					email: "b@example.test",
+					expires: Date.now() + 3_600_000,
+				},
+			]);
+			const originalIds = credentials.listStoredCredentials(provider).map(row => row.id);
+			await session.prompt("Request whose old bearer fails after re-login");
+			await session.waitForIdle();
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ provider, stopReason: "error" });
+
+			await credentials.reload();
+			const preserved = credentials.listStoredCredentials(provider);
+			expect(preserved.map(row => row.id)).toEqual(originalIds);
+			const peerToken = requestedTokens[0] === "copilot-a" ? "copilot-b" : "copilot-a";
+			expect(
+				new Set(preserved.map(row => (row.credential.type === "oauth" ? row.credential.access : undefined))),
+			).toEqual(new Set(["refreshed-copilot", peerToken]));
+
+			await session.prompt("Use the surviving credentials");
+			await session.waitForIdle();
+			expect(["refreshed-copilot", peerToken]).toContain(requestedTokens[1]);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({
+				stopReason: "stop",
+				content: [{ type: "text", text: "still authenticated" }],
+			});
+		} finally {
+			await session.dispose();
+			await manager.close();
+			credentials.close();
+		}
+	});
+
 	it("marks a recovered retry error, emits it, persists it, and excludes only model-context replay", async () => {
 		const { sessionManager, retryEndEvents, requestedKeys } = await runCredentialRecovery();
 

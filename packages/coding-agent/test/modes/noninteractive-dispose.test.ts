@@ -37,6 +37,7 @@ describe("print-mode error exit disposes the session before terminating", () => 
 			sessionManager: { buildSessionContext: () => ({ messages: [] }), getEntries: () => [] },
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
+			getDisabledCredentialNotices: async () => [],
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => {
