@@ -264,7 +264,16 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 // so a 400 that merely mentions the field for another reason stays terminal.
 const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
-	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
+	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
+// Strict JSON decoders and OpenAI-compatible validators express the same schema
+// rejection as an unknown *member* rather than as a forbidden extra input:
+// `json: unknown field "cache_control"` (Go `DisallowUnknownFields`),
+// `unknown_parameter` (OpenAI-compatible error codes), `Unpermitted parameter`
+// (Rails strong parameters), `is not a valid field` (hand-rolled validators).
+// These negations stay anchored to a schema-member noun, so a 400 rejecting a
+// cache_control *value* rather than the field itself keeps caching enabled.
+const CACHE_CONTROL_UNKNOWN_MEMBER_PATTERN =
+	/\b(?:un(?:known|permitted)|not (?:an? )?(?:known|valid|accepted))[_ -](?:field|param(?:eter)?|argument|key|propert(?:y|ies)|attribute|member|option)s?\b/i;
 // Anthropic rejects a breakpoint on an empty text block with a 400 that names
 // `cache_control` too. That is a content-shape fault — dropping every
 // breakpoint neither fixes it nor proves the endpoint lacks prompt caching.
@@ -311,7 +320,7 @@ function matchesCacheControlRejection(message: string, errorStatus: number | und
 	if (errorStatus !== 400) return false;
 	if (!CACHE_CONTROL_FIELD_PATTERN.test(message)) return false;
 	if (CACHE_CONTROL_EMPTY_TEXT_PATTERN.test(message)) return false;
-	return CACHE_CONTROL_REJECTION_PATTERN.test(message);
+	return CACHE_CONTROL_REJECTION_PATTERN.test(message) || CACHE_CONTROL_UNKNOWN_MEMBER_PATTERN.test(message);
 }
 
 /** Whether an OAuth refresh error message means the grant is definitively dead. */
