@@ -295,6 +295,41 @@ describe("collab registry", () => {
 		});
 	});
 
+	it("reports stale_generation, not access_unavailable, when a view-only generation rotated to control before the link request", async () => {
+		const dir = await tempDir();
+		const viewOnly = makeFixture({ instanceId: "upgrading-host", access: "view" });
+		const pub = await publish(dir, viewOnly);
+		const control = makeFixture({ instanceId: "upgrading-host", generation: 2, access: "control" });
+
+		// The listing sees a view-only generation; a control link is requested;
+		// before that request connects the room has rotated to a control-capable
+		// generation. The caller must be told to re-list, not that control is
+		// unavailable.
+		const realConnect = net.createConnection;
+		let connections = 0;
+		const connect = spyOn(net, "createConnection").mockImplementation(((options: net.NetConnectOpts) => {
+			if (++connections !== 2) return realConnect(options);
+			const socket = new net.Socket();
+			void pub
+				.close()
+				.then(() => publish(dir, control))
+				.then(() => socket.connect(options));
+			return socket;
+		}) as typeof net.createConnection);
+		try {
+			await expect(resolveCollabHostLink("upgrading-host", "control", { dir })).rejects.toMatchObject({
+				name: "CollabLinkError",
+				code: "stale_generation",
+			});
+		} finally {
+			connect.mockRestore();
+		}
+		expect(await resolveCollabHostLink("upgrading-host", "control", { dir })).toMatchObject({
+			generation: 2,
+			url: control.controlUrl,
+		});
+	});
+
 	it("keeps a host with an oversized session name or cwd listable by bounding snapshot fields on the wire", async () => {
 		const dir = await tempDir();
 		// Each of these alone would push the snapshot JSON past the 64 KiB response cap.

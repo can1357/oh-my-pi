@@ -440,6 +440,54 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
+	it("mirrors activity to a guest who joined while registry publication was still pending", async () => {
+		const { ctx, state } = makeHostContext();
+		// Hold publication open: the relay is up and the link is visible (an
+		// auto-started room is installed before start() resolves), so a guest
+		// can join now and must not miss what happens before publication lands.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const publishing = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		publishSpy.mockImplementation(async (source, options) => {
+			publishing.resolve();
+			await gate.promise;
+			return redirected(source, options);
+		});
+		host = new CollabHost(ctx);
+		const started = host.start(RELAY_URL, WEB_URL);
+		await publishing.promise;
+
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => guest.close());
+		const welcomed = Promise.withResolvers<void>();
+		const seen: string[] = [];
+		const after = Promise.withResolvers<void>();
+		guest.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "event" && frame.event.type === "notice") {
+				seen.push(frame.event.message);
+				if (frame.event.message === "after publication") after.resolve();
+			}
+		};
+		guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "early-guest" });
+		guest.connect();
+		await welcomed.promise;
+
+		// Session activity during the pending publication …
+		state.subscribed?.({ type: "notice", level: "info", message: "during publication", source: "test" });
+		gate.resolve();
+		await started;
+		// … and after it; frames arrive in send order, so if the first one had
+		// been mirrored at all it precedes the second.
+		state.subscribed?.({ type: "notice", level: "info", message: "after publication", source: "test" });
+		await after.promise;
+
+		expect(seen).toEqual(["during publication", "after publication"]);
+	});
+
 	it("stop() resolves only after a publication still in flight has been withdrawn", async () => {
 		const { ctx, state } = makeHostContext();
 		// Model production timing: the room is stopped (session switch) while the

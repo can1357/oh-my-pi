@@ -703,9 +703,9 @@ export async function resolveCollabHostLink(
 		throw new CollabLinkError("ambiguous", `${wanted} matches more than one Collab host; use an instance id: ${ids}`);
 	}
 	const [{ meta, snapshot }] = matches;
-	if (access === "control" && snapshot.access !== "control") {
-		throw new CollabLinkError("access_unavailable", `host ${snapshot.instanceId} publishes view access only`);
-	}
+	// No local access precheck: the host decides, and it checks the generation
+	// before the access level, so a room that rotated underneath the listing
+	// reports `stale_generation` rather than a verdict about its predecessor.
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
 	const result = await query(meta, { op: "link", access, generation: snapshot.generation }, timeoutMs);
 	if (result.status === "ok") {

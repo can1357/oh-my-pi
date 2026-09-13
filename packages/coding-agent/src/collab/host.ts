@@ -383,6 +383,35 @@ export class CollabHost {
 		}
 
 		this.#startedAt = Date.now();
+		// Mirror from the moment the relay is open. A guest can join as soon as
+		// the link is visible (auto-start installs the room before this
+		// resolves), and anything that happens after its welcome snapshot must
+		// reach it; the local registry work below is independent of that.
+		this.#unsubscribe = this.#ctx.session.subscribe(event => {
+			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
+			this.#onEventForState(event);
+		});
+		// Subagent frames publish on the session tree's observability bus at
+		// any spawn depth; mirroring from it is what lets nested agents reach
+		// guests at all. Embedders on the previous constructor signature only
+		// wire a session bus — fall back to it so depth-1 frames keep flowing.
+		const observabilityBus = this.#ctx.subagentEventBus ?? this.#ctx.eventBus;
+		if (observabilityBus) {
+			for (const channel of COLLAB_BUS_CHANNELS) {
+				this.#busUnsubscribers.push(
+					observabilityBus.on(channel, data => this.#broadcast({ t: "bus", channel, data })),
+				);
+			}
+		}
+		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+		this.#ctx.sessionManager.onEntryAppended = entry => {
+			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
+			// Model/thinking/title changes land as entries while idle; refresh
+			// guest state promptly (debounce + JSON diff dedupe).
+			this.#scheduleStateBroadcast();
+		};
+		this.#updateStatusSegment();
+
 		// Publish to the local host registry only after the relay connection
 		// succeeded. Publication failure warns but never breaks hosting (#6099).
 		// The in-flight task is tracked so a stop() that overtakes it withdraws
@@ -413,31 +442,6 @@ export class CollabHost {
 			throw new Error("relay connection closed during startup");
 		}
 		this.#registryPublication = publication;
-
-		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
-			this.#onEventForState(event);
-		});
-		// Subagent frames publish on the session tree's observability bus at
-		// any spawn depth; mirroring from it is what lets nested agents reach
-		// guests at all. Embedders on the previous constructor signature only
-		// wire a session bus — fall back to it so depth-1 frames keep flowing.
-		const observabilityBus = this.#ctx.subagentEventBus ?? this.#ctx.eventBus;
-		if (observabilityBus) {
-			for (const channel of COLLAB_BUS_CHANNELS) {
-				this.#busUnsubscribers.push(
-					observabilityBus.on(channel, data => this.#broadcast({ t: "bus", channel, data })),
-				);
-			}
-		}
-		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
-		this.#ctx.sessionManager.onEntryAppended = entry => {
-			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
-			// Model/thinking/title changes land as entries while idle; refresh
-			// guest state promptly (debounce + JSON diff dedupe).
-			this.#scheduleStateBroadcast();
-		};
-		this.#updateStatusSegment();
 	}
 
 	/**
