@@ -3010,13 +3010,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `edit`/`write`/`grep`, so the raw request matches the finalized set.)
 		const cursorRequestedToolNames = new Set(normalizeToolNames(options.toolNames ?? []));
 		const cursorScopeAllows = (name: string): boolean => {
+			// The scope decides on the CANONICAL registered spelling, not the one
+			// the frame used: Cursor sends the supported Claude Code spelling
+			// (`mcp__srv-x__tool`) for a tool registered under the minted
+			// (`mcp__srv_x_tool`), and `getExecutableTool` resolves that alias
+			// after this check — so judging the raw spelling would let a frame
+			// bypass an `mcp__<server>_*` pattern and an enforced allowlist that
+			// both target the minted name. `resolveMCPToolAlias` returns the
+			// registered tool only when exactly one candidate matches, so an
+			// ambiguous or unknown spelling stays judged as itself.
+			const canonical = resolveMCPToolAlias(name, candidate => toolRegistry.get(candidate))?.name ?? name;
 			// Metadata-aware disallow: pass the registered tool's raw `mcpServerName`
 			// so `mcp__<server>_*` still matches length-capped minted names (a plain
 			// name-prefix match misses the truncated + hashed registry key).
-			const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
-			const isBuiltIn = builtInRegistryToolNames.has(name);
+			const mcpServerName = (toolRegistry.get(canonical) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+			const isBuiltIn = builtInRegistryToolNames.has(canonical);
 			return isToolScopedIn(
-				name,
+				canonical,
 				disallowedPatterns,
 				{
 					enforceToolAllowlist,
@@ -3544,6 +3554,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// above, this is a safety pairing — it applies to restricted sessions too.
 		if (explicitlyRequestedToolNames) {
 			explicitlyRequestedToolNames = withSiblingTools(explicitlyRequestedToolNames);
+		}
+		// A declaration may spell an MCP tool the Claude Code way
+		// (`mcp__srv-x__tool`), which is the supported wire spelling but not the
+		// registered key (`mcp__srv_x_tool`). Resolve such entries to the
+		// registered name so an enforced allowlist admits the tool the
+		// declaration names, and so an explicit `disable`/disallow of the same
+		// spelling is judged against the same key. Unambiguous matches only, and
+		// every non-MCP or unresolvable entry is left untouched.
+		if (explicitlyRequestedToolNames && toolRegistry.size > 0) {
+			const resolved = new Set<string>();
+			let changed = false;
+			for (const name of explicitlyRequestedToolNames) {
+				const canonical = resolveMCPToolAlias(name, candidate =>
+					toolRegistry.has(candidate) ? { name: candidate } : undefined,
+				);
+				const next = canonical?.name ?? name;
+				if (next !== name) changed = true;
+				if (!resolved.has(next)) resolved.add(next);
+			}
+			if (changed) explicitlyRequestedToolNames = [...resolved];
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));

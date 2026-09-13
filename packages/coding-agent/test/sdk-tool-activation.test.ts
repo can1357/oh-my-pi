@@ -3375,6 +3375,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
+	it("admits a Claude Code MCP spelling declared in an enforced allowlist", async () => {
+		// A ported Claude Code agent declares the doubled-separator spelling
+		// (`mcp__seedpatch-client__bank`) while the tool registers under the
+		// minted key (`mcp__seedpatch_client_bank`). The declaration has to be
+		// resolved to the registered name or the allowlist admits nothing and
+		// every call dies as unadvertised.
+		const tempDir = makeTempDir();
+
+		await withProviderAuth(["openai"], async () => {
+			const bankTool = {
+				name: "mcp__seedpatch_client_bank",
+				label: "seedpatch-client/bank",
+				description: "Read the bank",
+				parameters: type({}),
+				mcpServerName: "seedpatch-client",
+				mcpToolName: "bank",
+				async execute() {
+					return { content: [{ type: "text", text: "bank contents" }] };
+				},
+			} satisfies CustomTool;
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				customTools: [bankTool],
+				toolNames: ["read", "mcp__seedpatch-client__bank"],
+				enforceToolAllowlist: true,
+			});
+			try {
+				expect(session.getActiveToolNames()).toContain("mcp__seedpatch_client_bank");
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("runs advisor tools through the approval gate", async () => {
 		// The advisor's tools are built straight from `BUILTIN_TOOLS`, outside
 		// the registry loop that wraps everything else. Its own loop and its
