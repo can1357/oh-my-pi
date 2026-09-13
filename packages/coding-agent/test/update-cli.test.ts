@@ -28,6 +28,7 @@ import {
 	resolveReleaseBinaryAsset,
 	resolveReleaseDist,
 	resolveReleaseRename,
+	resolveGitHubTokenForTest,
 	resolveUpdateMethodForTest,
 	resolveUpdateTargetFromPath,
 	shouldForceBinaryUpdate,
@@ -119,6 +120,35 @@ describe("parseUpdateArgs", () => {
 		expect(() => parseUpdateArgs(["update", "--canary", "--stable"])).toThrow(
 			"--canary and --stable are mutually exclusive",
 		);
+	});
+});
+describe("GitHub update credentials", () => {
+	it("prefers an explicit environment token over gh auth", async () => {
+		let calls = 0;
+		const token = await resolveGitHubTokenForTest({
+			envToken: "env-token",
+			ghPath: "gh",
+			runGhAuthToken: async () => {
+				calls += 1;
+				return "keyring-token";
+			},
+		});
+		expect(token).toBe("env-token");
+		expect(calls).toBe(0);
+	});
+
+	it("uses gh auth when no environment token is configured", async () => {
+		const token = await resolveGitHubTokenForTest({
+			envToken: "",
+			ghPath: "gh",
+			runGhAuthToken: async path => path + "-token  ",
+		});
+		expect(token).toBe("gh-token");
+	});
+
+	it("keeps anonymous fallback when gh is unavailable", async () => {
+		const token = await resolveGitHubTokenForTest({ envToken: "", ghPath: null });
+		expect(token).toBeUndefined();
 	});
 });
 
