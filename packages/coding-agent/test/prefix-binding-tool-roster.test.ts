@@ -5,8 +5,10 @@ import type { Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 function createPrefixBindingModel(): Model<"anthropic-messages"> {
@@ -55,10 +57,11 @@ function createTool(name: string): AgentTool {
 interface TestSession {
 	session: AgentSession;
 	contexts: Message[][];
+	systemPrompts: string[][];
 	rebuild: Mock<(toolNames: string[]) => Promise<string>>;
 }
 
-function newSession(model: Model): TestSession {
+function newSession(model: Model, options: { beforeAgentStartSystemPrompt?: string[] } = {}): TestSession {
 	const read = createTool("read");
 	const bash = createTool("bash");
 	const toolRegistry = new Map<string, AgentTool>([
@@ -67,6 +70,7 @@ function newSession(model: Model): TestSession {
 	]);
 	const mock = createMockModel({ responses: [{ content: ["ok"] }, { content: ["ok"] }] });
 	const contexts: Message[][] = [];
+	const systemPrompts: string[][] = [];
 	const rebuilder = {
 		async rebuildSystemPrompt(toolNames: string[]): Promise<string> {
 			return `tools:${toolNames.join(",")}`;
@@ -79,6 +83,7 @@ function newSession(model: Model): TestSession {
 		convertToLlm,
 		streamFn: (requestModel, context, streamOptions) => {
 			contexts.push([...context.messages]);
+			systemPrompts.push([...(context.systemPrompt ?? [])]);
 			return mock.stream(requestModel, context, streamOptions);
 		},
 	});
@@ -89,11 +94,17 @@ function newSession(model: Model): TestSession {
 		modelRegistry: { getApiKey: async () => "test-key" } as never,
 		toolRegistry,
 		builtInToolNames: ["read", "bash"],
+		extensionRunner: options.beforeAgentStartSystemPrompt
+			? ({
+					emitBeforeAgentStart: async () => ({ systemPrompt: options.beforeAgentStartSystemPrompt }),
+					emit: async () => undefined,
+				} as unknown as ExtensionRunner)
+			: undefined,
 		rebuildSystemPrompt: async toolNames => ({
 			systemPrompt: [await rebuilder.rebuildSystemPrompt(toolNames)],
 		}),
 	});
-	return { session, contexts, rebuild };
+	return { session, contexts, systemPrompts, rebuild };
 }
 
 function providerText(messages: Message[]): string {
@@ -175,5 +186,149 @@ describe("prefix-bound tool roster changes", () => {
 
 		expect(harness.rebuild).toHaveBeenCalledTimes(rebuildsBeforeRosterChange + 1);
 		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash"]);
+	});
+
+	it("drops a pending roster notice once the base prompt is rebuilt afterward", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+		// A later full rebuild (e.g. the model-cycle round trip's syncAfterModelChange)
+		// re-renders the complete roster, subsuming the queued delta.
+		await harness.session.refreshBaseSystemPrompt();
+
+		await harness.session.prompt("second");
+
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(0);
+		const secondRequest = providerText(harness.contexts[1]);
+		expect(secondRequest).not.toContain("Tool availability changed.");
+		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash"]);
+	});
+
+	it("does not ship a roster notice when a rebuild clears the delta during pre-prompt compaction", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta
+		// that survives to the next prompt (no rebuild behind it).
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+
+		// The pre-prompt maintenance pass can rebuild the base prompt mid-prompt
+		// (context promotion switches the model -> syncAfterModelChange, or a
+		// summary compaction), which re-renders the complete roster and clears the
+		// queued delta. The roster notice is consumed after that pass, so it must
+		// see the cleared delta and emit nothing — the outgoing request must never
+		// carry both a rebuilt roster and a contradicting notice.
+		const rebuildDuringCompaction = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementation(async () => {
+				await harness.session.refreshBaseSystemPrompt();
+			});
+
+		await harness.session.prompt("second");
+
+		expect(rebuildDuringCompaction).toHaveBeenCalledTimes(1);
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(0);
+		const secondRequest = providerText(harness.contexts[1]);
+		expect(secondRequest).not.toContain("Tool availability changed.");
+	});
+
+	it("keeps the roster notice when a turn override hides the rebuilt base", async () => {
+		const override = ["per-turn override prompt"];
+		const harness = newSession(createPrefixBindingModel(), { beforeAgentStartSystemPrompt: override });
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+
+		// A before_agent_start override is active for the turn, so a mid-prompt
+		// rebuild (here a promotion/summary rebuild) re-renders the base but never
+		// puts it on the wire — the override stays. The queued delta must survive
+		// that rebuild so the notice remains the only channel carrying the change.
+		const rebuildDuringCompaction = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementation(async () => {
+				await harness.session.refreshBaseSystemPrompt();
+			});
+
+		await harness.session.prompt("second");
+
+		expect(rebuildDuringCompaction).toHaveBeenCalledTimes(1);
+		// The provider saw the override, not the rebuilt roster.
+		expect(harness.systemPrompts[1]).toEqual(override);
+		// So the notice must still be delivered.
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(1);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
+	});
+
+	it("keeps the roster notice when a rebuild precedes a turn override", async () => {
+		const override = ["per-turn override prompt"];
+		const harness = newSession(createPrefixBindingModel(), { beforeAgentStartSystemPrompt: override });
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+		// A rebuild happens while no override is registered yet — modelling a memory
+		// backend's beforeAgentStartPrompt refresh, which runs inside
+		// buildSystemPromptForAgentStart before emitBeforeAgentStart sets the
+		// per-turn override. The rebuilt base must not clear the delta outright: the
+		// override registered moments later hides that base from the wire.
+		await harness.session.refreshBaseSystemPrompt();
+
+		await harness.session.prompt("second");
+
+		// The override hid the rebuilt base, so the provider never saw the roster there.
+		expect(harness.systemPrompts[1]).toEqual(override);
+		// The notice is the only channel carrying the change, so it must survive.
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(1);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
+	});
+
+	it("delivers a roster notice for a change queued during pre-prompt maintenance", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// The tool list changes mid-maintenance (e.g. an MCP refresh landing during
+		// the await). The roster notice carries no context-budget risk, so it must
+		// ship this turn alongside the schema change rather than deferring — a
+		// deferred notice would leave the wire tool list and stated availability out
+		// of sync, the same divergence as the original bug.
+		const rosterChangeDuringMaintenance = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await harness.session.setActiveToolPresentation(["read", "bash"], []);
+			});
+
+		await harness.session.prompt("second");
+
+		expect(rosterChangeDuringMaintenance).toHaveBeenCalledTimes(1);
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(1);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
 	});
 });

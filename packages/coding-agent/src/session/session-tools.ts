@@ -180,9 +180,30 @@ const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
  * (and re-splice a redundant developer message that busts the provider
  * prompt-cache prefix).
  */
+interface ToolRosterNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
 interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
+}
+
+interface PendingNoticePreview<T> {
+	notice: CustomMessage<T> | undefined;
+	/**
+	 * Exact rendered content included in the context estimate. Re-projecting and
+	 * comparing this key after maintenance catches every semantically relevant
+	 * change — mount membership, base-catalog suppression, summaries, and schemas
+	 * — without false-invalidating a byte-identical notice after a hidden rebuild.
+	 */
+	contentKey: string;
+}
+
+interface XdevMountNoticeProjection {
+	notice: CustomMessage<XdevMountNoticeDetails> | undefined;
+	announcedMounts: Set<string>;
 }
 
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
@@ -200,6 +221,16 @@ export class SessionTools {
 	#xdev: XdevState | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	/**
+	 * Whether the current {@link #baseSystemPrompt} already renders the roster the
+	 * pending delta describes — true after a full rebuild, false after a frozen
+	 * (prefix-preserving) apply queues a change the base did not re-render. The
+	 * delta is subsumed only when such a base is the prompt actually delivered, a
+	 * decision {@link takePendingToolRosterNotice} defers to send time because a
+	 * per-turn `before_agent_start` override (registered after some rebuilds) can
+	 * still keep the rebuilt base off the wire.
+	 */
+	#basePromptReflectsRosterDelta = false;
 	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
@@ -1079,7 +1110,16 @@ export class SessionTools {
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
-				this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
+				// The rebuilt prompt renders the complete current roster, so a delta
+				// queued by an earlier frozen apply is subsumed once that base is the
+				// prompt actually delivered. Whether it is — a per-turn
+				// `before_agent_start` override can still hide it — is unknown here
+				// (the override may be registered after this rebuild, e.g. a memory
+				// backend's beforeAgentStartPrompt refresh), so mark the base as
+				// carrying the roster and let `takePendingToolRosterNotice` decide at
+				// send time.
+				this.#basePromptReflectsRosterDelta = true;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1101,6 +1141,10 @@ export class SessionTools {
 		for (const name of names) mountedNames.add(name);
 	}
 
+	#setBasePromptXdevNames(names: readonly string[] | undefined): void {
+		this.#basePromptXdevNames = new Set(names);
+	}
+
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {
 		const previous = new Set(previousActiveToolNames);
 		const current = new Set(appliedNames);
@@ -1115,6 +1159,9 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingToolRosterDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+		// A frozen apply changed the roster without re-rendering the base prompt, so
+		// the base no longer reflects the pending delta.
+		this.#basePromptReflectsRosterDelta = false;
 	}
 
 	/**
@@ -1222,11 +1269,33 @@ export class SessionTools {
 		}
 	}
 
-	/** Consumes the hidden notice for provider-visible tool-roster changes. */
-	takePendingToolRosterNotice(): CustomMessage<{ added: string[]; removed: string[] }> | undefined {
+	/**
+	 * Consumes the hidden provider-visible roster notice for the current pending
+	 * delta. This carries no meaningful payload (a short tool-name list), so it is
+	 * never previewed or deferred for context budgeting: it is re-derived from the
+	 * live delta after pre-prompt maintenance, keeping the model's stated
+	 * availability in lockstep with the wire tool list.
+	 *
+	 * The notice is suppressed only when the prompt actually delivered this turn is
+	 * a rebuilt base that already renders the full roster (`baseDelivered` and
+	 * {@link #basePromptReflectsRosterDelta}). A per-turn `before_agent_start`
+	 * override that hides the rebuilt base leaves `baseDelivered` false, so the
+	 * notice still ships — the only channel carrying the change on that turn.
+	 */
+	takePendingToolRosterNotice(options: {
+		baseDelivered: boolean;
+	}): CustomMessage<ToolRosterNoticeDetails> | undefined {
+		if (!this.#pendingToolRosterDelta) return undefined;
+		const subsumed = options.baseDelivered && this.#basePromptReflectsRosterDelta;
+		const notice = subsumed ? undefined : this.#buildPendingToolRosterNotice();
+		this.#pendingToolRosterDelta = undefined;
+		this.#basePromptReflectsRosterDelta = false;
+		return notice;
+	}
+
+	#buildPendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
 		const pending = this.#pendingToolRosterDelta;
 		if (!pending) return undefined;
-		this.#pendingToolRosterDelta = undefined;
 		const added = [...pending.added];
 		const removed = [...pending.removed];
 		return {
@@ -1243,12 +1312,74 @@ export class SessionTools {
 		};
 	}
 
-	/** Consumes the hidden notice for unannounced `xd://` mount changes. */
-	takePendingXdevMountNotice(baseCatalogDelivered: boolean): CustomMessage<XdevMountNoticeDetails> | undefined {
+	/** Previews the hidden `xd://` mount notice and its rendered-content fingerprint. */
+	peekPendingXdevMountNotice(options: {
+		baseCatalogDelivered: boolean;
+	}): PendingNoticePreview<XdevMountNoticeDetails> | undefined {
+		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
+		if (!projection) return undefined;
+		return {
+			notice: projection.notice,
+			contentKey: this.#xdevNoticeContentKey(projection.notice),
+		};
+	}
+
+	/**
+	 * Consumes the mount notice only when its rendered content still matches the
+	 * preview included in the context estimate.
+	 */
+	takePendingXdevMountNotice(options: {
+		baseCatalogDelivered: boolean;
+		expectedContentKey: string;
+	}): CustomMessage<XdevMountNoticeDetails> | undefined {
+		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
+		if (!projection) return undefined;
+		const contentMatches = this.#xdevNoticeContentKey(projection.notice) === options.expectedContentKey;
+		if (!contentMatches) {
+			// Changed rendered content can follow mount/catalog changes or a
+			// same-named MCP tool reconnect whose schema replacement does not change
+			// mount membership or the applied-tool signature.
+			// If maintenance delivered a rebuilt base, commit additions carried by
+			// that prompt before deferring the remaining notice content.
+			if (options.baseCatalogDelivered) this.#recordBasePromptXdevAdditions();
+			return undefined;
+		}
+		// A hidden base rebuild can leave the projected notice byte-identical. The
+		// exact content was already budgeted, so consume it rather than withholding
+		// both the catalog and its availability notice from this request.
+		this.#pendingXdevMountDelta = undefined;
+		this.#announcedMounts = projection.announcedMounts;
+		return projection.notice;
+	}
+
+	/** Stable fingerprint of a mount notice's rendered text, ignoring its timestamp. */
+	#xdevNoticeContentKey(notice: CustomMessage<XdevMountNoticeDetails> | undefined): string {
+		if (!notice) return "";
+		const { content } = notice;
+		if (typeof content === "string") return content;
+		return content.map(part => (part.type === "text" ? part.text : "")).join("\u0000");
+	}
+
+	#recordBasePromptXdevAdditions(): void {
+		const pending = this.#pendingXdevMountDelta;
+		if (!pending) return;
+		this.#ensureAnnouncedMountsSeeded();
+		let changed = false;
+		for (const name of pending.added) {
+			if (!this.#basePromptXdevNames.has(name)) continue;
+			pending.added.delete(name);
+			this.#announcedMounts.add(name);
+			changed = true;
+		}
+		if (!changed) return;
+		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+	}
+
+	#projectPendingXdevMountNotice(baseCatalogDelivered: boolean): XdevMountNoticeProjection | undefined {
 		const pending = this.#pendingXdevMountDelta;
 		if (!pending) return undefined;
-		this.#pendingXdevMountDelta = undefined;
 		this.#ensureAnnouncedMountsSeeded();
+		const announcedMounts = new Set(this.#announcedMounts);
 		// A pending add for a device the outgoing base prompt already lists in its
 		// catalog needs no notice line — but only when the final provider prompt
 		// still carries that base catalog. A `before_agent_start` replacement drops
@@ -1259,7 +1390,7 @@ export class SessionTools {
 		// any request is sent (issue #7139 reviews).
 		if (baseCatalogDelivered) {
 			for (const name of pending.added) {
-				if (this.#basePromptXdevNames.has(name)) this.#announcedMounts.add(name);
+				if (this.#basePromptXdevNames.has(name)) announcedMounts.add(name);
 			}
 		}
 		// Only announce a net change relative to what the model already knows (from
@@ -1267,9 +1398,13 @@ export class SessionTools {
 		// device — the common resume/reconnect case — and an unmount for a device
 		// it was never told about are both suppressed, keeping the provider prompt
 		// cache prefix byte-stable across resumes.
-		const addedNames = [...pending.added].filter(name => !this.#announcedMounts.has(name));
-		const removedNames = [...pending.removed].filter(name => this.#announcedMounts.has(name));
-		if (addedNames.length === 0 && removedNames.length === 0) return undefined;
+		const addedNames = [...pending.added].filter(name => !announcedMounts.has(name));
+		const removedNames = [...pending.removed].filter(name => announcedMounts.has(name));
+		for (const name of addedNames) announcedMounts.add(name);
+		for (const name of removedNames) announcedMounts.delete(name);
+		if (addedNames.length === 0 && removedNames.length === 0) {
+			return { notice: undefined, announcedMounts };
+		}
 		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
 		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = removedNames.map(name => ({ name }));
@@ -1281,16 +1416,17 @@ export class SessionTools {
 					this.#host.settings.get("tools.xdevInlineDevices"),
 				)
 			: "";
-		for (const name of addedNames) this.#announcedMounts.add(name);
-		for (const name of removedNames) this.#announcedMounts.delete(name);
 		return {
-			role: "custom",
-			customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
-			content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
-			details: { added: addedNames, removed: removedNames },
-			attribution: "agent",
-			display: false,
-			timestamp: Date.now(),
+			notice: {
+				role: "custom",
+				customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
+				content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+				details: { added: addedNames, removed: removedNames },
+				attribution: "agent",
+				display: false,
+				timestamp: Date.now(),
+			},
+			announcedMounts,
 		};
 	}
 
@@ -1496,7 +1632,7 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames });
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
-		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
+		this.#setBasePromptXdevNames(built.xdevCatalogNames);
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
@@ -1505,6 +1641,14 @@ export class SessionTools {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
 		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+		// The rebuilt prompt renders the complete current roster, so a delta queued
+		// by an earlier frozen apply (e.g. a Code Mode boundary crossed mid
+		// model-cycle) is subsumed once this base is the prompt actually delivered.
+		// A per-turn `before_agent_start` override — which may be registered after
+		// this refresh, e.g. a memory backend's beforeAgentStartPrompt injection —
+		// can still hide it, so mark the base as carrying the roster and let
+		// `takePendingToolRosterNotice` decide at send time.
+		this.#basePromptReflectsRosterDelta = true;
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we

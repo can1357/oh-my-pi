@@ -6479,8 +6479,10 @@ export class AgentSession {
 
 			// Pending tool-roster and xd:// deltas accompany the next user-authored
 			// prompt, never an agent-initiated continuation. Reserve their pre-user
-			// position, but consume xd:// only after before_agent_start determines
-			// whether the final provider prompt still carries the base catalog.
+			// position now. Non-consuming previews count toward pre-prompt context
+			// maintenance, while the live deltas are consumed only after maintenance:
+			// promotion/summary can rebuild the base prompt and clear a roster delta
+			// it subsumes, avoiding a contradictory materialized notice.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
@@ -6577,10 +6579,40 @@ export class AgentSession {
 					return false;
 				}
 			}
-			const xdevMountNotice = isUserQueuedMessage(message)
-				? this.#tools.takePendingXdevMountNotice(baseXdevCatalogDelivered)
+
+			// Only the xd:// mount notice can carry substantial inline docs (up to
+			// XDEV_DOCS_TOTAL_BUDGET), so preview it in a copy and let context
+			// maintenance see the request's true size without consuming a delta a
+			// rebuild may supersede. The tool-roster notice is a tiny name list with
+			// no budget impact, so it is not previewed here — it must always ship
+			// alongside the schema change it describes (see below).
+			const previewXdevMountNotice = isUserQueuedMessage(message)
+				? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
 				: undefined;
-			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;
+			const maintenanceMessages = previewXdevMountNotice?.notice ? [...messages] : messages;
+			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
+				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
+			}
+			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
+			if (this.#promptGeneration !== generation) {
+				return false;
+			}
+			// Consume the xd:// notice only when its previewed revision still holds.
+			// A mount delta or catalog rebuild during the await invalidates it: any
+			// additions carried by the delivered base are recorded as announced,
+			// while remaining notice content waits for the next context check.
+			// The roster notice is re-derived from the live delta here and always
+			// delivered, keeping the model's stated availability in lockstep with
+			// the wire tool list even when a roster change landed during maintenance.
+			const xdevMountNotice = previewXdevMountNotice
+				? this.#tools.takePendingXdevMountNotice({
+						baseCatalogDelivered: baseXdevCatalogDelivered,
+						expectedContentKey: previewXdevMountNotice.contentKey,
+					})
+				: undefined;
+			const toolRosterNotice = isUserQueuedMessage(message)
+				? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
+				: undefined;
 			if (xdevMountNotice || toolRosterNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
@@ -6588,11 +6620,6 @@ export class AgentSession {
 					...(xdevMountNotice ? [xdevMountNotice] : []),
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 				);
-			}
-
-			await this.#maintenance.runPrePromptCompactionIfNeeded(messages);
-			if (this.#promptGeneration !== generation) {
-				return false;
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
