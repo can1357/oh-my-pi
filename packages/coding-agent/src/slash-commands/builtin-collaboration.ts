@@ -1,5 +1,5 @@
 import { Spacer } from "@oh-my-pi/pi-tui";
-import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { listCollabHosts } from "../collab/registry";
@@ -357,6 +357,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						TRUNCATE_LENGTHS.LONG,
 					);
 					const guests = host.participants - 1;
+					const room = [
+						`gen ${host.generation}`,
+						host.model ? sanitizeDisplayLine(`${host.model.provider}/${host.model.id}`) : "no model",
+						`started ${formatAge(Math.round((Date.now() - host.startedAt) / 1000)) || "just now"}`,
+					].join(", ");
 					const detail = [
 						`pid ${host.pid}`,
 						`${guests} guest${guests === 1 ? "" : "s"}`,
@@ -366,9 +371,10 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						truncateToWidth(sanitizeDisplayLine(shortenPath(host.cwd)), TRUNCATE_LENGTHS.TITLE),
 					].join(", ");
 					lines.push(
-						// Fields are bounded above; the composed row is bounded too so the
+						// Fields are bounded above; each composed row is bounded too so the
 						// fixed details can never push it past one transcript line.
-						truncateToWidth(` ${bullet} ${session} ${theme.fg("muted", `— ${detail}`)}`, TRUNCATE_LENGTHS.LINE),
+						truncateToWidth(` ${bullet} ${session} ${theme.fg("muted", `— ${room}`)}`, TRUNCATE_LENGTHS.LINE),
+						truncateToWidth(`   ${theme.fg("muted", detail)}`, TRUNCATE_LENGTHS.LINE),
 						`   ${theme.fg("dim", `${APP_NAME} collab link ${host.instanceId}${host.access === "view" ? " --view" : ""}`)}`,
 					);
 				}

@@ -229,6 +229,21 @@ describe("CollabController", () => {
 		expect(state.showStatus).toEqual([]);
 	});
 
+	it("applies auto-start enabled at runtime to the next session without a restart", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "off" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		expect(ctx.collabHost).toBeUndefined();
+
+		// The user flips the setting in /settings, then starts a new session.
+		state.autoStart = "control";
+		switchSession(state, `sess-next-${crypto.randomUUID()}`);
+		await settled(publishSpy, 1);
+
+		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
+		expect(snapshot).toMatchObject({ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId });
+	});
+
 	it("reports an auto-start failure without throwing into startup", async () => {
 		const { ctx, state } = makeControllerContext({ autoStart: "control", relayUrl: "" });
 		controller = new CollabController(ctx);

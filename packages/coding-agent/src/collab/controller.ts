@@ -64,10 +64,20 @@ export class CollabController {
 	 * background and a failure is reported without disturbing the session.
 	 */
 	autoStart(): void {
+		// Observe session changes from now on even when auto-start is currently
+		// off: the setting is read live, so enabling it later applies to the
+		// next `/new`, `/resume`, or branch without restarting omp.
+		this.#observeSessionChanges();
 		const access = this.autoStartMode;
 		if (access === "off" || this.#shutdown || this.host) return;
 		const started = this.#launchReporting(access);
 		this.#ops = this.#ops.then(() => started);
+	}
+
+	#observeSessionChanges(): void {
+		this.#unsubscribeSessionChange ??= this.#ctx.session.registerSessionChangeCallback(() =>
+			this.#onSessionChanged(),
+		);
 	}
 
 	/**
@@ -122,9 +132,7 @@ export class CollabController {
 	async #launch(access: CollabAccess, relay?: string): Promise<CollabHost> {
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
-		this.#unsubscribeSessionChange ??= this.#ctx.session.registerSessionChangeCallback(() =>
-			this.#onSessionChanged(),
-		);
+		this.#observeSessionChanges();
 		const previous = this.#host;
 		const host = new CollabHost(this.#ctx, { instanceId: this.instanceId, generation: ++this.#generation, access });
 		this.#host = host;

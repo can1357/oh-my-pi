@@ -61,6 +61,9 @@ describe("/collab list slash command", () => {
 		expect(listSpy).toHaveBeenCalledTimes(1);
 		const text = Bun.stripANSI(String(harness.showStatus.mock.calls.at(-1)?.[0] ?? ""));
 		expect(text).toContain("TUI Session (sess-tui)");
+		expect(text).toContain("gen 2");
+		expect(text).toContain("test/model-1");
+		expect(text).toMatch(/started \S+/);
 		expect(text).toContain("pid 42");
 		expect(text).toContain("1 guest");
 		expect(text).toContain("input required");
