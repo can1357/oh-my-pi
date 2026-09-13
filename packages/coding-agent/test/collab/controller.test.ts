@@ -16,7 +16,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
-import { type CollabHost, CollabHostStoppedError } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { CollabHost, CollabHostStoppedError } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
@@ -33,6 +34,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -224,10 +226,12 @@ describe("interactive collaboration startup", () => {
 	let testSession: TestSessionContext;
 	let mode: InteractiveMode | undefined;
 	let originalProject: string;
+	const remoteHosts: CollabHost[] = [];
 
 	beforeEach(async () => {
 		originalProject = getProjectDir();
 		setProjectDir(tmp);
+		spyOn(utils, "getConfigRootDir").mockReturnValue(tmp);
 		resetSettingsForTest();
 		await initTheme();
 		activeSettings = await Settings.init({ inMemory: true, cwd: tmp });
@@ -237,7 +241,6 @@ describe("interactive collaboration startup", () => {
 		activeSettings.override("startup.showSplash", false);
 		activeSettings.override("marketplace.autoUpdate", "off");
 		testSession = await createTestSession({
-			inMemory: true,
 			settingsOverrides: {
 				"collab.autoStart": "view",
 				"collab.relayUrl": RELAY_URL,
@@ -248,6 +251,8 @@ describe("interactive collaboration startup", () => {
 	});
 
 	afterEach(async () => {
+		await mode?.collabGuest?.leave("test cleanup").catch(() => {});
+		for (const remote of remoteHosts.splice(0)) await remote.stop("test cleanup");
 		await mode?.collabController.shutdown("test cleanup").catch(() => {});
 		mode?.stop();
 		stopPendingStartupComposer();
@@ -257,7 +262,7 @@ describe("interactive collaboration startup", () => {
 		setProjectDir(originalProject);
 	});
 
-	it("skips auto-hosting for an explicit guest initialization without changing the saved policy", async () => {
+	it("keeps renderer-only initialization local without changing the saved policy", async () => {
 		mode = new InteractiveMode(
 			testSession.session,
 			"test",
@@ -270,28 +275,51 @@ describe("interactive collaboration startup", () => {
 		);
 		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 
-		await mode.init({ suppressWelcomeIntro: true, autoStartCollab: false });
+		await mode.init({ suppressWelcomeIntro: true });
 
 		expect(mode.collabHost).toBeUndefined();
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 		expect(mode.settings.get("collab.autoStart")).toBe("view");
-		// The per-init intent must not permanently disable collaboration.
+		// Renderer-only initialization must not disable a later explicit start.
 		await mode.collabController.start({ access: "view" });
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
 	});
 
-	it("resumes the saved auto-host policy after the dedicated join command fails", async () => {
+	it("restores the local session and saved hosting policy after dedicated CLI join activation fails", async () => {
 		const finished = new Error("finished observing failed join");
+		testSession.sessionManager.appendMessage({ role: "user", content: "dedicated local transcript", timestamp: 0 });
+		await testSession.sessionManager.ensureOnDisk();
+		await testSession.sessionManager.flush();
+		const localFile = testSession.sessionManager.getSessionFile();
+		const remote = new CollabHost(makeControllerContext().ctx);
+		remoteHosts.push(remote);
+		await remote.start(RELAY_URL);
+		const render = InteractiveMode.prototype.renderInitialMessages;
+		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
+			async function (this: InteractiveMode, options) {
+				if (this.sessionManager.getSessionId() === remote.sessionId)
+					throw new Error("dedicated replica rendering failed");
+				await render.call(this, options);
+			},
+		);
 		beginStartupComposer({ terminal: new VirtualTerminal(), version: "test", cache: false });
 		spyOn(InteractiveMode.prototype, "getUserInput").mockImplementation(async function (this: InteractiveMode) {
 			mode = this;
 			await this.collabController.idle();
-			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
+			expect(this.sessionManager.getSessionFile()).toBe(localFile);
+			expect(this.session.messages).toMatchObject([{ role: "user", content: "dedicated local transcript" }]);
+			expect(
+				(await registry.listCollabHosts({ dir: tmp })).filter(
+					host => host.instanceId === this.collabController.instanceId,
+				),
+			).toMatchObject([{ access: "view", generation: 1 }]);
 			await this.session.newSession();
 			await this.collabController.idle();
-			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-				{ access: "view", generation: 2, sessionId: this.sessionManager.getSessionId() },
-			]);
+			expect(
+				(await registry.listCollabHosts({ dir: tmp })).filter(
+					host => host.instanceId === this.collabController.instanceId,
+				),
+			).toMatchObject([{ access: "view", generation: 2, sessionId: this.sessionManager.getSessionId() }]);
 			throw finished;
 		});
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
@@ -302,7 +330,7 @@ describe("interactive collaboration startup", () => {
 		try {
 			const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
 			const parsed = parseArgs(rawArgs);
-			parsed.join = "invalid-collab-link";
+			parsed.join = remote.link;
 			await expect(
 				runRootCommand(parsed, rawArgs, {
 					settings: activeSettings,
@@ -322,6 +350,275 @@ describe("interactive collaboration startup", () => {
 		} finally {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			authStorage.close();
+		}
+	});
+
+	async function prepareGuestMode(): Promise<{ local: InteractiveMode; remote: CollabHost; localFile: string }> {
+		testSession.sessionManager.appendMessage({ role: "user", content: "local transcript", timestamp: 0 });
+		await testSession.sessionManager.ensureOnDisk();
+		await testSession.sessionManager.flush();
+		const localFile = testSession.sessionManager.getSessionFile()!;
+		mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: new VirtualTerminal() }),
+		);
+		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		await mode.init({ suppressWelcomeIntro: true, autoStartCollab: true });
+		await mode.collabController.idle();
+		await executeBuiltinSlashCommand("/collab stop", { ctx: mode });
+		const remote = new CollabHost(makeControllerContext().ctx);
+		remoteHosts.push(remote);
+		await remote.start(RELAY_URL);
+		return { local: mode, remote, localFile };
+	}
+
+	it("does not restart a stopped host when join fails before replica activation", async () => {
+		const { local, remote, localFile } = await prepareGuestMode();
+		const failure = new Error("transport setup failed");
+		const connect = CollabSocket.prototype.connect;
+		let failed = false;
+		spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			if (!failed) {
+				failed = true;
+				throw failure;
+			}
+			connect.call(this);
+		});
+		await expect(new CollabGuestLink(local).join(remote.link)).rejects.toBe(failure);
+		await local.collabController.idle();
+		expect(local.sessionManager.getSessionFile()).toBe(localFile);
+		expect(
+			(await registry.listCollabHosts({ dir: tmp })).filter(
+				row => row.instanceId === local.collabController.instanceId,
+			),
+		).toEqual([]);
+	});
+
+	it("keeps manual join occupancy through post-switch rendering and restores before auto-hosting", async () => {
+		const { local, remote, localFile } = await prepareGuestMode();
+		const rendering = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const render = spyOn(local, "renderInitialMessages").mockImplementationOnce(async () => {
+			rendering.resolve();
+			await gate.promise;
+		});
+		const joining = executeBuiltinSlashCommand(`/join ${remote.link}`, { ctx: local });
+		try {
+			await rendering.promise;
+			await local.collabController.idle();
+			expect(local.sessionManager.getSessionFile()).not.toBe(localFile);
+			expect(local.collabGuest).toBeDefined();
+			expect(local.collabHost).toBeUndefined();
+			expect(
+				(await registry.listCollabHosts({ dir: tmp })).filter(
+					h => h.instanceId === local.collabController.instanceId,
+				),
+			).toEqual([]);
+		} finally {
+			gate.resolve();
+			await joining;
+			render.mockRestore();
+		}
+		await executeBuiltinSlashCommand("/leave", { ctx: local });
+		await local.collabController.idle();
+		expect(local.sessionManager.getSessionFile()).toBe(localFile);
+		expect(local.collabGuest).toBeUndefined();
+		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
+		expect(local.settings.get("collab.autoStart")).toBe("view");
+	});
+
+	it.each(["stop", "shutdown"] as const)(
+		"%s during restored-session rendering invalidates automatic hosting without blocking restoration",
+		async operation => {
+			const { local, remote, localFile } = await prepareGuestMode();
+			const guest = new CollabGuestLink(local);
+			await guest.join(remote.link);
+			const rendering = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<void>();
+			const render = spyOn(local, "renderInitialMessages").mockImplementationOnce(async () => {
+				rendering.resolve();
+				await gate.promise;
+			});
+			const leaving = guest.leave("left");
+			await rendering.promise;
+			try {
+				expect(local.sessionManager.getSessionFile()).toBe(localFile);
+				expect(local.collabGuest).toBe(guest);
+				await local.collabController[operation]("explicit user stop");
+			} finally {
+				gate.resolve();
+				await leaving;
+				render.mockRestore();
+			}
+			await local.collabController.idle();
+			expect(local.collabGuest).toBeUndefined();
+			expect(local.collabHost).toBeUndefined();
+			expect(local.settings.get("collab.autoStart")).toBe("view");
+			if (operation === "stop") {
+				await local.session.newSession();
+				await local.collabController.idle();
+				expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
+			}
+		},
+	);
+
+	it("coalesces explicit leave through held restoration and surfaces its failure without unlocking hosting", async () => {
+		const { local, remote } = await prepareGuestMode();
+		const guest = new CollabGuestLink(local);
+		await guest.join(remote.link);
+		const restoring = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const failure = new Error("local resume failed");
+		const resume = spyOn(local, "handleResumeSession").mockImplementation(async () => {
+			restoring.resolve();
+			await gate.promise;
+			throw failure;
+		});
+		const outcomes: unknown[] = [];
+		const first = guest.leave("left").then(
+			() => outcomes.push("resolved"),
+			err => outcomes.push(err),
+		);
+		await restoring.promise;
+		const second = guest.leave("again").then(
+			() => outcomes.push("resolved"),
+			err => outcomes.push(err),
+		);
+		try {
+			await Bun.sleep(0);
+			expect(outcomes).toEqual([]);
+			expect(local.collabGuest).toBe(guest);
+			local.collabController.autoStart();
+			expect(local.collabHost).toBeUndefined();
+		} finally {
+			gate.resolve();
+			await Promise.all([first, second]);
+			resume.mockRestore();
+		}
+		expect(outcomes).toEqual([failure, failure]);
+		expect(local.collabGuest).toBe(guest);
+		local.collabController.autoStart();
+		await local.collabController.idle();
+		expect(local.collabHost).toBeUndefined();
+	});
+
+	it("cancels a snapshot waiting to switch without letting late activation escape restoration", async () => {
+		const { local, remote, localFile } = await prepareGuestMode();
+		const switching = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const originalSwitch = local.session.switchSession.bind(local.session);
+		spyOn(local.session, "switchSession").mockImplementationOnce(async (...args) => {
+			switching.resolve();
+			await gate.promise;
+			return originalSwitch(...args);
+		});
+		const guest = new CollabGuestLink(local);
+		const joining = guest.join(remote.link).then(
+			() => "joined",
+			err => err,
+		);
+		await switching.promise;
+		let left = false;
+		const leaving = guest.leave("cancelled").then(() => {
+			left = true;
+		});
+		try {
+			await Bun.sleep(0);
+			expect(left).toBe(false);
+			expect(local.collabGuest).toBe(guest);
+		} finally {
+			gate.resolve();
+			await leaving;
+		}
+		expect(await joining).toBeInstanceOf(Error);
+		await local.collabController.idle();
+		expect(local.sessionManager.getSessionFile()).toBe(localFile);
+		expect(local.collabGuest).toBeUndefined();
+		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
+	});
+
+	it("holds guest ownership through resync and a host-goodbye restoration", async () => {
+		const { local, remote, localFile } = await prepareGuestMode();
+		const guest = new CollabGuestLink(local);
+		let transport: CollabSocket | undefined;
+		const send = CollabSocket.prototype.send;
+		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(
+			function (this: CollabSocket, frame, targetPeer) {
+				if (frame.t === "hello") transport = this;
+				return send.call(this, frame, targetPeer);
+			},
+		);
+		await guest.join(remote.link);
+		capture.mockRestore();
+		const rendering = Promise.withResolvers<void>();
+		const renderGate = Promise.withResolvers<void>();
+		const render = spyOn(local, "renderInitialMessages").mockImplementationOnce(async () => {
+			rendering.resolve();
+			await renderGate.promise;
+		});
+		if (!transport) throw new Error("Guest transport missing");
+		transport.send({ t: "hello", proto: COLLAB_PROTO, name: "resync" });
+		try {
+			await rendering.promise;
+			local.collabController.autoStart();
+			await local.collabController.idle();
+			expect(local.collabHost).toBeUndefined();
+			expect(local.collabGuest).toBe(guest);
+		} finally {
+			renderGate.resolve();
+			render.mockRestore();
+		}
+		const restoring = Promise.withResolvers<void>();
+		const restoreGate = Promise.withResolvers<void>();
+		const resume = local.handleResumeSession.bind(local);
+		spyOn(local, "handleResumeSession").mockImplementation(async file => {
+			restoring.resolve();
+			await restoreGate.promise;
+			await resume(file);
+		});
+		await remote.stop("host goodbye");
+		await restoring.promise;
+		const leaving = guest.leave("wait for goodbye");
+		try {
+			expect(local.collabGuest).toBe(guest);
+			expect(local.collabHost).toBeUndefined();
+			await expect(local.collabController.start({ access: "control" })).rejects.toBeInstanceOf(
+				CollabHostStoppedError,
+			);
+		} finally {
+			restoreGate.resolve();
+			await leaving;
+		}
+		await local.collabController.idle();
+		expect(local.sessionManager.getSessionFile()).toBe(localFile);
+		expect(local.collabGuest).toBeUndefined();
+		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
+	});
+
+	it("does not release a replica when the void resume wrapper silently cancels restoration", async () => {
+		const { local, remote, localFile } = await prepareGuestMode();
+		const guest = new CollabGuestLink(local);
+		await guest.join(remote.link);
+		const switchSession = spyOn(local.session, "switchSession").mockResolvedValueOnce(false);
+		const reported = Promise.withResolvers<string>();
+		spyOn(local, "showError").mockImplementation(message => reported.resolve(message));
+		try {
+			await remote.stop("host goodbye");
+			expect(await reported.promise).toContain("Local session restoration was cancelled");
+			await expect(guest.leave("left")).rejects.toThrow("Local session restoration was cancelled");
+			local.collabController.autoStart();
+			await local.collabController.idle();
+			expect(local.sessionManager.getSessionFile()).not.toBe(localFile);
+			expect(local.collabGuest).toBe(guest);
+			expect(local.collabHost).toBeUndefined();
+		} finally {
+			switchSession.mockRestore();
 		}
 	});
 
@@ -402,27 +699,63 @@ describe("interactive collaboration startup", () => {
 });
 
 describe("CollabController", () => {
-	it("observes local restoration without hosting guest replicas", async () => {
-		const { ctx, state } = makeControllerContext({ autoStart: "view" });
+	it("recovers later rotations after a teardown UI error without hiding the failure", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);
-		ctx.collabGuest = {} as NonNullable<InteractiveModeContext["collabGuest"]>;
 		controller.autoStart();
 		await controller.idle();
+		const failure = new Error("rotation UI teardown failed");
+		const status = spyOn(ctx.statusLine, "setCollabStatus").mockImplementationOnce(() => {
+			throw failure;
+		});
+		try {
+			switchSession(state, "failed-rotation");
+			await controller.idle().catch(() => {});
+			switchSession(state, "recovered-rotation");
+			await controller.idle().catch(() => {});
+			expect(ctx.collabHost?.sessionId).toBe("recovered-rotation");
+			expect(state.showStatus.some(message => message.includes(failure.message))).toBe(true);
+			await controller.shutdown("done");
+			expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		} finally {
+			status.mockRestore();
+		}
+	});
+
+	it("keeps manual teardown errors observable while allowing the next start", async () => {
+		const { ctx } = makeControllerContext();
+		controller = new CollabController(ctx);
+		await controller.start({ access: "view" });
+		const failure = new Error("manual UI teardown failed");
+		const status = spyOn(ctx.statusLine, "setCollabStatus").mockImplementationOnce(() => {
+			throw failure;
+		});
+		try {
+			await expect(controller.start({ access: "control" })).rejects.toBe(failure);
+			const recovered = await controller.start({ access: "control" });
+			expect(recovered.access).toBe("control");
+			await controller.shutdown("done");
+			expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		} finally {
+			status.mockRestore();
+		}
+	});
+
+	it("rechecks guest ownership after waiting for a session transition", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "view" });
+		controller = new CollabController(ctx);
+		const gate = Promise.withResolvers<void>();
+		const waiting = Promise.withResolvers<void>();
+		state.transition = gate.promise;
+		state.transitionWaited = waiting.resolve;
+		controller.autoStart();
+		await waiting.promise;
+		ctx.collabGuest = new CollabGuestLink(ctx);
+		state.transition = undefined;
+		gate.resolve();
+		await controller.idle();
+		expect(ctx.collabHost).toBeUndefined();
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		switchSession(state, "remote-replica-resync");
-		await controller.idle();
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		ctx.collabGuest = undefined;
-		switchSession(state, "restored-local-session");
-		await controller.idle();
-		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-			{ sessionId: "restored-local-session", access: "view" },
-		]);
-		switchSession(state, "next-local-session");
-		await controller.idle();
-		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-			{ sessionId: "next-local-session", access: "view", generation: 2 },
-		]);
 	});
 
 	it("auto-start installs the room synchronously and retains an early dialog for the first writer", async () => {

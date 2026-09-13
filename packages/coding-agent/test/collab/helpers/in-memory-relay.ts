@@ -27,6 +27,7 @@ export class FakeWebSocket {
 	static readonly CLOSED = 3;
 
 	binaryType = "blob";
+	bufferedAmount = 0;
 	readyState: number = FakeWebSocket.CONNECTING;
 	readonly role: "host" | "guest";
 	peerId = 0;

@@ -649,23 +649,29 @@ describe("collab registry", () => {
 		expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
 	});
 
-	it.skipIf(process.platform === "win32")(
-		"refuses a symlinked registry directory instead of listing or pruning through it",
-		async () => {
-			// A planted symlink must not turn listing (which prunes malformed
-			// `*.json`) into a way to delete files in an unrelated directory.
-			const target = await tempDir();
-			const bystander = path.join(target, "important.json");
-			await Bun.write(bystander, "{not registry metadata");
-			const link = path.join(await tempDir(), "collab-hosts");
-			await fs.symlink(target, link);
-
-			await expect(listCollabHosts({ dir: link })).rejects.toThrow();
-			expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
-			await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
-			expect(await fs.readdir(target)).toEqual(["important.json"]);
-		},
-	);
+	it("refuses a symlinked registry directory instead of listing or pruning through it", async () => {
+		// A planted symlink must not turn listing (which prunes malformed
+		// `*.json`) into a way to delete files in an unrelated directory.
+		const target = await tempDir();
+		const bystander = path.join(target, "important.json");
+		await Bun.write(bystander, "{not registry metadata");
+		const link = path.join(await tempDir(), "collab-hosts");
+		await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
+		const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+		if (!descriptor) throw new Error("Missing process.platform descriptor");
+		try {
+			// Exercise the Windows branch on Unix CI too; native Windows uses a junction.
+			for (const platform of new Set([process.platform, "win32"])) {
+				Object.defineProperty(process, "platform", { configurable: true, value: platform });
+				await expect(listCollabHosts({ dir: link })).rejects.toThrow();
+				expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
+				await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
+				expect(await fs.readdir(target)).toEqual(["important.json"]);
+			}
+		} finally {
+			Object.defineProperty(process, "platform", descriptor);
+		}
+	});
 
 	it.skipIf(process.platform === "win32")(
 		"relocates the socket to a short owner-private directory when the canonical path overflows sun_path",

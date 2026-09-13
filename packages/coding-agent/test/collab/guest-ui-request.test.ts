@@ -588,6 +588,7 @@ describe("collab proto handshake (#4049)", () => {
 		const ctx = {
 			settings: { get: () => "" },
 			sessionManager: { getSessionFile: () => null },
+			syncRunningSubagentBadge: () => {},
 		} as unknown as InteractiveModeContext;
 		const guest = new CollabGuestLink(ctx);
 		try {

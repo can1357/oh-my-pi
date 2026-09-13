@@ -473,6 +473,8 @@ export class CollabHost {
 		this.#abortStart?.(new CollabHostStoppedError(`collab host stopped: ${reason}`));
 		const socket = this.#socket;
 		if (socket) {
+			// Revocation drops queued application data; only the goodbye may drain.
+			socket.discardPendingSends();
 			// Sealing is asynchronous; without the flush the goodbye would still be
 			// in the send chain when #teardown closes the socket and drops it.
 			socket.send({ t: "bye", reason });

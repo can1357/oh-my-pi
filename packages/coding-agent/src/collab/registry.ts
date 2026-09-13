@@ -343,16 +343,16 @@ function handleConnection(socket: net.Socket, token: string, source: CollabHostR
 }
 
 /**
- * The registry directory must be a real directory owned by the current user
- * (POSIX). Both publication and listing check this: listing prunes malformed
+ * The registry must be a real directory; POSIX also verifies its owner.
+ * Both publication and listing check this: listing prunes malformed
  * entries, so following a symlink into an unrelated directory would let a
  * planted link turn `omp collab list` into a deletion tool.
  */
 async function assertPrivateDir(dir: string): Promise<fs.Stats | null> {
-	if (process.platform === "win32") return null;
 	const stat = await fs.promises.lstat(dir);
 	if (stat.isSymbolicLink()) throw new Error(`collab registry directory is a symlink: ${dir}`);
 	if (!stat.isDirectory()) throw new Error(`collab registry path is not a directory: ${dir}`);
+	if (process.platform === "win32") return null;
 	const uid = process.getuid?.();
 	if (uid !== undefined && stat.uid !== uid) {
 		throw new Error(`collab registry directory is not owned by the current user: ${dir}`);
@@ -361,7 +361,8 @@ async function assertPrivateDir(dir: string): Promise<fs.Stats | null> {
 }
 
 /**
- * Create the registry directory owner-only. `mkdir` with a mode leaves an
+ * Create the directory with owner-only POSIX permissions. Windows retains
+ * the config root's ACL. `mkdir` with a mode leaves an
  * existing directory's permissions alone, so an already-present directory is
  * tightened explicitly; a symlink or a directory owned by another user is
  * refused rather than published into.

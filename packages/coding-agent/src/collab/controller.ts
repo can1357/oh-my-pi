@@ -82,6 +82,23 @@ export class CollabController {
 		this.#ops = this.#ops.then(() => started);
 	}
 
+	/** Admit hosting only for a restored local identity, preserving later stop/shutdown intent. */
+	resumeAfterGuest(restoration: Promise<boolean>): void {
+		if (this.#shutdown) return;
+		this.#observeSessionChanges();
+		const stopEpoch = this.#stopEpoch;
+		const shutdown = (this.#shutdownWake ??= Promise.withResolvers<void>()).promise;
+		// The guest reports restoration failures to its caller/UI. Observe them
+		// here only to prevent hosting; shutdown must not await a stalled hook.
+		const restored = Promise.race([restoration.catch(() => false), shutdown]);
+		this.#ops = this.#ops.then(async () => {
+			if ((await restored) !== true) return;
+			if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
+			const access = this.autoStartMode;
+			if (access !== "off") await this.#launchReporting(access, stopEpoch);
+		});
+	}
+
 	/**
 	 * Interactive startup (extension hooks, mode reconciliation) has finished:
 	 * from now on guests in any room of this process may drive the session.
@@ -103,11 +120,12 @@ export class CollabController {
 	 */
 	async start(options: CollabStartOptions): Promise<CollabHost> {
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
 		const existing = this.host;
 		if (existing && (existing.access === "control" || options.access === "view")) return existing;
 		const stopEpoch = this.#stopEpoch;
 		// Abort an in-flight view connection before queuing behind its startup.
-		const stopping = existing?.stop("restarting with control access");
+		const stopping = existing && this.#stopHost(existing, "restarting with control access");
 		const started = this.#ops.then(async () => {
 			await stopping;
 			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
@@ -116,7 +134,7 @@ export class CollabController {
 			// this request waited. Reuse or upgrade it rather than racing its launch.
 			const current = this.host;
 			if (current && (current.access === "control" || options.access === "view")) return current;
-			if (current) await current.stop("restarting with control access");
+			if (current) await this.#stopHost(current, "restarting with control access");
 			return this.#launch(options.access, stopEpoch, options.relay);
 		});
 		// Report manual failures to the caller without poisoning later rotations.
@@ -130,7 +148,17 @@ export class CollabController {
 	/** Cancel pending launches and stop the current room, including a stop already in flight. */
 	async stop(reason: string): Promise<void> {
 		this.#stopEpoch++;
-		await this.#host?.stop(reason);
+		if (this.#host) await this.#stopHost(this.#host, reason);
+	}
+
+	async #stopHost(host: CollabHost, reason: string): Promise<void> {
+		try {
+			await host.stop(reason);
+		} finally {
+			// A completed teardown may reject on its final UI update. Do not
+			// make every later operation await that same cached rejection.
+			if (host.stopped && this.#host === host) this.#host = undefined;
+		}
 	}
 
 	/** Resolves once no stop/start sequence is in flight. */
@@ -179,6 +207,7 @@ export class CollabController {
 		// Shutdown or an explicit stop may have overtaken either wait.
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
+		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
 		this.#observeSessionChanges();
@@ -194,7 +223,7 @@ export class CollabController {
 		try {
 			// A previous room may still be withdrawing subscriptions and registry
 			// state after a fatal close. Finish that before installing new taps.
-			await previous?.stop("replaced");
+			if (previous) await this.#stopHost(previous, "replaced");
 			await host.start(relayUrl, webUrl);
 		} catch (err) {
 			if (this.#host === host) this.#host = undefined;
@@ -214,13 +243,17 @@ export class CollabController {
 		try {
 			await this.#launch(access, stopEpoch);
 		} catch (err) {
-			if (this.#shutdown || err instanceof CollabHostStoppedError) return;
-			logger.warn("Collab auto-start failed", { error: String(err) });
-			const message = sanitizeDisplayLine(err instanceof Error ? err.message : String(err));
-			this.#ctx.showStatus(truncateToWidth(`Collab auto-start failed: ${message}`, TRUNCATE_LENGTHS.LINE), {
-				dim: true,
-			});
+			this.#reportFailure(err);
 		}
+	}
+
+	#reportFailure(err: unknown): void {
+		if (this.#shutdown || err instanceof CollabHostStoppedError) return;
+		logger.warn("Collab auto-start failed", { error: String(err) });
+		const message = sanitizeDisplayLine(err instanceof Error ? err.message : String(err));
+		this.#ctx.showStatus(truncateToWidth(`Collab auto-start failed: ${message}`, TRUNCATE_LENGTHS.LINE), {
+			dim: true,
+		});
 	}
 
 	/**
@@ -235,12 +268,14 @@ export class CollabController {
 		const stopEpoch = this.#stopEpoch;
 		// Stop synchronously so a room still connecting is aborted now rather than
 		// after the queued start settles; the chain then waits for that stop.
-		const stopping = previous?.stop("session switched");
-		this.#ops = this.#ops.then(async () => {
-			await stopping;
-			if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
-			const access = this.autoStartMode;
-			if (access !== "off") await this.#launchReporting(access, stopEpoch);
-		});
+		const stopping = previous && this.#stopHost(previous, "session switched");
+		this.#ops = this.#ops
+			.then(async () => {
+				await stopping;
+				if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
+				const access = this.autoStartMode;
+				if (access !== "off") await this.#launchReporting(access, stopEpoch);
+			})
+			.catch(err => this.#reportFailure(err));
 	}
 }

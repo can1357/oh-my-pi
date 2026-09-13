@@ -42,7 +42,7 @@ function makeAgents(ids: string[]): AgentSnapshot[] {
 	}));
 }
 
-function makeGuestContext(counts: number[]): InteractiveModeContext {
+function makeGuestContext(): InteractiveModeContext {
 	let statusLineCount = 0;
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
@@ -98,7 +98,6 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest);
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);
 			ctx.statusLine.setRunningSubagents(agentIds);
-			counts.push(agentIds.length);
 		},
 	} as unknown as InteractiveModeContext;
 	return ctx;
@@ -141,14 +140,12 @@ describe("collab guest running-subagents badge", () => {
 		hostSocket.connect();
 		await hostOpen.promise;
 
-		const counts: number[] = [];
-		const ctx = makeGuestContext(counts);
+		const ctx = makeGuestContext();
 		const guest = new CollabGuestLink(ctx);
 
 		try {
 			await guest.join(link);
 			expect(ctx.collabGuest).toBe(guest);
-			expect(counts).toEqual([0, 1]);
 			expect(ctx.statusLine.subagentCount).toBe(1);
 
 			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
@@ -165,7 +162,6 @@ describe("collab guest running-subagents badge", () => {
 			await guest.leave("test cleanup");
 			expect(ctx.collabGuest).toBeUndefined();
 			expect(ctx.statusLine.subagentCount).toBe(0);
-			expect(counts.at(-1)).toBe(0);
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();

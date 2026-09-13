@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -459,6 +459,71 @@ describe("collab host registry lifecycle (#6099)", () => {
 		await late.welcomed;
 		expect(early.saw()).toBe(false);
 		expect(late.saw()).toBe(true);
+	});
+
+	it("revokes application frames queued, sealing, and awaiting sealing before sending goodbye", async () => {
+		const { ctx, state } = makeHostContext();
+		const originalConnect = CollabSocket.prototype.connect;
+		let transport: CollabSocket | undefined;
+		const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			transport = this;
+			return originalConnect.call(this);
+		});
+		host = new CollabHost(ctx);
+		try {
+			await host.start(RELAY_URL, WEB_URL);
+		} finally {
+			capture.mockRestore();
+		}
+		if (!transport) throw new Error("Host transport was not captured");
+		const hostWire = capturedSockets.find(socket => socket.role === "host");
+		if (!hostWire) throw new Error("Host WebSocket was not created");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const reader = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => reader.close());
+		const welcomed = Promise.withResolvers<void>();
+		const goodbye = Promise.withResolvers<void>();
+		const received: CollabFrame[] = [];
+		reader.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "event" || frame.t === "bye") received.push(frame);
+			if (frame.t === "bye") goodbye.resolve();
+		};
+		reader.onOpen = () => reader.send({ t: "hello", proto: COLLAB_PROTO, name: "reader" });
+		reader.connect();
+		await welcomed.promise;
+		await transport.flush();
+		hostWire.bufferedAmount = 64 * 1024;
+		state.subscribed?.({ type: "message_start", message: { role: "user", content: "already encrypted" } });
+		await transport.flush();
+
+		const sealing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const originalEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+		let held = false;
+		const encrypt = spyOn(crypto.subtle, "encrypt").mockImplementation(async (algorithm, key, data) => {
+			const frame: CollabFrame = JSON.parse(new TextDecoder().decode(data));
+			if (!held && frame.t === "event") {
+				held = true;
+				sealing.resolve();
+				await release.promise;
+			}
+			return originalEncrypt(algorithm, key, data);
+		});
+		try {
+			state.subscribed?.({ type: "message_start", message: { role: "user", content: "sealing" } });
+			state.subscribed?.({ type: "message_start", message: { role: "user", content: "not yet encrypted" } });
+			await sealing.promise;
+			const stopping = host.stop("revoked");
+			release.resolve();
+			await stopping;
+			await goodbye.promise;
+			expect(received).toEqual([{ t: "bye", reason: "revoked" }]);
+		} finally {
+			release.resolve();
+			encrypt.mockRestore();
+		}
 	});
 
 	it("refuses guest actions and discovery from the moment stop() begins, while the goodbye is still draining", async () => {

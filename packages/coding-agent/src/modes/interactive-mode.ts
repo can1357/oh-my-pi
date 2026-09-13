@@ -1526,10 +1526,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Host the session before extension hooks run: a dialog raised from a
 		// `session_start` hook is then retained for the first writer that joins.
 		// The relay connection proceeds in the background and never blocks init.
-		// Guests can join and answer dialogs from now on, but — like the local
-		// composer, whose submit gate is lifted at the end of init — they cannot
-		// prompt, interrupt, or command agents until startup has finished.
-		if (options.autoStartCollab !== false) this.collabController.autoStart();
+		// The owning caller keeps guest mutations gated through its full outer
+		// startup; early dialog answers do not require that readiness signal.
+		if (options.autoStartCollab === true) this.collabController.autoStart();
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
