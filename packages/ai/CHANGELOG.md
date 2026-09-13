@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added an opt-in bounded prompt-cache diagnostic journal with HMAC-derived request/prefix fingerprints, Anthropic attempt correlation, honest usage estimates, reset classifications, and no persisted prompt content (`PI_PROMPT_CACHE_DEBUG=1`) ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added
