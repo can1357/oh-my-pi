@@ -20,6 +20,7 @@ import { DEFAULT_VIEWPORT } from "./launch";
 import { closeCdpTarget, forgetSharedTarget, recordSharedTarget, type SharedTargetScope } from "./orphan-registry";
 import {
 	type BrowserHandle,
+	type BrowserKind,
 	type BrowserKindTag,
 	type CmuxBrowserHandle,
 	holdBrowser,
@@ -27,6 +28,7 @@ import {
 	releaseBrowser,
 } from "./registry";
 import type {
+	NavigationGuardSettings,
 	ReadyInfo,
 	RunErrorPayload,
 	RunResultOk,
@@ -37,6 +39,12 @@ import type {
 	WorkerInitPayload,
 	WorkerOutbound,
 } from "./tab-protocol";
+import {
+	checkNavigationTarget,
+	navigationBlockedMessage,
+	policyFromSettings,
+	resolveNavigationPolicy,
+} from "./url-guard";
 
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -77,6 +85,8 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	info: ReadyInfo;
 	pending: Map<string, PendingRun>;
 	dialogPolicy?: DialogPolicy;
+	/** SSRF navigation-guard policy in force for this tab (absent = fail closed). */
+	navigation?: NavigationGuardSettings;
 	kindTag: BrowserKindTag;
 	/**
 	 * Session id of the caller that CREATED the tab. Preserved across reuse so
@@ -117,6 +127,40 @@ export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 
 export type TabSession = WorkerTabSession | CmuxTabSession;
 
+/**
+ * Resolve the SSRF navigation-guard settings for a session from explicit
+ * configuration only: the `browser.allowPrivateUrls` /
+ * `browser.privateUrlAllowlist` settings, the `PI_BROWSER_ALLOW_PRIVATE_URLS`
+ * env override (applied inside `resolveNavigationPolicy`), and the hostnames
+ * of endpoints the *user* configured (the resolved browser kind's `cdpUrl` —
+ * which covers `app.cdp_url`/`app.relay` and the default relay endpoint —
+ * plus the `browser.relayUrl` / `browser.cdpUrl` settings). This is the
+ * explicit-relay allow of the port contract; it is never derived from page
+ * content.
+ */
+export function navigationSettingsForSession(
+	session: ToolSession | undefined,
+	kind: BrowserKind | undefined,
+	extra?: { allowFileUrls?: boolean },
+): NavigationGuardSettings {
+	const settings = session?.settings;
+	const policy = resolveNavigationPolicy({
+		allowPrivateUrlsSetting: settings?.get("browser.allowPrivateUrls"),
+		allowlistSetting: settings?.get("browser.privateUrlAllowlist"),
+		configuredEndpointUrls: [
+			kind && "cdpUrl" in kind ? kind.cdpUrl : undefined,
+			settings?.get("browser.relayUrl"),
+			settings?.get("browser.cdpUrl"),
+		],
+		allowFileUrls: extra?.allowFileUrls,
+	});
+	return {
+		allowPrivateUrls: policy.allowPrivateUrls === true,
+		privateUrlAllowlist: policy.privateUrlAllowlist,
+		allowFileUrls: policy.allowFileUrls === true,
+	};
+}
+
 export interface AcquireTabOptions {
 	url?: string;
 	waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
@@ -135,6 +179,12 @@ export interface AcquireTabOptions {
 	deadlineStartMs?: number;
 	dialogs?: DialogPolicy;
 	cmuxSurface?: string;
+	/**
+	 * SSRF navigation-guard policy for `url` and every later navigation on the
+	 * tab. Callers resolve it from settings (see `navigationSettingsForSession`);
+	 * absent = fail closed in the worker.
+	 */
+	navigation?: NavigationGuardSettings;
 	/**
 	 * Session id of the acquirer. Recorded on the tab when created (never on
 	 * reuse) so `releaseTabsForOwner` can walk the shared tabs map on session
@@ -277,6 +327,12 @@ async function acquireTabImpl(
 		throw new ToolAbortError("Browser tab open aborted");
 	}
 	killedTabs.delete(name);
+	// Fail-fast SSRF pre-flight on the explicitly requested URL. Enforcement
+	// also happens in the worker/cmux goto; this only saves the spawn.
+	if (opts.url) {
+		const verdict = await checkNavigationTarget(opts.url, policyFromSettings(opts.navigation));
+		if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
+	}
 	// Temporary refCount hold so releasing an existing tab on the SAME browser
 	// below cannot drop it to refCount 0 and dispose the instance we are about
 	// to reuse (e.g. reopening the sole tab with a different dialogs policy).
@@ -443,6 +499,7 @@ async function acquireTabImpl(
 		worker,
 		state: "alive",
 		info,
+		navigation: opts.navigation,
 		pending: new Map(),
 		dialogPolicy: opts.dialogs,
 		kindTag: browser.kind.kind,
@@ -488,6 +545,14 @@ async function acquireCmuxTab(
 			surfaceId = result.surface_id;
 			ownsSurface = true;
 			if (typeof result.url === "string" && result.url.length > 0) initialUrl = result.url;
+			// A fresh split is navigated BY cmux, so the request never crosses
+			// `CmuxTab.goto`: the landed URL (which can differ from `opts.url`
+			// through a server redirect) would otherwise be handed to the model
+			// unvalidated. Reuse the same policy the worker enforces.
+			if (initialUrl) {
+				const verdict = await checkNavigationTarget(initialUrl, policyFromSettings(opts.navigation));
+				if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
+			}
 			if (opts.url) {
 				await browser.client.request(
 					"browser.wait",
@@ -501,9 +566,17 @@ async function acquireCmuxTab(
 			}
 		}
 
-		const cmuxTab = new CmuxTab({ client: browser.client, surfaceId, url: initialUrl });
+		const cmuxTab = new CmuxTab({ client: browser.client, surfaceId, url: initialUrl, navigation: opts.navigation });
 		if (attachedSurface && opts.url) {
 			await cmuxTab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: opts.timeoutMs });
+		}
+		// `goto` quarantines a policy-violating landed URL and records it; an
+		// acquisition that ends on such a target must not hand the surface over.
+		const landed = cmuxTab.takeNavigationViolation();
+		if (landed) {
+			throw new ToolError(
+				`Blocked: navigation committed to ${JSON.stringify(landed)}, a private/internal or disallowed target.`,
+			);
 		}
 		const info = await cmuxTab.readyInfo(opts.viewport ?? DEFAULT_VIEWPORT);
 		// If the caller aborted while we were opening the cmux surface, close the
@@ -522,6 +595,7 @@ async function acquireCmuxTab(
 			state: "alive",
 			info,
 			pending: new Map(),
+			navigation: opts.navigation,
 			dialogPolicy: opts.dialogs,
 			kindTag: browser.kind.kind,
 			cmuxAttachedSurface: attachedSurface,
@@ -558,6 +632,10 @@ async function runInTabWithSnapshot(
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
 	const tab = tabs.get(name);
+	// Every model-facing run carries the tab's config-resolved SSRF policy so
+	// the worker re-applies it per `goto`/redirect. Internal callers pass a
+	// bare snapshot; the tab default fills it in here (never page content).
+	snapshot = { ...snapshot, navigation: snapshot.navigation ?? tab?.navigation };
 	if (!tab || tab.state === "dead") {
 		const killed = killedTabs.get(name);
 		throw new ToolError(
@@ -1220,6 +1298,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			url: opts.url,
 			waitUntil: opts.waitUntil,
 			timeoutMs: opts.timeoutMs,
+			navigation: opts.navigation,
 		};
 	}
 	// Connected and relay browsers are user-driven. When no target is requested,
@@ -1242,6 +1321,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		waitUntil: opts.waitUntil,
 		timeoutMs: opts.timeoutMs,
 		activateForScreenshot,
+		navigation: opts.navigation,
 	};
 }
 

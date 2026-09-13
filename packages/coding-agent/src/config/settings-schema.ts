@@ -4668,6 +4668,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"browser.allowPrivateUrls": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Allow Private Network URLs",
+			description:
+				"Allow the browser tool to navigate to private/loopback/link-local addresses. Cloud metadata endpoints stay blocked. Set PI_BROWSER_ALLOW_PRIVATE_URLS=0|1 to override.",
+		},
+	},
+
+	"browser.privateUrlAllowlist": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser URL Allowlist",
+			description:
+				"Hostnames the browser tool may navigate to even though they resolve privately: exact hosts, *.suffix wildcards, IPs or CIDRs. Configured relay/CDP endpoints are allowed implicitly.",
+		},
+	},
+
 	"browser.headless": {
 		type: "boolean",
 		default: true,

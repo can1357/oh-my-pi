@@ -40,6 +40,21 @@ export interface SessionSnapshot {
 	browserScreenshotDir?: string;
 	/** Force non-WebP screenshot encoding (e.g. for Ollama). Unset honors `OMP_NO_WEBP`. */
 	excludeWebP?: boolean;
+	/** Serializable SSRF navigation-guard policy applied to every `tab.goto` in the run. */
+	navigation?: NavigationGuardSettings;
+}
+
+/**
+ * Plain-data half of `url-guard.ts` `NavigationGuardPolicy` (the resolver seam
+ * stays main-thread/test-only). Carried with every init/run message so the tab
+ * worker can guard navigation without access to ToolSession. Absent means
+ * fail-closed defaults: private ranges and file:// blocked, metadata floor
+ * always blocked.
+ */
+export interface NavigationGuardSettings {
+	allowPrivateUrls?: boolean;
+	privateUrlAllowlist?: readonly string[];
+	allowFileUrls?: boolean;
 }
 
 export type WorkerInitPayload =
@@ -54,6 +69,8 @@ export type WorkerInitPayload =
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
+			/** SSRF navigation policy for the initial `page.goto` (absent = fail closed). */
+			navigation?: NavigationGuardSettings;
 	  }
 	| {
 			mode: "attach";
@@ -64,6 +81,8 @@ export type WorkerInitPayload =
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
+			/** SSRF navigation policy for the initial `page.goto` (absent = fail closed). */
+			navigation?: NavigationGuardSettings;
 			/**
 			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
 			 * stop a pending navigation so a blocked target cannot stall worker init (which
