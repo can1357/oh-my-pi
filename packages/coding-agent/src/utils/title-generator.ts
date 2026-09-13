@@ -663,14 +663,24 @@ function writeAgentStateFile(state: TerminalTitleState): void {
 }
 
 /**
+ * Invalidate every update still in flight, and return this terminal's state file path.
+ *
+ * The generation moves at once, whichever way the file is then removed: an update that yields
+ * after this must not publish a state for an agent that has been switched off or is exiting.
+ */
+function invalidateAgentStateFile(): string | null {
+	agentStateFileGeneration += 1;
+	return agentStateFilePath();
+}
+
+/**
  * Remove this terminal's state file, so nothing reads a state from a process that is gone.
  *
- * Synchronous on purpose: this runs at teardown and from a signal path, where an awaited unlink
- * may never get its turn. Anything still queued is cancelled by the flag rather than raced.
+ * Synchronous on purpose, and only for process exit and runtime teardown: a signal path may never
+ * give an awaited unlink its turn. A live setting change uses {@link queueAgentStateFileRemoval}.
  */
 function removeAgentStateFile(): void {
-	agentStateFileGeneration += 1;
-	const file = agentStateFilePath();
+	const file = invalidateAgentStateFile();
 	if (!file) return;
 	try {
 		fs.rmSync(file, { force: true });
@@ -678,6 +688,26 @@ function removeAgentStateFile(): void {
 	} catch (err) {
 		logger.debug("Agent state file removal failed", { err });
 	}
+}
+
+/**
+ * Remove this terminal's state file through the queue, for a setting turned off at runtime.
+ *
+ * That path runs on the TUI event loop, where a synchronous unlink on a stalled NFS home would
+ * freeze the interface. Queued behind the updates, it also runs after any write already in
+ * flight, and before a write from switching the setting straight back on.
+ */
+function queueAgentStateFileRemoval(): void {
+	const file = invalidateAgentStateFile();
+	if (!file) return;
+	agentStateFileWork = agentStateFileWork
+		.then(async () => {
+			await fs.promises.rm(file, { force: true });
+			await fs.promises.rm(`${file}.${process.pid}.tmp`, { force: true });
+		})
+		.catch(err => {
+			logger.debug("Agent state file removal failed", { err });
+		});
 }
 
 /** Resolves once every queued state-file update has landed. For tests. */
@@ -720,7 +750,7 @@ export function setAgentStateFileEnabled(enabled: boolean): void {
 	} else {
 		agentStateFileCleanupCancel?.();
 		agentStateFileCleanupCancel = undefined;
-		removeAgentStateFile();
+		queueAgentStateFileRemoval();
 	}
 }
 

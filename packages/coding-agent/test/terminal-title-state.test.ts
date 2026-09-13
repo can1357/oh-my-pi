@@ -228,6 +228,43 @@ describe("agent state file", () => {
 		expect(written.pid).toBe(process.pid);
 
 		setAgentStateFileEnabled(false);
+		await agentStateFileSettled();
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
+	});
+
+	it("removes the file off the event loop when the setting is switched off at runtime", async () => {
+		// /settings applies this on the TUI event loop. A synchronous unlink there freezes the
+		// interface while a stalled NFS home answers; only exit and teardown may block on the disk.
+		//
+		// A write held in flight makes the difference observable: a queued removal has to wait
+		// behind it, a synchronous one would have removed the file before the call returned.
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("attention");
+		await agentStateFileSettled();
+		expect(await Bun.file(stateFile()).exists()).toBe(true);
+
+		let release = (): void => {};
+		let entered = (): void => {};
+		const inFlight = new Promise<void>(resolve => {
+			entered = resolve;
+		});
+		spyOn(Bun, "write").mockImplementationOnce(() => {
+			entered();
+			return new Promise<number>(resolve => {
+				release = () => resolve(0);
+			});
+		});
+		setTerminalTitleState("working");
+		await inFlight;
+
+		try {
+			setAgentStateFileEnabled(false);
+			expect(await Bun.file(stateFile()).exists()).toBe(true);
+		} finally {
+			// Released whatever the assertion did: a write left held stalls every test after this one.
+			release();
+		}
+		await agentStateFileSettled();
 		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 
@@ -254,9 +291,10 @@ describe("agent state file", () => {
 	});
 
 	it("does not publish an update that a removal overtook mid-flight", async () => {
-		// The update yields at every await, and a removal is synchronous, so it can land between
-		// the last check and the rename completing - finding nothing to delete, because the file
-		// does not exist yet. The rename then publishes a state for a process that is gone.
+		// The update yields at every await, and the teardown and exit removal is synchronous, so it
+		// can land between the last check and the rename completing - finding nothing to delete,
+		// because the file does not exist yet. The rename then publishes a state for a process that
+		// is gone. (Switching the setting off queues its removal instead, so it cannot land here.)
 		//
 		// The stand-in mimics exactly that: the removal happens first, and the rename lands
 		// anyway. A mock that let the rename fail would pass without the guard and prove nothing.
@@ -264,7 +302,7 @@ describe("agent state file", () => {
 		const rename = spyOn(fs, "rename");
 		rename.mockImplementationOnce(async (from, to) => {
 			const body = await Bun.file(from as string).text();
-			setAgentStateFileEnabled(false);
+			disposeTerminalTitleState();
 			await Bun.write(to as string, body);
 		});
 
@@ -277,8 +315,8 @@ describe("agent state file", () => {
 	});
 
 	it("does not leave a rolled-back state file behind when a removal lands during a Windows replacement", async () => {
-		// On Windows, replacing an existing file moves it to a backup first. A removal landing in that
-		// window deletes the pending file, the replacement fails, and the helper rolls the backup back
+		// On Windows, replacing an existing file moves it to a backup first. A teardown or exit removal
+		// landing in that window deletes the pending file, the replacement fails, and the helper rolls the backup back
 		// into place - restoring a state for a process that is being torn down.
 		//
 		// Linux never takes that path, so the stand-in drives it: the first rename fails with EPERM,
@@ -296,7 +334,7 @@ describe("agent state file", () => {
 			})
 			.mockImplementationOnce((from, to) => realRename(from, to))
 			.mockImplementationOnce(async (from, to) => {
-				setAgentStateFileEnabled(false);
+				disposeTerminalTitleState();
 				return realRename(from, to);
 			});
 
