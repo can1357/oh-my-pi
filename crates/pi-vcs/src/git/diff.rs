@@ -825,6 +825,20 @@ struct GitHunks<'a> {
 	budget:   Option<RenderBudget>,
 }
 
+/// Conservative worst-case byte length `bytes` will occupy in `self.out`
+/// once `String::from_utf8_lossy` converts it: the exact length when
+/// `bytes` is already valid UTF-8 (no allocation needed to know that), or
+/// 3x its length otherwise, since `from_utf8_lossy` replaces each maximal
+/// invalid UTF-8 subsequence with one 3-byte U+FFFD. Computed before the
+/// (potentially huge) lossy conversion runs, so a budget check can refuse
+/// an oversized append without ever performing it.
+const fn lossy_conversion_bound(bytes: &[u8]) -> usize {
+	match std::str::from_utf8(bytes) {
+		Ok(text) => text.len(),
+		Err(_) => bytes.len().saturating_mul(3),
+	}
+}
+
 impl GitHunks<'_> {
 	/// `Err` once `self.out` has grown past what the budget leaves for this
 	/// change; checked after every write below so a hunk (or a single very
@@ -833,6 +847,22 @@ impl GitHunks<'_> {
 	fn check_budget(&self) -> std::io::Result<()> {
 		if let Some(budget) = self.budget
 			&& self.out.len() > budget.remaining()
+		{
+			return Err(std::io::Error::other(BudgetExceeded));
+		}
+		Ok(())
+	}
+
+	/// `Err` once appending `bytes` lossy-converted would grow `self.out`
+	/// past what the budget leaves, using `lossy_conversion_bound` computed
+	/// before the conversion runs — the same guard `check_budget` performs
+	/// after the fact, but early enough to refuse the append itself instead
+	/// of performing it first. Every site that lossy-converts caller-sized
+	/// bytes onto `self.out` (the function-context line, an ordinary hunk
+	/// line) must call this before converting, not only `check_budget` after.
+	fn check_budget_for(&self, bytes: &[u8]) -> std::io::Result<()> {
+		if let Some(budget) = self.budget
+			&& self.out.len().saturating_add(lossy_conversion_bound(bytes)) > budget.remaining()
 		{
 			return Err(std::io::Error::other(BudgetExceeded));
 		}
@@ -857,6 +887,12 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 		self.out.push_str(" @@");
 		if let Some(function) = function_context(self.old_data, header.before_hunk_start) {
 			self.out.push(' ');
+			// `function_context` returns the complete preceding
+			// non-whitespace/non-`}` line from `old_data`, independent of the
+			// hunk's own line lengths: a pathological invalid-UTF-8 line here
+			// must be bounded the same way an ordinary hunk line is below,
+			// before the lossy conversion runs.
+			self.check_budget_for(function)?;
 			self.out.push_str(&String::from_utf8_lossy(function));
 		}
 		self.out.push('\n');
@@ -870,15 +906,7 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 			// converting: computing the lossy string first would already
 			// have performed the oversized allocation this check exists to
 			// prevent, on a single line with no embedded newline to stop it.
-			let appended_len = match std::str::from_utf8(content) {
-				Ok(text) => text.len(),
-				Err(_) => content.len().saturating_mul(3),
-			};
-			if let Some(budget) = self.budget
-				&& self.out.len().saturating_add(appended_len) > budget.remaining()
-			{
-				return Err(std::io::Error::other(BudgetExceeded));
-			}
+			self.check_budget_for(content)?;
 			self.out.push_str(&String::from_utf8_lossy(content));
 			// Tokens carry their terminator; a token without one is the
 			// final line of a file that does not end in a newline.
@@ -1797,6 +1825,52 @@ mod tests {
 			 {} bytes for a {}-byte input",
 			out.len(),
 			invalid_line.len()
+		);
+	}
+
+	// Regression for the round-2 reviewer finding: `function_context` returns
+	// the complete preceding non-whitespace/non-`}` line from `old_data`,
+	// independent of the hunk's own line lengths. `consume_hunk` used to
+	// lossy-convert and append that slice before any budget check ran (the
+	// first `check_budget()` call comes after the header line, but only once
+	// the function-context text has already been pushed onto `out`), so a
+	// pathological function-context line could still balloon `out` up to 3x
+	// its size before the error surfaced. It must be bounded the same way an
+	// ordinary hunk line already is.
+	#[test]
+	fn hunk_writer_bounds_the_function_context_line_before_converting_it() {
+		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
+
+		let mut out = String::new();
+		// Every byte is its own maximal invalid subsequence, so lossy
+		// conversion expands this 3x: 1,000,000 bytes -> 3,000,000 bytes.
+		let invalid_context_line = vec![0x80_u8; 1_000_000];
+		let mut old_data = invalid_context_line.clone();
+		old_data.push(b'\n');
+		old_data.extend_from_slice(b"unchanged\n");
+		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, b"x\n".as_slice())];
+		let budget = Some(RenderBudget { limit: 100, already: 0 });
+		let mut sink = GitHunks { out: &mut out, old_data: &old_data, budget };
+		// `before_hunk_start: 2` makes `function_context` scan exactly the
+		// first line of `old_data` — the pathological one — and return it.
+		let header = HunkHeader {
+			before_hunk_start: 2,
+			before_hunk_len:   0,
+			after_hunk_start:  1,
+			after_hunk_len:    1,
+		};
+		let err = sink.consume_hunk(header, &lines).unwrap_err();
+		assert!(
+			err.get_ref()
+				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
+			"{err:?}"
+		);
+		assert!(
+			out.len() < invalid_context_line.len() / 10,
+			"hunk writer converted the oversized function-context line before checking the budget: \
+			 wrote {} bytes for a {}-byte context line",
+			out.len(),
+			invalid_context_line.len()
 		);
 	}
 
