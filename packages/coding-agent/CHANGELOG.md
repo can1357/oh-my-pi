@@ -6,6 +6,10 @@
 
 - `tui.stateFile` also writes the agent run state - working, idle, or waiting on you - to `<terminal>.state.json` in the terminal-sessions directory, so a supervisor or status bar that is not the terminal can read it instead of guessing from whether output is still moving ([#11830](https://github.com/can1357/oh-my-pi/pull/11830) by [@michael-schnell](https://github.com/michael-schnell)).
 
+### Changed
+
+- Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

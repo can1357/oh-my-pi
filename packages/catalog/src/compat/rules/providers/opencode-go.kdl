@@ -45,6 +45,18 @@ provider "opencode-go" {
 	class "kimi" {
 		thinking-mode "effort"
 	}
+	// The Go gateway proxies Muse Spark's Responses lane to Meta but cannot
+	// round-trip encrypted reasoning: the upstream issues `encrypted_content`
+	// bound to the gateway's own caller, so replaying it on a later step 400s
+	// with "reasoning `encrypted_content` was not issued to this caller"
+	// (#11928). Stop requesting it and drop native reasoning items from replay
+	// so multi-step tool-call turns stop failing.
+	class "meta" {
+		family "muse-spark" {
+			include-encrypted-reasoning #false
+			filter-reasoning-history #true
+		}
+	}
 	class "mimo" {
 		family "v2" {
 			thinking-mode "effort"
