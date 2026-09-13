@@ -133,11 +133,24 @@ export function planAdvisorUsageLimitWait(args: {
 	retryAtMs?: number;
 	blockedUntilMs?: number;
 	retryAfterMs?: number;
+	reportResetAtMs?: number;
+	priorBlockedUntilMs?: number;
+	priorBlockedUntilTimed?: boolean;
 	retry: { enabled: boolean; maxDelayMs: number; maxRetries: number };
 	attempt: number;
 	nowMs: number;
 }): number | undefined {
-	const { retryAtMs, blockedUntilMs, retryAfterMs, retry, attempt, nowMs } = args;
+	const {
+		retryAtMs,
+		blockedUntilMs,
+		retryAfterMs,
+		reportResetAtMs,
+		priorBlockedUntilMs,
+		priorBlockedUntilTimed,
+		retry,
+		attempt,
+		nowMs,
+	} = args;
 	if (!retry.enabled) return undefined;
 	// A direct compare keeps maxRetries=0 meaning "no retries" (latch immediately),
 	// matching the primary retry path's exhausted-budget semantics.
@@ -146,8 +159,22 @@ export function planAdvisorUsageLimitWait(args: {
 	// blocked sibling does — the next attempt's getApiKey re-ranks and picks up
 	// whichever is available first.
 	const candidates: number[] = [];
+	let credentialUnblockAtMs = blockedUntilMs;
+	if (reportResetAtMs !== undefined && retryAfterMs === undefined) {
+		// A complete usage report is authoritative for a hintless failure and
+		// replaces this call's heuristic block in either direction. Preserve a
+		// prior provider-timed block, which remains independently authoritative.
+		credentialUnblockAtMs = reportResetAtMs;
+		if (
+			priorBlockedUntilTimed === true &&
+			priorBlockedUntilMs !== undefined &&
+			priorBlockedUntilMs > credentialUnblockAtMs
+		) {
+			credentialUnblockAtMs = priorBlockedUntilMs;
+		}
+	}
+	if (credentialUnblockAtMs !== undefined) candidates.push(Math.max(0, credentialUnblockAtMs - nowMs));
 	if (retryAtMs !== undefined) candidates.push(Math.max(0, retryAtMs - nowMs) + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS);
-	if (blockedUntilMs !== undefined) candidates.push(Math.max(0, blockedUntilMs - nowMs));
 	if (candidates.length === 0 && retryAfterMs !== undefined) candidates.push(Math.max(0, retryAfterMs));
 	if (candidates.length === 0) return undefined;
 	const waitMs = Math.min(...candidates);
@@ -1544,6 +1571,9 @@ export class SessionAdvisors {
 			isUsageLimitOutcome(extractHttpStatusFromError(error), message);
 		let usageRetryAtMs: number | undefined;
 		let usageBlockedUntilMs: number | undefined;
+		let usageReportResetAtMs: number | undefined;
+		let usagePriorBlockedUntilMs: number | undefined;
+		let usagePriorBlockedUntilTimed: boolean | undefined;
 		if (usageLimit) {
 			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
 				currentModel.provider,
@@ -1559,6 +1589,9 @@ export class SessionAdvisors {
 			if (outcome.switched) return true;
 			usageRetryAtMs = outcome.retryAtMs;
 			usageBlockedUntilMs = outcome.blockedUntilMs;
+			usageReportResetAtMs = outcome.reportResetAtMs;
+			usagePriorBlockedUntilMs = outcome.priorBlockedUntilMs;
+			usagePriorBlockedUntilTimed = outcome.priorBlockedUntilTimed;
 		}
 		if (!assistantFailure && !accountPolicyDenial && !usageLimit) return false;
 
@@ -1574,7 +1607,14 @@ export class SessionAdvisors {
 				? this.#waitOutAdvisorUsageLimit(
 						advisor,
 						retrySettings,
-						{ retryAtMs: usageRetryAtMs, blockedUntilMs: usageBlockedUntilMs, retryAfterMs },
+						{
+							retryAtMs: usageRetryAtMs,
+							blockedUntilMs: usageBlockedUntilMs,
+							retryAfterMs,
+							reportResetAtMs: usageReportResetAtMs,
+							priorBlockedUntilMs: usagePriorBlockedUntilMs,
+							priorBlockedUntilTimed: usagePriorBlockedUntilTimed,
+						},
 						signal,
 					)
 				: Promise.resolve(false);
@@ -1640,13 +1680,23 @@ export class SessionAdvisors {
 	async #waitOutAdvisorUsageLimit(
 		advisor: ActiveAdvisor,
 		retry: { enabled: boolean; maxDelayMs: number; maxRetries: number },
-		timing: { retryAtMs?: number; blockedUntilMs?: number; retryAfterMs?: number },
+		timing: {
+			retryAtMs?: number;
+			blockedUntilMs?: number;
+			retryAfterMs?: number;
+			reportResetAtMs?: number;
+			priorBlockedUntilMs?: number;
+			priorBlockedUntilTimed?: boolean;
+		},
 		signal: AbortSignal,
 	): Promise<boolean> {
 		const waitMs = planAdvisorUsageLimitWait({
 			retryAtMs: timing.retryAtMs,
 			blockedUntilMs: timing.blockedUntilMs,
 			retryAfterMs: timing.retryAfterMs,
+			reportResetAtMs: timing.reportResetAtMs,
+			priorBlockedUntilMs: timing.priorBlockedUntilMs,
+			priorBlockedUntilTimed: timing.priorBlockedUntilTimed,
 			retry,
 			attempt: advisor.usageLimitRetries,
 			nowMs: Date.now(),

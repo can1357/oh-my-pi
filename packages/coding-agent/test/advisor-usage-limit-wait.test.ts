@@ -24,6 +24,32 @@ describe("planAdvisorUsageLimitWait", () => {
 		expect(waitMs).toBe(50_000);
 	});
 
+	it("uses a complete usage-report reset instead of a longer hintless heuristic block", () => {
+		// AuthStorage's hintless fallback is 60s, but the complete usage report
+		// says this exhausted window resets in 10s. A 30s cap must permit retry.
+		const waitMs = planAdvisorUsageLimitWait({
+			blockedUntilMs: NOW + 60_000,
+			reportResetAtMs: NOW + 10_000,
+			retry: { ...RETRY, maxDelayMs: 30_000 },
+			attempt: 0,
+			nowMs: NOW,
+		});
+		expect(waitMs).toBe(10_000);
+	});
+
+	it("preserves a prior provider-timed block over a shorter usage-report reset", () => {
+		const waitMs = planAdvisorUsageLimitWait({
+			blockedUntilMs: NOW + 60_000,
+			reportResetAtMs: NOW + 10_000,
+			priorBlockedUntilMs: NOW + 40_000,
+			priorBlockedUntilTimed: true,
+			retry: { ...RETRY, maxDelayMs: 30_000 },
+			attempt: 0,
+			nowMs: NOW,
+		});
+		expect(waitMs).toBeUndefined();
+	});
+
 	it("declines (latch) when the block outlasts retry.maxDelayMs", () => {
 		// Genuine 30-minute quota exhaustion exceeds the 5-minute cap.
 		const waitMs = planAdvisorUsageLimitWait({
