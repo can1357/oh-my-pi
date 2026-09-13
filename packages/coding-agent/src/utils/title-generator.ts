@@ -474,6 +474,12 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
  * Repeating the same sanitized title is a no-op on every platform.
  */
 export function setTerminalTitle(title: string): void {
+	// The teardown latch belongs HERE, not only on the composed-state path: this
+	// is the sink every title write funnels through, and it is exported, so a
+	// direct importer firing from a delayed callback after
+	// `disposeTerminalTitleState()` would otherwise write straight into the
+	// parent shell's tab whose title teardown just restored.
+	if (terminalTitleRuntime.disposed) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
 	if (next === lastTerminalTitle) return;
@@ -484,6 +490,14 @@ export function setTerminalTitle(title: string): void {
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
 	// An authoritative session title (rename, new session, focus swap) supersedes
 	// any extension override so the base title tracks the real session again.
+	//
+	// It does NOT release the teardown latch. Every caller here is a routine
+	// session update, and several arrive from async transitions that can resume
+	// AFTER teardown restored the shell's title (an extension `newSession()`
+	// continuing past its `await`, a collab host frame) — work `stop()` cannot
+	// cancel. Releasing here would let the emit below, and a re-armed spinner,
+	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
+	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
 	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
@@ -493,10 +507,17 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * Set a terminal title from an extension's `setTitle()`. Unlike the session base
  * title, this owns the terminal verbatim: periodic and run-state updates will not
  * rewrite it. Cleared when the app next sets an authoritative session title via
- * {@link setSessionTerminalTitle}.
+ * {@link setSessionTerminalTitle}, or when the extension passes an empty or blank
+ * title to release its claim.
  */
 export function setExtensionTerminalTitle(title: string): void {
-	terminalTitleRuntime.extensionOverride = title;
+	// A title that renders to nothing RELEASES the override rather than owning the
+	// terminal with it: `emitTerminalTitle` falls through on nullish only, so a
+	// latched blank would strand the title at the bare brand and silence every
+	// subsequent run-state change. Reuse the sink's own emptiness predicate so
+	// "releases its claim" means the same thing here as it does at the sink, and
+	// so the stored override is the value that will actually render.
+	terminalTitleRuntime.extensionOverride = sanitizeTerminalTitlePart(title);
 	emitTerminalTitle();
 }
 
@@ -522,6 +543,11 @@ const terminalTitleRuntime: {
 	 *  app next establishes an authoritative session title (rename, new session,
 	 *  focus swap) via `setSessionTerminalTitle`. */
 	extensionOverride: string | undefined;
+	/** Set by `disposeTerminalTitleState()` at teardown. While set, nothing may
+	 *  re-arm the spinner or emit an OSC title — teardown restores the shell's own
+	 *  title, so a later write would land in the parent shell's tab. Cleared only
+	 *  by `initTerminalTitleState()`, when the app takes the terminal over again. */
+	disposed: boolean;
 } = {
 	label: undefined,
 	state: "idle",
@@ -529,6 +555,7 @@ const terminalTitleRuntime: {
 	enabled: true,
 	timer: undefined,
 	extensionOverride: undefined,
+	disposed: false,
 };
 
 /**
@@ -560,6 +587,8 @@ export function buildTerminalTitleWithState(
 }
 
 function emitTerminalTitle(): void {
+	// The teardown latch lives at the sink (`setTerminalTitle`), so every path
+	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
 	const next =
@@ -580,7 +609,7 @@ function stopTerminalTitleSpinner(): void {
 }
 
 function startTerminalTitleSpinner(): void {
-	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	if (isConPTYHosted() || terminalTitleRuntime.disposed || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
 		emitTerminalTitle();
@@ -610,8 +639,36 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	emitTerminalTitle();
 }
 
-/** Release terminal-title runtime resources. */
+/**
+ * Take ownership of the terminal title: the counterpart to
+ * {@link disposeTerminalTitleState}, called once when the UI claims the terminal.
+ * This is the ONLY release of the teardown latch. Routine updates — session
+ * rename, cwd change, focus swap, collab host state — must not release it: they
+ * can arrive from an async transition that resumes after teardown already handed
+ * the tab back to the shell.
+ */
+export function initTerminalTitleState(): void {
+	terminalTitleRuntime.disposed = false;
+	// A fresh claim starts from the shell's title, not whatever the previous
+	// session last emitted: the dedupe cache must not swallow the first write.
+	lastTerminalTitle = undefined;
+	// Releasing the latch alone would leave a stopped timer behind a `working`
+	// state — a frozen spinner frame. Mirror the enable path and re-arm.
+	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+}
+
+/**
+ * Stop the spinner timer and latch the runtime off; call on session/UI teardown.
+ * The latch is the load-bearing half: `shutdown()` disposes and restores the shell
+ * title BEFORE it unsubscribes the session, so a live `#handleAgentStart` in that
+ * window would otherwise re-arm the spinner and write `π ⠋ …` into the parent
+ * shell's tab. Released only by {@link initTerminalTitleState}.
+ */
 export function disposeTerminalTitleState(): void {
+	terminalTitleRuntime.disposed = true;
+	// `popTerminalTitle()` hands the terminal back to the shell, so the runtime no
+	// longer knows what is on screen: the stale dedupe cache (`lastTerminalTitle`,
+	// cleared below) must not swallow the first write after the latch releases.
 	stopTerminalTitleSpinner();
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;

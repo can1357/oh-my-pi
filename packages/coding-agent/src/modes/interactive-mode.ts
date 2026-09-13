@@ -162,6 +162,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-colo
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import {
 	disposeTerminalTitleState,
+	initTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
 	setSessionTerminalTitle,
@@ -1472,6 +1473,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#ownsStartedUi = true;
 		}
 		pushTerminalTitle();
+		// Claim the terminal title before any session update: this is the one path
+		// that releases the teardown latch, so a late async `setSessionTerminalTitle`
+		// after shutdown can never write into the parent shell's tab.
+		initTerminalTitleState();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.

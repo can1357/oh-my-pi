@@ -5,11 +5,13 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
+	initTerminalTitleState,
 	setExtensionTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalTitle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
@@ -599,6 +601,16 @@ const OSC_TITLE_RE = /\x1b\]0;([\s\S]*?)\x07/;
 // private TITLE_SPINNER_FRAMES); a clobbered override would surface one of these.
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+// The `working` separator is a spinner frame everywhere except ConPTY hosts
+// (native Windows and WSL), where the title is static `:` because no interval is
+// ever scheduled. Assert the separator the host actually renders instead of
+// skipping the platform: the contract under test — the override was released, so
+// the run state drives the title again — holds identically on both.
+function expectWorkingSeparator(title: string | undefined, label: string): void {
+	if (isConPTYHosted()) expect(title).toBe(`π : ${label}`);
+	else expect(SPINNER_FRAMES.some(frame => title?.includes(frame))).toBe(true);
+}
+
 describe("terminal title runtime", () => {
 	let writes: string[] = [];
 	let stdoutSpy: { mockRestore(): void } | undefined;
@@ -630,8 +642,10 @@ describe("terminal title runtime", () => {
 		});
 
 		// Drive the module-global back to a known state from the public API so
-		// the tests are order-independent: clear any override + session base and
-		// settle the run state to idle.
+		// the tests are order-independent: claim the terminal (the previous test's
+		// teardown latched it off), clear any override + session base, and settle
+		// the run state to idle.
+		initTerminalTitleState();
 		setSessionTerminalTitle(undefined);
 		setTerminalTitleState("idle");
 
@@ -767,5 +781,58 @@ describe("terminal title runtime", () => {
 		} finally {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
+	});
+
+	it("releases the override when an extension sets an empty title", () => {
+		// CONTRACT: `setTitle("")` is the obvious way an extension author clears a
+		// title, so an empty override must RELEASE ownership back to the run-state
+		// composer rather than latch as a live verbatim override. Otherwise the
+		// title is stranded at the bare brand and the run state can never show again.
+		setSessionTerminalTitle("my-session");
+		setExtensionTerminalTitle("Deploying prod");
+		writes.length = 0;
+
+		setExtensionTerminalTitle("");
+
+		// The composed run-state title is back, not the bare `π` default.
+		const last = emittedTitles().at(-1);
+		expect(last).toBeDefined();
+		expect(last).toContain("my-session");
+		expect(last).not.toContain("Deploying prod");
+	});
+
+	it("keeps the run state live after an extension clears its title with an empty string", () => {
+		// CONTRACT (the stranding bug): after `setTitle("")` the spinner must still
+		// be able to drive the title. A latched empty override silently kills every
+		// subsequent state change — zero writes, dead spinner, until something calls
+		// `setSessionTerminalTitle` again.
+		setSessionTerminalTitle("my-session");
+		setExtensionTerminalTitle("");
+		writes.length = 0;
+
+		setTerminalTitleState("working");
+
+		const last = emittedTitles().at(-1);
+		expect(last).toBeDefined();
+		expect(last).toContain("my-session");
+		expectWorkingSeparator(last, "my-session");
+	});
+
+	it("releases the override for a blank title, not just an empty string", () => {
+		// CONTRACT: release is defined by what the title RENDERS to, not by JS
+		// falsiness. `setTerminalTitle` sanitizes with `sanitizeTerminalTitlePart`,
+		// which trims — so `"   "` renders as the bare `π` default while being
+		// truthy. Storing it verbatim would latch it as a live override and strand
+		// the run state exactly as `""` did.
+		setSessionTerminalTitle("my-session");
+		setExtensionTerminalTitle("   ");
+		writes.length = 0;
+
+		setTerminalTitleState("working");
+
+		const last = emittedTitles().at(-1);
+		expect(last).toBeDefined();
+		expect(last).toContain("my-session");
+		expectWorkingSeparator(last, "my-session");
 	});
 });
