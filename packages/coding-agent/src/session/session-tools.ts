@@ -912,7 +912,7 @@ export class SessionTools {
 		toolNames: string[],
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
-		options?: { fullWrite?: boolean },
+		options?: { fullWrite?: boolean; mounted?: ReadonlySet<string> },
 	): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
@@ -966,11 +966,21 @@ export class SessionTools {
 		});
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
-		const mountNames = this.#resolveMountCandidates(toolNames, {
-			builtInWriteAvailable,
-			runtimeSelectedToolNames: this.#runtimeSelectedToolNames,
-			fullWrite: options?.fullWrite,
-		});
+		const mountNames = !this.#xdev
+			? new Set<string>()
+			: options?.mounted
+				? new Set(
+						Array.from(options.mounted).filter(name =>
+							selectedTools.some(
+								({ name: selectedName, tool }) => selectedName === name && isMountableUnderXdev(tool),
+							),
+						),
+					)
+				: this.#resolveMountCandidates(toolNames, {
+						builtInWriteAvailable,
+						runtimeSelectedToolNames: this.#runtimeSelectedToolNames,
+						fullWrite: options?.fullWrite,
+					});
 		// Demoted tools stay reachable through the eval bridge, so nothing is
 		// mounted under xd:// while code mode restricts the direct surface.
 		if (codeMode.active) mountNames.clear();
@@ -1175,10 +1185,7 @@ export class SessionTools {
 				}
 			} else {
 				this.#dormantFullWrite = writePreviouslyHadFullAccess;
-				if (
-					options?.fullWrite === false &&
-					(previousDeviceOnlyWrite || restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
-				) {
+				if (options?.fullWrite === false) {
 					this.#dormantDeviceOnlyWrite = true;
 				} else if (writePreviouslyHadFullAccess) {
 					this.#dormantDeviceOnlyWrite = false;
@@ -1577,7 +1584,7 @@ export class SessionTools {
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
 		try {
-			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal, { fullWrite });
+			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal, { fullWrite, mounted });
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
 			throw error;

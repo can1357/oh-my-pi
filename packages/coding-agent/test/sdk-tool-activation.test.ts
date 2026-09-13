@@ -922,6 +922,42 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("retains an explicit fullWrite:false downgrade applied directly to a mount-free restriction", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			await session.setActiveToolPresentation(["read"], [], { fullWrite: false });
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+
+			await session.setActiveToolPresentation(["read", "write"], []);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const blockedTarget = path.join(tempDir, "blocked-mount-free-downgrade.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("explicit write selection via setActiveToolsByName clears a stale fullWrite:false downgrade", async () => {
 		const tempDir = makeTempDir();
 		const customAmbient: CustomTool = {
