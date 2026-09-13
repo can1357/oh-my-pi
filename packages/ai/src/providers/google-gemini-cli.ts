@@ -318,31 +318,10 @@ export function canFoldSystemInstruction(request: CloudCodeAssistRequest["reques
 	return si.parts.some(p => typeof p.text === "string" && p.text.trim().length > 0);
 }
 
-export function foldSystemInstructionIntoContents(request: CloudCodeAssistRequest["request"]): boolean {
-	const si = request.systemInstruction;
-	if (!si?.parts || si.parts.length === 0) return false;
-	const systemParts = si.parts.filter(p => typeof p.text === "string" && p.text.length > 0);
-	delete request.systemInstruction;
-	if (systemParts.length === 0) return false;
-
-	if (!request.contents || request.contents.length === 0) {
-		request.contents = [{ role: "user", parts: [...systemParts] }];
-		return true;
-	}
-	const firstTurn = request.contents[0];
-	if (firstTurn.role === "user") {
-		firstTurn.parts = [...systemParts, ...(firstTurn.parts ?? [])];
-	} else {
-		request.contents.unshift({ role: "user", parts: [...systemParts] });
-	}
-	return true;
-}
-
-export function foldSystemPromptsIntoContents(
-	contents: CloudCodeAssistRequest["request"]["contents"],
-	systemPrompts: string[],
+function prependPartsToContents(
+	contents: NonNullable<CloudCodeAssistRequest["request"]["contents"]>,
+	parts: Array<{ text: string }>,
 ): void {
-	const parts = systemPrompts.filter(text => text.length > 0).map(text => ({ text }));
 	if (parts.length === 0) return;
 	if (contents.length === 0) {
 		contents.push({ role: "user", parts });
@@ -354,6 +333,36 @@ export function foldSystemPromptsIntoContents(
 	} else {
 		contents.unshift({ role: "user", parts });
 	}
+}
+
+export function foldSystemInstructionIntoContents(
+	request: CloudCodeAssistRequest["request"],
+	sanitize?: (text: string) => string,
+): boolean {
+	const si = request.systemInstruction;
+	if (!si?.parts || si.parts.length === 0) return false;
+	const systemParts = si.parts
+		.filter((p): p is { text: string } => typeof p.text === "string" && p.text.trim().length > 0)
+		.map(p => ({ text: sanitize ? sanitize(p.text) : p.text }));
+	delete request.systemInstruction;
+	if (systemParts.length === 0) return false;
+
+	if (!request.contents) {
+		request.contents = [];
+	}
+	prependPartsToContents(request.contents, systemParts);
+	return true;
+}
+
+export function foldSystemPromptsIntoContents(
+	contents: NonNullable<CloudCodeAssistRequest["request"]["contents"]>,
+	systemPrompts: string[],
+	sanitize?: (text: string) => string,
+): void {
+	const parts = systemPrompts
+		.filter(text => text.trim().length > 0)
+		.map(text => ({ text: sanitize ? sanitize(text) : text }));
+	prependPartsToContents(contents, parts);
 }
 
 export function sanitizeAntigravitySystemInstruction(text: string): string {
@@ -1052,7 +1061,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									},
 								);
 							}
-							foldSystemInstructionIntoContents(requestBody.request);
+							foldSystemInstructionIntoContents(
+								requestBody.request,
+								isAntigravity ? sanitizeAntigravitySystemInstruction : undefined,
+							);
 							requestBodyJson = JSON.stringify(requestBody);
 							if (rawRequestDump) {
 								rawRequestDump.body = requestBody;
@@ -1457,7 +1469,11 @@ export function buildRequest(
 	// tags it with role "user" to mirror the real client.
 	if (systemPrompts.length > 0) {
 		if (shouldFold) {
-			foldSystemPromptsIntoContents(contents, systemPrompts);
+			foldSystemPromptsIntoContents(
+				contents,
+				systemPrompts,
+				isAntigravity ? sanitizeAntigravitySystemInstruction : undefined,
+			);
 		} else {
 			request.systemInstruction = {
 				...(isAntigravity ? { role: "user" } : {}),

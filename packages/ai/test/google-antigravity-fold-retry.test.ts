@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { isAntigravitySynthetic429, isUsageLimitOutcome, parseRateLimitReason } from "@oh-my-pi/pi-ai/error/rate-limit";
 import {
 	getAntigravityProviderSessionState,
 	sanitizeAntigravitySystemInstruction,
@@ -36,6 +37,17 @@ function createSynthetic429Response(): Response {
 		error: {
 			code: 429,
 			message: "Resource has been exhausted (e.g. check quota).",
+			status: "RESOURCE_EXHAUSTED",
+		},
+	});
+	return new Response(body, { status: 429, headers: { "content-type": "application/json" } });
+}
+
+function createDetailsLessDailyQuota429Response(): Response {
+	const body = JSON.stringify({
+		error: {
+			code: 429,
+			message: "You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
 			status: "RESOURCE_EXHAUSTED",
 		},
 	});
@@ -234,6 +246,93 @@ describe("google-antigravity synthetic 429 systemInstruction fold retry", () => 
 		expect(result.stopReason).toBe("error");
 		const sessionState = getAntigravityProviderSessionState(sessionStateMap);
 		expect(sessionState?.foldedModels?.has("gemini-3-flash")).toBeFalsy();
+	});
+
+	it("does not fold on details-less daily quota 429 with 'quota will reset' message", async () => {
+		const requests: Array<{ body: any }> = [];
+		const sessionStateMap = new Map<string, ProviderSessionState>();
+
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const bodyText = typeof init?.body === "string" ? init.body : "";
+			requests.push({ body: JSON.parse(bodyText) });
+			return createDetailsLessDailyQuota429Response();
+		};
+
+		const context: Context = {
+			systemPrompt: ["You are an expert coding assistant."],
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+		};
+
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: JSON.stringify({ token: "fake-token", projectId: "test-proj" }),
+			antigravityEndpointMode: "production",
+			providerSessionState: sessionStateMap,
+			fetch: fetchMock,
+			maxRetryDelayMs: 0,
+		});
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		// Did not retry with folding
+		expect(requests).toHaveLength(1);
+		expect(requests[0].body.request.systemInstruction).toBeDefined();
+		const sessionState = getAntigravityProviderSessionState(sessionStateMap);
+		expect(sessionState?.foldedModels?.has("gemini-3-flash")).toBeFalsy();
+	});
+
+	it("classifies details-less daily quota error as QUOTA_EXHAUSTED and rotates credentials", () => {
+		const dailyQuotaBody = JSON.stringify({
+			error: {
+				code: 429,
+				message: "You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
+				status: "RESOURCE_EXHAUSTED",
+			},
+		});
+		expect(isAntigravitySynthetic429(429, dailyQuotaBody)).toBe(false);
+		expect(parseRateLimitReason(dailyQuotaBody)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, dailyQuotaBody)).toBe(true);
+
+		const syntheticBody = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+			},
+		});
+		expect(isAntigravitySynthetic429(429, syntheticBody)).toBe(true);
+		expect(parseRateLimitReason(syntheticBody)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, syntheticBody)).toBe(false);
+	});
+
+	it("sanitizes system conventions tag with nonce even when folded", async () => {
+		const requests: Array<{ body: any }> = [];
+		const sessionStateMap = new Map<string, ProviderSessionState>();
+		const sessionState = getAntigravityProviderSessionState(sessionStateMap)!;
+		sessionState.foldedModels = new Set(["gemini-3-flash"]);
+
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const bodyText = typeof init?.body === "string" ? init.body : "";
+			requests.push({ body: JSON.parse(bodyText) });
+			return createSseResponse("Response");
+		};
+
+		const context: Context = {
+			systemPrompt: ["<system-conventions>\nRFC 2119\n</system-conventions>"],
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		};
+
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: JSON.stringify({ token: "fake-token", projectId: "test-proj" }),
+			antigravityEndpointMode: "production",
+			providerSessionState: sessionStateMap,
+			fetch: fetchMock,
+		});
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+		expect(requests).toHaveLength(1);
+		const foldedFirstPart = requests[0].body.request.contents[0].parts[0].text;
+		expect(foldedFirstPart).toMatch(/<system-conventions id="[a-f0-9]{8}">\nRFC 2119\n<\/system-conventions>/);
 	});
 
 	it("randomizes system-conventions tag with 8-character hex nonce", () => {
