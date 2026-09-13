@@ -67,12 +67,20 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 			}
 
 			try {
-				await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
-				const response = await state.client.reflect(state.bankId, params.query, {
+				// Snapshot routing before the first await so a live primary rebuild
+				// cannot send this call to a bank that was never ensured.
+				const client = state.client;
+				const bankId = state.bankId;
+				const config = state.config;
+				const banksSet = state.banksSet;
+				const recallTags = state.recallTags;
+				const recallTagsMatch = state.recallTagsMatch;
+				await ensureBankExists(client, bankId, config, banksSet);
+				const response = await client.reflect(bankId, params.query, {
 					context: params.context,
-					budget: state.config.recallBudget,
-					tags: state.recallTags,
-					tagsMatch: state.recallTagsMatch,
+					budget: config.recallBudget,
+					tags: recallTags,
+					tagsMatch: recallTagsMatch,
 				});
 				const text = response.text?.trim() || "No relevant information found to reflect on.";
 				return {
