@@ -8,6 +8,7 @@ import {
 	BUILTIN_BLOB_DESTINATIONS,
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
+import { HISTORY_SCOPE_KINDS } from "../session/history-storage";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
 import {
 	COMPACTION_METHOD_CHOICES,
@@ -2126,6 +2127,31 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	"history.scope": {
+		type: "enum",
+		values: HISTORY_SCOPE_KINDS,
+		default: "session",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Prompt History Scope",
+			description:
+				"Which prompts the Up arrow recalls: this session (default), the current folder, this repository (worktrees included), or all projects",
+		},
+	},
+
+	"history.searchScope": {
+		type: "enum",
+		values: HISTORY_SCOPE_KINDS,
+		default: "global",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "History Search Scope",
+			description: "Scope Ctrl+R history search opens on; Tab and Shift+Tab change it while the panel is open",
+		},
+	},
+
 	"composer.recallClearedDrafts": {
 		type: "boolean",
 		default: true,

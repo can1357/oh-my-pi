@@ -1,7 +1,8 @@
-import { Database, type Statement } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { checkpointWal, getDbBusyTimeoutMs, getHistoryDbPath, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { primaryRootOrCwd } from "../utils/active-repo-context";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -17,6 +18,25 @@ export interface HistoryEntry {
 	sessionId?: string;
 }
 
+/**
+ * Recall scopes, narrowest first. Single source for the settings enum and the
+ * Ctrl+R scope ring, so the three never drift apart.
+ */
+export const HISTORY_SCOPE_KINDS = ["session", "cwd", "repo", "global"] as const;
+
+export type HistoryScopeKind = (typeof HISTORY_SCOPE_KINDS)[number];
+
+/**
+ * Recall filter for {@link HistoryStorage.getRecent} / {@link HistoryStorage.search}.
+ * Omitting the scope, or passing `global`, reads the whole table (the pre-#4331 behavior).
+ */
+export interface HistoryScope {
+	/** `session`: one conversation; `cwd`: one directory; `repo`: one repository; `global`: everything. */
+	kind: HistoryScopeKind;
+	/** Session id (`session`), directory (`cwd`), or primary repository root (`repo`). */
+	value?: string;
+}
+
 type HistoryRow = {
 	id: number;
 	prompt: string;
@@ -24,6 +44,16 @@ type HistoryRow = {
 	cwd: string | null;
 	session_id: string | null;
 };
+
+/** Rendered scope predicate: `where` for statements without a `WHERE`, `and` for the others. */
+type ScopeClause = { where: string; and: string; params: SQLQueryBindings[] };
+
+const EMPTY_SCOPE_CLAUSE: ScopeClause = { where: "", and: "", params: [] };
+
+// A bare repository root is not a directory list, so `repo` scope expands it with `json_each`;
+// the list is bound as JSON, keeping the statement text (and its cache key) constant.
+const REPO_WHERE = "WHERE cwd IN (SELECT value FROM json_each(?))";
+const REPO_AND = "AND cwd IN (SELECT value FROM json_each(?))";
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
@@ -70,10 +100,10 @@ export class HistoryStorage {
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
-	#recentStmt: Statement;
-	#searchStmt: Statement;
-	// Cache substring-fallback prepared statements keyed by token count.
-	#substringStmts = new Map<number, Statement>();
+	// Scope fragments vary per query shape, so statements are cached by full SQL text.
+	#stmts = new Map<string, Statement>();
+	// Repository membership per stored directory: a directory never changes repository mid-process.
+	#rootCache = new Map<string, string>();
 
 	private constructor(dbPath: string) {
 		this.#ensureDir(dbPath);
@@ -109,12 +139,6 @@ END;
 				logger.warn("HistoryStorage FTS rebuild failed", { error: String(error) });
 			}
 		}
-		this.#recentStmt = this.#db.prepare(
-			"SELECT id, prompt, created_at, cwd, session_id FROM history ORDER BY created_at DESC, id DESC LIMIT ?",
-		);
-		this.#searchStmt = this.#db.prepare(
-			"SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ORDER BY h.created_at DESC, h.id DESC LIMIT ?",
-		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
 VALUES (?, ${SQLITE_NOW_EPOCH}, ?, ?)
@@ -150,11 +174,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 	#close(): void {
 		checkpointWal(this.#db);
-		for (const stmt of this.#substringStmts.values()) stmt.finalize();
-		this.#substringStmts.clear();
+		for (const stmt of this.#stmts.values()) stmt.finalize();
+		this.#stmts.clear();
 		this.#upsertRowStmt.finalize();
-		this.#recentStmt.finalize();
-		this.#searchStmt.finalize();
 		this.#db.close();
 	}
 
@@ -193,13 +215,16 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
-	/** Returns unique prompts ordered by their most recent submission. */
-	getRecent(limit: number): HistoryEntry[] {
+	/** Returns unique prompts ordered by their most recent submission, restricted to `scope`. */
+	getRecent(limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
 		try {
-			const rows = this.#recentStmt.all(safeLimit) as HistoryRow[];
+			const clause = this.#scopeClause(scope);
+			const rows = this.#prepare(
+				`SELECT id, prompt, created_at, cwd, session_id FROM history ${clause.where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+			).all(...clause.params, safeLimit) as HistoryRow[];
 			return rows.map(row => this.#toEntry(row));
 		} catch (error) {
 			logger.error("HistoryStorage getRecent failed", { error: String(error) });
@@ -207,13 +232,23 @@ ON CONFLICT(prompt) DO UPDATE SET
 		}
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
-	search(query: string, limit: number): HistoryEntry[] {
+	/** Finds unique prompts matching every query token, newest first, restricted to `scope`. */
+	search(query: string, limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
 		const tokens = this.#tokenize(query);
 		if (tokens.length === 0) return [];
+
+		// Resolved before the query paths, like `getRecent`: a scope that cannot be rendered
+		// means an unusable handle, and reading unscoped is never an option — fail closed.
+		let clause: ScopeClause;
+		try {
+			clause = this.#scopeClause(scope);
+		} catch (error) {
+			logger.error("HistoryStorage search scope failed", { error: String(error) });
+			return [];
+		}
 
 		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
 		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
@@ -221,7 +256,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
-			ftsRows = this.#searchStmt.all(ftsQuery, safeLimit) as HistoryRow[];
+			ftsRows = this.#prepare(
+				`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ${clause.and} ORDER BY h.created_at DESC, h.id DESC LIMIT ?`,
+			).all(ftsQuery, ...clause.params, safeLimit) as HistoryRow[];
 		} catch (error) {
 			// Malformed FTS expression - fall through to substring path.
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
@@ -232,7 +269,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		//    by safeLimit, ordered by recency - no full-table load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit);
+			subRows = this.#searchSubstring(tokens, safeLimit, clause);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -355,21 +392,67 @@ ON CONFLICT(prompt) DO UPDATE SET
 			.filter(tok => tok.length > 0);
 	}
 
-	#searchSubstring(tokens: string[], limit: number): HistoryRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: unknown[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
-		params.push(limit);
-		return stmt.all(...(params as [string, ...unknown[]])) as HistoryRow[];
+	#searchSubstring(tokens: string[], limit: number, clause: ScopeClause): HistoryRow[] {
+		const whereClause = tokens.map(() => "prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
+		const stmt = this.#prepare(
+			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ${clause.and} ORDER BY created_at DESC, id DESC LIMIT ?`,
+		);
+		const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+		params.push(...clause.params, limit);
+		return stmt.all(...params) as HistoryRow[];
 	}
 
-	#getSubstringStmt(tokenCount: number): Statement {
-		let stmt = this.#substringStmts.get(tokenCount);
-		if (stmt) return stmt;
-		const whereClause = Array(tokenCount).fill("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
-		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
-		);
-		this.#substringStmts.set(tokenCount, stmt);
+	/**
+	 * SQL fragment (and its bound values) restricting a read to `scope`.
+	 * `undefined` and `global` read the whole table; every other kind either filters or
+	 * matches nothing — a configured scope never silently widens to the full history.
+	 */
+	#scopeClause(scope?: HistoryScope): ScopeClause {
+		if (!scope || scope.kind === "global") return EMPTY_SCOPE_CLAUSE;
+		switch (scope.kind) {
+			case "session":
+				return { where: "WHERE session_id = ?", and: "AND session_id = ?", params: [scope.value ?? ""] };
+			case "cwd":
+				return { where: "WHERE cwd = ?", and: "AND cwd = ?", params: [scope.value ?? ""] };
+			case "repo":
+				return {
+					where: REPO_WHERE,
+					and: REPO_AND,
+					params: [JSON.stringify(this.#repoDirs(scope.value))],
+				};
+			default:
+				return { where: "WHERE 1 = 0", and: "AND 1 = 0", params: [] };
+		}
+	}
+
+	/**
+	 * Stored directories belonging to the repository rooted at `root`. Resolved per read
+	 * because `cwd` holds the raw submission directory: a subdirectory or a linked worktree
+	 * shares only its primary root with the repository, never its path, so a plain equality
+	 * (or a path prefix) would drop most of a repository's history.
+	 */
+	#repoDirs(root?: string): string[] {
+		if (!root) return [];
+		const rows = this.#prepare(
+			"SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''",
+		).all() as Array<{ cwd: string }>;
+		return rows.map(row => row.cwd).filter(dir => this.#rootOf(dir) === root);
+	}
+
+	#rootOf(dir: string): string {
+		const cached = this.#rootCache.get(dir);
+		if (cached !== undefined) return cached;
+		const root = primaryRootOrCwd(dir);
+		this.#rootCache.set(dir, root);
+		return root;
+	}
+
+	#prepare(sql: string): Statement {
+		let stmt = this.#stmts.get(sql);
+		if (!stmt) {
+			stmt = this.#db.prepare(sql);
+			this.#stmts.set(sql, stmt);
+		}
 		return stmt;
 	}
 

@@ -52,6 +52,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import type { HistoryScope } from "../../session/history-storage";
 import type { SessionEntry, SessionMessageEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -111,6 +112,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
+import { historyScopeRing } from "../history-scope";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
@@ -408,6 +410,7 @@ export class SelectorController {
 		this.showSelector(done => {
 			const component = new HistorySearchComponent(
 				historyStorage,
+				this.#historyScopeRing(),
 				prompt => {
 					done();
 					this.ctx.editor.setText(prompt);
@@ -419,6 +422,19 @@ export class SelectorController {
 				},
 			);
 			return { component, focus: component };
+		});
+	}
+
+	/**
+	 * Scope ring for history search: the configured start scope first, narrowest to
+	 * widest after it. The conversation id comes from the session manager — the
+	 * provider-side `AgentSession.sessionId` is not what prompts are stored under — and
+	 * the directory is the one prompts are written with.
+	 */
+	#historyScopeRing(): HistoryScope[] {
+		return historyScopeRing(this.ctx.settings.get("history.searchScope"), {
+			sessionId: this.ctx.sessionManager.getSessionId(),
+			cwd: getProjectDir(),
 		});
 	}
 
