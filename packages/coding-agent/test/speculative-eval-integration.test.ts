@@ -435,6 +435,49 @@ describe("streamed eval speculation", () => {
 		expect(admitted[1]?.args).toMatchObject({ path: "COMMITTED.txt" });
 		await shadow.discard("test complete");
 	});
+	it("rejects appended source at reconcile even when the prefix matches", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-appended-"));
+		temporaryDirectories.push(directory);
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
+		const session: ToolSession = {
+			cwd: directory,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getEvalSessionId: () => "speculative-eval-appended-test",
+			getToolForEvalBridge: name => (name === "read" ? eraseToolSchema(read) : undefined),
+			getEvalBridgeToolNames: () => ["read"],
+			settings,
+		};
+		const read = new ReadTool(session);
+		const evalTool = new EvalTool(session);
+		await evalTool.execute("warm-appended", { language: "js", code: "globalThis.shadowWarm = true" });
+		const coordinator: SpeculativeOperationSink = {
+			maxInFlight: 2,
+			async admit() {
+				return undefined;
+			},
+			close() {},
+		};
+		const code = 'await tool.read({ path: "a.txt" });';
+		const args = { language: "js", code };
+		const shadow = new EvalShadowCellSession({
+			coordinator,
+			parentToolCallId: "eval-appended",
+			session,
+			cwd: directory,
+			sessionId: "speculative-eval-appended-test",
+		});
+		const toolCall = { type: "toolCall" as const, id: "eval-appended", name: "eval", arguments: args };
+		shadow.update(toolCall, JSON.stringify(args));
+		await shadow.finalize({ args });
+		// Identical arguments still match the verified plan.
+		expect(shadow.matchesFinalArgs(args)).toBe(true);
+		// Appended source keeps the streamed prefix but was never verified:
+		// a hoisted shadow here would invalidate the projected read.
+		expect(shadow.matchesFinalArgs({ language: "js", code: `${code}\nvar tool = {};` })).toBe(false);
+		await shadow.discard("test complete");
+	});
 
 	it("namespaces child tool-call IDs across outer eval calls", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-child-ids-"));

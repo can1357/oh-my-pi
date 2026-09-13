@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.19] - 2026-09-12
+
 ### Added
 
 - Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
+
 ### Fixed
 
 - Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).

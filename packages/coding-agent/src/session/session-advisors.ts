@@ -230,6 +230,8 @@ export interface SessionAdvisorsOptions {
 	/** Active memory backend's developer instructions, wrapped for advisors. */
 	memoryPrompt?: string;
 	configs?: AdvisorConfig[];
+	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
+	configWarnings?: string[];
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 }
@@ -329,6 +331,7 @@ export class SessionAdvisors {
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
+	#advisorConfigWarnings: string[];
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -364,6 +367,7 @@ export class SessionAdvisors {
 		this.#advisorContextPrompt = options.contextPrompt;
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
+		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
@@ -1887,6 +1891,16 @@ export class SessionAdvisors {
 	 */
 	toggleAdvisorEnabled(): boolean {
 		return this.setAdvisorEnabled(!this.#advisorEnabled);
+	}
+
+	/**
+	 * WATCHDOG.yml problems found during startup discovery (dropped entries,
+	 * unparseable files). Pulled by the interactive mode AFTER the UI subscribes
+	 * to session events — a constructor-time `emitNotice` would fire before any
+	 * listener exists and be lost.
+	 */
+	get configWarnings(): readonly string[] {
+		return this.#advisorConfigWarnings;
 	}
 
 	/**

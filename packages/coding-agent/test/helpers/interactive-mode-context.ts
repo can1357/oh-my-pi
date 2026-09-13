@@ -110,6 +110,11 @@ export function createSessionStub(
 		getToolByName: () => undefined,
 		hasBuiltInTool: () => true,
 		getLastAssistantMessage: () => undefined,
+		agent: {
+			state: { streamMessage: null },
+			getPendingToolResults: () => [],
+			metadataForProvider: () => undefined,
+		},
 		getEvalPreludes: () => [],
 		getEnabledToolNames: () => [],
 		getContextUsage: () => undefined,

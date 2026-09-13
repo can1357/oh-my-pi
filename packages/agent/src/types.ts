@@ -351,8 +351,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * `customWireName` aliases). Lets hosts route calls to tools they expose
 	 * through side transports (e.g. `xd://` device mounts) instead of failing
 	 * with "Tool not found". Returning `undefined` keeps the failure.
+	 *
+	 * `advertised` is the very snapshot exact-name dispatch just searched — the
+	 * set offered to THIS request. A host must resolve against it rather than
+	 * its own live tool state: an MCP `tools/list_changed` mid-stream reassigns
+	 * the agent's tools, so live state can hold a roster the model never saw,
+	 * and a name-recovering host would dispatch a tool this request never
+	 * advertised while exact dispatch still answered from the snapshot.
 	 */
-	resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
+	/**
+	 * Names reachable through {@link resolveFallbackTool} but absent from the
+	 * advertised set (e.g. `xd://` device mounts). Consulted only to name a
+	 * plausible target when a call misses, so a mis-transcribed device call is
+	 * recoverable; never a dispatch source.
+	 */
+	suggestFallbackToolNames?: () => Iterable<string>;
 
 	/**
 	 * Enable intent tracing for tool calls.
@@ -698,6 +712,14 @@ export interface ToolSpeculationStreamSession {
 	finalize(context: ToolSpeculationAssessmentContext): void | Promise<void>;
 	commit(): void | Promise<void>;
 	discard(reason: string): void | Promise<void>;
+	/**
+	 * Whether the session's streamed plan still authorizes these final
+	 * arguments. The coordinator discards the session when the finalized call
+	 * kept its ID but a hook or argument transform replaced its arguments:
+	 * deferred work planned from the original code must never release.
+	 * Sessions without this predicate are always retained.
+	 */
+	matchesFinalArgs?(args: Readonly<Record<string, unknown>>): boolean;
 }
 
 export interface SpeculativeOperationSink {

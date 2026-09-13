@@ -93,6 +93,8 @@ describe("JsRuntime global disposal", () => {
 					JSON: true,
 					"JSON.stringify": true,
 					"Array.prototype.join": true,
+					"Object.prototype.toString": true,
+					__omp_call_tool__: true,
 				},
 			});
 
@@ -147,6 +149,33 @@ describe("JsRuntime global disposal", () => {
 			expect(shadowSnapshotDigest(after)).not.toBe(before);
 		} finally {
 			globals.String = genuineString;
+			runtime.dispose();
+		}
+	});
+	it("reports the installed bridge dispatcher identity in snapshots", async () => {
+		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-call-tool" });
+		try {
+			// The dispatcher is an owned global installed by every runtime, so
+			// the identity flag is always present; the exact-shape assertion
+			// above pins the full key set.
+			expect(runtime.snapshotUserGlobals().initialGlobals).toMatchObject({ __omp_call_tool__: true });
+		} finally {
+			runtime.dispose();
+		}
+	});
+	it("changes the snapshot digest when Object.prototype.toString is replaced", async () => {
+		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-tostring" });
+		const genuineToString = Object.prototype.toString;
+		try {
+			const before = shadowSnapshotDigest(runtime.snapshotUserGlobals());
+			Object.prototype.toString = function toString() {
+				return "spoofed";
+			};
+			const after = runtime.snapshotUserGlobals();
+			expect(after.initialGlobals).toMatchObject({ "Object.prototype.toString": false });
+			expect(shadowSnapshotDigest(after)).not.toBe(before);
+		} finally {
+			Object.prototype.toString = genuineToString;
 			runtime.dispose();
 		}
 	});

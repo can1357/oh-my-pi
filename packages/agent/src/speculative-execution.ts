@@ -222,6 +222,10 @@ class TrackedStreamSession implements ToolSpeculationStreamSession {
 		this.#closed = true;
 		await this.inner.discard(reason);
 	}
+
+	matchesFinalArgs(args: Readonly<Record<string, unknown>>): boolean {
+		return this.inner.matchesFinalArgs?.(args) ?? true;
+	}
 }
 
 /** One streamed assistant response's invisible speculative-operation lifecycle. */
@@ -498,8 +502,20 @@ export class SpeculativeOperationCoordinator {
 				await this.#discardCandidate(candidate, "fingerprint_mismatch", "final tool call changed");
 			}
 		}
-		for (const toolCallId of this.#streamSessions.keys()) {
-			if (!calls.has(toolCallId)) await this.discardStreamSession(toolCallId, "final outer tool call changed");
+		for (const toolCallId of [...this.#streamSessions.keys()]) {
+			const finalCall = calls.get(toolCallId);
+			if (!finalCall) {
+				await this.discardStreamSession(toolCallId, "final outer tool call changed");
+				continue;
+			}
+			// A hook or argument transform may replace arguments while keeping the
+			// ID: the session planned from the original code, so releasing its
+			// deferred work would execute a stale plan.
+			const session = this.#streamSessions.get(toolCallId);
+			const args = finalCall.arguments;
+			if (session && args !== undefined && !session.matchesFinalArgs(args as Record<string, unknown>)) {
+				await this.discardStreamSession(toolCallId, "final outer tool call arguments changed");
+			}
 		}
 	}
 

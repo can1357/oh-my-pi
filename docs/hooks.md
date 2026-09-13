@@ -59,6 +59,15 @@ Default sessions load JS/TS hook factories discovered by `hookCapability` throug
 3. Append plugin extension entry points
 4. Append explicitly configured paths
 
+### Native discovery location
+
+The native provider scans only two subdirectories per config root — a factory placed **directly** in `hooks/` is not discovered:
+
+- Project: `<cwd>/.omp/hooks/pre/*.{ts,js}` and `<cwd>/.omp/hooks/post/*.{ts,js}`
+- User: `<agentDir>/hooks/pre/*.{ts,js}` and `<agentDir>/hooks/post/*.{ts,js}` (default `~/.omp/agent/hooks/...`; profile- and `PI_CODING_AGENT_DIR`-aware)
+
+So `<cwd>/.omp/hooks/psy-guards.ts` (no `pre/`/`post/` subdirectory) loads nothing and reports no error — move it into `pre/` or `post/`, e.g. `<cwd>/.omp/hooks/pre/psy-guards.ts`. This mirrors `.claude/hooks/pre|post/`. Only `.ts`/`.js` factories are appended to the extension pipeline and bound through the extension runner. See [Extension Loading](./extension-loading.md) for the shared module pipeline these factories flow through (native `.omp/extensions/` roots, plugin entries, configured paths, load order, and disable controls).
+
 The legacy `discoverAndLoadHooks(configuredPaths, cwd)` helper still exists and does:
 
 1. Load discovered hooks from capability registry (`loadCapability("hooks")`)

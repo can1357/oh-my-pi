@@ -1214,6 +1214,54 @@ describe("agentLoop with AgentMessage", () => {
 		);
 	});
 
+	it("hands resolveFallbackTool the request's advertised snapshot", async () => {
+		// A host that recovers a mis-spelled name must resolve it against the set
+		// THIS request advertised, not its own live tool state: an MCP
+		// `tools/list_changed` reassigns the agent's tools mid-stream, so live
+		// state can hold a roster the model never saw. The loop therefore hands
+		// over the same snapshot exact-name dispatch searched.
+		const toolSchema = type({ value: "string" });
+		const advertisedTool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "mcp__srv_bank",
+			label: "Bank",
+			description: "Advertised MCP tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `bank: ${params.value}` }], details: params };
+			},
+		};
+		const advertisedTools = [advertisedTool];
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: advertisedTools };
+		const seen: Array<readonly { name: string }[]> = [];
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "tool-1", name: "mcp__srv__bank", arguments: { value: "read" } }],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// Resolve ONLY from the handed-over snapshot; never from ambient state.
+			resolveFallbackTool: (name, advertised) => {
+				seen.push(advertised);
+				return name === "mcp__srv__bank" ? advertised.find(tool => tool.name === "mcp__srv_bank") : undefined;
+			},
+		};
+
+		const messages = await agentLoop([createUserMessage("go")], context, config, undefined, mock.stream).result();
+
+		// The snapshot is the context's own array, so it cannot drift from what
+		// exact-name dispatch matched against for this request.
+		expect(seen.length).toBeGreaterThan(0);
+		for (const advertised of seen) expect(advertised).toBe(advertisedTools);
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "tool-1");
+		expect(result?.isError).toBeFalsy();
+		expect(result?.content).toContainEqual({ type: "text", text: "bank: read" });
+	});
+
 	it("suggests the intended tool when a miss shares its trailing segment", async () => {
 		const toolSchema = type({ path: "string" });
 		const makeTool = (name: string): AgentTool<typeof toolSchema, { path: string }> => ({
@@ -1267,6 +1315,57 @@ describe("agentLoop with AgentMessage", () => {
 		// No plausible target: the bare failure is preserved, never a guess.
 		expect(textOf("tool-3")).toContain("Tool totally_unrelated not found");
 		expect(textOf("tool-3")).not.toContain("Did you mean");
+	});
+
+	it("suggests a mounted device the advertised set does not contain", async () => {
+		// Observed in a real transcript: the session mounts `github` as an
+		// `xd://` device, the model emitted `mcp__<ns>__<id>_github`, and the miss
+		// produced a bare `not found`. That is the one unrecoverable shape — the
+		// capability is live, but it appears in no advertised name, so matching
+		// only the advertised set had nothing to offer.
+		const toolSchema = type({ path: "string" });
+		const makeTool = (name: string): AgentTool<typeof toolSchema, { path: string }> => ({
+			name,
+			label: name,
+			description: "Advertised tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: params.path }], details: params };
+			},
+		});
+		const context: AgentContext = {
+			systemPrompt: [""],
+			messages: [],
+			tools: [makeTool("read")],
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "mcp__nsnsnsnsnsns__ididididid_github", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// Devices are routable by `resolveFallbackTool` but never advertised.
+			suggestFallbackToolNames: () => ["github", "lsp"],
+		};
+
+		const messages = await agentLoop([createUserMessage("go")], context, config, undefined, mock.stream).result();
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "tool-1");
+		const text = (result?.content ?? [])
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("\n");
+
+		expect(text).toContain("Did you mean github?");
+		// Advisory only: naming the device must not dispatch it. No
+		// `resolveFallbackTool` is installed here, so the call still fails.
+		expect(result?.isError).toBe(true);
 	});
 
 	it("ranks the distinctive tail ahead of tools sharing only the generic one", async () => {
@@ -6302,6 +6401,30 @@ describe("speculative tool execution", () => {
 
 		expect(coordinator.size).toBe(0);
 		expect(SpeculativeOperationCoordinator.take(message)).toBeUndefined();
+		await coordinator.close("test complete");
+	});
+	it("discards stream sessions whose final arguments changed", async () => {
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true });
+		const discarded: string[] = [];
+		expect(
+			coordinator.registerStreamSession("stream-1", {
+				update() {},
+				finalize() {},
+				commit() {},
+				async discard(reason: string) {
+					discarded.push(reason);
+				},
+				matchesFinalArgs: args => args.code === "original",
+			}),
+		).toBe(true);
+		const callFor = (code: string) =>
+			new Map([["stream-1", { type: "toolCall" as const, id: "stream-1", name: "eval", arguments: { code } }]]);
+		// Unchanged arguments retain the session.
+		await coordinator.reconcileFinalCalls(callFor("original"));
+		expect(discarded).toEqual([]);
+		// A hook rewrite that keeps the ID discards the stale plan.
+		await coordinator.reconcileFinalCalls(callFor("replaced"));
+		expect(discarded).toEqual(["final outer tool call arguments changed"]);
 		await coordinator.close("test complete");
 	});
 

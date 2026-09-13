@@ -568,6 +568,9 @@ export class UiHelpers {
 							this.ctx.pendingTools.set(content.id, readGroup);
 							if (assistantComponent) {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
+								if (this.ctx.viewSession.isStreaming) {
+									this.ctx.eventController?.inheritReadToolAssistant(content.id, assistantComponent);
+								}
 							}
 						} else {
 							const normalizedArgs = normalizeToolArgs(content.arguments);
@@ -652,6 +655,9 @@ export class UiHelpers {
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
+					if (this.ctx.viewSession.isStreaming) {
+						this.ctx.eventController?.inheritReadToolAssistant(message.toolCallId, undefined);
+					}
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
@@ -659,6 +665,10 @@ export class UiHelpers {
 						assistantComponent.setToolResultImages(message.toolCallId, images);
 						const hasText = message.content.some(c => c.type === "text");
 						if (!hasText && settings.get("terminal.showImages")) {
+							if (pendingReadComponent) {
+								pendingReadComponent.updateResult(message, false, message.toolCallId);
+								this.ctx.pendingTools.delete(message.toolCallId);
+							}
 							readToolCallArgs.delete(message.toolCallId);
 							readToolCallAssistantComponents.delete(message.toolCallId);
 							continue;

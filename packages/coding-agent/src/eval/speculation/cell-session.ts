@@ -80,6 +80,8 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 	#occurrenceAssignment = Promise.resolve();
 	#snapshot: Readonly<Record<string, ShadowValue | unknown>> | undefined;
 	#lastPlan: { code: string; language: string; plan: ShadowPlan | null } | undefined;
+	/** Exact source the stream finalize verified; reconcile must see the same bytes. */
+	#finalizedCode: string | undefined;
 	#snapshotToken: { language: string; revision: number; digest: string } | undefined;
 	#closed = false;
 	#updates = Promise.resolve();
@@ -131,13 +133,13 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			this.#planning = false;
 		}
 	}
-
 	async finalize(context: { args: Readonly<Record<string, unknown>> }): Promise<void> {
 		if (this.#closed) return;
 		if (!this.#decoder.matchesFinal(context.args)) {
 			await this.discard("final eval arguments do not match streamed shadow plan");
 			return;
 		}
+		if (typeof context.args.code === "string") this.#finalizedCode = context.args.code;
 		await this.#updates;
 		// Re-project the final arguments: streamed prefixes may have admitted
 		// operations that later source invalidates (e.g. a hoisted `tool` shadow
@@ -149,6 +151,18 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 		if (!(await this.#verifyFinalPlan(context.args))) {
 			await this.discard("final eval arguments invalidate an admitted speculative operation");
 		}
+	}
+	/**
+	 * Whether the streamed plan still authorizes these final arguments. The
+	 * coordinator re-checks after hook/transform reconciliation and discards
+	 * the session on mismatch. The decoder check alone accepts any extension
+	 * of the streamed prefix, so additionally require the exact source the
+	 * stream finalize verified: appended source (e.g. a hoisted `tool` shadow
+	 * after the read) invalidates previously projected operations. Pure: safe
+	 * to call any number of times.
+	 */
+	matchesFinalArgs(args: Readonly<Record<string, unknown>>): boolean {
+		return this.#finalizedCode !== undefined && this.#decoder.matchesFinal(args) && args.code === this.#finalizedCode;
 	}
 
 	async #verifyFinalPlan(args: Readonly<Record<string, unknown>>): Promise<boolean> {

@@ -164,6 +164,21 @@ function isDefinitelyString(expression: ShadowExpression): boolean {
 	);
 }
 
+/**
+ * Whether string-coercing this value may invoke a mutable intrinsic. Literals
+ * of primitive type and intrinsics-gated transform outputs have fixed
+ * conversions; arrays dispatch `Array.prototype.join` and every other opaque
+ * value (snapshots, prior results, property reads, objects) may reach either
+ * `join` or `Object.prototype.toString`. Callers refuse the projection unless
+ * both flags report intact.
+ */
+function coercionNeedsIntrinsics(expression: ShadowExpression): boolean {
+	if (expression.kind === "literal") return false;
+	if (expression.kind === "concat") return expression.items.some(coercionNeedsIntrinsics);
+	if (expression.kind === "transform") return false;
+	return true;
+}
+
 type ProjectionState = {
 	readonly snapshot: Readonly<Record<string, unknown>>;
 	readonly initialGlobals: Readonly<Record<string, boolean>>;
@@ -289,6 +304,15 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 				items.push(projected);
 			}
 		}
+		// Implicit template coercion dispatches `Array.prototype.join` for
+		// arrays and `Object.prototype.toString` for other objects; refuse the
+		// projection unless both intrinsics report intact.
+		if (
+			items.some(coercionNeedsIntrinsics) &&
+			(!intrinsicIntact(state, "Array.prototype.join") || !intrinsicIntact(state, "Object.prototype.toString"))
+		) {
+			return undefined;
+		}
 		return { kind: "concat", items };
 	}
 	if (
@@ -298,9 +322,16 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 	) {
 		const left = projectExpression(expression.left, state);
 		const right = projectExpression(expression.right, state);
-		return left && right && (isDefinitelyString(left) || isDefinitelyString(right))
-			? { kind: "concat", items: [left, right] }
-			: undefined;
+		if (!(left && right && (isDefinitelyString(left) || isDefinitelyString(right)))) return undefined;
+		// Same implicit coercion as templates: either side may dispatch `join`
+		// or `toString` when it is not a statically fixed primitive.
+		if (
+			(coercionNeedsIntrinsics(left) || coercionNeedsIntrinsics(right)) &&
+			(!intrinsicIntact(state, "Array.prototype.join") || !intrinsicIntact(state, "Object.prototype.toString"))
+		) {
+			return undefined;
+		}
+		return { kind: "concat", items: [left, right] };
 	}
 	if (isCallExpression(expression) && expression.arguments.every(argument => isExpression(argument))) {
 		const args = expression.arguments as Expression[];
@@ -311,7 +342,15 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 			args.length === 1
 		) {
 			const input = projectExpression(args[0] as Expression, state);
-			return input ? { kind: "transform", name: "String", input } : undefined;
+			if (!input) return undefined;
+			// String() coerces its input: arrays dispatch join, objects toString.
+			if (
+				coercionNeedsIntrinsics(input) &&
+				(!intrinsicIntact(state, "Array.prototype.join") || !intrinsicIntact(state, "Object.prototype.toString"))
+			) {
+				return undefined;
+			}
+			return { kind: "transform", name: "String", input };
 		}
 		if (
 			isMemberExpression(expression.callee) &&
@@ -336,9 +375,15 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 		) {
 			const input = projectExpression(expression.callee.object, state);
 			const argument = args[0] ? projectExpression(args[0], state) : undefined;
-			return input && (!args[0] || argument)
-				? { kind: "transform", name: "Array.join", input, ...(argument ? { argument } : {}) }
-				: undefined;
+			if (!input || (args[0] && !argument)) return undefined;
+			// Elements and the separator stringify: objects reach toString
+			// (nested arrays stay under the join gate above).
+			const elements = input.kind === "array" ? input.items : [input];
+			const coerced = argument === undefined ? elements : [...elements, argument];
+			if (coerced.some(coercionNeedsIntrinsics) && !intrinsicIntact(state, "Object.prototype.toString")) {
+				return undefined;
+			}
+			return { kind: "transform", name: "Array.join", input, ...(argument ? { argument } : {}) };
 		}
 	}
 	return undefined;
@@ -372,6 +417,11 @@ function addOperation(
 	if (!isCallExpression(call)) return undefined;
 	const name = callKind(call);
 	if (name !== "read" || call.arguments.length !== 1) return undefined;
+	// The prelude tool proxy resolves the bridge dispatcher per call, so admit
+	// reads only while the runtime reports its installed identity: a poisoned
+	// installation must degrade to unadmitted dependents, never to speculative
+	// I/O against a bridge the authoritative cell cannot reach.
+	if (!intrinsicIntact(state, "__omp_call_tool__")) return undefined;
 	const argument = call.arguments[0];
 	if (!argument || !isExpression(argument)) return undefined;
 	const projectedArgs = projectExpression(argument, state);
