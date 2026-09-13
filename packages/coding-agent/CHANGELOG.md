@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Retry fail-fast messages now distinguish a provider-stated wait from an OMP-estimated cooldown, so a hintless usage-limit heuristic no longer surfaces as `Provider requested …` ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

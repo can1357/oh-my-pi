@@ -71,7 +71,7 @@ Flow (`#handleRetryableError`):
 5. For usage limits, apply a successful credential switch or banked Codex reset immediately; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
 6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals only continue when a fallback is applied.
 7. If the current model's retry budget is exhausted, stop unless a fallback model was found. A fallback receives a fresh retry budget.
-8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping.
+8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping. The message names the winning wait's provenance: `Provider requested …` only when it traces to timing the provider stated (a parsed retry hint, or a complete usage-report reset), otherwise `OMP-estimated …` for the capped backoff and the hintless `QUOTA_EXHAUSTED` heuristic.
 9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless this is a resolved interrupted tool turn.
 10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
@@ -113,7 +113,7 @@ Backoff sequence with default settings, before jitter:
 
 The actual local sleep is 75–100% of the nominal value, matching Anthropic-style retry jitter so concurrent sessions do not retry in lockstep.
 
-Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay. If the computed delay is greater than `retry.maxDelayMs` and no switch succeeded, retry ends immediately with a final error instead of sleeping.
+Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay. If the computed delay is greater than `retry.maxDelayMs` and no switch succeeded, retry ends immediately with a final error instead of sleeping, reporting the wait as provider-requested only when it came from provider-stated timing.
 
 ## Abort mechanics
 
@@ -223,7 +223,7 @@ Retry stops and will not auto-continue when any of these occur:
 - error is not retry-classified
 - error is context overflow (delegated to compaction path)
 - max retries are exceeded and no fallback model is available
-- provider-requested delay exceeds `retry.maxDelayMs` and no credential/model switch is available
+- provider-stated or OMP-estimated delay exceeds `retry.maxDelayMs` and no credential/model switch is available (the `auto_retry_end` message names which one)
 - user cancels retry (`abort_retry` or `Esc` during retry loader)
 - global abort (`abort`) cancels retry first
 

@@ -181,6 +181,8 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: false });
 		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
 		expect(retryEndEvents[0].finalError).toContain("Provider requested 11180001ms wait");
+		// Provider-stated timing must not be reported as an OMP estimate.
+		expect(retryEndEvents[0].finalError).not.toContain("OMP-estimated");
 		// No multi-hour (or any) sleep — the cap path skips scheduler.wait entirely.
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThanOrEqual(100);
@@ -461,7 +463,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false });
 		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
-		expect(retryEndEvents[0].finalError).toContain("Provider requested 1800000ms wait");
+		expect(retryEndEvents[0].finalError).toContain("OMP-estimated 1800000ms wait");
+		// The 30-minute fallback is a guess, so it must not claim the provider
+		// asked for that wait (issue #11689).
+		expect(retryEndEvents[0].finalError).not.toContain("Provider requested");
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThanOrEqual(100);
 		}
