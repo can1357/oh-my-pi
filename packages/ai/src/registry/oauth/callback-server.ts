@@ -210,6 +210,15 @@ export abstract class OAuthCallbackFlow {
 	abstract exchangeToken(code: string, state: string, redirectUri: string): Promise<OAuthCredentials>;
 
 	/**
+	 * Optional hook invoked with the raw authorization-redirect URL right before
+	 * the authorization code is redeemed. A flow may use it to reject a callback
+	 * whose `iss` (issuer) does not match the authorization server it started
+	 * against (OAuth 2.0 authorization-server-issuer detection, RFC 9207).
+	 * Throwing aborts the login before any token exchange happens.
+	 */
+	protected onAuthorizeRedirect?(url: URL): void;
+
+	/**
 	 * Generate CSRF state token. Override if provider needs custom state generation.
 	 */
 	generateState(): string {
@@ -573,6 +582,23 @@ export abstract class OAuthCallbackFlow {
 
 		if (resultState.ok) {
 			const resolve = this.#callbackResolve;
+			// Let a flow reject a redirect whose issuer does not match the
+			// authorization server it started against, before the code is
+			// redeemed (RFC 9207).
+			try {
+				this.onAuthorizeRedirect?.(url);
+			} catch (error) {
+				const reject = this.#callbackReject;
+				queueMicrotask(() => {
+					reject?.(
+						error instanceof Error ? error : new AIError.OAuthError(String(error), { kind: "device-auth" }),
+					);
+				});
+				return new Response(
+					(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", JSON.stringify(resultState)),
+					{ status: 500, headers: { "Content-Type": "text/html" } },
+				);
+			}
 			queueMicrotask(() => {
 				resolve?.({ code: resultState.code, state: resultState.state });
 			});

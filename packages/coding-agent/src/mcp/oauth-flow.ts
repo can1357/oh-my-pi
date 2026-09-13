@@ -406,6 +406,31 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		return this.config.authorizationUrl;
 	}
 
+	/**
+	 * Reject a redirected callback whose `iss` (issuer) does not match the
+	 * authorization server this flow started against. Uses the discovered
+	 * issuer — the authorization URL origin and path — per RFC 9207. When `iss`
+	 * is absent (a legacy AS), continue.
+	 */
+	protected override onAuthorizeRedirect(url: URL): void {
+		const iss = url.searchParams.get("iss");
+		if (iss === null) return; // Legacy AS — no issuer claim, continue.
+		// The issuer is the authorization server's origin + path (RFC 9207);
+		// query params like `client_id` never appear in `iss`, so compare against
+		// origin+path only.
+		let expectedIssuer: string;
+		try {
+			const authUrl = new URL(this.config.authorizationUrl);
+			expectedIssuer = authUrl.origin + authUrl.pathname;
+		} catch {
+			// Unparseable authorizationUrl — fall back to a flat string match.
+			expectedIssuer = this.config.authorizationUrl;
+		}
+		if (iss !== expectedIssuer) {
+			throw new Error(`OAuth iss mismatch`);
+		}
+	}
+
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
 			await this.#tryRegisterClient(redirectUri);
