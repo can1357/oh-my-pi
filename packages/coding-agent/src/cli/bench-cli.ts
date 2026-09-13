@@ -943,7 +943,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	try {
-		const targets = resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each

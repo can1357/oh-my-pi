@@ -106,7 +106,7 @@ export async function runIfBenchCommand(
 
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	try {
-		const targets = resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		board?.log(
 			chalk.dim(
 				`if-bench · ${targets.length} model${targets.length === 1 ? "" : "s"} · up to ${maxTurns} turns · array ${arrayLength} · nya{1,${nyaMax}} · temperature 0`,
