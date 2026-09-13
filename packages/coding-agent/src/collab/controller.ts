@@ -14,7 +14,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
 import type { InteractiveModeContext } from "../modes/types";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
-import { CollabHost } from "./host";
+import { CollabHost, CollabHostStoppedError } from "./host";
 import type { CollabAccess } from "./registry";
 
 export type CollabAutoStart = "off" | CollabAccess;
@@ -152,12 +152,17 @@ export class CollabController {
 		return host;
 	}
 
-	/** Background start: a failure is logged and shown, never thrown. */
+	/**
+	 * Background start: a failure is logged and shown, never thrown. A room
+	 * that this controller (or `/collab stop`) deliberately stopped while it
+	 * was still connecting — session switch, access upgrade, shutdown — is not
+	 * a failure; its replacement, if any, is already on its way.
+	 */
 	async #launchReporting(access: CollabAccess): Promise<void> {
 		try {
 			await this.#launch(access);
 		} catch (err) {
-			if (this.#shutdown) return;
+			if (this.#shutdown || err instanceof CollabHostStoppedError) return;
 			logger.warn("Collab auto-start failed", { error: String(err) });
 			const message = sanitizeDisplayLine(err instanceof Error ? err.message : String(err));
 			this.#ctx.showStatus(truncateToWidth(`Collab auto-start failed: ${message}`, TRUNCATE_LENGTHS.LINE), {

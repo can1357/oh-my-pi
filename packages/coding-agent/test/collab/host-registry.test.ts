@@ -3,8 +3,9 @@
  * (#6099). It publishes exactly once — and only after the relay connection
  * succeeds — serves metadata without links, hands out a link only for its
  * current generation and published access, withdraws on every teardown path
- * (explicit stop, session switch, terminal relay close), keeps hosting when
- * publication fails, and guests joining through the relay never add an entry.
+ * (explicit stop, terminal relay close), suspends without withdrawing while
+ * another session is provisionally active, keeps hosting when publication
+ * fails, and guests joining through the relay never add an entry.
  *
  * The in-memory relay harness (./helpers/in-memory-relay) replaces the real
  * WebSocket so a real CollabHost/CollabSocket run unchanged; a per-test spy on
@@ -31,6 +32,8 @@ interface HostContextState {
 	sessionId: string;
 	showStatus: string[];
 	subscribed: ((event: { type: string; [k: string]: unknown }) => void) | null;
+	/** Invoked on every `getSessionId()` read, i.e. each time the host checks the session it mirrors. */
+	onSessionIdRead: (() => void) | undefined;
 	/** Resolves when the host clears its status-line segment, i.e. tore down. */
 	tornDown: PromiseWithResolvers<void>;
 }
@@ -45,12 +48,16 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 		sessionId: `sess-${crypto.randomUUID()}`,
 		showStatus: [],
 		subscribed: null,
+		onSessionIdRead: undefined,
 		tornDown: Promise.withResolvers<void>(),
 	};
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
-			getSessionId: () => state.sessionId,
+			getSessionId: () => {
+				state.onSessionIdRead?.();
+				return state.sessionId;
+			},
 			getCwd: () => "/tmp/collab-registry-test",
 			snapshotForReplication: () => ({
 				header: {
@@ -242,81 +249,94 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
-	it("withdraws when the underlying session is switched out", async () => {
+	it("suspends mirroring and discovery while another session is active and resumes when the switch rolls back", async () => {
 		const { ctx, state } = makeHostContext();
 		host = new CollabHost(ctx);
 		await host.start(RELAY_URL, WEB_URL);
-		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
+		const original = state.sessionId;
 		if (!state.subscribed) throw new Error("host never subscribed to session events");
-
-		// The active session changed; the next broadcast detects the mismatch
-		// and tears the host down.
-		state.sessionId = `sess-switched-${Date.now()}`;
-		state.subscribed({ type: "notice", level: "info", message: "switched", source: "test" });
-
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-	});
-
-	it("withdraws on the next discovery query when the session switched while idle", async () => {
-		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx);
-		await host.start(RELAY_URL, WEB_URL);
-		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
-
-		// No broadcast happens after the switch (idle host, e.g. /resume): the
-		// stale room must not be served to `omp collab list`, and the query
-		// itself triggers withdrawal.
-		state.sessionId = `sess-idle-switched-${Date.now()}`;
-
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-	});
-
-	it("refuses to mirror a dialog once the active session is no longer the room's session", async () => {
-		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx);
-		await host.start(RELAY_URL, WEB_URL);
-
-		// `/resume` swaps the active session and runs the new session's hooks
-		// before the session-change callbacks fire. A dialog raised in that
-		// window belongs to the new session and must never reach this room.
-		state.sessionId = `sess-resumed-${Date.now()}`;
-		const request = host.requestGuestUi({ kind: "select", title: "Resumed hook", options: ["Yes", "No"] });
-
-		expect(request).toBeNull();
-		// Refusing also ends the stale room (the goodbye is flushed first).
-		await state.tornDown.promise;
-		expect(host.stopped).toBe(true);
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-	});
-
-	it("never welcomes a guest into a room whose session switched while idle", async () => {
-		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx);
-		await host.start(RELAY_URL, WEB_URL);
 		const parsed = parseCollabLink(host.link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		const key = await importRoomKey(parsed.key);
 
-		// The TUI moved on to another session without broadcasting anything.
-		state.sessionId = `sess-idle-switched-${Date.now()}`;
-
-		// A guest holding the old link joins: the host must not answer with a
-		// welcome (which would snapshot the *new* session) and must withdraw.
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
-		guestCleanups.push(() => socket.close());
-		let welcomed = false;
-		socket.onFrame = frame => {
-			if (frame.t === "welcome") welcomed = true;
+		// A guest already in the room records every notice it is shown.
+		const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		guestCleanups.push(() => guest.close());
+		const welcomed = Promise.withResolvers<void>();
+		const seen: string[] = [];
+		const restored = Promise.withResolvers<void>();
+		guest.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "event" && frame.event.type === "notice") {
+				seen.push(frame.event.message);
+				if (frame.event.message === "restored") restored.resolve();
+			}
 		};
-		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name: "late-guest" });
-		socket.connect();
+		guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "viewer" });
+		guest.connect();
+		await welcomed.promise;
 
-		// Processing the hello is what ends the stale room; the fake relay does
-		// not close guests when the host leaves, so wait for the host's teardown.
-		await state.tornDown.promise;
-		expect(welcomed).toBe(false);
+		// `switchSession()` adopted the target id but has not committed: whatever
+		// the other session emits stays out of this room, and the room is not
+		// listed — yet its entry is left in place and the room is not ended.
+		state.sessionId = `sess-provisional-${Date.now()}`;
+		state.subscribed({ type: "notice", level: "info", message: "from the other session", source: "test" });
+		expect(host.requestGuestUi({ kind: "select", title: "Other session's hook", options: ["Yes"] })).toBeNull();
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		expect((await fs.readdir(tmp)).filter(name => name.endsWith(".json"))).toHaveLength(1);
+		expect(host.stopped).toBe(false);
+
+		// The switch failed and the previous id was restored without any
+		// callback: the room is current again, mirrors again, and is listed again.
+		state.sessionId = original;
+		state.subscribed({ type: "notice", level: "info", message: "restored", source: "test" });
+		await restored.promise;
+		expect(seen).toEqual(["restored"]);
+		const pending = host.requestGuestUi({ kind: "select", title: "After rollback", options: ["Yes"] });
+		expect(pending).not.toBeNull();
+		expect((await registry.listCollabHosts({ dir: tmp })).map(h => h.sessionId)).toEqual([original]);
+	});
+
+	it("never welcomes a guest while another session is active, and welcomes one after the switch rolls back", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+		const original = state.sessionId;
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const key = await importRoomKey(parsed.key);
+		const join = (name: string): { welcomed: Promise<void>; saw: () => boolean } => {
+			const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+			guestCleanups.push(() => socket.close());
+			let welcomed = false;
+			const done = Promise.withResolvers<void>();
+			socket.onFrame = frame => {
+				if (frame.t === "welcome") {
+					welcomed = true;
+					done.resolve();
+				}
+			};
+			socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name });
+			socket.connect();
+			return { welcomed: done.promise, saw: () => welcomed };
+		};
+
+		// A guest holding the old link joins during the uncommitted switch: a
+		// welcome would snapshot the *other* session, so none is sent. The
+		// host's check of the session id is the moment its hello was refused.
+		state.sessionId = `sess-provisional-${Date.now()}`;
+		const helloRefused = Promise.withResolvers<void>();
+		state.onSessionIdRead = () => helloRefused.resolve();
+		const early = join("early-guest");
+		await helloRefused.promise;
+		state.onSessionIdRead = undefined;
+
+		// After the rollback the room serves joins again.
+		state.sessionId = original;
+		const late = join("late-guest");
+		await late.welcomed;
+		expect(early.saw()).toBe(false);
+		expect(late.saw()).toBe(true);
 	});
 
 	it("withdraws on a terminal (non-reconnecting) relay close", async () => {

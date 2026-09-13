@@ -140,6 +140,18 @@ export interface CollabHostOptions {
 	access?: CollabAccess;
 }
 
+/**
+ * `start()` rejects with this when `stop()` deliberately ends the room while it
+ * is still connecting (session switch, access upgrade, `/collab stop`,
+ * shutdown), as opposed to a relay failure.
+ */
+export class CollabHostStoppedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CollabHostStoppedError";
+	}
+}
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -285,7 +297,7 @@ export class CollabHost {
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
-		if (this.#stopped) throw new Error("collab host already stopped");
+		if (this.#stopped) throw new CollabHostStoppedError("collab host already stopped");
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
@@ -302,7 +314,7 @@ export class CollabHost {
 		firstOpen.promise.catch(() => {});
 		this.#abortStart = firstOpen.reject;
 		const key = await importRoomKey(rawKey);
-		if (this.#stopped) throw new Error("collab host stopped during startup");
+		if (this.#stopped) throw new CollabHostStoppedError("collab host stopped before connecting");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
@@ -420,7 +432,7 @@ export class CollabHost {
 	async stop(reason: string): Promise<void> {
 		if (this.#teardownDone) return this.#teardownDone;
 		if (this.#stopped) return;
-		this.#abortStart?.(new Error(`collab host stopped: ${reason}`));
+		this.#abortStart?.(new CollabHostStoppedError(`collab host stopped: ${reason}`));
 		const socket = this.#socket;
 		if (socket) {
 			// Sealing is asynchronous; without the flush the goodbye would still be
@@ -484,17 +496,17 @@ export class CollabHost {
 	/**
 	 * The session this room mirrors is still the active one. Every path that
 	 * reads or mutates session state on a guest's behalf (broadcasts, joins,
-	 * prompts, registry queries) checks this first: a host that outlived a
-	 * session switch ends itself instead of exposing the successor session
-	 * through the old room.
+	 * prompts, registry queries) checks this first and refuses on a mismatch:
+	 * the room mirrors nothing, welcomes nobody, and is absent from discovery
+	 * while another session is active. It is suspended rather than ended
+	 * because `switchSession()` adopts the target id before it commits and a
+	 * failed switch restores the previous id without notifying anyone; only
+	 * the committed change, delivered to the controller through the
+	 * session-change callback, stops the room. A rolled-back switch simply
+	 * finds the room current again.
 	 */
 	#sessionStillCurrent(): boolean {
-		if (this.#ctx.sessionManager.getSessionId() === this.#sessionId) return true;
-		if (!this.#stopped) {
-			void this.stop("session switched");
-			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
-		}
-		return false;
+		return this.#ctx.sessionManager.getSessionId() === this.#sessionId;
 	}
 
 	/** Live metadata and capability lookups served over the registry IPC. */
@@ -507,8 +519,9 @@ export class CollabHost {
 
 	/**
 	 * Non-capability snapshot; URLs are only ever returned by `link`. A host
-	 * that switched sessions while idle withdraws on the next discovery query
-	 * instead of describing the new session under the old room's identity.
+	 * whose session is not the active one answers `snapshot_unavailable`, so a
+	 * listing omits it — without pruning — instead of describing the other
+	 * session under this room's identity.
 	 */
 	#registrySnapshot(): CollabHostSnapshot {
 		if (!this.#sessionStillCurrent()) throw new Error("session switched");

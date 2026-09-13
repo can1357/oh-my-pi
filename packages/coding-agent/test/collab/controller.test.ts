@@ -338,6 +338,64 @@ describe("CollabController", () => {
 		);
 	});
 
+	describe("while the first room is still connecting", () => {
+		/** Resolves once the first relay socket exists; it stays in CONNECTING, later sockets open normally. */
+		let firstSocketStalled: PromiseWithResolvers<void>;
+
+		beforeEach(() => {
+			firstSocketStalled = Promise.withResolvers<void>();
+			let stallNext = true;
+			globalThis.WebSocket = class extends FakeWebSocket {
+				constructor(url: string) {
+					super(url);
+					if (stallNext) {
+						stallNext = false;
+						// The base class opens on a microtask unless the socket already left CONNECTING.
+						this.readyState = FakeWebSocket.CLOSING;
+						firstSocketStalled.resolve();
+					}
+				}
+			} as unknown as typeof WebSocket;
+		});
+
+		it("a session switch replaces the room without reporting an auto-start failure", async () => {
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+			const first = ctx.collabHost;
+			if (!first) throw new Error("auto-start did not install a host");
+			await firstSocketStalled.promise;
+
+			// `/new` while the first room waits for the relay: routine, not a failure.
+			switchSession(state, `sess-next-${crypto.randomUUID()}`);
+			await settled(publishSpy, 1);
+			await controller.idle();
+
+			expect(first.stopped).toBe(true);
+			expect(ctx.collabHost).toMatchObject({ generation: 2, sessionId: state.sessionId });
+			expect(state.showStatus.filter(message => /auto-start failed/.test(message))).toEqual([]);
+		});
+
+		it("upgrading a view auto-start to control replaces the room without reporting an auto-start failure", async () => {
+			const { ctx, state } = makeControllerContext({ autoStart: "view" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+			const viewRoom = ctx.collabHost;
+			if (!viewRoom) throw new Error("auto-start did not install a host");
+			await firstSocketStalled.promise;
+
+			// `/collab` before the view room connected: the control room takes over.
+			const controlRoom = await controller.start({ access: "control" });
+			await controller.idle();
+
+			expect(viewRoom.stopped).toBe(true);
+			expect(controlRoom.access).toBe("control");
+			expect(ctx.collabHost).toBe(controlRoom);
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 2, access: "control" }]);
+			expect(state.showStatus.filter(message => /auto-start failed/.test(message))).toEqual([]);
+		});
+	});
+
 	it("waits for a room that ended on its own to finish withdrawing before the next room publishes", async () => {
 		const { ctx, state } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);
@@ -451,6 +509,9 @@ describe("CollabController", () => {
 			expect(second).not.toBe(first);
 			expect(second!.generation).toBe(2);
 			expect(second!.sessionId).toBe(state.sessionId);
+			// The successor is chained behind the aborted start's completion, so
+			// by now that start has settled — and settled quietly.
+			expect(state.showStatus.filter(message => /auto-start failed/.test(message))).toEqual([]);
 		});
 	});
 });
