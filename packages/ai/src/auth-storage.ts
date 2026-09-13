@@ -7069,7 +7069,9 @@ export class AuthStorage {
 		);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
-			const disabledCause = message ?? "upstream reported invalidated OAuth token";
+			const disabledCause = message
+				? `upstream reported invalidated OAuth token: ${message}`
+				: "upstream reported invalidated OAuth token";
 			// The broker persists (and logs) a remote disable on its own host; this
 			// session still observed the invalidation and must announce it here.
 			const deleted = this.#store.deleteAuthCredentialRemote
@@ -7226,7 +7228,7 @@ export class AuthStorage {
 			await this.revalidateCredentials(signal);
 		} catch (error) {
 			logger.debug("Credential snapshot revalidation failed before tombstone replay; reporting without recovery", {
-				error: String(error),
+				error: redactSecrets(String(error)),
 			});
 			return disabled.filter(summary => isActionableCredentialDisable(summary, []));
 		}

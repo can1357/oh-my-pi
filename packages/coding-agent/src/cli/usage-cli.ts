@@ -660,7 +660,9 @@ export function formatUsageBreakdown(
 		}
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
-			const label = credentialAccountLabel(summary, part => redaction?.get(part) ?? part);
+			const label = sanitizeText(
+				redactSecrets(credentialAccountLabel(summary, part => redaction?.get(part) ?? part)),
+			);
 			// Mask before summarizing: truncation must not leave a partial identity behind.
 			const cause = redaction ? maskDiagnosticIdentities(summary.cause, redaction) : summary.cause;
 			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";

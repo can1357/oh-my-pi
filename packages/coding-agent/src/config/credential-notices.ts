@@ -20,7 +20,7 @@ import {
 	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, pluralize, redactUrlSecrets } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, pluralize, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
@@ -45,7 +45,7 @@ function causeSummary(cause: string): string {
 
 /** Provider ids come from the registry or an extension; bound them like titles too. */
 function providerLabel(provider: string): string {
-	return truncateToWidth(provider, TRUNCATE_LENGTHS.TITLE);
+	return truncateToWidth(redactUrlSecrets(provider), TRUNCATE_LENGTHS.TITLE);
 }
 
 /**
@@ -129,7 +129,7 @@ export async function collectDisabledCredentialNotices(
 		if (hidden > 0) notices.push(`… ${hidden} more signed-out ${pluralize("account", hidden)}; see omp usage.`);
 		return notices;
 	} catch (error) {
-		logger.debug("Disabled credential replay skipped", { error: String(error) });
+		logger.debug("Disabled credential replay skipped", { error: redactSecrets(String(error)) });
 		return [];
 	}
 }

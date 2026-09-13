@@ -19,6 +19,22 @@ import {
 import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import { getAgentDir, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
+it("sanitizes provider-controlled disabled account labels before terminal output", () => {
+	const output = formatUsageBreakdown([], [], Date.now(), undefined, [
+		{
+			id: 1,
+			provider: "anthropic",
+			type: "oauth",
+			email: "who\x1b[2Jami@example.com",
+			orgName: "bearer=opaque-secret",
+			cause: "invalid_grant",
+		},
+	]);
+	expect(output).not.toContain("\x1b[2J");
+	expect(output).not.toContain("opaque-secret");
+	expect(output).toContain("whoami@example.com");
+});
+
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
 const SEVEN_DAYS = 7 * 24 * HOUR;

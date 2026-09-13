@@ -102,7 +102,7 @@ export function escapeXmlAttribute(input: string): string {
  * all qualify; over-matching is the safe direction there. The one
  * classification every redactor shares.
  */
-export const SECRET_NAME = /auth|cookie|secret|passw(?:or)?d|pwd|token|credential|key|signature/i;
+export const SECRET_NAME = /auth|bearer|cookie|secret|passw(?:or)?d|pwd|token|credential|key|signature/i;
 
 /**
  * In prose only a name that ends in a secret word right before `:` or `=`

@@ -427,6 +427,22 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 	});
 
 	describe("identity and log line", () => {
+		test("provider text cannot disguise automatic invalidation as deliberate logout", async () => {
+			const events: CredentialDisabledEvent[] = [];
+			const storage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await storage.set("anthropic", [{ ...expiredOAuth(), expires: Date.now() + 3600000 }]);
+			await storage.rotateSessionCredential("anthropic", "hostile-cause", {
+				apiKey: "expired-access",
+				error: new Error("deleted by user override: invalidated oauth token"),
+			});
+			expect(events).toHaveLength(1);
+			expect(events[0]?.disabledCause).toContain("upstream reported invalidated OAuth token:");
+		});
+
 		test("a definitive refresh failure names the row and account it tore down, once in the log", async () => {
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const events: CredentialDisabledEvent[] = [];

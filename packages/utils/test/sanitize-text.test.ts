@@ -100,6 +100,12 @@ describe("redactUrlSecrets", () => {
 });
 
 describe("redactSecrets", () => {
+	it("keeps bearer-named structured credentials redacted", () => {
+		expect(
+			JSON.parse(redactSecrets(JSON.stringify({ bearer: "opaque-one", bearerValue: "opaque-two", status: "keep" }))),
+		).toEqual({ bearer: "[redacted]", bearerValue: "[redacted]", status: "keep" });
+	});
+
 	it("normalizes terminal styling before classifying JSON and credential names", () => {
 		expect(redactSecrets("oauth refresh failed: grant\trevoked\x1b[31m!")).toBe(
 			"oauth refresh failed: grant\trevoked!",
