@@ -10,7 +10,11 @@ import {
 	type Context,
 	EventStream,
 	isApiKeyResolver,
+	isPromptCacheDebugEnabled,
 	type Model,
+	type PromptCacheDiagnosticBranchState,
+	type PromptCacheDiagnosticCompactionState,
+	type PromptCacheDiagnosticContextInput,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
@@ -1675,9 +1679,51 @@ async function emitHarmonyAudit(
 	);
 }
 
+/**
+ * Carry context-generation facts that exist only in the agent transcript to
+ * provider adapters. These roles and fields are authoritative session state:
+ * summaries identify the latest branch/compaction rewrite, while `prunedAt`
+ * identifies the latest pruned tool result. The provider-bound Message[]
+ * conversion intentionally erases custom summary roles, so derive this before
+ * conversion rather than guessing from serialized prompt text.
+ */
+function promptCacheDiagnosticContextFor(
+	messages: readonly AgentMessage[],
+): PromptCacheDiagnosticContextInput | undefined {
+	let branchState: PromptCacheDiagnosticBranchState | undefined;
+	let compactionState: PromptCacheDiagnosticCompactionState | undefined;
+	let pruneState: number | undefined;
+	for (const message of messages) {
+		switch (message.role) {
+			case "branchSummary":
+				if (branchState === undefined || message.timestamp >= branchState.timestamp) {
+					branchState = { timestamp: message.timestamp, fromId: message.fromId };
+				}
+				break;
+			case "compactionSummary":
+				if (compactionState === undefined || message.timestamp >= compactionState.timestamp) {
+					compactionState = { timestamp: message.timestamp };
+				}
+				break;
+			case "toolResult":
+				if (message.prunedAt !== undefined && (pruneState === undefined || message.prunedAt > pruneState)) {
+					pruneState = message.prunedAt;
+				}
+				break;
+		}
+	}
+	if (branchState === undefined && compactionState === undefined && pruneState === undefined) return undefined;
+	return {
+		...(branchState === undefined ? {} : { branchState }),
+		...(compactionState === undefined ? {} : { compactionState }),
+		...(pruneState === undefined ? {} : { pruneState }),
+	};
+}
+
 interface PreparedProviderCall {
 	model: Model;
 	context: Context;
+	promptCacheDiagnosticContext: PromptCacheDiagnosticContextInput | undefined;
 	promptToolWireTools: Context["tools"];
 	ownedDialect: Dialect | undefined;
 }
@@ -1692,6 +1738,13 @@ async function prepareProviderCall(
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
+	const derivedPromptCacheDiagnosticContext = isPromptCacheDebugEnabled()
+		? promptCacheDiagnosticContextFor(messages)
+		: undefined;
+	const promptCacheDiagnosticContext =
+		config.promptCacheDiagnosticContext === undefined && derivedPromptCacheDiagnosticContext === undefined
+			? undefined
+			: { ...config.promptCacheDiagnosticContext, ...derivedPromptCacheDiagnosticContext };
 
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
@@ -1728,7 +1781,7 @@ async function prepareProviderCall(
 			tools: undefined,
 		};
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	return { model, context: llmContext, promptCacheDiagnosticContext, promptToolWireTools, ownedDialect };
 }
 
 /**
@@ -1751,7 +1804,7 @@ async function streamAssistantResponse(
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
-	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
+	const { model, context: llmContext, promptCacheDiagnosticContext, promptToolWireTools, ownedDialect } = providerCall;
 
 	const streamFunction = streamFn || streamSimple;
 
@@ -1843,6 +1896,7 @@ async function streamAssistantResponse(
 		return await runInActiveSpan(chatSpan, async () => {
 			let response = await streamFunction(model, llmContext, {
 				...config,
+				promptCacheDiagnosticContext,
 				apiKey,
 				metadata: resolvedMetadata,
 				toolChoice: effectiveToolChoice,

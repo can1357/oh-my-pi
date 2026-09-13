@@ -15,6 +15,9 @@
  *     endpoints without context management keep the text.
  *   • The empty-completion retry does not re-issue a compaction pause.
  */
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 
 import {
@@ -27,6 +30,10 @@ import { AnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { type ConversationalUserCarrier, kConversationalUser } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import {
+	PromptCacheDebugJournal,
+	type PromptCacheDiagnosticContextInput,
+} from "@oh-my-pi/pi-ai/utils/prompt-cache-debug";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
@@ -135,6 +142,37 @@ function createPausedCompactionEvents(
 					},
 					...iterations,
 				],
+			},
+		},
+		{ type: "message_stop" },
+	];
+}
+
+function createDiagnosticTextEvents(cacheRead: number): MockAnthropicEvent[] {
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: `msg_diagnostic_${cacheRead}`,
+				usage: {
+					input_tokens: 64,
+					output_tokens: 0,
+					cache_read_input_tokens: cacheRead,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "end_turn" },
+			usage: {
+				input_tokens: 64,
+				output_tokens: 1,
+				cache_read_input_tokens: cacheRead,
+				cache_creation_input_tokens: 0,
 			},
 		},
 		{ type: "message_stop" },
@@ -673,6 +711,145 @@ describe("anthropic server-side compaction response", () => {
 		expect(result.providerPayload).toBeUndefined();
 		expect(result.stopDetails).toEqual({ type: "compaction" });
 		expect(result.errorMessage).toBeUndefined();
+	});
+});
+
+describe("anthropic prompt-cache diagnostic adapter", () => {
+	it("forwards caller context facts and keeps per-client sidecars isolated", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prompt-cache-adapter-"));
+		const firstPath = path.join(tempDir, "first.jsonl");
+		const secondPath = path.join(tempDir, "second.jsonl");
+		const firstJournal = new PromptCacheDebugJournal({ filePath: firstPath });
+		const secondJournal = new PromptCacheDebugJournal({ filePath: secondPath });
+		try {
+			await withEnv({ PI_PROMPT_CACHE_DEBUG: "1" }, async () => {
+				let cacheRead = 700;
+				const createClient = () => ({
+					baseURL: "https://api.anthropic.com",
+					messages: {
+						create: () => createMockRequest(createDiagnosticTextEvents(cacheRead)),
+					},
+				});
+				const firstClient = createClient();
+				const secondClient = createClient();
+				const sessionId = "anthropic-diagnostic-adapter-regression";
+				const transitionState = {
+					branchState: { timestamp: 10, fromId: "branch-a" },
+					compactionState: { timestamp: 20 },
+					pruneState: 30,
+				};
+				const adapterContext: Context = {
+					systemPrompt: ["stable"],
+					tools: [
+						{
+							name: "lookup",
+							description: "stable",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					],
+					messages: [{ role: "user", content: "stable", timestamp: 1 }],
+				};
+				const diagnosticOptions = (
+					journal: PromptCacheDebugJournal,
+					promptCacheDiagnosticContext?: PromptCacheDiagnosticContextInput,
+				) => ({
+					apiKey: "sk-ant-test",
+					cacheRetention: "short" as const,
+					sessionId,
+					...(promptCacheDiagnosticContext ? { promptCacheDiagnosticContext } : {}),
+					providerOptions: { promptCacheDiagnosticJournal: journal },
+				});
+
+				await streamAnthropic(fableModel, adapterContext, {
+					...diagnosticOptions(firstJournal),
+					client: firstClient,
+				}).result();
+
+				cacheRead = 2;
+				await streamAnthropic(fableModel, adapterContext, {
+					...diagnosticOptions(firstJournal, transitionState),
+					client: firstClient,
+				}).result();
+
+				cacheRead = 1;
+				await streamAnthropic(fableModel, adapterContext, {
+					...diagnosticOptions(firstJournal, transitionState),
+					client: firstClient,
+				}).result();
+
+				cacheRead = 0;
+				await streamAnthropic(fableModel, adapterContext, {
+					...diagnosticOptions(firstJournal, {
+						...transitionState,
+						compactionState: { timestamp: 40 },
+					}),
+					client: firstClient,
+				}).result();
+
+				cacheRead = 900;
+				await streamAnthropic(
+					fableModel,
+					{ messages: [{ role: "user", content: "other-client", timestamp: 3 }] },
+					{
+						...diagnosticOptions(secondJournal),
+						client: secondClient,
+					},
+				).result();
+			});
+
+			await firstJournal.flush();
+			await secondJournal.flush();
+			const parseSequence = (line: string): number => {
+				const value: unknown = JSON.parse(line);
+				if (
+					typeof value !== "object" ||
+					value === null ||
+					!("sequence" in value) ||
+					typeof value.sequence !== "number"
+				) {
+					throw new Error("journal record omitted a numeric sequence");
+				}
+				return value.sequence;
+			};
+			const firstPhysicalRecords = (await Bun.file(firstPath).text())
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map(parseSequence);
+			const secondPhysicalRecords = (await Bun.file(secondPath).text())
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map(parseSequence);
+			expect(firstJournal.records).toHaveLength(4);
+			expect(secondJournal.records).toHaveLength(1);
+			expect(firstPhysicalRecords).toEqual([1, 2, 3, 4]);
+			expect(secondPhysicalRecords).toEqual([1]);
+
+			const first = firstJournal.records[0]!;
+			const second = firstJournal.records[1]!;
+			const third = firstJournal.records[2]!;
+			const fourth = firstJournal.records[3]!;
+			expect(first.bodySource).toBe("prepared");
+			expect(second.bodySource).toBe("prepared");
+			expect(second.request.markers.length).toBe(first.request.markers.length);
+			expect(second.context.compaction).toBe("absent");
+			expect(second.context.branchStateDigest).not.toBeNull();
+			expect(second.context.compactionStateDigest).not.toBeNull();
+			expect(second.context.pruneStateDigest).not.toBeNull();
+			expect(second.context.mutation).toBe("compaction");
+			expect(second.reset).toMatchObject({ observed: true, cause: "compaction-branch-replay" });
+			expect(third.context.branchStateDigest).toBe(second.context.branchStateDigest);
+			expect(third.context.compactionStateDigest).toBe(second.context.compactionStateDigest);
+			expect(third.context.pruneStateDigest).toBe(second.context.pruneStateDigest);
+			expect(third.context.mutation).not.toBe("compaction");
+			expect(third.reset).toMatchObject({ observed: true, cause: "unknown" });
+			expect(fourth.context.compactionStateDigest).not.toBe(third.context.compactionStateDigest);
+			expect(fourth.context.mutation).toBe("compaction");
+			expect(fourth.reset).toMatchObject({ observed: true, cause: "compaction-branch-replay" });
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 
