@@ -249,7 +249,10 @@ export function isActionableCredentialDisable(
 		const accountEmail = account.email?.toLowerCase();
 		const accountAccountId = account.accountId?.toLowerCase();
 		const accountOrgId = account.orgId?.toLowerCase();
-		if (summaryOrgId && accountOrgId && summaryOrgId !== accountOrgId) return false;
+		// An org-scoped tombstone names a subscription; only a credential in that
+		// organization recovers it — mirroring the persistence matcher, where an
+		// org-less login never replaces an org-scoped row (the reverse upgrade does).
+		if (summaryOrgId && accountOrgId !== summaryOrgId) return false;
 		// When both sides name a person, that decides: openai-codex stores the shared
 		// workspace id as accountId and orgId, so two members must not recover each other.
 		if (summaryEmail && accountEmail) return summaryEmail === accountEmail;

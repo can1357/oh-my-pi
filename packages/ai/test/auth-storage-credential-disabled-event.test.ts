@@ -526,6 +526,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const authStorage = openStorageWithTombstones([
 				// Same person, different subscription: org A was lost, org B is live.
 				tombstone({ id: 1, orgId: "org-a" }),
+				// Same person, org-scoped subscription lost, only an org-less login is live.
+				tombstone({ id: 4, email: "personal@example.com", orgId: "org-c" }),
+				// The reverse upgrade still recovers: a pre-org tombstone claimed by an org-scoped login.
+				tombstone({ id: 5, email: "upgraded@example.com", orgId: undefined }),
 				// openai-codex stores the shared workspace id as accountId and orgId for every member.
 				tombstone({ id: 2, email: "alice@example.com", accountId: "ws-team", orgId: "ws-team" }),
 				// Same workspace under a member whose email is unknown: recovered by the shared id.
@@ -534,10 +538,12 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await authStorage.set("anthropic", [
 				{ ...expiredOAuth(), orgId: "org-b" },
 				{ ...expiredOAuth(), email: "bob@example.com", accountId: "ws-team", orgId: "ws-team" },
+				{ ...expiredOAuth(), email: "personal@example.com", orgId: undefined, orgName: undefined },
+				{ ...expiredOAuth(), email: "upgraded@example.com", orgId: "org-d" },
 			]);
 
 			const actionable = await authStorage.listActionableDisabledCredentials();
-			expect(actionable.map(summary => summary.id)).toEqual([1, 2]);
+			expect(actionable.map(summary => summary.id).toSorted()).toEqual([1, 2, 4]);
 		});
 
 		test("treats an identity-less tombstone as recovered by any live credential of its provider", async () => {
