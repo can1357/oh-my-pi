@@ -216,7 +216,7 @@ export abstract class OAuthCallbackFlow {
 	 * against (OAuth 2.0 authorization-server-issuer detection, RFC 9207).
 	 * Throwing aborts the login before any token exchange happens.
 	 */
-	protected onAuthorizeRedirect?(url: URL): void;
+	onAuthorizeRedirect?(url: URL): void;
 
 	/**
 	 * Generate CSRF state token. Override if provider needs custom state generation.
@@ -589,13 +589,20 @@ export abstract class OAuthCallbackFlow {
 				this.onAuthorizeRedirect?.(url);
 			} catch (error) {
 				const reject = this.#callbackReject;
+				const message = error instanceof Error ? error.message : String(error);
 				queueMicrotask(() => {
 					reject?.(
 						error instanceof Error ? error : new AIError.OAuthError(String(error), { kind: "device-auth" }),
 					);
 				});
+				// Render the failure variant of the callback page: this
+				// redirect carried our state but was rejected, so the user must
+				// see "Authentication Failed", not the success page.
 				return new Response(
-					(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", JSON.stringify(resultState)),
+					(templateHtml as unknown as string).replaceAll(
+						"__OAUTH_STATE__",
+						JSON.stringify({ ok: false as const, error: message }),
+					),
 					{ status: 500, headers: { "Content-Type": "text/html" } },
 				);
 			}
@@ -663,6 +670,17 @@ export abstract class OAuthCallbackFlow {
 							const parsed = parseCallbackInput(input);
 							if (!parsed.code) return null;
 							if (expectedState && parsed.state && parsed.state !== expectedState) return null;
+							// A pasted redirect URL carries the same RFC 9207 `iss`
+							// exposure as the loopback callback - run the same guard
+							// (a bare pasted code has no URL to validate). A mismatch
+							// rejects the login, mirroring the callback path.
+							let redirectUrl: URL | undefined;
+							try {
+								redirectUrl = new URL(input.trim());
+							} catch {
+								redirectUrl = undefined;
+							}
+							if (redirectUrl) this.onAuthorizeRedirect?.(redirectUrl);
 							return { code: parsed.code, state: parsed.state ?? "" };
 						}),
 					]);

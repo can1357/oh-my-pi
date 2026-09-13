@@ -321,7 +321,7 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
  * scheme/host (URL parser already does this), drop fragment/query, strip a
  * trailing slash on the path. The path is otherwise case-sensitive.
  */
-function normalizeIssuerUrl(value: string): string | undefined {
+export function normalizeIssuerUrl(value: string): string | undefined {
 	try {
 		const u = new URL(value);
 		const path = u.pathname.replace(/\/+$/, "");

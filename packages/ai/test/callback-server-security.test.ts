@@ -34,7 +34,7 @@ class IssuerGuardedFlow extends OAuthCallbackFlow {
 		return { access: code, refresh: "refresh", expires: Date.now() + 60_000 };
 	}
 
-	protected override onAuthorizeRedirect(url: URL): void {
+	override onAuthorizeRedirect(url: URL): void {
 		// Mirrors MCPOAuthFlow: compare the RFC 9207 `iss` parameter against the
 		// authorization-server issuer (origin + path); a legacy AS omits `iss`.
 		const iss = url.searchParams.get("iss");
@@ -218,6 +218,9 @@ describe("OAuthCallbackFlow callback security", () => {
 			const attacker = `${redirectUri}?code=stolen-code&state=${encodeURIComponent(state)}&iss=${encodeURIComponent("https://attacker.example.com")}`;
 			const attackerResponse = await fetch(attacker);
 			expect(attackerResponse.status).toBe(500);
+			const page = await attackerResponse.text();
+			expect(page).toContain('"ok":false');
+			expect(page).toContain("OAuth iss mismatch");
 			await expect(login).rejects.toThrow("OAuth iss mismatch");
 		} finally {
 			abort.abort("test cleanup");
@@ -268,6 +271,44 @@ describe("OAuthCallbackFlow callback security", () => {
 			const response = await fetch(`${redirectUri}?code=legacy-code&state=${encodeURIComponent(state)}`);
 			expect(response.status).toBe(200);
 			expect((await login).access).toBe("legacy-code");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("rejects a pasted redirect whose RFC 9207 issuer does not match", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () =>
+				"https://localhost/callback?code=stolen-code&iss=https%3A%2F%2Fattacker.example.com",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			await expect(login).rejects.toThrow("OAuth iss mismatch");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("accepts a pasted redirect whose RFC 9207 issuer matches", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () =>
+				"https://localhost/callback?code=legitimate-code&iss=https%3A%2F%2Fauth.example.com%2Ftenant",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			expect((await login).access).toBe("legitimate-code");
 		} finally {
 			abort.abort("test cleanup");
 			await login.catch(() => undefined);

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an opt-in RFC 9207 authorization-server-issuer hook to the OAuth callback loopback: flows can now override `onAuthorizeRedirect(url)` to reject an authorization redirect whose `iss` does not match the discovered issuer before the code is redeemed, closing a mixed-up-authorization-server attack on multi-issuer MCP hosts ([#11936](https://github.com/can1357/oh-my-pi/pull/11936)).
+- Added an opt-in RFC 9207 authorization-server-issuer hook to the OAuth callback loopback: flows can now override `onAuthorizeRedirect(url)` to reject an authorization redirect whose `iss` does not match the discovered issuer before the code is redeemed, closing a mixed-up-authorization-server attack on multi-issuer MCP hosts ([#11936](https://github.com/can1357/oh-my-pi/pull/11936) by [@bchap1n](https://github.com/bchap1n)).
 
 ## [18.1.19] - 2026-09-12
 
