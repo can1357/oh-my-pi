@@ -1097,6 +1097,33 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
 	});
 
+	test("the verdict is withheld when the stored accounts are parked by an unrelated backoff, not denied the model", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "parked-a", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "parked-b", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		// Earlier auth failures parked both accounts under the unscoped backoff.
+		for (const [sessionId, apiKey] of [
+			["parked-1", "parked-a"],
+			["parked-2", "parked-b"],
+		] as const) {
+			expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(apiKey);
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, { error: authError(), apiKey });
+		}
+
+		// A denial whose bearer no longer matches storage blocks nothing; neither
+		// parked account was ever denied this model, so there is no verdict.
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		expect(await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
+	});
+
 	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
 		if (!store) throw new Error("test setup failed");
 		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });

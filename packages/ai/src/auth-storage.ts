@@ -2071,6 +2071,32 @@ export class AuthStorage {
 		return blockedUntil;
 	}
 
+	/**
+	 * Block expiry written under exactly `blockScope` — in memory or persisted —
+	 * ignoring the unscoped provider key that
+	 * {@link AuthStorage.#getCredentialBlockedUntil} always folds in. Answers
+	 * "was this credential blocked for this scope", not "is it usable now".
+	 */
+	#getScopedCredentialBlockedUntil(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		blockScope: string,
+	): number | undefined {
+		let blockedUntil = this.#getCredentialBlockedUntilForKey(
+			this.#toScopedBackoffKey(providerKey, blockScope),
+			credentialIndex,
+			Date.now(),
+		);
+		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
+		if (credentialId === undefined) return blockedUntil;
+		const persistedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
+		if (persistedBlockedUntil !== undefined && (blockedUntil === undefined || persistedBlockedUntil > blockedUntil)) {
+			blockedUntil = persistedBlockedUntil;
+		}
+		return blockedUntil;
+	}
+
 	/** Checks if a credential is temporarily blocked due to usage limits. */
 	#isCredentialBlocked(
 		provider: string,
@@ -7026,7 +7052,9 @@ export class AuthStorage {
 					? boundedDiagnostic(credentialAccountLabel(credential), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX)
 					: "API key";
 			const providerKey = this.#getProviderTypeKey(provider, credential.type);
-			if (this.#getCredentialBlockedUntil(provider, providerKey, index, modelPolicyScope) !== undefined) {
+			// Only a block written under the model-policy scope is a denial of this
+			// model; the folding lookup would also count an unrelated global backoff.
+			if (this.#getScopedCredentialBlockedUntil(provider, providerKey, index, modelPolicyScope) !== undefined) {
 				deniedCount += 1;
 				tried.push(`${label} denied`);
 				continue;
