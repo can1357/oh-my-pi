@@ -262,7 +262,16 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 // Anthropic-compatible proxies that do not implement prompt caching reject the
 // `cache_control` field itself with a 400 naming it. Requires rejection wording
 // so a 400 that merely mentions the field for another reason stays terminal.
-const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b/i;
+//
+// The mention must also BE the rejected member rather than a path *under* it.
+// Validators name the field's own position, so dotted segments before the name
+// (`messages.0.content.0.cache_control`) are still field-level; a segment after
+// it (`cache_control.ttl`, `cache_control["ttl"]`) means the endpoint accepted
+// the field and refused a nested option. The fallback this predicate gates
+// strips every breakpoint and latches `cacheControlUnsupported` for the rest of
+// the session, which would disable the 5m caching such an endpoint still
+// supports — a refused `ttl: "1h"` belongs to the extended-cache-ttl beta path.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?!\.\w|\[\s*["'])/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
 	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
 // Strict JSON decoders and OpenAI-compatible validators express the same schema
