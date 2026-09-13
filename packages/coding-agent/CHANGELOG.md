@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added optional `statusLineVimNormal`, `statusLineVimInsert`, `statusLineVimVisual`, and `statusLineVimVisualLine` theme colors, so the Vim-mode status segment and the composer border follow the active theme like the mode icons already do; a theme that omits them keeps today's `accent`/`success`/`warning` rendering.
+- Added optional `statusLineVimNormal`, `statusLineVimInsert`, `statusLineVimVisual`, and `statusLineVimVisualLine` theme colors, so the Vim-mode status segment and the composer border follow the active theme like the mode icons already do; a theme that omits them keeps today's `accent`/`success`/`warning` rendering ([#11915](https://github.com/can1357/oh-my-pi/pull/11915) by [@georgesleen](https://github.com/georgesleen)).
 
 ## [18.1.19] - 2026-09-12
 
