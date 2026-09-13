@@ -677,8 +677,6 @@ impl ServerConfig {
 
 	/// Acquires process authority on the opened project directory.
 	pub fn try_lock_authority(&self) -> Result<AuthorityLock> {
-		use cap_std::fs;
-
 		if self
 			.authority_held
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -694,15 +692,7 @@ impl ServerConfig {
 			});
 		}
 		let result = (|| {
-			let root = self
-				.root
-				.try_clone()
-				.map(fs::Dir::into_std_file)
-				.map_err(|source| Error::Io {
-					operation: sf!("clone Environment authority handle"),
-					path: self.environment_root.clone(),
-					source,
-				})?;
+			let root = self.authority_handle()?;
 			root.try_lock().map_err(|source| Error::Io {
 				operation: sf!("lock Environment authority"),
 				path:      self.environment_root.clone(),
@@ -717,6 +707,56 @@ impl ServerConfig {
 				Err(error)
 			},
 		}
+	}
+
+	/// Opens the descriptor the authority lock is taken on.
+	///
+	/// `cap_std::fs::Dir` opens ambient directories with `O_PATH` on Linux and
+	/// the BSDs, and `flock(2)` rejects `O_PATH` descriptors with `EBADF`, so
+	/// the lock uses a fresh descriptor for the same directory and compares its
+	/// identity against the capability root before locking it.
+	#[cfg(unix)]
+	fn authority_handle(&self) -> Result<fs::File> {
+		let root = fs::File::open(&self.environment_root).map_err(|source| Error::Io {
+			operation: sf!("open Environment authority handle"),
+			path: self.environment_root.clone(),
+			source,
+		})?;
+		let opened = root.metadata().map_err(|source| Error::Io {
+			operation: sf!("inspect Environment authority handle"),
+			path: self.environment_root.clone(),
+			source,
+		})?;
+		let capability = self
+			.root
+			.try_clone()
+			.and_then(|root| root.into_std_file().metadata())
+			.map_err(|source| Error::Io {
+				operation: sf!("inspect Environment capability root"),
+				path: self.environment_root.clone(),
+				source,
+			})?;
+		if !same_directory_identity(&capability, &opened) {
+			return Err(Error::InvalidTarget {
+				target: Str::new(self.environment_root.to_string_lossy()),
+				reason: sf!("Environment root changed while acquiring authority"),
+			});
+		}
+		Ok(root)
+	}
+
+	/// Opens the descriptor the authority lock is taken on.
+	#[cfg(not(unix))]
+	fn authority_handle(&self) -> Result<fs::File> {
+		self
+			.root
+			.try_clone()
+			.map(cap_std::fs::Dir::into_std_file)
+			.map_err(|source| Error::Io {
+				operation: sf!("clone Environment authority handle"),
+				path: self.environment_root.clone(),
+				source,
+			})
 	}
 
 	pub(crate) fn clone_root(&self) -> Result<Dir> {

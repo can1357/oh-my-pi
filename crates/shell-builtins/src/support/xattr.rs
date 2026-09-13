@@ -1,9 +1,13 @@
-//! Minimal extended-attribute probes used by `ls` and `mkdir`.
+//! Minimal extended-attribute probes and copies used by `ls`, `mkdir`, and
+//! `mv`.
+
+#[cfg(target_os = "linux")]
+use std::{ffi, ptr};
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+use std::{ffi::OsString, io, path::Path};
 
 #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
-use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::{ffi, io, ptr};
+use omp_core::FastHashMap;
 
 /// Returns whether a path has at least one extended ACL or attribute.
 #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
@@ -43,11 +47,78 @@ pub(crate) fn get_acl_perm_bits_from_xattr(path: impl AsRef<Path>) -> u32 {
 		.unwrap_or(0)
 }
 
+/// Reads the extended attributes of `path` as name/value pairs.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+pub(crate) fn retrieve_xattrs(
+	path: impl AsRef<Path>,
+) -> io::Result<FastHashMap<OsString, Vec<u8>>> {
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::unix::ffi::OsStringExt as _;
+
+		let path = path.as_ref();
+		let names = list_link_xattrs(path)?;
+		let mut attrs = FastHashMap::default();
+		for name in names
+			.split(|byte| *byte == 0)
+			.filter(|name| !name.is_empty())
+		{
+			// An attribute can disappear between listing and reading, which the
+			// `xattr` crate reports as an absent value rather than an error.
+			if let Some(value) = get_link_xattr(path, &name_cstring(name)?)? {
+				attrs.insert(OsString::from_vec(name.to_vec()), value);
+			}
+		}
+		Ok(attrs)
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = path;
+		Ok(FastHashMap::default())
+	}
+}
+
+/// Writes `xattrs` onto `path`.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+pub(crate) fn apply_xattrs(
+	path: impl AsRef<Path>,
+	xattrs: FastHashMap<OsString, Vec<u8>>,
+) -> io::Result<()> {
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::unix::ffi::OsStrExt as _;
+
+		let path = path.as_ref();
+		for (name, value) in xattrs {
+			set_link_xattr(path, &name_cstring(name.as_bytes())?, &value)?;
+		}
+		Ok(())
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = (path, xattrs);
+		Ok(())
+	}
+}
+
+/// Copies every extended attribute of `source` onto `dest`.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+pub(crate) fn copy_xattrs(source: impl AsRef<Path>, dest: impl AsRef<Path>) -> io::Result<()> {
+	apply_xattrs(dest, retrieve_xattrs(source)?)
+}
+
 #[cfg(target_os = "linux")]
 fn path_cstring(path: &Path) -> io::Result<ffi::CString> {
 	use std::os::unix::ffi::OsStrExt;
 	ffi::CString::new(path.as_os_str().as_bytes())
 		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
+}
+
+#[cfg(target_os = "linux")]
+fn name_cstring(name: &[u8]) -> io::Result<ffi::CString> {
+	ffi::CString::new(name).map_err(|_| {
+		io::Error::new(io::ErrorKind::InvalidInput, "attribute name contains a NUL byte")
+	})
 }
 
 #[cfg(target_os = "linux")]
@@ -93,6 +164,66 @@ fn get_xattr(path: &Path, name: &[u8]) -> io::Result<Vec<u8>> {
 	}
 	value.truncate(read as usize);
 	Ok(value)
+}
+
+#[cfg(target_os = "linux")]
+fn list_link_xattrs(path: &Path) -> io::Result<Vec<u8>> {
+	let path = path_cstring(path)?;
+	// SAFETY: the C path is valid and a null buffer with length zero performs a
+	// size query.
+	let size = unsafe { libc::llistxattr(path.as_ptr(), ptr::null_mut(), 0) };
+	if size < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	if size == 0 {
+		return Ok(Vec::new());
+	}
+	let mut names = vec![0_u8; size as usize];
+	// SAFETY: `names` is writable for its full reported capacity.
+	let read = unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+	if read < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	names.truncate(read as usize);
+	Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+fn get_link_xattr(path: &Path, name: &ffi::CStr) -> io::Result<Option<Vec<u8>>> {
+	let path = path_cstring(path)?;
+	// SAFETY: both C strings are valid; a null value pointer performs a size query.
+	let size = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), ptr::null_mut(), 0) };
+	if size < 0 {
+		let error = io::Error::last_os_error();
+		return match error.raw_os_error() {
+			Some(libc::ENODATA) => Ok(None),
+			_ => Err(error),
+		};
+	}
+	let mut value = vec![0_u8; size as usize];
+	// SAFETY: `value` is writable for the queried size and all pointers remain
+	// live.
+	let read = unsafe {
+		libc::lgetxattr(path.as_ptr(), name.as_ptr(), value.as_mut_ptr().cast(), value.len())
+	};
+	if read < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	value.truncate(read as usize);
+	Ok(Some(value))
+}
+
+#[cfg(target_os = "linux")]
+fn set_link_xattr(path: &Path, name: &ffi::CStr, value: &[u8]) -> io::Result<()> {
+	let path = path_cstring(path)?;
+	// SAFETY: the C strings are valid and `value` is readable for its length.
+	let written = unsafe {
+		libc::lsetxattr(path.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0)
+	};
+	if written != 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(())
 }
 
 #[cfg(target_os = "linux")]

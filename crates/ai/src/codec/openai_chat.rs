@@ -1306,7 +1306,14 @@ fn validate_thinking_selection(
 		Setting::Require(reasoning) | Setting::Prefer(reasoning) => reasoning,
 	};
 	let selection = selection.ok_or_else(capability_error)?;
-	if reasoning.max_tokens != selection.budget {
+	// Only a bound the caller pinned is checked against the catalog: effort-only
+	// wires reject a request that carries one at all, so an unpinned request
+	// takes the resolved effort and leaves the budget to the routes that spell
+	// it.
+	if reasoning
+		.max_tokens
+		.is_some_and(|budget| selection.budget != Some(budget))
+	{
 		return Err(capability_error());
 	}
 	if let Some(effort) = reasoning.effort
@@ -4940,5 +4947,43 @@ mod tests {
 		let policy = policy::WirePolicy::baseline();
 		let wire = encode_with_model_limit(&policy, Some(131_072), limited_request(200_000));
 		assert_eq!(wire["max_completion_tokens"], 200_000_u64);
+	}
+
+	fn selection_with_budget(
+		effort: omp_catalog::ThinkingEffort,
+		budget: u64,
+	) -> omp_catalog::ThinkingSelection {
+		omp_catalog::ThinkingSelection {
+			effort,
+			wire_effort: effort,
+			native_effort: None,
+			budget: Some(budget),
+			wire_model: omp_catalog::WireModelId::from_ref("test-wire-model").into(),
+			reasoning_mode: None,
+			suppress_when_off: false,
+			adaptive_tag_only: false,
+		}
+	}
+
+	#[test]
+	fn unpinned_reasoning_takes_the_resolved_catalog_budget() {
+		// Effort-only wires reject a request that carries a budget at all, so an
+		// unpinned request has to pass validation while the policy resolved one.
+		let pin = |max_tokens| ReasoningRequest {
+			visibility: ReasoningVisibility::Visible,
+			effort: Some(ReasoningEffort::High),
+			max_tokens,
+			preserve_signatures: true,
+		};
+		let selection = selection_with_budget(omp_catalog::ThinkingEffort::High, 16_384);
+		let mut request = request(Arc::from([text_message("hello")]));
+		request.reasoning = Setting::Prefer(pin(None));
+		assert!(super::validate_thinking_selection(&request, Some(&selection)).is_ok());
+		// A pinned bound that agrees with the catalog is accepted.
+		request.reasoning = Setting::Prefer(pin(Some(16_384)));
+		assert!(super::validate_thinking_selection(&request, Some(&selection)).is_ok());
+		// A pinned bound that contradicts it is not.
+		request.reasoning = Setting::Prefer(pin(Some(8_192)));
+		assert!(super::validate_thinking_selection(&request, Some(&selection)).is_err());
 	}
 }

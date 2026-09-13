@@ -107,9 +107,24 @@ def release_licenses(vendor: Path) -> tuple[str, dict[str, tuple[str, ...]], dic
             safe_release_path(vendor, value, f"native component {', '.join(static_names)}")
             for value in raw_paths
         ]
+        # The release metadata lists every license a component may pull in across
+        # the build matrix — the ``zlib`` module is zlib-ng on some targets and
+        # classic zlib on others — while the archive ships only the corpus of the
+        # target it was built for. Candidates the archive omits are therefore not
+        # part of this build; drop them, unless an audited fallback stands in.
+        shipped = [
+            (relative, path)
+            for relative, path in paths
+            if path.is_file() or relative in AUDITED_LICENSE_FALLBACKS
+        ]
+        if not shipped:
+            fail(
+                f"statically linked {', '.join(static_names)} ships no license text: "
+                + ", ".join(relative for relative, _ in paths)
+            )
         for name in static_names:
-            references.setdefault(name, set()).update(relative for relative, _ in paths)
-        for relative, path in paths:
+            references.setdefault(name, set()).update(relative for relative, _ in shipped)
+        for relative, path in shipped:
             corpus.setdefault(relative, path)
 
     return (
