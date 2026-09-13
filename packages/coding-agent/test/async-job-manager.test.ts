@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { AsyncJobError, AsyncJobManager, AsyncJobRunError } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
 	const deadline = Date.now() + 2_000;
@@ -822,6 +822,90 @@ describe("AsyncJobManager", () => {
 		manager.cancelAll({ ownerId: "Sub" });
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
+	});
+
+	test("waitForOwnerJobs follows a reused public ID into its new generation", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 0 });
+		const firstGate = Promise.withResolvers<string>();
+		const secondGate = Promise.withResolvers<string>();
+		const jobId = manager.register("bash", "first generation", () => firstGate.promise, {
+			id: "reused",
+			ownerId: "Sub",
+		});
+		const firstJob = manager.getJob(jobId)!;
+		const replacementRegistered = firstJob.promise.then(() => {
+			expect(
+				manager.register("bash", "second generation", () => secondGate.promise, {
+					id: jobId,
+					ownerId: "Sub",
+				}),
+			).toBe(jobId);
+		});
+		const waiting = manager.waitForOwnerJobs("Sub");
+		let settled = false;
+		void waiting.then(() => {
+			settled = true;
+		});
+
+		firstGate.resolve("first done");
+		await replacementRegistered;
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		secondGate.resolve("second done");
+		await expect(waiting).resolves.toBe(true);
+	});
+
+	test("merges resolved run-result details into latestDetails over the last progress report", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const jobId = manager.register("bash", "exit seven", async ({ reportProgress }) => {
+			// Terminal reportProgress overwrites latestDetails with a render
+			// payload, as bash/eval tools do.
+			await reportProgress("done", { async: { state: "completed", type: "bash" } });
+			return { text: "done", details: { exitCode: 7 } };
+		});
+
+		await manager.waitForAll();
+
+		const job = manager.getJob(jobId);
+		expect(job?.status).toBe("completed");
+		expect(job?.latestDetails?.exitCode).toBe(7);
+		// The reportProgress payload survives underneath the merge.
+		expect(job?.latestDetails?.async).toEqual({ state: "completed", type: "bash" });
+	});
+
+	test("merges timedOut settlement details and keeps exitCode 0 for a clean exit", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const timedOutJobId = manager.register("bash", "slow", async ({ reportProgress }) => {
+			await reportProgress("still running", { async: { state: "running" } });
+			return { text: "timed out", details: { timedOut: true } };
+		});
+		const cleanJobId = manager.register("bash", "fast", async ({ reportProgress }) => {
+			await reportProgress("done", { async: { state: "completed" } });
+			return { text: "ok", details: { exitCode: 0 } };
+		});
+
+		await manager.waitForAll();
+
+		expect(manager.getJob(timedOutJobId)?.latestDetails?.timedOut).toBe(true);
+		expect(manager.getJob(cleanJobId)?.latestDetails?.exitCode).toBe(0);
+	});
+
+	test("merges AsyncJobRunError details into latestDetails on the failure path", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const jobId = manager.register("bash", "failing", async ({ reportProgress }) => {
+			await reportProgress("about to fail", { async: { state: "failed" } });
+			throw new AsyncJobRunError("command failed", { exitCode: 7, timedOut: false });
+		});
+
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		const job = manager.getJob(jobId);
+		expect(job?.status).toBe("failed");
+		expect(job?.errorText).toBe("command failed");
+		expect(job?.latestDetails?.exitCode).toBe(7);
+		expect(job?.latestDetails?.timedOut).toBe(false);
 	});
 });
 

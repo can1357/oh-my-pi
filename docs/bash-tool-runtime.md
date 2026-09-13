@@ -10,7 +10,7 @@ There are two different bash execution surfaces in coding-agent:
 
 1. **Tool-call surface** (`toolName: "bash"`): used when the model calls the bash tool.
    - Entry point: `BashTool.execute()`.
-   - Parameters include `command`, optional `env`, `timeout`, `cwd`, `pty`, and, when `async.enabled` is true, `async`.
+   - Parameters include `command`, optional `env`, `timeout`, `cwd`, `pty`, and, when `async.enabled` is true, `async` (`true` or `"auto"`) plus `progress` (`"wake"` or `"ambient"`).
 2. **User bang-command surface** (`!cmd` from interactive input or RPC `bash` command): session-level helper path.
    - Entry point: `AgentSession.executeBash()`.
 
@@ -26,7 +26,8 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 
 - validates optional `env` names against shell-variable syntax,
 - extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied, unless the path needs shell expansion,
-- rejects `async: true` when `async.enabled` is false,
+- rejects `async: true` and `async: "auto"` when `async.enabled` is false,
+- rejects `progress` unless the same call uses `async: true` or `async: "auto"`,
 - defaults `timeout` to 300 seconds; `0` explicitly disables the command deadline.
 
 There are no structured `head` or `tail` parameters. Before execution, internal URLs in the command and environment values are expanded to backing filesystem paths; an internal URL used as `cwd` is also resolved. Expansion can create parent directories for writable `local://` paths. The configured direnv/devenv preflight can then merge project environment changes, with explicit `env` values taking precedence.
@@ -198,6 +199,7 @@ The bash executor builds the sink with `headBytes` and `maxColumns` from setting
 - per-line column cap: when `maxColumns > 0` (`tools.outputMaxColumns`, default 768 bytes) over-wide lines are ellipsis-truncated at write time and the rest of the line is dropped,
 - tracks total bytes/lines seen,
 - mirrors the **raw, uncapped** stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active,
+- mirrors from the first byte for async Bash with model-facing progress, so a truncated progress event can cite the same stable artifact as the final result,
 - marks `truncated` on tail overflow, middle elision, column-cap drops, or file spill.
 
 `dump()` returns:
@@ -224,7 +226,13 @@ For non-PTY foreground execution, `BashTool` uses a separate `TailBuffer` for pa
 
 For PTY execution, live rendering is handled by custom UI overlay, not by `onUpdate` text chunks.
 
-When `async.enabled` is true and the call passes `async: true`, `BashTool` starts a managed bash job immediately, returns a running result with a job id, and stores completion through the session job manager. Auto-backgrounding can also use this path after `bash.autoBackground.thresholdMs`; it is skipped for PTY and client-bridge terminal routes and falls back to foreground execution when the job manager is at capacity. A queued steering message can background a still-running auto-background candidate early.
+When `async.enabled` is true and the call passes `async: true`, `BashTool` starts a managed bash job immediately, returns a running result with a job id, and stores completion through the session job manager; at the running-job cap it throws. With `async: "auto"`, the same process starts inline: it waits for `bash.asyncAuto.inlineGraceMs` (one second by default), then promotes if still running. A command whose deadline is at or below the grace plus a 1 s buffer never promotes and runs inline to completion. Promotion first drains in-flight chunk deliveries into the inline preview, bounded to 1 s; a stalled delivery or a preview that outgrew its tail buffer promotes anyway with progress coverage marked gapped, so completion keeps the terminal text. Requested progress activates only at promotion, so output already shown inline is not also pushed. The explicit auto mode works even when settings-driven auto-backgrounding is disabled; at the job limit it runs inline to completion and appends a notice instead of failing. Unmarked calls can use the same lifecycle when `bash.autoBackground.enabled` is on; that route retains the separate `bash.autoBackground.thresholdMs`, is skipped for PTY/client-bridge terminals, and falls back to foreground at the job limit. A queued steering message can promote a still-running candidate early.
+
+`progress: "wake"` opts that managed job into model-facing progress. The Bash output sampler carries partial lines across chunks, reports each complete non-empty merged stdout/stderr line, and flushes a final unterminated line on exit. The shared delivery channel groups output into 200 ms windows, permits a 10-event burst, and refills one event permit every two seconds. Rate-limited notifications are suppressed from model context but remain in the complete artifact. Permitted output produced while the model is busy stays queued for the next batch; no newer event replaces an older one. Wake delivery starts a follow-up turn when the model is idle. `progress: "ambient"` uses the same capture and batching path but is injected only at an already-active step boundary.
+
+Rate limiting drops complete post-batch events by timing, not severity. Suppression counts events rather than lines. When delivery resumes—or a terminal suppression summary is emitted—the batch retains bounded previews from the first and last suppressed events while omitting text from the events between them. Delivered progress therefore cannot prove that an error or transition did not occur. The full artifact is authoritative. Buckets are per job.
+
+Progress and job completion are independent, ordered notifications: any final progress batch is delivered before the async result. The progress choice does not change the command timeout; `timeout: 0` is still the explicit way to disable the deadline.
 
 ## Result shaping, metadata, and error mapping
 
