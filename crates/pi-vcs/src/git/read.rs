@@ -433,6 +433,16 @@ impl GitRepo {
 			Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
 			Err(err) => return Err(err.into()),
 		};
+		// `git replace`/`--graft` rewrites reachability without moving refs
+		// either, so its refs join the cache key. gix ignores them entirely
+		// (gix 0.85 collects replacements only when `core.useReplaceRefs` is
+		// false — the check is inverted), so their presence forces the
+		// `rev-list` fallback, which honors them like git does.
+		let replacements = if self.is_reftable() {
+			None
+		} else {
+			self.replace_refs()?
+		};
 		let mut cache = self
 			.divergence
 			.lock()
@@ -441,18 +451,72 @@ impl GitRepo {
 			&& cached.head == head
 			&& cached.upstream == upstream
 			&& cached.shallow == shallow
+			&& cached.replacements == replacements
 		{
 			return Ok(Some(cached.counts));
 		}
-		let counts = self.count_ahead_behind(&head, &upstream)?;
+		let counts = self.count_ahead_behind(&head, &upstream, replacements.as_deref())?;
 		if let Some(counts) = counts {
-			*cache = Some(DivergenceCache { head, upstream, shallow, counts });
+			*cache = Some(DivergenceCache { head, upstream, shallow, replacements, counts });
 		}
 		Ok(counts)
 	}
 
-	fn count_ahead_behind(&self, head: &str, upstream: &str) -> Result<Option<(u32, u32)>> {
-		if self.is_reftable() {
+	/// `refs/replace/*` fingerprint as sorted `src=dst` lines — the same pairs
+	/// gix snapshots into the object store at open time. Read fresh on every
+	/// call: replacements change reachability without moving HEAD, the
+	/// upstream ref, or the shallow file.
+	fn replace_refs(&self) -> Result<Option<Vec<u8>>> {
+		let mut names = Vec::new();
+		if let Ok(entries) = std::fs::read_dir(self.info().common_dir.join("refs/replace")) {
+			for entry in entries.flatten() {
+				if entry.file_type().is_ok_and(|t| t.is_file())
+					&& let Ok(name) = entry.file_name().into_string()
+				{
+					names.push(name);
+				}
+			}
+		}
+		for dir in [&self.info().git_dir, &self.info().common_dir] {
+			let Ok(content) = std::fs::read_to_string(dir.join("packed-refs")) else {
+				continue;
+			};
+			for line in content
+				.lines()
+				.map(str::trim)
+				.filter(|line| !line.is_empty() && !line.starts_with(['#', '^']))
+			{
+				if let Some((_, name)) = line.split_once(' ')
+					&& let Some(short) = name.strip_prefix("refs/replace/")
+				{
+					names.push(short.to_owned());
+				}
+			}
+		}
+		if names.is_empty() {
+			return Ok(None);
+		}
+		names.sort();
+		names.dedup();
+		let mut lines = Vec::with_capacity(names.len());
+		for name in names {
+			if let Some(target) = self.read_ref(&format!("refs/replace/{name}"))? {
+				lines.push(format!("{name}={target}"));
+			}
+		}
+		if lines.is_empty() {
+			return Ok(None);
+		}
+		Ok(Some(lines.join("\n").into_bytes()))
+	}
+
+	fn count_ahead_behind(
+		&self,
+		head: &str,
+		upstream: &str,
+		replacements: Option<&[u8]>,
+	) -> Result<Option<(u32, u32)>> {
+		if self.is_reftable() || replacements.is_some() {
 			let spec = format!("{head}...{upstream}");
 			let Some(counts) = cli_try(self.root(), &["rev-list", "--left-right", "--count", &spec])?
 			else {
@@ -1881,6 +1945,33 @@ mod tests {
 		let summary = repo.status_summary()?;
 		assert_eq!((summary.ahead, summary.behind), (None, None));
 		assert_eq!(summary.untracked, 1);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_observes_replace_refs() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["branch", "upstream"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		git(root, &["config", "branch.main.remote", "."])?;
+		git(root, &["config", "branch.main.merge", "refs/heads/upstream"])?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// A graft rewrites reachability without moving either tip.
+		let tree = git(root, &["write-tree"])?;
+		let side = git(root, &["commit-tree", tree.trim(), "-m", "side"])?;
+		git(root, &["replace", "--graft", "HEAD", side.trim()])?;
+		assert_eq!(
+			git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.trim(),
+			"2\t1"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
+
+		// Removing the replacement restores the original counts.
+		git(root, &["replace", "-d", "HEAD"])?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
 		Ok(())
 	}
 

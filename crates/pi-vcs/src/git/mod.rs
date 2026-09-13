@@ -44,10 +44,11 @@ pub struct GitRepo {
 }
 
 struct DivergenceCache {
-	head:     String,
-	upstream: String,
-	shallow:  Option<Vec<u8>>,
-	counts:   (u32, u32),
+	head:         String,
+	upstream:     String,
+	shallow:      Option<Vec<u8>>,
+	replacements: Option<Vec<u8>>,
+	counts:       (u32, u32),
 }
 
 impl std::fmt::Debug for GitRepo {
