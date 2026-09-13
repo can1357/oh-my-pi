@@ -180,18 +180,27 @@ pub struct NumstatEntry {
 #[derive(Debug, Clone, Default)]
 pub struct DiffOptions {
 	/// Diff the index against HEAD instead of the worktree against the index.
-	pub cached:  bool,
+	pub cached:    bool,
 	/// Base revision; with `head` produces a two-rev diff.
-	pub base:    Option<String>,
+	pub base:      Option<String>,
 	/// Head revision (requires `base`).
-	pub head:    Option<String>,
+	pub head:      Option<String>,
 	/// Restrict to these worktree-relative paths.
-	pub files:   Vec<String>,
+	pub files:     Vec<String>,
 	/// Unified context lines (default 3).
-	pub context: Option<u32>,
+	pub context:   Option<u32>,
 	/// Include binary patch blocks (`GIT binary patch`) instead of the
 	/// "Binary files differ" placeholder.
-	pub binary:  bool,
+	pub binary:    bool,
+	/// Refuse with [`crate::Error::OutputTooLarge`] once the rendered patch
+	/// exceeds this many bytes. Rendering stops at the first change that
+	/// crosses the cap, and a change whose input blobs alone would push the
+	/// buffered total past it is refused from its object headers before any
+	/// content is read. This bounds the patch and the blobs held to render it;
+	/// the change list itself is still proportional to the number of changed
+	/// paths, and a binary change transiently holds a few multiples of its
+	/// input (both blobs, delta, compressed and base85 bodies) while rendering.
+	pub max_bytes: Option<usize>,
 }
 
 /// Untracked-file reporting mode for status queries.

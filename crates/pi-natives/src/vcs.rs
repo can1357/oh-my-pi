@@ -170,12 +170,17 @@ pub struct VcsShowResult {
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsDiffOptions {
-	pub cached:  Option<bool>,
-	pub base:    Option<String>,
-	pub head:    Option<String>,
-	pub files:   Option<Vec<String>>,
-	pub context: Option<u32>,
-	pub binary:  Option<bool>,
+	pub cached:    Option<bool>,
+	pub base:      Option<String>,
+	pub head:      Option<String>,
+	pub files:     Option<Vec<String>>,
+	pub context:   Option<u32>,
+	pub binary:    Option<bool>,
+	/// Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+	/// this many bytes, instead of buffering an arbitrarily large string.
+	/// Carried as a double so a budget past 2^32 reaches the renderer intact
+	/// (a `u32` field would wrap it); values beyond `usize` saturate.
+	pub max_bytes: Option<f64>,
 }
 /// Status query options.
 #[napi(object)]
@@ -324,12 +329,13 @@ impl From<core::ShowResult> for VcsShowResult {
 impl From<VcsDiffOptions> for core::DiffOptions {
 	fn from(v: VcsDiffOptions) -> Self {
 		Self {
-			cached:  v.cached.unwrap_or(false),
-			base:    v.base,
-			head:    v.head,
-			files:   v.files.unwrap_or_default(),
-			context: v.context,
-			binary:  v.binary.unwrap_or(false),
+			cached:    v.cached.unwrap_or(false),
+			base:      v.base,
+			head:      v.head,
+			files:     v.files.unwrap_or_default(),
+			context:   v.context,
+			binary:    v.binary.unwrap_or(false),
+			max_bytes: v.max_bytes.map(|v| v as usize),
 		}
 	}
 }

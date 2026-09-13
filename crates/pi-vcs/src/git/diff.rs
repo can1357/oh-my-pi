@@ -36,8 +36,21 @@ impl GitRepo {
 	pub fn diff_text(&self, options: &DiffOptions) -> Result<String> {
 		let repo = self.gix()?;
 		let changes = collect_changes(&repo, options)?;
-		render_changes(&repo, &changes, options.context.unwrap_or(3), options.binary)
-			.map(|rendered| rendered.into_iter().map(|item| item.text).collect())
+		let rendered = render_changes(
+			&repo,
+			&changes,
+			options.context.unwrap_or(3),
+			options.binary,
+			options.max_bytes,
+		)?;
+		// Size the joined patch once: growing it by doubling would hold up to
+		// twice the output during the copy, on top of the per-change strings
+		// that are released as they are consumed.
+		let mut text = String::with_capacity(rendered.iter().map(|item| item.text.len()).sum());
+		for item in rendered {
+			text.push_str(&item.text);
+		}
+		Ok(text)
 	}
 
 	/// Return changed paths, using the destination path for renames.
@@ -53,7 +66,7 @@ impl GitRepo {
 	pub fn numstat(&self, options: &DiffOptions) -> Result<Vec<NumstatEntry>> {
 		let repo = self.gix()?;
 		let changes = collect_changes(&repo, options)?;
-		let rendered = render_changes(&repo, &changes, 0, false)?;
+		let rendered = render_changes(&repo, &changes, 0, false, None)?;
 		Ok(changes
 			.into_iter()
 			.zip(rendered)
@@ -111,7 +124,7 @@ impl GitRepo {
 		let mut cache = repo
 			.diff_resource_cache_for_tree_diff()
 			.map_err(|err| Error::backend("git diff --no-index", err))?;
-		render_change(&repo, &mut cache, &change, 3, binary).map(|rendered| rendered.text)
+		render_change(&repo, &mut cache, &change, 3, binary, None).map(|rendered| rendered.text)
 	}
 
 	/// Render a commit header and its patch against its first parent.
@@ -164,7 +177,7 @@ impl GitRepo {
 			None
 		};
 		let changes = tree_changes(&repo, parent_tree.as_ref(), Some(&tree), &[])?;
-		for rendered in render_changes(&repo, &changes, 3, false)? {
+		for rendered in render_changes(&repo, &changes, 3, false, None)? {
 			text.push_str(&rendered.text);
 		}
 
@@ -503,11 +516,67 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 	Ok(out)
 }
 
+/// The byte cap threaded into a single change's render so its hunk and
+/// binary writers can stop as soon as this change's own growth crosses what
+/// remains of the total budget, instead of only noticing after the whole
+/// change has been built. Closes the gap where a single oversized rendered
+/// change — a base85 body that expands past its compressed input, or a hunk
+/// of many short lines — could overshoot `max_bytes` by the whole change's
+/// size before `render_changes`' post-render check ever ran.
+#[derive(Clone, Copy)]
+struct RenderBudget {
+	/// The full cap from `DiffOptions::max_bytes`, kept for error messages.
+	limit:   usize,
+	/// Bytes already produced by earlier changes in this `diff_text` call.
+	already: usize,
+}
+
+impl RenderBudget {
+	/// How much further this change's own output may grow before crossing
+	/// `limit`, given what earlier changes already produced.
+	const fn remaining(self) -> usize {
+		self.limit.saturating_sub(self.already)
+	}
+}
+
+/// Sentinel wrapped in the `io::Error` that `GitHunks::consume_hunk` returns
+/// once a hunk's growth crosses the remaining budget, so `render_change` can
+/// tell a budget breach apart from a genuine I/O or backend failure.
+#[derive(Debug)]
+struct BudgetExceeded;
+
+impl std::fmt::Display for BudgetExceeded {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("diff render output exceeded the byte budget")
+	}
+}
+
+impl std::error::Error for BudgetExceeded {}
+
+/// Translate the `io::Error` a unified-diff `.consume()` call can return:
+/// `BudgetExceeded` becomes the same `OutputTooLarge` the pre- and
+/// post-render checks in `render_changes` raise, anything else is a genuine
+/// backend failure.
+fn map_hunk_error(err: std::io::Error, budget: Option<RenderBudget>) -> Error {
+	if err
+		.get_ref()
+		.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some())
+	{
+		Error::OutputTooLarge {
+			operation: "diffText",
+			limit:     budget.map_or(0, |budget| budget.limit),
+		}
+	} else {
+		Error::backend("git diff", err)
+	}
+}
+
 fn render_changes(
 	repo: &gix::Repository,
 	changes: &[FileChange],
 	context: u32,
 	binary_patch: bool,
+	max_bytes: Option<usize>,
 ) -> Result<Vec<Rendered>> {
 	let roots = if changes.iter().any(|change| change.worktree_new) {
 		gix::diff::blob::pipeline::WorktreeRoots {
@@ -521,11 +590,55 @@ fn render_changes(
 		.diff_resource_cache(gix::diff::blob::pipeline::Mode::ToGit, roots)
 		.map_err(|err| Error::backend("git diff", err))?;
 	let mut out = Vec::with_capacity(changes.len());
+	let mut total = 0usize;
 	for change in changes {
-		out.push(render_change(repo, &mut cache, change, context, binary_patch)?);
+		// Rendering loads both sides of a change into memory, so a single file
+		// larger than what is left of the cap would breach it before the
+		// post-render check below could see the output. Refuse it up front from
+		// object headers and file metadata, which cost no content reads.
+		if let Some(limit) = max_bytes
+			&& total.saturating_add(change_input_bytes(repo, change)) > limit
+		{
+			return Err(Error::OutputTooLarge { operation: "diffText", limit });
+		}
+		let budget = max_bytes.map(|limit| RenderBudget { limit, already: total });
+		let rendered = render_change(repo, &mut cache, change, context, binary_patch, budget)?;
 		cache.clear_resource_cache_keep_allocation();
+		total += rendered.text.len();
+		if let Some(limit) = max_bytes
+			&& total > limit
+		{
+			return Err(Error::OutputTooLarge { operation: "diffText", limit });
+		}
+		out.push(rendered);
 	}
 	Ok(out)
+}
+
+/// Bytes `render_change` holds in memory for `change`: both blob sizes read
+/// from object headers, or the working-tree file's size for a side that lives
+/// there. Best effort — a side that cannot be sized counts as zero and is left
+/// to the post-render check.
+fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
+	let blob_bytes = |id: gix::ObjectId| -> usize {
+		if id.is_null() {
+			return 0;
+		}
+		repo
+			.try_find_header(id)
+			.ok()
+			.flatten()
+			.map_or(0, |header| usize::try_from(header.size()).unwrap_or(usize::MAX))
+	};
+	let new_bytes = if change.worktree_new {
+		repo
+			.workdir()
+			.and_then(|dir| std::fs::symlink_metadata(dir.join(&change.new_path)).ok())
+			.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
+	} else {
+		blob_bytes(change.new_id)
+	};
+	blob_bytes(change.old_id).saturating_add(new_bytes)
 }
 
 fn render_change(
@@ -534,6 +647,7 @@ fn render_change(
 	change: &FileChange,
 	context: u32,
 	binary_patch: bool,
+	budget: Option<RenderBudget>,
 ) -> Result<Rendered> {
 	let old_kind = change
 		.old_mode
@@ -590,8 +704,8 @@ fn render_change(
 				text.push_str("GIT binary patch\n");
 				let old = object_bytes(repo, change.old_id)?;
 				let new = object_bytes(repo, change.new_id)?;
-				append_binary_body(&mut text, &old, &new)?;
-				append_binary_body(&mut text, &new, &old)?;
+				append_binary_body(&mut text, &old, &new, budget)?;
+				append_binary_body(&mut text, &new, &old, budget)?;
 			} else {
 				text.push_str("Binary files ");
 				push_old_path(&mut text, change);
@@ -622,7 +736,7 @@ fn render_change(
 				push_new_path(&mut text, change);
 				text.push('\n');
 				let old_data = prepared.old.data.as_slice().unwrap_or_default();
-				let sink = GitHunks { out: &mut text, old_data };
+				let sink = GitHunks { out: &mut text, old_data, budget };
 				gix::diff::blob::UnifiedDiff::new(
 					&diff,
 					&input,
@@ -630,7 +744,7 @@ fn render_change(
 					gix::diff::blob::unified_diff::ContextSize::symmetrical(context),
 				)
 				.consume()
-				.map_err(|err| Error::backend("git diff", err))?;
+				.map_err(|err| map_hunk_error(err, budget))?;
 			}
 			Ok(Rendered { text, added: Some(added), removed: Some(removed) })
 		},
@@ -706,6 +820,54 @@ fn compute_similarity(
 struct GitHunks<'a> {
 	out:      &'a mut String,
 	old_data: &'a [u8],
+	/// Remaining-budget check threaded from `render_change`; `None` when the
+	/// caller set no `max_bytes`.
+	budget:   Option<RenderBudget>,
+}
+
+/// Conservative worst-case byte length `bytes` will occupy in `self.out`
+/// once `String::from_utf8_lossy` converts it: the exact length when
+/// `bytes` is already valid UTF-8 (no allocation needed to know that), or
+/// 3x its length otherwise, since `from_utf8_lossy` replaces each maximal
+/// invalid UTF-8 subsequence with one 3-byte U+FFFD. Computed before the
+/// (potentially huge) lossy conversion runs, so a budget check can refuse
+/// an oversized append without ever performing it.
+const fn lossy_conversion_bound(bytes: &[u8]) -> usize {
+	match std::str::from_utf8(bytes) {
+		Ok(text) => text.len(),
+		Err(_) => bytes.len().saturating_mul(3),
+	}
+}
+
+impl GitHunks<'_> {
+	/// `Err` once `self.out` has grown past what the budget leaves for this
+	/// change; checked after every write below so a hunk (or a single very
+	/// long line within one) stops as soon as it crosses the remaining cap
+	/// instead of finishing unconditionally.
+	fn check_budget(&self) -> std::io::Result<()> {
+		if let Some(budget) = self.budget
+			&& self.out.len() > budget.remaining()
+		{
+			return Err(std::io::Error::other(BudgetExceeded));
+		}
+		Ok(())
+	}
+
+	/// `Err` once appending `bytes` lossy-converted would grow `self.out`
+	/// past what the budget leaves, using `lossy_conversion_bound` computed
+	/// before the conversion runs — the same guard `check_budget` performs
+	/// after the fact, but early enough to refuse the append itself instead
+	/// of performing it first. Every site that lossy-converts caller-sized
+	/// bytes onto `self.out` (the function-context line, an ordinary hunk
+	/// line) must call this before converting, not only `check_budget` after.
+	fn check_budget_for(&self, bytes: &[u8]) -> std::io::Result<()> {
+		if let Some(budget) = self.budget
+			&& self.out.len().saturating_add(lossy_conversion_bound(bytes)) > budget.remaining()
+		{
+			return Err(std::io::Error::other(BudgetExceeded));
+		}
+		Ok(())
+	}
 }
 
 impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
@@ -725,11 +887,26 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 		self.out.push_str(" @@");
 		if let Some(function) = function_context(self.old_data, header.before_hunk_start) {
 			self.out.push(' ');
+			// `function_context` returns the complete preceding
+			// non-whitespace/non-`}` line from `old_data`, independent of the
+			// hunk's own line lengths: a pathological invalid-UTF-8 line here
+			// must be bounded the same way an ordinary hunk line is below,
+			// before the lossy conversion runs.
+			self.check_budget_for(function)?;
 			self.out.push_str(&String::from_utf8_lossy(function));
 		}
 		self.out.push('\n');
+		self.check_budget()?;
 		for &(kind, content) in lines {
 			self.out.push(kind.to_prefix());
+			// `String::from_utf8_lossy` replaces each maximal invalid UTF-8
+			// subsequence with one 3-byte U+FFFD, so a run of invalid bytes
+			// can expand this line up to 3x. Bound that worst case (or the
+			// exact cost when `content` is already valid UTF-8) before
+			// converting: computing the lossy string first would already
+			// have performed the oversized allocation this check exists to
+			// prevent, on a single line with no embedded newline to stop it.
+			self.check_budget_for(content)?;
 			self.out.push_str(&String::from_utf8_lossy(content));
 			// Tokens carry their terminator; a token without one is the
 			// final line of a file that does not end in a newline.
@@ -737,6 +914,10 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 				self.out.push('\n');
 				self.out.push_str("\\ No newline at end of file\n");
 			}
+			// Stop as soon as this hunk's own growth crosses what remains of
+			// the budget, rather than finishing every line of a hunk (or every
+			// hunk of a change) that could by itself be many times the cap.
+			self.check_budget()?;
 		}
 		Ok(())
 	}
@@ -744,7 +925,12 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 	fn finish(self) {}
 }
 
-fn append_binary_body(out: &mut String, source: &[u8], target: &[u8]) -> Result<()> {
+fn append_binary_body(
+	out: &mut String,
+	source: &[u8],
+	target: &[u8],
+	budget: Option<RenderBudget>,
+) -> Result<()> {
 	let literal = zlib_compress(target)?;
 	let delta = if source.is_empty() || target.is_empty() {
 		None
@@ -759,13 +945,19 @@ fn append_binary_body(out: &mut String, source: &[u8], target: &[u8]) -> Result<
 	if let Some((size, compressed)) =
 		delta.filter(|(_, compressed)| compressed.len() < literal.len())
 	{
-		append_binary_block(out, "delta", size, &compressed)
+		append_binary_block(out, "delta", size, &compressed, budget)
 	} else {
-		append_binary_block(out, "literal", target.len(), &literal)
+		append_binary_block(out, "literal", target.len(), &literal, budget)
 	}
 }
 
-fn append_binary_block(out: &mut String, kind: &str, size: usize, compressed: &[u8]) -> Result<()> {
+fn append_binary_block(
+	out: &mut String,
+	kind: &str,
+	size: usize,
+	compressed: &[u8],
+	budget: Option<RenderBudget>,
+) -> Result<()> {
 	let _ = writeln!(out, "{kind} {size}");
 	for line in compressed.chunks(52) {
 		let len = line.len();
@@ -788,6 +980,16 @@ fn append_binary_block(out: &mut String, kind: &str, size: usize, compressed: &[
 			);
 		}
 		out.push('\n');
+		// Stop encoding further lines once this block alone has crossed what
+		// remains of the budget: the base85 body can be built from an input
+		// already inside the cap yet still expand past it (roughly 5/4 the
+		// zlib-compressed size), so the pre-render input check alone is not
+		// enough to bound it.
+		if let Some(budget) = budget
+			&& out.len() > budget.remaining()
+		{
+			return Err(Error::OutputTooLarge { operation: "diffText", limit: budget.limit });
+		}
 	}
 	out.push('\n');
 	Ok(())
@@ -1496,6 +1698,202 @@ mod tests {
 		assert_eq!(
 			repo.diff_text(&cached_binary).expect("cached binary diff"),
 			git(dir.path(), &["diff", "--cached", "--binary"])
+		);
+	}
+
+	// Regression: an isolated-task baseline once rendered the whole index-vs-HEAD
+	// patch before anyone looked at its size; on a 15-way jj conflict exported to
+	// git that was ~1.7M blobs and grew the process to 141 GB. A cap one byte
+	// under the patch must surface as `OutputTooLarge`; a cap equal to it must
+	// return the same bytes as an uncapped render.
+	#[test]
+	fn max_bytes_rejects_oversized_patch_and_passes_one_within_cap() {
+		let dir = fixture();
+		fs::write(dir.path().join("file.txt"), "one\nchanged\nthree\n").expect("write");
+		fs::remove_file(dir.path().join("delete.txt")).expect("delete");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let full = repo.diff_text(&DiffOptions::default()).expect("diff");
+
+		let roomy = DiffOptions { max_bytes: Some(full.len()), ..DiffOptions::default() };
+		assert_eq!(repo.diff_text(&roomy).expect("diff within cap"), full);
+
+		let tight = DiffOptions { max_bytes: Some(full.len() - 1), ..DiffOptions::default() };
+		let err = repo.diff_text(&tight).unwrap_err();
+		assert_eq!(err.kind(), "OutputTooLarge");
+		assert!(
+			matches!(err, Error::OutputTooLarge { operation: "diffText", limit } if limit == full.len() - 1),
+			"{err:?}"
+		);
+	}
+
+	// The cap bounds memory, not just output: rendering loads both sides of a
+	// change, so one file larger than the cap must be refused from its object
+	// header even when its rendered diff would be a few lines.
+	#[test]
+	fn max_bytes_refuses_a_change_whose_inputs_exceed_the_cap_before_rendering() {
+		let dir = fixture();
+		let body = "0123456789abcdef\n".repeat(256);
+		fs::write(dir.path().join("big.txt"), &body).expect("write big");
+		git(dir.path(), &["add", "big.txt"]);
+		git(dir.path(), &["commit", "-qm", "big"]);
+		fs::write(dir.path().join("big.txt"), format!("{body}tail\n")).expect("modify big");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let rendered = repo.diff_text(&DiffOptions::default()).expect("diff");
+		assert!(rendered.len() < 1024, "one-line change renders small: {}", rendered.len());
+
+		let capped = DiffOptions { max_bytes: Some(1024), ..DiffOptions::default() };
+		let err = repo.diff_text(&capped).unwrap_err();
+		assert!(matches!(err, Error::OutputTooLarge { limit: 1024, .. }), "{err:?}");
+
+		let roomy =
+			DiffOptions { max_bytes: Some(2 * body.len() + rendered.len()), ..DiffOptions::default() };
+		assert_eq!(repo.diff_text(&roomy).expect("diff within cap"), rendered);
+	}
+
+	// Regression for the P1 gap: the byte cap used to be checked only after a
+	// whole change was built, so one oversized hunk could still allocate far
+	// past the budget before `render_changes` ever looked. The hunk writer
+	// must stop mid-hunk once its own growth crosses what remains of the cap.
+	#[test]
+	fn hunk_writer_stops_within_budget_instead_of_finishing_the_hunk() {
+		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
+
+		let mut out = String::new();
+		let lines: Vec<(DiffLineKind, &[u8])> = (0..10_000)
+			.map(|_| (DiffLineKind::Add, b"x\n".as_slice()))
+			.collect();
+		let full_len: usize = lines.iter().map(|(_, content)| content.len()).sum();
+		let budget = Some(RenderBudget { limit: 100, already: 0 });
+		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let header = HunkHeader {
+			before_hunk_start: 1,
+			before_hunk_len:   0,
+			after_hunk_start:  1,
+			after_hunk_len:    10_000,
+		};
+		let err = sink.consume_hunk(header, &lines).unwrap_err();
+		assert!(
+			err.get_ref()
+				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
+			"{err:?}"
+		);
+		assert!(
+			out.len() < full_len / 10,
+			"hunk writer kept writing past the budget: wrote {} of a possible {full_len} bytes",
+			out.len()
+		);
+	}
+
+	// Regression: a single line with no embedded newline (a real shape — a
+	// file with pathological non-NUL, non-UTF8 content and no line breaks)
+	// used to be converted with `String::from_utf8_lossy` and appended
+	// wholesale before the per-line budget check ran. `from_utf8_lossy`
+	// replaces each maximal invalid subsequence with one 3-byte U+FFFD, so a
+	// run of invalid bytes can expand up to 3x; the check must happen before
+	// the (potentially huge) lossy conversion, not after.
+	#[test]
+	fn hunk_writer_bounds_a_single_line_of_invalid_utf8_before_converting_it() {
+		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
+
+		let mut out = String::new();
+		// Every byte is its own maximal invalid subsequence (0x80 is a bare
+		// continuation byte, invalid as a sequence start), so lossy
+		// conversion expands this 3x: 1,000,000 bytes -> 3,000,000 bytes.
+		let invalid_line = vec![0x80_u8; 1_000_000];
+		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, invalid_line.as_slice())];
+		let budget = Some(RenderBudget { limit: 100, already: 0 });
+		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let header = HunkHeader {
+			before_hunk_start: 1,
+			before_hunk_len:   0,
+			after_hunk_start:  1,
+			after_hunk_len:    1,
+		};
+		let err = sink.consume_hunk(header, &lines).unwrap_err();
+		assert!(
+			err.get_ref()
+				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
+			"{err:?}"
+		);
+		assert!(
+			out.len() < invalid_line.len() / 10,
+			"hunk writer converted the oversized invalid-UTF8 line before checking the budget: wrote \
+			 {} bytes for a {}-byte input",
+			out.len(),
+			invalid_line.len()
+		);
+	}
+
+	// Regression for the round-2 reviewer finding: `function_context` returns
+	// the complete preceding non-whitespace/non-`}` line from `old_data`,
+	// independent of the hunk's own line lengths. `consume_hunk` used to
+	// lossy-convert and append that slice before any budget check ran (the
+	// first `check_budget()` call comes after the header line, but only once
+	// the function-context text has already been pushed onto `out`), so a
+	// pathological function-context line could still balloon `out` up to 3x
+	// its size before the error surfaced. It must be bounded the same way an
+	// ordinary hunk line already is.
+	#[test]
+	fn hunk_writer_bounds_the_function_context_line_before_converting_it() {
+		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
+
+		let mut out = String::new();
+		// Every byte is its own maximal invalid subsequence, so lossy
+		// conversion expands this 3x: 1,000,000 bytes -> 3,000,000 bytes.
+		let invalid_context_line = vec![0x80_u8; 1_000_000];
+		let mut old_data = invalid_context_line.clone();
+		old_data.push(b'\n');
+		old_data.extend_from_slice(b"unchanged\n");
+		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, b"x\n".as_slice())];
+		let budget = Some(RenderBudget { limit: 100, already: 0 });
+		let mut sink = GitHunks { out: &mut out, old_data: &old_data, budget };
+		// `before_hunk_start: 2` makes `function_context` scan exactly the
+		// first line of `old_data` — the pathological one — and return it.
+		let header = HunkHeader {
+			before_hunk_start: 2,
+			before_hunk_len:   0,
+			after_hunk_start:  1,
+			after_hunk_len:    1,
+		};
+		let err = sink.consume_hunk(header, &lines).unwrap_err();
+		assert!(
+			err.get_ref()
+				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
+			"{err:?}"
+		);
+		assert!(
+			out.len() < invalid_context_line.len() / 10,
+			"hunk writer converted the oversized function-context line before checking the budget: \
+			 wrote {} bytes for a {}-byte context line",
+			out.len(),
+			invalid_context_line.len()
+		);
+	}
+
+	// Regression for the P1 gap: base85-encoding a binary body can expand well
+	// past a tiny remaining budget even though the input itself fit under it;
+	// the block writer must stop once its own growth crosses the cap rather
+	// than encoding the whole payload first.
+	#[test]
+	fn binary_block_writer_stops_within_budget_instead_of_finishing_the_block() {
+		let mut out = String::new();
+		let compressed = vec![0xab_u8; 100_000];
+		let budget = Some(RenderBudget { limit: 200, already: 0 });
+		let err = append_binary_block(&mut out, "literal", compressed.len(), &compressed, budget)
+			.unwrap_err();
+		assert!(
+			matches!(err, Error::OutputTooLarge { operation: "diffText", limit: 200 }),
+			"{err:?}"
+		);
+		assert!(
+			out.len() < compressed.len() / 10,
+			"binary writer kept encoding past the budget: wrote {} of a possible {} bytes",
+			out.len(),
+			compressed.len()
 		);
 	}
 
