@@ -863,6 +863,22 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 		self.check_budget()?;
 		for &(kind, content) in lines {
 			self.out.push(kind.to_prefix());
+			// `String::from_utf8_lossy` replaces each maximal invalid UTF-8
+			// subsequence with one 3-byte U+FFFD, so a run of invalid bytes
+			// can expand this line up to 3x. Bound that worst case (or the
+			// exact cost when `content` is already valid UTF-8) before
+			// converting: computing the lossy string first would already
+			// have performed the oversized allocation this check exists to
+			// prevent, on a single line with no embedded newline to stop it.
+			let appended_len = match std::str::from_utf8(content) {
+				Ok(text) => text.len(),
+				Err(_) => content.len().saturating_mul(3),
+			};
+			if let Some(budget) = self.budget
+				&& self.out.len().saturating_add(appended_len) > budget.remaining()
+			{
+				return Err(std::io::Error::other(BudgetExceeded));
+			}
 			self.out.push_str(&String::from_utf8_lossy(content));
 			// Tokens carry their terminator; a token without one is the
 			// final line of a file that does not end in a newline.
@@ -1741,6 +1757,46 @@ mod tests {
 			out.len() < full_len / 10,
 			"hunk writer kept writing past the budget: wrote {} of a possible {full_len} bytes",
 			out.len()
+		);
+	}
+
+	// Regression: a single line with no embedded newline (a real shape — a
+	// file with pathological non-NUL, non-UTF8 content and no line breaks)
+	// used to be converted with `String::from_utf8_lossy` and appended
+	// wholesale before the per-line budget check ran. `from_utf8_lossy`
+	// replaces each maximal invalid subsequence with one 3-byte U+FFFD, so a
+	// run of invalid bytes can expand up to 3x; the check must happen before
+	// the (potentially huge) lossy conversion, not after.
+	#[test]
+	fn hunk_writer_bounds_a_single_line_of_invalid_utf8_before_converting_it() {
+		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
+
+		let mut out = String::new();
+		// Every byte is its own maximal invalid subsequence (0x80 is a bare
+		// continuation byte, invalid as a sequence start), so lossy
+		// conversion expands this 3x: 1,000,000 bytes -> 3,000,000 bytes.
+		let invalid_line = vec![0x80_u8; 1_000_000];
+		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, invalid_line.as_slice())];
+		let budget = Some(RenderBudget { limit: 100, already: 0 });
+		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let header = HunkHeader {
+			before_hunk_start: 1,
+			before_hunk_len:   0,
+			after_hunk_start:  1,
+			after_hunk_len:    1,
+		};
+		let err = sink.consume_hunk(header, &lines).unwrap_err();
+		assert!(
+			err.get_ref()
+				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
+			"{err:?}"
+		);
+		assert!(
+			out.len() < invalid_line.len() / 10,
+			"hunk writer converted the oversized invalid-UTF8 line before checking the budget: wrote \
+			 {} bytes for a {}-byte input",
+			out.len(),
+			invalid_line.len()
 		);
 	}
 
