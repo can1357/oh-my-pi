@@ -137,6 +137,16 @@ describe("credential sign-out notices", () => {
 		expect(notice).toMatch(/^Signed out of extension-provider-y+… x+…: /);
 		// `/login` matches its argument exactly: a cut id is not offered as one.
 		expect(notice).toMatch(/Sign in again with \/login and choose the provider\.$/);
+		// Nor is an id the display sanitizer would alter.
+		expect(
+			formatCredentialDisabledNotice({
+				credentialId: 2,
+				credentialType: "oauth",
+				email: "x@example.com",
+				provider: "ext\tprovider",
+				disabledCause: "oauth refresh failed: invalid_grant",
+			}),
+		).toMatch(/^Signed out of ext {1,8}provider x@example\.com: .*\/login and choose the provider\.$/);
 	});
 
 	it("strips terminal control sequences and tabs from provider-controlled notice text", async () => {

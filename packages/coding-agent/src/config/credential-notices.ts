@@ -48,11 +48,12 @@ function providerLabel(provider: string): string {
 
 /**
  * The remedy is an executable command and `/login` matches its argument by
- * exact equality, so an id the title bound would cut is never advertised as
- * an argument; the argument-free selector reaches it instead.
+ * exact equality, so an id the title bound would cut, or the display
+ * sanitizer would alter (a tab, a control character, a home path), is never
+ * advertised as an argument; the argument-free selector reaches it instead.
  */
 function loginRemedy(provider: string): string {
-	return providerLabel(provider) === provider
+	return sanitizeDisplayWarning(providerLabel(provider)) === provider
 		? `Sign in again with /login ${provider}.`
 		: "Sign in again with /login and choose the provider.";
 }
