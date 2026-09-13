@@ -73,16 +73,22 @@ export function historyScopeRing(start: HistoryScopeKind, context: HistoryScopeC
 }
 
 /**
+ * Storage shape a history editor consumes: scoped reads, and writes that carry only the project
+ * directory. A prompt's conversation stays with the storage's own session resolver, so an adapter
+ * advertising `sessionId` would compile while silently dropping it.
+ */
+export type ScopedHistoryStorage = Pick<HistoryStorage, "getRecent"> & {
+	add(prompt: string, cwd?: string): Promise<void>;
+};
+
+/**
  * Adapt `storage` to the editor's scope-free interface, resolving `scope` on every read.
  *
  * Resolution is lazy by design: the editor keeps one storage for its whole lifetime while
  * the conversation, the directory or the `history.scope` setting change underneath it, so a
  * scope captured at install time would keep serving the previous context.
  */
-export function bindHistoryScope(
-	storage: HistoryStorage,
-	scope: () => HistoryScope,
-): Pick<HistoryStorage, "add" | "getRecent"> {
+export function bindHistoryScope(storage: HistoryStorage, scope: () => HistoryScope): ScopedHistoryStorage {
 	return {
 		add: (prompt, cwd) => storage.add(prompt, cwd),
 		getRecent: limit => storage.getRecent(limit, scope()),
@@ -91,7 +97,7 @@ export function bindHistoryScope(
 
 /** A storage bound to a live scope, plus the key an editor re-seeds on when that scope changes. */
 export interface HistorySource {
-	storage: Pick<HistoryStorage, "add" | "getRecent">;
+	storage: ScopedHistoryStorage;
 	/** Identity of the scope in effect right now; distinct values mean a different data set. */
 	sourceKey: () => string;
 }
