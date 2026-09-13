@@ -18,7 +18,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import {
-	agentStateFileSettled,
+	__agentStateFileSettledForTests,
 	setAgentStateFileEnabled,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
@@ -1897,16 +1897,16 @@ describe("selector setting side effects", () => {
 			setTerminalTitleState("attention");
 
 			controller.handleSettingChange("tui.stateFile", true);
-			await agentStateFileSettled();
+			await __agentStateFileSettledForTests();
 			expect(await Bun.file(stateFile()).exists()).toBe(true);
 			expect((await Bun.file(stateFile()).json()).state).toBe("attention");
 
 			controller.handleSettingChange("tui.stateFile", false);
-			await agentStateFileSettled();
+			await __agentStateFileSettledForTests();
 			expect(await Bun.file(stateFile()).exists()).toBe(false);
 		} finally {
 			setAgentStateFileEnabled(false);
-			await agentStateFileSettled();
+			await __agentStateFileSettledForTests();
 			for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
 			__resetDirsFromEnvForTests();
 			await fs.promises.rm(agentRoot, { recursive: true, force: true });
