@@ -366,7 +366,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						truncateToWidth(sanitizeDisplayLine(shortenPath(host.cwd)), TRUNCATE_LENGTHS.TITLE),
 					].join(", ");
 					lines.push(
-						` ${bullet} ${session} ${theme.fg("muted", `— ${detail}`)}`,
+						// Fields are bounded above; the composed row is bounded too so the
+						// fixed details can never push it past one transcript line.
+						truncateToWidth(` ${bullet} ${session} ${theme.fg("muted", `— ${detail}`)}`, TRUNCATE_LENGTHS.LINE),
 						`   ${theme.fg("dim", `${APP_NAME} collab link ${host.instanceId}${host.access === "view" ? " --view" : ""}`)}`,
 					);
 				}

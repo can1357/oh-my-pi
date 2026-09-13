@@ -155,6 +155,8 @@ export class CollabHost {
 	readonly #access: CollabAccess;
 	#relayConnected = false;
 	#registryPublication: CollabHostPublication | null = null;
+	/** Publication still being created; teardown awaits and withdraws it. */
+	#pendingPublication: Promise<CollabHostPublication | null> | null = null;
 	/** Rejects the in-flight first-open wait when `stop()` overtakes `start()`. */
 	#abortStart: ((reason: Error) => void) | null = null;
 	#unsubscribe?: () => void;
@@ -347,19 +349,25 @@ export class CollabHost {
 		this.#startedAt = Date.now();
 		// Publish to the local host registry only after the relay connection
 		// succeeded. Publication failure warns but never breaks hosting (#6099).
-		let publication: CollabHostPublication | null = null;
-		try {
-			publication = await publishCollabHost(this.#registrySource(), { instanceId: this.#instanceId });
-		} catch (err) {
-			logger.warn("Collab host registry publication failed", { error: String(err) });
-			this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
-				dim: true,
-			});
-		}
+		// The in-flight task is tracked so a stop() that overtakes it withdraws
+		// the result before resolving: a successor room reuses this endpoint.
+		const publishing = publishCollabHost(this.#registrySource(), { instanceId: this.#instanceId }).then(
+			publication => publication,
+			err => {
+				logger.warn("Collab host registry publication failed", { error: String(err) });
+				this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
+					dim: true,
+				});
+				return null;
+			},
+		);
+		this.#pendingPublication = publishing;
+		const publication = await publishing;
+		this.#pendingPublication = null;
 		if (this.#stopped) {
 			// The relay closed fatally (or stop() ran) while publication was in
-			// flight: #teardown had nothing to withdraw, so withdraw here and refuse
-			// to finish startup instead of installing a dead host that stays discoverable.
+			// flight: withdraw it here too (close is idempotent) and refuse to
+			// finish startup instead of installing a dead host that stays discoverable.
 			if (publication) {
 				await publication
 					.close()
@@ -443,6 +451,15 @@ export class CollabHost {
 		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
+		// A publication still being created when the room ended is withdrawn
+		// before stop() resolves: a successor room reuses this instance
+		// endpoint, and this room's late cleanup must never unlink the winner.
+		const pending = this.#pendingPublication;
+		this.#pendingPublication = null;
+		const late = pending ? await pending : null;
+		if (late) {
+			await late.close().catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+		}
 	}
 
 	/**

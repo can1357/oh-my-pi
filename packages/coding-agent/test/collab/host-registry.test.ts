@@ -344,6 +344,44 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
+	it("stop() resolves only after a publication still in flight has been withdrawn", async () => {
+		const { ctx, state } = makeHostContext();
+		// Model production timing: the room is stopped (session switch) while the
+		// registry work is still ahead of it. The gate opens from the host's own
+		// teardown, so publication completes strictly after the room ended.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const events: string[] = [];
+		const publishing = Promise.withResolvers<void>();
+		publishSpy.mockImplementation(async (source, options) => {
+			publishing.resolve();
+			await state.tornDown.promise;
+			const publication = await redirected(source, options);
+			const close = publication.close.bind(publication);
+			publication.close = () => {
+				// close() is idempotent and both teardown and the aborted start call it.
+				if (!events.includes("withdrawn")) events.push("withdrawn");
+				return close();
+			};
+			return publication;
+		});
+		host = new CollabHost(ctx, { instanceId: "reused-endpoint" });
+		const started = host.start(RELAY_URL, WEB_URL);
+		await publishing.promise;
+
+		await host.stop("session switched").then(() => events.push("stopped"));
+		await started.catch(() => {});
+
+		// The successor room (same instance id, same endpoint path) can only be
+		// started safely if the withdrawal happened before stop() resolved.
+		expect(events).toEqual(["withdrawn", "stopped"]);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		const successor = new CollabHost(ctx, { instanceId: "reused-endpoint", generation: 2 });
+		await successor.start(RELAY_URL, WEB_URL);
+		expect((await registry.listCollabHosts({ dir: tmp })).map(h => h.generation)).toEqual([2]);
+		await successor.stop("done");
+	});
+
 	it("keeps hosting when publication fails, surfacing a discovery warning", async () => {
 		const { ctx, state } = makeHostContext();
 		// Publication rejects; start() must still resolve and hosting continue.
