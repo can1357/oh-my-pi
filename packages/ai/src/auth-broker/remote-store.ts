@@ -777,7 +777,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			await this.refreshSnapshot();
 		} catch (error) {
-			logger.debug("auth-broker snapshot refresh after rejected disable failed", { error: String(error) });
+
+			logger.debug("auth-broker snapshot refresh after rejected disable failed", {
+				error: redactSecrets(String(error)),
+			});
 		}
 	}
 
@@ -800,7 +803,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				void this.#reconcileAfterRejectedDisable();
 				return;
 			}
-			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+			logger.warn("auth-broker disable propagation failed", { id, error: redactSecrets(String(error)) });
 		});
 		return true;
 	}

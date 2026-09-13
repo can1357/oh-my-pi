@@ -2565,7 +2565,9 @@ export class AuthStorage {
 		const updated = this.#getStoredCredentials(provider).filter(entry => entry.id !== target.id);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
-		this.#emitCredentialDisabled(credentialDisabledEvent(provider, target.id, expectedCredential, disabledCause));
+		if (isAutomaticDisableCause(disabledCause)) {
+			this.#emitCredentialDisabled(credentialDisabledEvent(provider, target.id, expectedCredential, disabledCause));
+		}
 		return true;
 	}
 
@@ -7093,8 +7095,8 @@ export class AuthStorage {
 			const disabledCause = message
 				? `upstream reported invalidated OAuth token: ${message}`
 				: "upstream reported invalidated OAuth token";
-			// The broker persists (and logs) a remote disable on its own host; this
-			// session still observed the invalidation and must announce it here.
+			// The shared CAS path announces only an accepted disable, both here
+			// and on the broker host; a peer rotation/removal must stay silent.
 			const deleted = await this.#disableCredentialByIdIfMatches(
 				provider,
 				target.id,
