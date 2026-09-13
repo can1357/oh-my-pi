@@ -886,17 +886,17 @@ export class Editor implements Component, Focusable {
 
 	/**
 	 * Add a prompt to history for up/down arrow navigation.
-	 * Called after successful submission. `sessionId` pins the conversation the prompt was
-	 * typed in: a command can switch sessions while it runs, and the prompt belongs to the
-	 * one that was active when it was submitted.
+	 * Called after successful submission. `origin` pins where the prompt was typed: a command
+	 * can switch the conversation or move the working directory while it runs, and the prompt
+	 * belongs to the context that was active when it was submitted.
 	 */
-	addToHistory(text: string, sessionId?: string): void {
+	addToHistory(text: string, origin?: { sessionId?: string; cwd?: string }): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 
 		const stor = this.#historyStorage;
 		if (stor) {
-			stor.add(trimmed, getProjectDir(), sessionId).catch(error => {
+			stor.add(trimmed, origin?.cwd ?? getProjectDir(), origin?.sessionId).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}

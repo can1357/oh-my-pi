@@ -8,7 +8,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "../../modes/components/ask-dialog";
@@ -928,10 +928,10 @@ export class InputController {
 					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
-				// Commands such as /new, /resume and /fork switch the conversation while they
-				// run, so the id is captured before dispatch: the command belongs to the
-				// conversation it was typed in, not the one it moved to.
-				const submittedIn = this.ctx.sessionManager.getSessionId();
+				// Commands such as /new, /resume, /fork and /move switch the conversation or the
+				// working directory while they run, so both are captured before dispatch: the
+				// command belongs where it was typed, not where it moved to.
+				const submittedIn = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
@@ -1608,9 +1608,9 @@ export class InputController {
 
 		if (text) {
 			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
-			// Same reason as the submit path: capture the conversation before a session-switching
-			// command runs, so the recorded text is filed where it was typed.
-			const submittedIn = this.ctx.sessionManager.getSessionId();
+			// Same reason as the submit path: capture the conversation and directory before a
+			// command that switches either runs, so the recorded text is filed where it was typed.
+			const submittedIn = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
 			if (slashResult === true) {
 				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);

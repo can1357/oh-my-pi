@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-coding-agent/modes/queue-input";
@@ -105,25 +106,33 @@ describe("input controller — slash command history (#3148)", () => {
 
 		await editor.onSubmit?.("/hotkeys");
 
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys", DEFAULT_SESSION_ID);
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys", expect.objectContaining({ sessionId: DEFAULT_SESSION_ID }));
 	});
 
-	it("files a session-switching command under the conversation it was typed in", async () => {
+	it("files a switching command under the conversation and directory it was typed in", async () => {
+		const moved = TempDir.createSync("@omp-slash-origin-");
+		const origin = getProjectDir();
 		let sessionId = "source-session";
 		const { ctx, editor, addToHistory } = makeCtx();
 		ctx.sessionManager = {
 			getSessionId: () => sessionId,
 		} as unknown as InteractiveModeContext["sessionManager"];
-		// `/hotkeys` rides the shared dispatch path; its handler stands in for `/new` or
-		// `/resume`, which switch the conversation before the controller records the command.
+		// `/hotkeys` rides the shared dispatch path; its handler stands in for `/new`,
+		// `/resume` or `/move`, which switch the conversation and the directory before the
+		// controller records the command.
 		ctx.handleHotkeysCommand = () => {
 			sessionId = "destination-session";
+			setProjectDir(moved.path());
 		};
 		controllerFor(ctx);
 
-		await editor.onSubmit?.("/hotkeys");
-
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys", "source-session");
+		try {
+			await editor.onSubmit?.("/hotkeys");
+			expect(addToHistory).toHaveBeenCalledWith("/hotkeys", { sessionId: "source-session", cwd: origin });
+		} finally {
+			setProjectDir(origin);
+			await moved.remove().catch(() => {});
+		}
 	});
 
 	it("records a non-secret /mcp subcommand", async () => {
@@ -133,7 +142,10 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/mcp list");
 
 		expect(handleMCPCommand).toHaveBeenCalledWith("/mcp list");
-		expect(addToHistory).toHaveBeenCalledWith("/mcp list", DEFAULT_SESSION_ID);
+		expect(addToHistory).toHaveBeenCalledWith(
+			"/mcp list",
+			expect.objectContaining({ sessionId: DEFAULT_SESSION_ID }),
+		);
 	});
 
 	it("does NOT record /mcp add with a --token (would leak the bearer token)", async () => {
@@ -178,7 +190,10 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/queue inspect the final result");
 
 		expect(followUp).toHaveBeenCalledWith("inspect the final result", undefined);
-		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result", DEFAULT_SESSION_ID);
+		expect(addToHistory).toHaveBeenCalledWith(
+			"/queue inspect the final result",
+			expect.objectContaining({ sessionId: DEFAULT_SESSION_ID }),
+		);
 		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 
