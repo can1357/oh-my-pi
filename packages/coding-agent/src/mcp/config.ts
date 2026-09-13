@@ -332,13 +332,11 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	// An entry is a glob over the sanitized names the server may advertise, and
 	// I don't enumerate it: the practical spelling is the entry itself, and a
 	// glob that reaches past the one native tool keeps the server. A literal
-	// I don't enumerate it: the practical spelling is the entry itself, and a
-	// glob that reaches past the one native tool keeps the server. A literal
 	// entry (`web_search_exa`, `web_fetch_ex[a]`) is judged by whether the
 	// native integration provides the name it spells — the only case a drop is
 	// provable. A pattern entry is judged the same way, with the safe bias
 	// that a glob addressing the native name keeps the server mounted.
-	const pool = [...Object.keys(NATIVE_EXA_MCP_TOOLS), ...allowlist];
+	const pool = [...NATIVE_EXA_MCP_TOOLS, ...allowlist];
 	const effective = filterMCPTools({
 		toolNames: pool,
 		enabledTools: allowlist,
