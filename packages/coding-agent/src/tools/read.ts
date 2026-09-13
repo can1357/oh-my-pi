@@ -629,12 +629,20 @@ function splitImageQuestionTarget(readPath: string): { path: string; question?: 
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
+	path: type("string").describe("Local path, internal URI (e.g. memory://), or URL. Inline selectors are supported."),
+});
+
+const readSchemaWithSkills = type({
 	path: type("string").describe(
 		"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
 	),
 });
 
 const readSchemaWithoutMemory = type({
+	path: type("string").describe("Local path, internal URI, or URL. Inline selectors are supported."),
+});
+
+const readSchemaWithoutMemoryWithSkills = type({
 	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
 });
 
@@ -822,6 +830,7 @@ async function assessLocalReadSpeculation(
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
+	readonly readsSkillUris = true;
 	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
@@ -834,7 +843,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	description: string;
 	get parameters(): typeof readSchema {
-		return this.session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
+		// `skillful: false` removes the system-prompt catalog and must also
+		// strip the provider-side `skill://` hint, matching sdk.ts:3186.
+		const hasSkills = this.session.settings.get("skillful") && (this.session.skills?.length ?? 0) > 0;
+		if (this.session.settings.get("memory.backend") === "off") {
+			return hasSkills ? readSchemaWithoutMemoryWithSkills : readSchemaWithoutMemory;
+		}
+		return hasSkills ? readSchemaWithSkills : readSchema;
 	}
 	readonly strict = true;
 

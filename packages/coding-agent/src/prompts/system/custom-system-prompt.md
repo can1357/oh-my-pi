@@ -39,6 +39,11 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 {{/list}}
 </skills>
 {{/if}}
+{{#if hasSkillUriAccess}}
+{{#unless skills.length}}
+Loaded skills remain addressable as `skill://<name>`.
+{{/unless}}
+{{/if}}
 {{#if alwaysApplyRules.length}}
 {{#each alwaysApplyRules}}
 {{content}}

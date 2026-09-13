@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { resolveContainedPathSync } from "../discovery/contained-path";
+import { resolveContainedPath, type ContainedPathResolution } from "../discovery/contained-path";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
@@ -9,6 +9,19 @@ import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { ImageAttachmentEntry } from ".";
 import { normalizeLocalScheme } from "./path-utils";
 import { ToolError } from "./tool-errors";
+
+/**
+ * A `skill://` URL that resolves outside its plugin root or to a missing target.
+ * Unlike other resolution failures, containment violations MUST fail closed:
+ * `expandInternalUrls` rethrows them instead of leaving the token for the
+ * shell (which would read it as a relative path).
+ */
+export class SkillContainmentError extends ToolError {
+	constructor(message: string) {
+		super(message);
+		this.name = "SkillContainmentError";
+	}
+}
 
 /** Regex to find skill:// tokens in command text. */
 const SKILL_URL_PATTERN = /'skill:\/\/[^'\s")`\\]+'|"skill:\/\/[^"\s')`\\]+"|skill:\/\/[^\s'")`\\;&|<>($]+/g;
@@ -47,15 +60,23 @@ export interface InternalUrlExpansionOptions {
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
 	ensureLocalParentDirs?: boolean;
+	/** Resolve bare skill:// URIs to the skill base directory instead of the instruction file. */
+	skillUrlForDirectory?: boolean;
 	/** Calling session's agent-scoped applicable rules — lets rule:// resolve without process-global state. */
 	rules?: readonly Rule[];
 }
 
 /**
- * Resolve a single skill:// URL to its absolute filesystem path.
- * Does NOT read file content or verify existence.
+ * Parse a skill:// URL into its structural pieces — validated skill match,
+ * bare-URI target, or traversal-validated relative path — shared by the sync
+ * and async resolvers so the security contract cannot diverge. Only the
+ * containment operation varies between the two entry points.
  */
-export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): string {
+function parseSkillUrlTarget(
+	url: string,
+	skills: readonly Skill[],
+	forDirectory: boolean,
+): { skill: Skill; target: string } {
 	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
 	if (!parsed) {
 		throw new ToolError(`Invalid skill:// URL: ${url}`);
@@ -85,11 +106,11 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	// Combine any colon suffix (line range like ":1-5") with the path segment
 	const rawPath = (parsed[2] ?? "") + (suffix ? `/${suffix}` : "");
 	const hasRelativePath = rawPath !== "" && rawPath !== "/";
-
 	if (!hasRelativePath) {
-		return path.resolve(skill.baseDir);
+		// A bare URI addresses the skill's configured instruction file, or its
+		// base directory for directory-oriented callers (bash cwd).
+		return { skill, target: path.resolve(forDirectory ? skill.baseDir : skill.filePath) };
 	}
-
 	let relativePath: string;
 	try {
 		relativePath = decodeURIComponent(rawPath.slice(1));
@@ -109,22 +130,34 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
 		throw new ToolError("Path traversal is not allowed in skill:// URLs");
 	}
-	// Agent Plugin skills (§4.1): the resource must canonically resolve within
-	// the plugin root. Fail closed: a dangling or unresolvable path is rejected
-	// rather than handed to bash, where writing through it could create the
-	// outside target. Symlinks may target other files inside the same package.
-	if (skill.containRoot) {
-		const contained = resolveContainedPathSync(skill.containRoot, resolvedPath);
-		if (contained.status === "outside") {
-			throw new ToolError(`skill:// path resolves outside the plugin root: ${url}`);
-		}
-		if (contained.status === "missing") {
-			throw new ToolError(`skill:// path does not exist: ${url}`);
-		}
-		return contained.realPath;
-	}
+	return { skill, target: resolvedPath };
+}
 
-	return resolvedPath;
+/** Throw the fail-closed SkillContainmentError unless the target is contained. */
+function skillContainOrThrow(url: string, contained: ContainedPathResolution): string {
+	if (contained.status === "outside") {
+		throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
+	}
+	if (contained.status === "missing") {
+		throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
+	}
+	return contained.realPath;
+}
+
+/**
+ * Async variant for the production `expandInternalUrls` path: containment runs
+ * the ASYNC resolver, so a slow or stalled network/FUSE plugin filesystem
+ * cannot block the TUI/RPC event loop and cancellation can interrupt the
+ * lookup.
+ */
+export async function resolveSkillUrlToPathAsync(
+	url: string,
+	skills: readonly Skill[],
+	options: { forDirectory?: boolean } = {},
+): Promise<string> {
+	const { skill, target } = parseSkillUrlTarget(url, skills, options.forDirectory === true);
+	if (!skill.containRoot) return target;
+	return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, target));
 }
 
 /**
@@ -268,6 +301,7 @@ async function resolveInternalUrlToPath(
 	sessionId?: string,
 	agentRegistry?: ResolveContext["agentRegistry"],
 	rules?: readonly Rule[],
+	skillUrlForDirectory?: boolean,
 ): Promise<string> {
 	const url = normalizeLocalScheme(rawUrl);
 	const scheme = extractScheme(url);
@@ -276,7 +310,7 @@ async function resolveInternalUrlToPath(
 	}
 
 	if (scheme === "skill") {
-		return resolveSkillUrlToPath(url, skills);
+		return resolveSkillUrlToPathAsync(url, skills, { forDirectory: skillUrlForDirectory });
 	}
 
 	if (scheme === "attachment") {
@@ -330,23 +364,6 @@ async function resolveInternalUrlToPath(
 }
 
 /**
- * Expand all skill:// URIs in a bash command string.
- * Returns the command with URIs replaced by shell-escaped absolute paths.
- * Throws ToolError if any URI cannot be resolved.
- */
-export function expandSkillUrls(command: string, skills: readonly Skill[]): string {
-	if (skills.length === 0 || !command.includes("skill://")) {
-		return command;
-	}
-
-	return command.replace(SKILL_URL_PATTERN, token => {
-		const url = unquoteToken(token);
-		const resolvedPath = resolveSkillUrlToPath(url, skills);
-		return shellEscape(resolvedPath);
-	});
-}
-
-/**
  * Expand supported internal URLs in a bash command string to shell-escaped absolute paths.
  * Unresolvable URLs and literal mentions inside larger quoted text are left unchanged.
  * Supported schemes: skill://, agent://, artifact://, memory://, rule://, local://, attachment://
@@ -382,8 +399,13 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.sessionId,
 				options.agentRegistry,
 				options.rules,
+				options.skillUrlForDirectory,
 			);
-		} catch {
+		} catch (error) {
+			// Containment violations fail closed: never hand the raw token to the
+			// shell, which would read it as a relative path. Other resolution
+			// failures keep the legacy pass-through behavior.
+			if (error instanceof SkillContainmentError) throw error;
 			continue;
 		}
 		const replacement = options.noEscape ? resolvedPath : shellEscape(resolvedPath);

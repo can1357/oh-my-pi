@@ -224,6 +224,8 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	loadMode?: ToolLoadMode;
 	/** If true, tool may stage deferred changes that require explicit resolve/discard. */
 	deferrable?: boolean;
+	/** Whether this tool can read `skill://` instruction content. Survives the custom-tool → definition bridge. */
+	readsSkillUris?: boolean;
 	/** MCP server name for discovery/search metadata when this tool fronts an MCP server. */
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */

@@ -2,8 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { type ResolveContext, resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { expandInternalUrls, expandSkillUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
-import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { expandInternalUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
 
 function shellEscape(p: string): string {
 	return `'${p.replace(/'/g, "'\\''")}'`;
@@ -54,110 +53,6 @@ function createInternalRouter(resources: Record<string, { sourcePath?: string; e
 		},
 	};
 }
-
-describe("expandSkillUrls", () => {
-	it("expands a basic skill:// URI to an absolute path", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "python skill://valid-skill/scripts/init.py";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("expands multiple skill:// URIs in one command", () => {
-		const skills = [
-			createSkill("first-skill", "/tmp/skills/first-skill"),
-			createSkill("second-skill", "/tmp/skills/second-skill"),
-		];
-		const command = "cp skill://first-skill/a.txt skill://second-skill/b.txt";
-		const firstPath = path.join(skills[0].baseDir, "a.txt");
-		const secondPath = path.join(skills[1].baseDir, "b.txt");
-
-		expect(expandSkillUrls(command, skills)).toBe(`cp ${shellEscape(firstPath)} ${shellEscape(secondPath)}`);
-	});
-
-	it("throws ToolError for unknown skills with available names", () => {
-		const skills = [
-			createSkill("first-skill", "/tmp/skills/first-skill"),
-			createSkill("second-skill", "/tmp/skills/second-skill"),
-		];
-
-		expect(() => expandSkillUrls("python skill://missing/run.py", skills)).toThrow(
-			"Unknown skill: missing. Available: first-skill, second-skill",
-		);
-	});
-
-	it("throws ToolError for path traversal attempts", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-
-		expect(() => expandSkillUrls("cat skill://valid-skill/../../../etc/passwd", skills)).toThrow(
-			"Path traversal (..) is not allowed in skill:// URLs",
-		);
-	});
-
-	it("returns command unchanged when there are no skill:// tokens", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "git status";
-
-		expect(expandSkillUrls(command, skills)).toBe(command);
-	});
-
-	it("does not expand non-skill internal URIs", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "echo agent://1 artifact://abc rule://security";
-
-		expect(expandSkillUrls(command, skills)).toBe(command);
-	});
-
-	it("expands URI in double quotes", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = 'python "skill://valid-skill/scripts/init.py"';
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("expands URI in single quotes", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "python 'skill://valid-skill/scripts/init.py'";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("shell-escapes paths with spaces", () => {
-		const skills = [createSkill("space-skill", "/tmp/skills/with space")];
-		const command = "python skill://space-skill/scripts/my%20file.py";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/my file.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("shell-escapes paths containing single quotes", () => {
-		const skills = [createSkill("quote-skill", "/tmp/skills/with'quote")];
-		const command = "python skill://quote-skill/scripts/init.py";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("resolves skill://name with no relative path to the skill directory", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "printf '%s\n' skill://valid-skill";
-
-		expect(expandSkillUrls(command, skills)).toBe(`printf '%s\n' ${shellEscape(skills[0].baseDir)}`);
-	});
-
-	it("returns command unchanged when no skills are loaded", () => {
-		const command = "python skill://valid-skill/scripts/init.py";
-		expect(expandSkillUrls(command, [])).toBe(command);
-	});
-
-	it("throws ToolError when traversal is attempted with encoded segments", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		expect(() => expandSkillUrls("cat skill://valid-skill/%2E%2E/%2E%2E/etc/passwd", skills)).toThrow(ToolError);
-	});
-});
 
 describe("expandInternalUrls", () => {
 	it("expands skill/agent/artifact/memory/rule URLs in one command", async () => {

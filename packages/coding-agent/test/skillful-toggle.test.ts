@@ -131,6 +131,27 @@ describe("skillful setting and /skillful session toggle", () => {
 		).toBe(1);
 	});
 
+	it("announces URI syntax without catalog rows for hidden-only skills mid-session", async () => {
+		await Bun.write(
+			path.join(tempDir, ".omp", "skills", "test-skill", "SKILL.md"),
+			`---\nname: test-skill\ndescription: A hidden test skill.\ndisable-model-invocation: true\n---\n# Test Skill\n`,
+		);
+		const s = await createSession({ skillful: false });
+		expect(s.skills.map(skill => skill.name)).toEqual(["test-skill"]);
+		s.agent.appendMessage(createUserMessage("earlier work"));
+
+		expect(await s.toggleSkillful()).toBe(true);
+
+		const notices = s.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "skillful-notice",
+		);
+		expect(notices.length).toBe(1);
+		const notice = notices[0];
+		const content = notice.role === "custom" ? notice.content : "";
+		expect(content).toContain("skill://<name>");
+		expect(content).not.toContain("- test-skill:");
+	});
+
 	it("adds no notice when disabling mid-session", async () => {
 		const s = await createSession();
 		s.agent.appendMessage(createUserMessage("earlier work"));
