@@ -1,5 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
+import { OMP_AGENT_ID_ENV, OMP_SESSION_ID_ENV } from "../session/agent-identity-env";
 import { OutputSink } from "../session/streaming-output";
 import type { ToolSession } from "../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
@@ -282,6 +283,8 @@ export const MANAGED_KERNEL_ENV_KEYS = [
 	"PI_TOOL_BRIDGE_TOKEN",
 	"PI_TOOL_BRIDGE_SESSION",
 	"PI_EVAL_LOCAL_ROOTS",
+	OMP_SESSION_ID_ENV,
+	OMP_AGENT_ID_ENV,
 ] as const;
 
 interface ManagedKernelEnvOptions {
@@ -290,6 +293,10 @@ interface ManagedKernelEnvOptions {
 	bridgeSessionId?: string;
 	bridge?: { url: string; token: string };
 	localRoots?: Record<string, string>;
+	/** Spawning session id, exported so eval `subprocess` children inherit it. */
+	ompSessionId?: string;
+	/** Spawning agent/task id (falls back to the session id upstream). */
+	ompAgentId?: string;
 }
 interface ManagedKernelEnvPolicy {
 	sparse?: boolean;
@@ -315,6 +322,8 @@ export function buildManagedKernelEnvPatch(
 			patch.PI_TOOL_BRIDGE_SESSION = options.bridgeSessionId ?? "";
 		}
 		if (localRoots) patch.PI_EVAL_LOCAL_ROOTS = JSON.stringify(localRoots);
+		if (options.ompSessionId) patch[OMP_SESSION_ID_ENV] = options.ompSessionId;
+		if (options.ompAgentId) patch[OMP_AGENT_ID_ENV] = options.ompAgentId;
 		return patch;
 	}
 	return {
@@ -324,6 +333,8 @@ export function buildManagedKernelEnvPatch(
 		PI_TOOL_BRIDGE_TOKEN: options.bridge?.token ?? null,
 		PI_TOOL_BRIDGE_SESSION: options.bridge && options.bridgeSessionId ? options.bridgeSessionId : null,
 		PI_EVAL_LOCAL_ROOTS: localRoots && Object.keys(localRoots).length > 0 ? JSON.stringify(localRoots) : null,
+		[OMP_SESSION_ID_ENV]: options.ompSessionId ?? null,
+		[OMP_AGENT_ID_ENV]: options.ompAgentId ?? null,
 	};
 }
 

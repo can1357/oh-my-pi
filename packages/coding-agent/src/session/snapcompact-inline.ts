@@ -17,6 +17,7 @@
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { YAML } from "bun";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
 import contextStub from "../prompts/system/snapcompact-context-stub.md" with { type: "text" };
@@ -230,6 +231,51 @@ interface BuiltInlineToolResultCandidate {
 }
 
 /**
+ * Head shape of a structured envelope: an `ok:` YAML envelope, a JSON
+ * object/array, or a YAML document marker.
+ */
+const STRUCTURED_HEAD_PATTERN = /^(?:ok:\s*(?:true|false)|\{|\[|---)/;
+/** Bytes of the head sniffed for a parseable mapping. */
+const STRUCTURED_SNIFF_BYTES = 4096;
+
+/** First line with a non-whitespace character, leading indentation stripped. */
+function firstNonEmptyLine(text: string): string {
+	let start = 0;
+	while (start < text.length) {
+		let end = text.indexOf("\n", start);
+		if (end === -1) end = text.length;
+		const line = text.slice(start, end).trim();
+		if (line.length > 0) return line;
+		start = end + 1;
+	}
+	return "";
+}
+
+/**
+ * Whether a tool result is machine-structured output (a YAML/JSON envelope)
+ * rather than prose.
+ *
+ * Rasterization trades exact glyphs for density, which is a good trade for
+ * prose and a bad one for structured data: an agent re-reads an envelope for
+ * exact ids, keys, and numbers, and an OCR-ambiguous digit is a wrong answer
+ * rather than a slightly worse summary. Structured results therefore always
+ * ship as text.
+ */
+function isStructuredToolResult(text: string): boolean {
+	const head = text.length > STRUCTURED_SNIFF_BYTES ? text.slice(0, STRUCTURED_SNIFF_BYTES) : text;
+	if (STRUCTURED_HEAD_PATTERN.test(firstNonEmptyLine(head))) return true;
+	// Envelope whose first key is not `ok` — still structured if the head
+	// parses as a mapping carrying one. A head cut mid-structure throws, which
+	// is the same answer as "not structured".
+	try {
+		const parsed = YAML.parse(head);
+		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && "ok" in parsed;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Build the exact same text payload and planning candidate for estimation and
  * live transformation. Image blocks do not suppress co-resident text.
  */
@@ -258,7 +304,13 @@ function buildInlineToolResultCandidate(
 		candidate: {
 			id: toolCallId,
 			textTokens,
-			frames: !isError && textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
+			// `frames: 0` is the single skip signal `planInlineSwaps` honors, so
+			// exempting here keeps the transform and the /context estimate in
+			// agreement automatically — both build candidates through here.
+			frames:
+				!isError && textTokens >= MIN_TOOL_RESULT_TOKENS && !isStructuredToolResult(text)
+					? snapcompact.frames(text, { shape })
+					: 0,
 			isError,
 		},
 		text,

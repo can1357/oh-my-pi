@@ -99,6 +99,15 @@ export interface PythonExecutorOptions {
 	artifactPath?: string;
 	artifactId?: string;
 	/**
+	 * Harness session id, exported to the kernel as `OMP_SESSION_ID` so
+	 * `subprocess` children of an eval cell can correlate with the agent turn.
+	 * Unrelated to {@link PythonExecutorOptions.sessionId}, which only
+	 * namespaces the retained kernel.
+	 */
+	ompSessionId?: string;
+	/** Harness agent/task id, exported to the kernel as `OMP_AGENT_ID`. */
+	ompAgentId?: string;
+	/**
 	 * On-disk roots the prelude helpers (`read`/`write`) substitute for
 	 * internal-URL schemes (e.g. `{ local: "/…/artifacts/local" }`). Exported to
 	 * the kernel as `PI_EVAL_LOCAL_ROOTS` (JSON) so `write("local://x")` lands

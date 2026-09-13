@@ -6,7 +6,7 @@ import {
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
-import { skillCapability } from "../capability/skill";
+import { skillCapability, type SkillFrontmatter } from "../capability/skill";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, isUserSourceEnabled, loadCapability } from "../discovery";
@@ -32,8 +32,29 @@ export interface Skill {
 	 * every `skill://` resource access must realpath-resolve within it.
 	 */
 	containRoot?: string;
+	/**
+	 * Tool names the skill declares it needs (`metadata.requires` frontmatter).
+	 * The subagent preflight refuses to spawn an agent whose tool list lacks
+	 * one of these when the assignment references the skill.
+	 */
+	requires?: string[];
 	/** Source metadata for display */
 	_source?: SourceMeta;
+}
+
+/**
+ * Tool names a skill's `metadata.requires` frontmatter declares. `undefined`
+ * when the key is absent or carries nothing usable, so the property stays off
+ * the runtime skill for the overwhelming majority that declare no requirement.
+ */
+export function skillRequiredTools(frontmatter: SkillFrontmatter | undefined): string[] | undefined {
+	const requires = frontmatter?.metadata?.requires;
+	if (!Array.isArray(requires)) return undefined;
+	const tools = requires
+		.filter((tool): tool is string => typeof tool === "string")
+		.map(tool => tool.trim())
+		.filter(tool => tool.length > 0);
+	return tools.length > 0 ? tools : undefined;
 }
 
 export interface SkillWarning {
@@ -111,6 +132,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			requires: skillRequiredTools(capSkill.frontmatter),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -255,6 +277,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				requires: skillRequiredTools(capSkill.frontmatter),
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -293,6 +316,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					requires: skillRequiredTools(capSkill.frontmatter),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -394,6 +418,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			requires: skillRequiredTools(capSkill.frontmatter),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);

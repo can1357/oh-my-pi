@@ -1,3 +1,4 @@
+import { resolveAgentIdentity } from "../../session/agent-identity-env";
 import type { ToolSession } from "../../tools";
 import {
 	type ExecutorBackend,
@@ -26,18 +27,30 @@ function readInterpreterSetting(session: ToolSession): string | undefined {
 	return sharedReadInterpreterSetting(session, "python.interpreter");
 }
 
-/** Resolve the retained Python kernel identity owned by a tool session. */
+/**
+ * Resolve the retained Python kernel identity owned by a tool session.
+ *
+ * `ompSessionId`/`ompAgentId` are the harness session/agent ids exported into
+ * the kernel process (see `agent-identity-env`), so `subprocess` children of an
+ * eval cell can correlate with the turn that ran them. They are unrelated to
+ * `sessionId`, which namespaces the retained kernel.
+ */
 export function resolvePythonKernelIdentity(session: ToolSession): {
 	cwd: string;
 	sessionId: string;
 	interpreter: string | undefined;
 	kernelOwnerId: string | undefined;
+	ompSessionId: string | undefined;
+	ompAgentId: string | undefined;
 } {
+	const identity = resolveAgentIdentity(session);
 	return {
 		cwd: session.cwd,
 		sessionId: namespaceSessionId(session.getEvalSessionId?.() ?? defaultEvalSessionId(session)),
 		interpreter: readInterpreterSetting(session),
 		kernelOwnerId: session.getEvalKernelOwnerId?.() ?? undefined,
+		ompSessionId: identity.sessionId,
+		ompAgentId: identity.agentId,
 	};
 }
 
@@ -65,6 +78,8 @@ export default {
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
 			localRoots: resolveEvalUrlRoots(opts.session),
 			kernelOwnerId: identity.kernelOwnerId,
+			ompSessionId: identity.ompSessionId,
+			ompAgentId: identity.ompAgentId,
 			reset: opts.reset,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,

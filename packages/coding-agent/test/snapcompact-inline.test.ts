@@ -208,6 +208,41 @@ describe("SnapcompactInlineTransformer", () => {
 		expect((context.messages[0] as { content: string }).content).toBe("first user prompt");
 	});
 
+	it("never images structured envelopes, though prose of the same weight is imaged", async () => {
+		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer(options);
+		const model = makeModel();
+		// One per detection branch: `ok:` head, JSON head, and a mapping whose
+		// `ok` key only shows up once the head is parsed.
+		const envelopes: Record<string, string> = {
+			yamlOkHead: `ok: true\nschemaVersion: '2'\ndata:\n  text: ${LARGE}`,
+			jsonHead: JSON.stringify({ ok: true, data: { text: LARGE } }),
+			okAfterFirstKey: `schemaVersion: '2'\nok: false\nerror:\n  code: rate_limited\n  message: ${LARGE}`,
+		};
+		for (const [label, envelope] of Object.entries(envelopes)) {
+			const context: Context = {
+				systemPrompt: ["You are a coding agent."],
+				messages: [userMessage("go"), toolResult("call_env", envelope), toolResult("call_last", SMALL)],
+			};
+			const result = await transformer.transform(context, model);
+			expect(imageCount(result), label).toBe(0);
+			expect((result.messages[1] as ToolResultMessage).content, label).toEqual([{ type: "text", text: envelope }]);
+			// The /context estimate must agree with the live transform.
+			expect(
+				estimateInlineSavings({ options, model, systemPrompt: [], messages: context.messages }).toolResults
+					?.swapped,
+				label,
+			).toBe(0);
+		}
+
+		// Control: identical position and size, prose instead of an envelope.
+		const prose: Context = {
+			systemPrompt: ["You are a coding agent."],
+			messages: [userMessage("go"), toolResult("call_env", LARGE), toolResult("call_last", SMALL)],
+		};
+		expect(imageCount(await transformer.transform(prose, model))).toBeGreaterThan(0);
+	});
+
 	it("compacts text in mixed tool results while preserving every source image and the input context", async () => {
 		const options = withTestShape({ renderSystemPrompt: "all", renderToolResults: true });
 		const renderedTexts: string[] = [];

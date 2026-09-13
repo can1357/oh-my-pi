@@ -25,6 +25,7 @@ import { InternalUrlRouter } from "../internal-urls";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
+import { agentIdentityEnv, resolveAgentIdentity } from "../session/agent-identity-env";
 import type {
 	ClientBridgeTerminalExitStatus,
 	ClientBridgeTerminalHandle,
@@ -1053,13 +1054,18 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			command = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
 		}
 
+		// Session/agent identity: seeded into every bash child so external CLIs
+		// can correlate their side effects with this turn, and reused as the
+		// internal-URL session scope so both read the same id.
+		const identity = resolveAgentIdentity(this.session);
+		const identityEnv = agentIdentityEnv(this.session);
 		const internalUrlOptions: InternalUrlExpansionOptions = {
 			skills: this.session.skills ?? [],
 			attachments: this.session.getImageAttachments?.() ?? [],
 			internalRouter: InternalUrlRouter.instance(),
 			cwd: this.session.cwd,
 			sessionFile: this.session.getSessionFile() ?? undefined,
-			sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
+			sessionId: identity.sessionId,
 			agentRegistry: this.session.agentRegistry,
 			rules: this.session.activeRules,
 			localOptions: {
@@ -1068,7 +1074,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			},
 		};
 		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
-		const resolvedEnv = env
+		const callerEnv = env
 			? Object.fromEntries(
 					await Promise.all(
 						Object.entries(env).map(async ([key, value]) => [
@@ -1082,6 +1088,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					),
 				)
 			: undefined;
+		// Caller-supplied values win: an explicit `env` entry may deliberately
+		// re-point a child's identity. Stays `undefined` when there is nothing
+		// to inject at all (detached tools, unit sessions) so the executor keeps
+		// its no-overlay path.
+		const resolvedEnv: Record<string, string> | undefined =
+			callerEnv || Object.keys(identityEnv).length > 0 ? { ...identityEnv, ...callerEnv } : undefined;
 
 		// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
 		if (cwd?.includes("://") || cwd?.includes("local:/")) {

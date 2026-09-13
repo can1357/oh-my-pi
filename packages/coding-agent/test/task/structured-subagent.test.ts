@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadSkillsFromDir, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -42,10 +43,12 @@ function session(
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
+		skills?: Skill[];
 	} = {},
 ): ToolSession {
 	return {
 		cwd: options.cwd ?? "/tmp",
+		skills: options.skills ?? [],
 		hasUI: false,
 		outputSchema: options.outputSchema,
 		settings:
@@ -129,6 +132,44 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
+	});
+
+	it("refuses a spawn when an assignment's skill requires a tool the agent lacks", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-requires-"));
+		try {
+			await fs.mkdir(path.join(dir, "shipit"), { recursive: true });
+			await fs.writeFile(
+				path.join(dir, "shipit", "SKILL.md"),
+				"---\nname: shipit\ndescription: Ship the build\nmetadata:\n  requires:\n    - bash\n---\n\nRun the deploy script.\n",
+			);
+			const { skills } = await loadSkillsFromDir({ dir, source: "custom:user" });
+			expect(skills.map(skill => skill.requires)).toEqual([["bash"]]);
+
+			const skillRequest = request({
+				session: session({ skills }),
+				assignment: "Follow skill://shipit exactly, then report.",
+			});
+
+			// AGENT declares read/write/ast_grep — no bash.
+			mockDiscovery();
+			await expect(resolveEffectiveSubagentPolicy(skillRequest)).rejects.toThrow(
+				"skill shipit requires tool bash; agent worker lacks it",
+			);
+
+			// Unreferenced skills never gate a spawn.
+			vi.restoreAllMocks();
+			mockDiscovery();
+			await expect(
+				resolveEffectiveSubagentPolicy(request({ session: session({ skills }), assignment: "Just look around." })),
+			).resolves.toMatchObject({ agentName: "worker" });
+
+			// `exec` expands to bash, so the requirement is satisfied.
+			vi.restoreAllMocks();
+			mockDiscovery({ ...AGENT, tools: ["read", "exec"] });
+			await expect(resolveEffectiveSubagentPolicy(skillRequest)).resolves.toMatchObject({ agentName: "worker" });
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
