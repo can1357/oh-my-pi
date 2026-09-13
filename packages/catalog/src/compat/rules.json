@@ -145,6 +145,7 @@
 		"providers/moonshot.kdl",
 		"providers/muse-code.kdl",
 		"providers/nanogpt.kdl",
+		"providers/native-tools.kdl",
 		"providers/novita.kdl",
 		"providers/nvidia.kdl",
 		"providers/ollama-cloud.kdl",
@@ -154,6 +155,7 @@
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
 		"providers/openrouter.kdl",
+		"providers/output-limits.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
 		"providers/synthetic.kdl",
@@ -12083,6 +12085,15 @@
 				}
 			},
 			{
+				"source": "providers/native-tools.kdl:2",
+				"apis": [
+					"cursor-agent"
+				],
+				"catalog": {
+					"requiresNativeTools": true
+				}
+			},
+			{
 				"source": "providers/novita.kdl:6",
 				"class": "glm",
 				"providers": [
@@ -14159,6 +14170,17 @@
 				},
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/output-limits.kdl:2",
+				"apis": [
+					"openai-codex-responses",
+					"cursor-agent",
+					"gitlab-duo-agent"
+				],
+				"catalog": {
+					"omitMaxOutputTokens": true
 				}
 			},
 			{

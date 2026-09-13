@@ -256,6 +256,9 @@ export function compileCascade(sources: readonly { file: string; text: string }[
 				case "class":
 					parseScope(node, { class: requiredName(node) }, CLASS_CHILDREN, rules);
 					break;
+				case "on-api":
+					parseScope(node, { apis: stringArguments(node) }, PROVIDER_CHILDREN, rules);
+					break;
 				case "provider":
 					parseScope(node, { providers: [requiredName(node)] }, PROVIDER_CHILDREN, rules);
 					break;

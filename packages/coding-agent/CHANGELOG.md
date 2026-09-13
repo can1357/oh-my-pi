@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can run `/btw`-style side turns with `ctx.runEphemeralTurn()`, optionally omitting tool definitions and setting supported output-token and outbound context-byte caps (Codex rejects output-token caps before inference), without adding to session history ([#11657](https://github.com/can1357/oh-my-pi/pull/11657) by [@gokceneraslan](https://github.com/gokceneraslan)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

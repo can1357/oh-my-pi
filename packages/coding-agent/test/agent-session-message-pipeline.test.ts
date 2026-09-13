@@ -19,10 +19,20 @@ import {
 	type TextContent,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import {
+	ExtensionRunner,
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
@@ -32,6 +42,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -90,6 +101,344 @@ describe("AgentSession message pipeline", () => {
 			await session.dispose();
 		}
 	});
+
+	function sideSession(chunks: string[], finalFlush = false): AgentSession {
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: getBundledModel("openai", "gpt-4o-mini"), systemPrompt: [], tools: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			obfuscator: finalFlush ? new SecretObfuscator([{ type: "plain", content: "test-secret" }]) : undefined,
+			sideStreamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				const message = createAssistantMessage(chunks.join(""));
+				for (const delta of chunks) stream.push({ type: "text_delta", contentIndex: 0, delta, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+				return stream;
+			},
+		});
+		sessions.push(session);
+		return session;
+	}
+
+	it.each([false, true])("awaits ordered async delivery, final flush=%s", async finalFlush => {
+		const chunks = ["A", finalFlush ? "$" : "B"];
+		const session = sideSession(chunks, finalFlush);
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		const enteredFirst = Promise.withResolvers<void>();
+		const enteredSecond = Promise.withResolvers<void>();
+		const delivered: string[] = [];
+		let settled = false;
+		const turn = session
+			.runEphemeralTurn({
+				promptText: "Question?",
+				onTextDelta: async delta => {
+					if (delta === "A") {
+						enteredFirst.resolve();
+						await first.promise;
+					} else {
+						enteredSecond.resolve();
+						await second.promise;
+					}
+					delivered.push(delta);
+				},
+			})
+			.then(result => {
+				settled = true;
+				return result;
+			});
+		await enteredFirst.promise;
+		expect(delivered).toEqual([]);
+		expect(settled).toBe(false);
+		first.resolve();
+		await enteredSecond.promise;
+		expect(delivered).toEqual(["A"]);
+		expect(settled).toBe(false);
+		second.resolve();
+		expect((await turn).replyText).toBe(chunks.join(""));
+		expect(delivered).toEqual(chunks);
+	});
+
+	it.each([false, true])("propagates async delivery failure, final flush=%s", async finalFlush => {
+		const session = sideSession(["A", finalFlush ? "$" : "B"], finalFlush);
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Question?",
+				onTextDelta: async delta => {
+					if (delta !== "A") throw new Error("delivery failed");
+				},
+			}),
+		).rejects.toThrow("delivery failed");
+	});
+
+	it.each([false, true])("aborts side inference when delivery fails, caller signal=%s", async withCallerSignal => {
+		const caller = new AbortController();
+		const message = createAssistantMessage("answer");
+		let providerSignal: AbortSignal | undefined;
+		let stream: AssistantMessageEventStream | undefined;
+		let delivered = 0;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: getBundledModel("openai", "gpt-4o-mini"), systemPrompt: [], tools: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (_model, _context, options) => {
+				providerSignal = options?.signal;
+				stream = new AssistantMessageEventStream();
+				// Mid-stream: no terminal event, so an unaborted transport keeps producing.
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "A", partial: message });
+				return stream;
+			},
+		});
+		sessions.push(session);
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Question?",
+				signal: withCallerSignal ? caller.signal : undefined,
+				onTextDelta: async () => {
+					delivered++;
+					throw new Error("delivery failed");
+				},
+			}),
+		).rejects.toThrow("delivery failed");
+		expect(providerSignal?.aborted).toBe(true);
+		expect(caller.signal.aborted).toBe(false);
+		// Further provider output is never consumed: the loop is gone with the request.
+		stream!.push({ type: "text_delta", contentIndex: 0, delta: "late", partial: message });
+		expect(delivered).toBe(1);
+	});
+
+	it.each(["tool", "caller"] as const)(
+		"stops registered-tool side inference on %s cancellation",
+		async cancellation => {
+			const runtime = new ExtensionRuntime();
+			const manager = SessionManager.inMemory();
+			const toolAbort = new AbortController();
+			const caller = new AbortController();
+			const started = Promise.withResolvers<void>();
+			let providerSignal: AbortSignal | undefined;
+			let delivered = 0;
+			let providerStream: AssistantMessageEventStream | undefined;
+			const extension = await loadExtensionFromFactory(
+				api => {
+					api.registerTool({
+						name: "consult",
+						label: "Consult",
+						description: "Consult current context",
+						parameters: api.arktype({}),
+						async execute(_id, _params, _signal, _update, ctx) {
+							await ctx.runEphemeralTurn!({
+								promptText: "Question?",
+								signal: caller.signal,
+								onTextDelta: () => {
+									delivered++;
+								},
+							});
+							return { content: [{ type: "text", text: "done" }], details: {} };
+						},
+					});
+				},
+				manager.getCwd(),
+				new EventBus(),
+				runtime,
+				"tool-side-cancellation",
+			);
+			const registry = createModelRegistryStub() as unknown as ModelRegistry;
+			const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, registry);
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: { model: getBundledModel("openai", "gpt-4o-mini"), systemPrompt: [], tools: [] },
+				}),
+				sessionManager: manager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: registry,
+				extensionRunner: runner,
+				sideStreamFn: (_model, _context, options) => {
+					providerSignal = options?.signal;
+					providerStream = new AssistantMessageEventStream();
+					providerSignal?.addEventListener(
+						"abort",
+						() => {
+							providerStream!.push({
+								type: "error",
+								reason: "aborted",
+								error: { ...createAssistantMessage(""), stopReason: "aborted" },
+							});
+						},
+						{ once: true },
+					);
+					started.resolve();
+					return providerStream;
+				},
+			});
+			sessions.push(session);
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+			const tool = new RegisteredToolAdapter(extension.tools.get("consult")!, runner);
+			const execution = tool.execute("consult-1", {}, toolAbort.signal).catch(() => undefined);
+			try {
+				await started.promise;
+				(cancellation === "tool" ? toolAbort : caller).abort();
+				expect(providerSignal?.aborted).toBe(true);
+				await execution;
+				providerStream!.push({
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "late",
+					partial: createAssistantMessage("late"),
+				});
+				await Bun.sleep(10);
+				expect(delivered).toBe(0);
+			} finally {
+				caller.abort();
+				await execution;
+			}
+		},
+	);
+
+	it.each(["handler timeout", "caller cancellation"] as const)(
+		"stops side inference and delivery on %s, including through a saved context",
+		async cancellation => {
+			const runtime = new ExtensionRuntime();
+			const manager = SessionManager.inMemory();
+			const caller = new AbortController();
+			const started = Promise.withResolvers<void>();
+			let providerSignal: AbortSignal | undefined;
+			let delivered = 0;
+			let timer: Timer | undefined;
+			const extension = await loadExtensionFromFactory(
+				api => {
+					api.on("session_start", async () => {
+						await saved.runEphemeralTurn!({
+							promptText: "Question?",
+							signal: caller.signal,
+							onTextDelta: () => {
+								delivered++;
+							},
+						});
+					});
+				},
+				manager.getCwd(),
+				new EventBus(),
+				runtime,
+				"ephemeral-cancellation-test",
+			);
+			const registry = createModelRegistryStub() as unknown as ModelRegistry;
+			const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, registry);
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: { model: getBundledModel("openai", "gpt-4o-mini"), systemPrompt: [], tools: [] },
+				}),
+				sessionManager: manager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: registry,
+				extensionRunner: runner,
+				sideStreamFn: (_model, _context, options) => {
+					providerSignal = options?.signal;
+					const stream = new AssistantMessageEventStream();
+					const message = createAssistantMessage("answer");
+					timer = setInterval(
+						() => stream.push({ type: "text_delta", contentIndex: 0, delta: "answer", partial: message }),
+						10,
+					);
+					providerSignal?.addEventListener(
+						"abort",
+						() => {
+							clearInterval(timer);
+							stream.push({ type: "error", reason: "aborted", error: { ...message, stopReason: "aborted" } });
+						},
+						{ once: true },
+					);
+					started.resolve();
+					return stream;
+				},
+			});
+			sessions.push(session);
+			// Bind runtime actions before emitting the handler under test.
+			const handler = extension.handlers.get("session_start")!;
+			extension.handlers.delete("session_start");
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+			extension.handlers.set("session_start", handler);
+			const saved = runner.createContext();
+			testSetExtensionHandlerTimeoutMs(cancellation === "handler timeout" ? 100 : 1000);
+			try {
+				const emission = runner.emit({ type: "session_start" });
+				await started.promise;
+				if (cancellation === "caller cancellation") caller.abort();
+				await emission;
+				expect(providerSignal?.aborted).toBe(true);
+				const atCancellation = delivered;
+				await Bun.sleep(30);
+				expect(delivered).toBe(atCancellation);
+			} finally {
+				caller.abort();
+				clearInterval(timer);
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		},
+	);
+
+	it.each(["context", "before_provider_request", "after_provider_response"] as const)(
+		"rejects side turns inside %s hooks, including saved contexts",
+		async hook => {
+			const runtime = new ExtensionRuntime();
+			const manager = SessionManager.inMemory();
+			const failures: string[] = [];
+			const extension = await loadExtensionFromFactory(
+				api => {
+					const handler = async (_event: unknown, ctx: ExtensionContext) => {
+						await Promise.resolve();
+						for (const context of [ctx, saved]) {
+							try {
+								await context.runEphemeralTurn!({ promptText: "Question?" });
+							} catch (error) {
+								failures.push(String(error));
+							}
+						}
+					};
+					api.on("context", handler);
+					api.on("before_provider_request", handler);
+					api.on("after_provider_response", handler);
+				},
+				manager.getCwd(),
+				new EventBus(),
+				runtime,
+				"ephemeral-reentrancy-test",
+			);
+			const registry = createModelRegistryStub() as unknown as ModelRegistry;
+			const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, registry);
+			const inference = vi.fn(() => {
+				const stream = new AssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Answer") });
+				return stream;
+			});
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: { model: getBundledModel("openai", "gpt-4o-mini"), systemPrompt: [], tools: [] },
+				}),
+				sessionManager: manager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: registry,
+				extensionRunner: runner,
+				sideStreamFn: inference,
+			});
+			sessions.push(session);
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+			const saved = runner.createContext();
+			if (hook === "context") await runner.emitContext([]);
+			else if (hook === "before_provider_request") await runner.emitBeforeProviderRequest({});
+			else await runner.emitAfterProviderResponse({ status: 200, headers: {} });
+			expect(failures).toHaveLength(2);
+			for (const failure of failures) expect(failure).toContain(`cannot be called from a ${hook} hook`);
+			expect(inference).not.toHaveBeenCalled();
+			await saved.runEphemeralTurn!({ promptText: "Question?" });
+			expect(inference).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it("applies transformContext before convertToLlm", async () => {
 		const inputMessages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: Date.now() }];
@@ -408,11 +757,13 @@ describe("AgentSession message pipeline", () => {
 		expect(requestOnPayload).toHaveBeenCalledWith({ original: true, session: true }, undefined);
 		expect(result).toEqual({ original: true, session: true });
 	});
-	it("keeps ephemeral side-channel cache key separate from provider routing while preserving websocket state", async () => {
+	it("lets an extension stream a context-aware side turn without persisting its exchange", async () => {
 		const api = "test-ephemeral-side-channel";
 		let capturedOptions: SimpleStreamOptions | undefined;
+		let capturedContext: Context | undefined;
 		registerCustomApi(api, (_model, _context, options) => {
 			capturedOptions = options;
+			capturedContext = _context;
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage("Answer");
@@ -435,25 +786,50 @@ describe("AgentSession message pipeline", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		const promptCacheKey = "inherited-parent-cache";
+		const sessionManager = SessionManager.inMemory();
+		const modelRegistry = createModelRegistryStub() as unknown as ModelRegistry;
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			sessionManager.getCwd(),
+			sessionManager,
+			modelRegistry,
+		);
 		const session = new AgentSession({
+			extensionRunner: runner,
 			agent: new Agent({
 				promptCacheKey,
 				initialState: {
 					model,
 					systemPrompt: ["system prompt"],
-					messages: [],
+					messages: [{ role: "user", content: "The experiment codename is zephyr-42.", timestamp: 1 }],
 					tools: [],
 				},
 			}),
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
+			modelRegistry,
 			preferWebsockets: true,
 		});
 		sessions.push(session);
 		const cacheSessionId = session.sessionId;
 
-		const result = await session.runEphemeralTurn({ promptText: "Question?" });
+		await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+		const context = runner.createContext();
+		if (!context.runEphemeralTurn) throw new Error("Host did not expose side turns");
+		const messagesBefore = structuredClone(session.agent.state.messages);
+		const entriesBefore = structuredClone(sessionManager.getEntries());
+		const deltas: string[] = [];
+		const result = await context.runEphemeralTurn({
+			promptText: "Question?",
+			onTextDelta: delta => {
+				deltas.push(delta);
+			},
+		});
+		expect(deltas.join("")).toBe("Answer");
+		expect(JSON.stringify(capturedContext?.messages)).toContain("zephyr-42");
+		expect(session.agent.state.messages).toEqual(messagesBefore);
+		expect(sessionManager.getEntries()).toEqual(entriesBefore);
 
 		expect(result.replyText).toBe("Answer");
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);
@@ -559,6 +935,242 @@ describe("AgentSession message pipeline", () => {
 		expect(agent.state.messages).toBe(mainMessages);
 		expect(agent.state.messages).toEqual(mainSnapshot);
 		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
+	});
+
+	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
+		"encodes the output cap and omits tools in the %s HTTP request",
+		async api => {
+			const model = buildModel({
+				id: "side-stream-model",
+				name: "Side Stream Model",
+				api,
+				provider: "test-provider",
+				baseUrl: "https://provider.invalid",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			});
+			const bodies: Record<string, unknown>[] = [];
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["system prompt"],
+						messages: [],
+						tools: [
+							{
+								name: "local_tool",
+								label: "Local tool",
+								description: "A local tool",
+								parameters: { type: "object", properties: {} },
+								execute: async () => ({ content: [], details: {} }),
+							},
+						],
+					},
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				sideStreamFn: (target, context, options) =>
+					streamSimple(target, context, {
+						...options,
+						apiKey: "test-key",
+						fetch: async (_url, init) => {
+							bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+							// Exercise the real encoder but stop at the HTTP boundary, without inference.
+							return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+						},
+					}),
+			});
+			sessions.push(session);
+			await expect(
+				session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321, tools: false }),
+			).rejects.toThrow();
+			expect(bodies).toHaveLength(1);
+			expect(bodies[0].tools ?? []).toEqual([]);
+			if (api === "ollama-chat") expect(bodies[0].options).toMatchObject({ num_predict: 321 });
+			else expect(bodies[0][api === "anthropic-messages" ? "max_tokens" : "max_output_tokens"]).toBe(321);
+		},
+	);
+
+	it.each([
+		["Codex", getBundledModel("openai-codex", "gpt-5.4")],
+		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
+			api =>
+				[
+					api,
+					buildModel({ ...getBundledModel("openai", "gpt-4o"), api, provider: "custom", compat: undefined }),
+				] as const,
+		),
+		[
+			"custom Codex route",
+			buildModel({
+				...getBundledModel("openai-codex", "gpt-5.4"),
+				provider: "custom",
+				id: "opaque-model",
+				omitMaxOutputTokens: false,
+			}),
+		],
+		[
+			"Ollama Cloud",
+			buildModel({
+				...getBundledModel("openai", "gpt-4o"),
+				api: "ollama-chat",
+				provider: "ollama-cloud",
+				omitMaxOutputTokens: true,
+			}),
+		],
+		[
+			"Completions proxy",
+			buildModel({
+				...getBundledModel("openai", "gpt-4o"),
+				api: "openai-completions",
+				provider: "custom",
+				omitMaxOutputTokens: true,
+			}),
+		],
+	])("rejects capped %s side turns before inference but permits uncapped turns", async (_label, model) => {
+		let calls = 0;
+		const sideStreamFn: StreamFn = () => {
+			calls++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("Uncapped answer");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "Uncapped answer", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		await expect(session.runEphemeralTurn({ promptText: "Question?", maxTokens: 32 })).rejects.toThrow(
+			"does not support maxTokens",
+		);
+		expect(calls).toBe(0);
+		expect((await session.runEphemeralTurn({ promptText: "Question?" })).replyText).toBe("Uncapped answer");
+		expect(calls).toBe(1);
+	});
+
+	it.each([
+		["expands", "short-secret"],
+		["shrinks", "long-secret-".repeat(100)],
+	])("measures the outbound context when obfuscation %s it", async (change, secret) => {
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const context: Context = {
+			systemPrompt: [secret],
+			messages: [{ role: "user", content: secret, timestamp: 1 }],
+			tools: [],
+		};
+		const before = structuredClone(context);
+		const outbound = obfuscateProviderContext(obfuscator, context);
+		const plainBytes = Buffer.byteLength(JSON.stringify(context), "utf8");
+		const outboundBytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
+		const agent = new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } });
+		vi.spyOn(agent, "buildSideRequestContext").mockResolvedValue(context);
+		let capturedContext: Context | undefined;
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			obfuscator,
+			sideStreamFn: (_model, sent) => {
+				capturedContext = sent;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		sessions.push(session);
+
+		if (change === "expands") {
+			expect(outboundBytes).toBeGreaterThan(plainBytes);
+			await expect(
+				session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: plainBytes }),
+			).rejects.toThrow("context exceeds");
+			expect(capturedContext).toBeUndefined();
+		} else {
+			expect(outboundBytes).toBeLessThan(plainBytes);
+			expect(
+				(await session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: outboundBytes })).replyText,
+			).toBe("Answer");
+			expect(capturedContext).toEqual(outbound);
+		}
+		expect(context).toEqual(before);
+	});
+
+	it.each([0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+		"rejects invalid ephemeral caps (%s) before dispatch",
+		async cap => {
+			let calls = 0;
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: { model: getBundledModel("openai", "gpt-4o-mini"), messages: [], tools: [] },
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				sideStreamFn: () => {
+					calls++;
+					throw new Error("Unexpected provider dispatch");
+				},
+			});
+			sessions.push(session);
+			for (const field of ["maxTokens", "maxContextBytes"] as const) {
+				await expect(session.runEphemeralTurn({ promptText: "Question?", [field]: cap })).rejects.toThrow(
+					`${field} must be a positive safe integer`,
+				);
+			}
+			expect(calls).toBe(0);
+		},
+	);
+
+	it("rejects an oversized ephemeral context before inference", async () => {
+		let calls = 0;
+		const sideStreamFn: StreamFn = () => {
+			calls++;
+			return new AssistantMessageEventStream();
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: getBundledModel("openai", "gpt-4o-mini"),
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		await expect(session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: 1 })).rejects.toThrow(
+			"Ephemeral turn context exceeds the configured 1-byte limit.",
+		);
+		expect(calls).toBe(0);
 	});
 
 	it("rotates ephemeral side-channel credentials on Google Resource exhausted", async () => {
@@ -1677,7 +2289,46 @@ describe("AgentSession message pipeline", () => {
 		expect(occurrences).toBe(1);
 	});
 
-	it("ephemeral side-channel forwards native tools, injects developer reminder, leaves toolChoice auto", async () => {
+	it("rejects Cursor tool opt-out before dispatch, including custom provider names", async () => {
+		let calls = 0;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: buildModel({
+						...getBundledModel("openai", "gpt-4o"),
+						api: "cursor-agent",
+						provider: "custom",
+						id: "opaque-model",
+						compat: undefined,
+					}),
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: () => {
+				calls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		sessions.push(session);
+		await expect(session.runEphemeralTurn({ promptText: "Question?", tools: false })).rejects.toThrow(
+			"does not support tools: false",
+		);
+		expect(calls).toBe(0);
+		expect((await session.runEphemeralTurn({ promptText: "Question?" })).replyText).toBe("Answer");
+		expect(calls).toBe(1);
+	});
+
+	it.each([undefined, false] as const)("ephemeral tool catalog with tools=%s", async tools => {
 		await withNativeDialectEnv(async () => {
 			const api = "test-ephemeral-tools-warm-cache";
 			let capturedContext: Context | undefined;
@@ -1730,13 +2381,19 @@ describe("AgentSession message pipeline", () => {
 			});
 			sessions.push(session);
 
-			const result = await session.runEphemeralTurn({ promptText: "Side Question?" });
+			const result = await session.runEphemeralTurn({ promptText: "Side Question?", tools });
 
 			expect(result.replyText).toBe("Not using tools");
 			expect(capturedContext).toBeDefined();
 			expect(capturedContext!.tools).toBeDefined();
-			expect(capturedContext!.tools!.length).toBe(1);
-			expect(capturedContext!.tools![0].name).toBe("side_tool");
+			if (tools === false) {
+				expect(capturedContext!.tools).toEqual([]);
+				expect(capturedOptions?.toolChoice).toBe("none");
+			} else {
+				expect(capturedContext!.tools!.map(tool => tool.name)).toEqual(["side_tool"]);
+				expect(capturedOptions?.toolChoice).toBeUndefined();
+			}
+			expect(session.agent.state.tools).toEqual([tool]);
 
 			// Developer reminder injected immediately before user prompt
 			const messages = capturedContext!.messages;
@@ -1752,13 +2409,10 @@ describe("AgentSession message pipeline", () => {
 			expect(textContent).toHaveLength(1);
 			expect(textContent[0]?.type).toBe("text");
 			expect(textContent[0]?.text).toMatch(/^<system-reminder>\n[\s\S]+\n<\/system-reminder>\n?$/);
-
-			// Tool choice must be undefined (not "none") for cache hits
-			expect(capturedOptions?.toolChoice).toBeUndefined();
 		});
 	});
 
-	it("ephemeral side-channel discards any emitted tool calls", async () => {
+	it.each([undefined, false] as const)("ephemeral discards tool calls with tools=%s", async tools => {
 		const api = "test-ephemeral-tools-discard";
 		registerCustomApi(api, (_model, _context, _options) => {
 			const stream = new AssistantMessageEventStream();
@@ -1804,7 +2458,7 @@ describe("AgentSession message pipeline", () => {
 		});
 		sessions.push(session);
 
-		const result = await session.runEphemeralTurn({ promptText: "Side Question?" });
+		const result = await session.runEphemeralTurn({ promptText: "Side Question?", tools });
 
 		expect(result.replyText).toBe("Here is text");
 		expect(result.assistantMessage.content.some(block => block.type === "toolCall")).toBe(false);
