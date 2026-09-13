@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.19] - 2026-09-12
+
 ### Added
 
 - Added Charm Hyper as a built-in provider with API-key login, live model discovery, and per-model pricing, effort ladders, and limits read straight from its catalog ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
