@@ -1368,22 +1368,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Subscribe before any getApiKey() call so startup model probes can't fire a
 	// credential_disabled event past us. An embedder's constructor handler makes the
 	// listener set non-empty from construction, which defeats AuthStorage's no-listener
-	// buffer — so we can't rely on it to catch startup events for the extension runner.
+	// buffer — so retain startup events until both the runner and session exist.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
-	// The session is the user-facing surface, but its `notice` stream reaches
-	// only current subscribers: a teardown before the session exists, or before
-	// the caller subscribes to the returned session, reaches nobody and survives
-	// as a tombstone that `session.getDisabledCredentialNotices()` replays —
-	// pulled once after subscribing, as the CLI modes do.
+	// The session retains undelivered notices for pull-after-subscribe replay,
+	// including stores and older brokers that cannot supply tombstones.
 	let credentialDisabledNoticeTarget: AgentSession | undefined;
 	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
-		credentialDisabledNoticeTarget?.announceCredentialDisabled(event);
+		if (credentialDisabledNoticeTarget) {
+			credentialDisabledNoticeTarget.announceCredentialDisabled(event);
+		} else {
+			startupCredentialDisabledEvents.push(event);
+		}
 		if (credentialDisabledTarget) {
 			// Discard return: any handler error is routed through runner.onError listeners.
 			void credentialDisabledTarget.emitCredentialDisabled(event);
-		} else {
-			startupCredentialDisabledEvents.push(event);
 		}
 	});
 	await modelRegistry.hydrateCredentialScopedModelCaches();
@@ -2831,7 +2830,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 
 		credentialDisabledTarget = extensionRunner;
-		for (const event of startupCredentialDisabledEvents.splice(0)) {
+		for (const event of startupCredentialDisabledEvents) {
 			// Discard return: any handler error is routed through runner.onError listeners.
 			void extensionRunner.emitCredentialDisabled(event);
 		}
@@ -3908,6 +3907,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		hasSession = true;
 		credentialDisabledNoticeTarget = session;
+		for (const event of startupCredentialDisabledEvents) {
+			session.announceCredentialDisabled(event);
+		}
+		startupCredentialDisabledEvents.length = 0;
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).

@@ -29,7 +29,7 @@ import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../too
  * the HTTP client's 10 s timeout plus a retry, and a stalled broker must not
  * hold every interactive or scripted start for that long.
  */
-const REPLAY_LOOKUP_BUDGET_MS = 2_000;
+export const REPLAY_LOOKUP_BUDGET_MS = 2_000;
 
 /** Account label bounded like other TUI titles. */
 function accountLabel(

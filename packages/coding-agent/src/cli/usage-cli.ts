@@ -882,9 +882,18 @@ export function selectReportableAccounts(
 function maskDiagnosticIdentities(text: string, redaction: Map<string, string>): string {
 	const identities = [...redaction.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
 	if (identities.length === 0) return text;
+	const emailMasks = new Map<string, string>();
+	const pattern = identities.map(identity => {
+		const literal = RegExp.escape(identity);
+		if (!/^[^\s@]+@[^\s@]+$/.test(identity)) return literal;
+		emailMasks.set(identity.toLowerCase(), redaction.get(identity)!);
+		// Only email identities are case-insensitive; project/account IDs stay exact.
+		return `(?i:${literal})`;
+	});
 	// Match the longest identity once; do not re-mask replacements or interpret `$&` in a mask.
-	return text.replace(new RegExp(identities.map(identity => RegExp.escape(identity)).join("|"), "g"), identity =>
-		redaction.get(identity)!,
+	return text.replace(
+		new RegExp(pattern.join("|"), "g"),
+		identity => redaction.get(identity) ?? emailMasks.get(identity.toLowerCase())!,
 	);
 }
 
@@ -1094,6 +1103,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		} catch {
 			// Usage output must not fail because tombstone listing did.
 		}
+		// Recovery is independent of usage support: a reauthorized managed MCP
+		// account must clear its retained tombstone without gaining a usage row.
+		disabled = disabled.filter(summary => isActionableCredentialDisable(summary, storedAccounts));
 		let filteredReports = reports;
 		if (cmd.provider) {
 			const wanted = cmd.provider.toLowerCase();
@@ -1129,13 +1141,11 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled
-				.filter(summary => isActionableCredentialDisable(summary, accounts))
-				.map(summary => ({
-					...summary,
-					provider: redactUrlSecrets(summary.provider),
-					cause: redactSecrets(summary.cause),
-				}));
+			let disabledForJson = disabled.map(summary => ({
+				...summary,
+				provider: redactUrlSecrets(summary.provider),
+				cause: redactSecrets(summary.cause),
+			}));
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
@@ -1158,11 +1168,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		if (
-			filteredReports.length === 0 &&
-			accounts.length === 0 &&
-			!disabled.some(summary => isActionableCredentialDisable(summary, accounts))
-		) {
+		if (filteredReports.length === 0 && accounts.length === 0 && disabled.length === 0) {
 			const scope = cmd.provider ? ` for provider "${redactUrlSecrets(cmd.provider)}"` : "";
 			// Credentials exist but every one is for a provider without a usage
 			// endpoint — say so rather than implying nothing is logged in.

@@ -2,14 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AssistantMessage, AuthStorage } from "@oh-my-pi/pi-ai";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type AssistantMessage, AuthStorage, type DisabledCredentialSummary } from "@oh-my-pi/pi-ai";
 import * as oauthUtils from "@oh-my-pi/pi-ai/oauth";
 import {
 	collectDisabledCredentialNotices,
 	formatCredentialDisabledNotice,
 } from "@oh-my-pi/pi-coding-agent/config/credential-notices";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
@@ -28,11 +32,6 @@ const oauthCredential = (expires: number) => ({
 
 describe("credential sign-out notices", () => {
 	it("replays a racing teardown without a subscription mark, but deduplicates one observed live", async () => {
-		const { Agent } = await import("@oh-my-pi/pi-agent-core");
-		const { AgentSession } = await import("@oh-my-pi/pi-coding-agent/session/agent-session");
-		const { ModelRegistry } = await import("@oh-my-pi/pi-coding-agent/config/model-registry");
-		const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
-		const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
 		authStorage = await AuthStorage.create(":memory:");
 		const session = new AgentSession({
 			agent: new Agent(),
@@ -43,8 +42,7 @@ describe("credential sign-out notices", () => {
 		});
 		try {
 			for (const subscribed of [false, true]) {
-				const lookup =
-					Promise.withResolvers<Awaited<ReturnType<AuthStorage["listActionableDisabledCredentials"]>>>();
+				const lookup = Promise.withResolvers<DisabledCredentialSummary[]>();
 				vi.spyOn(authStorage, "listActionableDisabledCredentials").mockReturnValueOnce(lookup.promise);
 				const live: AgentSessionEvent[] = [];
 				const mark = session.disabledCredentialNoticeMark;

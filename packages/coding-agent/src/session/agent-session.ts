@@ -54,6 +54,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	CredentialAccountIdentity,
 	CredentialDisabledEvent,
 	ImageContent,
 	Message,
@@ -75,7 +76,7 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
+import { type Effort, isActionableCredentialDisable, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -102,7 +103,11 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
-import { collectDisabledCredentialNotices, formatCredentialDisabledNotice } from "../config/credential-notices";
+import {
+	collectDisabledCredentialNotices,
+	formatCredentialDisabledNotice,
+	REPLAY_LOOKUP_BUDGET_MS,
+} from "../config/credential-notices";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
@@ -392,6 +397,9 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+// Match AuthStorage's no-listener event budget; a long-lived SDK session must
+// not retain every historical sign-out just to bridge startup subscription.
+const MAX_DISABLED_CREDENTIAL_NOTICES = 32;
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
@@ -619,8 +627,9 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
-	/** Credentials announced live through `auth` notices, in order; see {@link AgentSession.disabledCredentialNoticeMark}. */
-	readonly #announcedDisabledCredentialIds: number[] = [];
+	/** Recent sign-outs survive even when the store cannot replay tombstones. */
+	readonly #disabledCredentialNotices = new Map<number, { event: CredentialDisabledEvent; announcedAt?: number }>();
+	#disabledCredentialNoticeCount = 0;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
@@ -10815,12 +10824,20 @@ export class AgentSession {
 
 	/**
 	 * Announce a credential the auth layer tore down while this session is
-	 * live: a `warning` notice with source `auth` for subscribers, logged so a
-	 * later {@link AgentSession.getDisabledCredentialNotices} replay can leave
-	 * out what a listener already saw.
+	 * live: a `warning` notice with source `auth` for subscribers. Retain the
+	 * event for replay when nobody was listening or the store lacks tombstones.
 	 */
 	announceCredentialDisabled(event: CredentialDisabledEvent): void {
-		this.#announcedDisabledCredentialIds.push(event.credentialId);
+		const position = this.#disabledCredentialNoticeCount++;
+		this.#disabledCredentialNotices.delete(event.credentialId);
+		this.#disabledCredentialNotices.set(event.credentialId, {
+			event,
+			announcedAt: this.#eventListeners.length > 0 ? position : undefined,
+		});
+		if (this.#disabledCredentialNotices.size > MAX_DISABLED_CREDENTIAL_NOTICES) {
+			const oldest = this.#disabledCredentialNotices.keys().next();
+			if (!oldest.done) this.#disabledCredentialNotices.delete(oldest.value);
+		}
 		this.emitNotice("warning", formatCredentialDisabledNotice(event), "auth");
 	}
 
@@ -10831,7 +10848,7 @@ export class AgentSession {
 	 * from that position on reached the new listener.
 	 */
 	get disabledCredentialNoticeMark(): number {
-		return this.#announcedDisabledCredentialIds.length;
+		return this.#disabledCredentialNoticeCount;
 	}
 
 	/**
@@ -10840,21 +10857,69 @@ export class AgentSession {
 	 * {@link AgentSession.getAdvisorConfigWarnings}: a teardown before this
 	 * session had a listener — background model discovery while the session was
 	 * being created, an earlier session, a sibling process — reached nobody's
-	 * `notice` stream and survives only as a tombstone. Teardowns after
+	 * `notice` stream. Recent events are retained in memory; tombstones also
+	 * recover earlier sessions and sibling-process sign-outs. Teardowns after
 	 * subscribing arrive live as `notice` events with source `auth`; pass the
 	 * {@link AgentSession.disabledCredentialNoticeMark} taken before
 	 * subscribing as `announcedAfter` so a teardown racing the replay — even
 	 * one landing while the lookup is in flight — is told once. Bounded and
-	 * best-effort: an unreachable broker yields no notices, never an error.
+	 * best-effort: an unreachable broker still permits retained event replay.
 	 */
-	getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
+	async getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
+		const deadline = performance.now() + REPLAY_LOOKUP_BUDGET_MS;
 		const announcedAfter = options?.announcedAfter;
+		const storedIds = new Set<number>();
+		const announced = (id: number): boolean => {
+			const position = this.#disabledCredentialNotices.get(id)?.announcedAt;
+			return announcedAfter !== undefined && position !== undefined && position >= announcedAfter;
+		};
+		const authStorage = this.#modelRegistry.authStorage;
 		// Membership is read when the lookup settles, not when it starts.
-		return collectDisabledCredentialNotices(
-			this.#modelRegistry.authStorage,
-			options?.nowMs ?? Date.now(),
-			id => announcedAfter !== undefined && this.#announcedDisabledCredentialIds.includes(id, announcedAfter),
-		);
+		const notices = await collectDisabledCredentialNotices(authStorage, options?.nowMs ?? Date.now(), id => {
+			storedIds.add(id);
+			return announced(id);
+		});
+		let needsFallback = false;
+		for (const id of this.#disabledCredentialNotices.keys()) {
+			if (!storedIds.has(id) && !announced(id)) {
+				needsFallback = true;
+				break;
+			}
+		}
+		if (!needsFallback) return notices;
+		// Empty tombstone listings skip revalidation. A sibling login can still
+		// recover retained events, so refresh within the original replay budget.
+		// A failed refresh cannot prove recovery from stale cached identities.
+		const activeAccounts: CredentialAccountIdentity[] = [];
+		const remainingMs = Math.ceil(deadline - performance.now());
+		if (remainingMs > 0) {
+			try {
+				await authStorage.revalidateCredentials(AbortSignal.timeout(remainingMs));
+				for (const [provider, value] of Object.entries(authStorage.getAll())) {
+					for (const credential of Array.isArray(value) ? value : [value]) {
+						if (credential.type !== "oauth") continue;
+						const { type, email, accountId, projectId, orgId } = credential;
+						activeAccounts.push({ provider, type, email, accountId, projectId, orgId });
+					}
+				}
+			} catch {
+				// Retain warnings rather than infer recovery from an unreachable store.
+			}
+		}
+		for (const [id, { event }] of this.#disabledCredentialNotices) {
+			if (storedIds.has(id) || announced(id)) continue;
+			if (
+				!isActionableCredentialDisable(
+					{ ...event, id, type: event.credentialType, cause: event.disabledCause },
+					activeAccounts,
+				)
+			) {
+				this.#disabledCredentialNotices.delete(id);
+				continue;
+			}
+			notices.push(formatCredentialDisabledNotice(event));
+		}
+		return notices;
 	}
 
 	/**

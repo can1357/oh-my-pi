@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, type CredentialDisabledEvent } from "@oh-my-pi/pi-ai";
+import {
+	type AuthCredentialStore,
+	AuthStorage,
+	type CredentialDisabledEvent,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai";
 import * as oauthUtils from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -343,50 +348,90 @@ describe("createAgentSession credential_disabled subscription", () => {
 		}
 	});
 
-	it("captures startup events even when the embedder constructor handler is attached", async () => {
-		// With a constructor `onCredentialDisabled`, the AuthStorage listener set is non-empty
-		// from construction, so the no-listener buffer can't catch startup events for any
-		// later subscriber. The SDK listener subscribes immediately at the top of
-		// `createAgentSession` so every disable event reaches both the embedder (synchronously)
-		// and the extension runner (deferred until initialize).
-		const dirs = makeDirs("embedder-and-extension");
-		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
-			onCredentialDisabled: event => {
-				embedderEvents.push(event);
-			},
-		});
-		const ext = makeRecordingExtension();
-
-		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext.factory]));
-
-		try {
-			// Fire BEFORE initialize — simulates an OAuth invalid_grant during startup model
-			// probes when the embedder constructor handler is set.
+	it.each(["missing", "empty", "supported"] as const)(
+		"replays actual startup disables with %s tombstone support and deduplicates observed live accounts",
+		async tombstones => {
+			const dirs = makeDirs("startup-replay");
+			const embedderEvents: CredentialDisabledEvent[] = [];
+			const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(path.join(dirs.agentDir, "agent.db"));
+			if (tombstones === "missing") store.listDisabledCredentials = undefined;
+			if (tombstones === "empty") store.listDisabledCredentials = async () => [];
+			const authStorage = new AuthStorage(store, {
+				onCredentialDisabled: event => {
+					embedderEvents.push(event);
+				},
+			});
+			const ext = makeRecordingExtension();
 			await authStorage.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
-			await authStorage.getApiKey("anthropic", "startup-with-embedder");
-			await drainCredentialDisabledDispatch();
+			// Exercise the SDK's real auth-fallback probe before the runner and
+			// session exist, with an embedder preventing AuthStorage's own buffering.
+			const { session } = await createAgentSession({
+				...baseOptions(dirs, authStorage, [ext.factory]),
+				modelPattern: "anthropic/claude-sonnet-4-5",
+				modelPatternAuthFallback: "anthropic/claude-sonnet-4-5",
+			});
+			try {
+				expect(embedderEvents).toEqual([disabledEvent("anthropic")]);
+				expect(authStorage.getAll().anthropic).toBeUndefined();
+				expect(ext.events).toEqual([]);
+				const startupReplay = await session.getDisabledCredentialNotices();
+				expect(startupReplay).toHaveLength(1);
+				expect(startupReplay[0]).toContain("signed-out@example.com");
+				expect(startupReplay[0]).toContain("/login anthropic");
 
-			// Embedder fires immediately (sync push from AuthStorage's fan-out loop). The
-			// extension still hasn't received it because the runner is uninitialized.
-			expect(embedderEvents).toHaveLength(1);
-			expect(embedderEvents[0]?.provider).toBe("anthropic");
-			expect(ext.events).toHaveLength(0);
+				const observed = ext.next();
+				initializeRunnerForTest(session.extensionRunner);
+				expect(await observed).toEqual(embedderEvents[0]!);
+				expect(embedderEvents).toHaveLength(1);
 
-			// Initialize the runner. The buffered event flushes through emit().
-			const observed = ext.next();
-			initializeRunnerForTest(session.extensionRunner);
-			const extEvent = await observed;
+				const live: string[] = [];
+				const mark = session.disabledCredentialNoticeMark;
+				const unsubscribe = session.subscribe(event => {
+					if (event.type === "notice" && event.source === "auth") live.push(event.message);
+				});
+				await authStorage.set("anthropic", [{ ...expiredOAuth(), email: "live@example.com" }]);
+				await authStorage.getApiKey("anthropic", "live-account");
+				expect(live).toHaveLength(1);
+				expect(live[0]).toContain("live@example.com");
+				// Same provider, different credential ids: only the account this
+				// marked listener actually saw is excluded from replay.
+				const replay = await session.getDisabledCredentialNotices({ announcedAfter: mark });
+				expect(replay).toHaveLength(1);
+				expect(replay[0]).toContain("signed-out@example.com");
+				unsubscribe();
 
-			expect(extEvent.provider).toBe("anthropic");
-			expect(extEvent.disabledCause).toContain("invalid_grant");
-			// Embedder didn't double-receive.
-			expect(embedderEvents).toHaveLength(1);
-		} finally {
-			await session.dispose();
-		}
-	});
+				const unobservedMark = session.disabledCredentialNoticeMark;
+				await authStorage.set("anthropic", [{ ...expiredOAuth(), email: "unobserved@example.com" }]);
+				await authStorage.getApiKey("anthropic", "no-subscriber");
+				expect(await session.getDisabledCredentialNotices({ announcedAfter: unobservedMark })).toEqual(
+					expect.arrayContaining([expect.stringContaining("unobserved@example.com")]),
+				);
+
+				// The returned session has a stale empty credential view when another
+				// process logs in. Empty/missing listings do not trigger store replay
+				// revalidation, but retained notices must still recognize recovery.
+				const sibling = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"));
+				try {
+					await sibling.set(
+						"anthropic",
+						[
+							expiredOAuth(),
+							{ ...expiredOAuth(), email: "live@example.com" },
+							{ ...expiredOAuth(), email: "unobserved@example.com" },
+						].map(credential => ({ ...credential, expires: Date.now() + 3_600_000 })),
+					);
+				} finally {
+					sibling.close();
+				}
+				expect(authStorage.getAll().anthropic).toBeUndefined();
+				expect(await session.getDisabledCredentialNotices()).toEqual([]);
+			} finally {
+				await session.dispose();
+				authStorage.close();
+			}
+		},
+	);
 
 	it("releases the session subscription if createAgentSession throws mid-startup", async () => {
 		const dirs = makeDirs("startup-failure");

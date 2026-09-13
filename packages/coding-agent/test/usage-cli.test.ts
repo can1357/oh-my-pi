@@ -81,10 +81,12 @@ describe("runUsageCommand disabled credential output", () => {
 			setAgentDir(profile.path());
 			const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
 			const projectId = "private-project-42";
+			const email = "Person@Example.test";
+			const accountId = "AcCt";
 			const cause = `oauth refresh failed: HTTP 400 ${JSON.stringify({
 				error: "invalid_grant",
 				refresh_token: "BODYSECRET",
-				error_description: `${projectId} denied; client_secret=ECHOSECRET`,
+				error_description: `${email.toUpperCase()} ${projectId} ${projectId.toUpperCase()} ${accountId} ${accountId.toLowerCase()} denied; client_secret=ECHOSECRET`,
 			})}`;
 			let authStorage: AuthStorage | undefined;
 			try {
@@ -99,6 +101,8 @@ describe("runUsageCommand disabled credential output", () => {
 						refresh: "SYNTHETICREFRESH",
 						expires: 1,
 						projectId,
+						email,
+						accountId,
 					});
 					const id = authStorage.exportSnapshot().credentials[0]!.id;
 					expect(authStorage.disableCredentialById(id, cause)).toBe(true);
@@ -132,10 +136,16 @@ describe("runUsageCommand disabled credential output", () => {
 					expect(text).toContain("denied");
 					if (redact) {
 						expect(text).not.toContain(projectId);
+						expect(text).not.toContain(email);
+						expect(text).not.toContain(email.toUpperCase());
+						expect(text).not.toContain(accountId);
+						expect(text).toContain("Pe*");
 						expect(text).toContain("pr*");
 					} else {
-						expect(text).toContain(`${projectId} denied`);
+						expect(text).toContain(`${email.toUpperCase()} ${projectId}`);
 					}
+					expect(text).toContain(projectId.toUpperCase());
+					expect(text).toContain(`${accountId.toLowerCase()} denied`);
 					if (json) {
 						const payload = JSON.parse(output) as { disabledCredentials: DisabledCredentialSummary[] };
 						expect(payload.disabledCredentials).toHaveLength(1);
@@ -151,6 +161,84 @@ describe("runUsageCommand disabled credential output", () => {
 				authStorage?.close();
 				vi.restoreAllMocks();
 				process.exitCode = originalExitCode;
+				setAgentDir(originalAgentDir);
+				if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+				await profile.remove();
+			}
+		});
+
+		it(`recovers retained managed MCP tombstones without adding usage rows in ${json ? "JSON" : "text"}`, async () => {
+			const profile = TempDir.createSync("@omp-usage-recovery-");
+			const originalAgentDir = getAgentDir();
+			const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+			const originalExitCode = process.exitCode;
+			setAgentDir(profile.path());
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp";
+			const email = "Recovered@Example.test";
+			const cause = "oauth refresh failed: invalid_grant";
+			let retained: DisabledCredentialSummary[] = [];
+			let authStorage: AuthStorage | undefined;
+			try {
+				for (const recovered of [false, true]) {
+					const store = new SqliteAuthCredentialStore(new Database(profile.join("auth.db")));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await authStorage.set(provider, {
+						type: "oauth",
+						access: recovered ? "REAUTHORIZEDACCESS" : "DISABLEDACCESS",
+						refresh: recovered ? "REAUTHORIZEDREFRESH" : "DISABLEDREFRESH",
+						expires: Date.now() + HOUR,
+						email: recovered ? email.toLowerCase() : email,
+					});
+					if (!recovered) {
+						const id = authStorage.exportSnapshot().credentials[0]!.id;
+						expect(authStorage.disableCredentialById(id, cause)).toBe(true);
+						retained = await store.listDisabledCredentials();
+						expect(retained).toEqual([expect.objectContaining({ id, provider, email, cause })]);
+					}
+					// SQLite prunes recovered rows; a broker may retain the original forensic listing.
+					vi.spyOn(store, "listDisabledCredentials").mockResolvedValue(retained);
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					let errors = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+						errors += String(chunk);
+						return true;
+					});
+					process.exitCode = 0;
+					await runUsageCommand({ json });
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					if (json) {
+						const payload = JSON.parse(output) as {
+							disabledCredentials: DisabledCredentialSummary[];
+							accountsWithoutUsage: UsageAccountIdentity[];
+						};
+						expect(payload.disabledCredentials).toEqual(recovered ? [] : retained);
+						expect(payload.accountsWithoutUsage).toEqual([]);
+						expect(errors).toBe("");
+					} else if (recovered) {
+						expect(output).toBe("");
+						expect(errors).toContain("providers without a usage endpoint");
+						expect(errors).not.toContain("No credentials found");
+						expect(process.exitCode).toBe(1);
+					} else {
+						expect(output).toContain(email);
+						expect(output).toContain("re-login to restore");
+						expect(errors).toBe("");
+					}
+				}
+			} finally {
+				authStorage?.close();
+				vi.restoreAllMocks();
+				process.exitCode = originalExitCode ?? 0;
 				setAgentDir(originalAgentDir);
 				if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
 				else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
