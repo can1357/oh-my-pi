@@ -137,6 +137,83 @@ function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): 
 }
 
 /**
+ * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
+ * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
+ * method-order loop so every caller agrees with what would really be selected.
+ *
+ * `excludeMedia` skips `snapcompact` regardless of model support: it archives
+ * history onto base64-encoded image frames (up to ~3 MB), which is the opposite
+ * of what a byte/payload-limit 413 recovery needs — a request already rejected
+ * for being too large in bytes should not be retried with an even larger,
+ * media-heavy one (#11482).
+ */
+function isCompactionMethodUsable(
+	candidate: CompactionMethod,
+	reason: "overflow" | "threshold" | "idle" | "incomplete",
+	model: Model | undefined,
+	settings: ConfiguredCompactionSettings,
+	excludeMedia = false,
+): boolean {
+	return candidate === "remote"
+		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
+		: candidate === "snapcompact"
+			? !excludeMedia && model?.input.includes("image") === true
+			: candidate === "handoff"
+				? reason !== "overflow"
+				: true;
+}
+
+/**
+ * Whether the configured method order contains at least one method that
+ * `runAutoCompaction` would actually select for `reason` on `model` — a non-empty
+ * `methodOrder` alone (see {@link hasConfiguredCompactionMethod}) is not enough: an
+ * unusable-for-this-reason configuration (e.g. `methodOrder: ["handoff"]` for an
+ * `"overflow"` reason, or `snapcompact`-only on a text-only model) would otherwise be
+ * reported as available and then silently no-op in `runAutoCompaction` (#11482).
+ */
+function hasUsableCompactionMethod(
+	reason: "overflow" | "threshold" | "idle" | "incomplete",
+	model: Model | undefined,
+	settings: ConfiguredCompactionSettings,
+	excludeMedia = false,
+): boolean {
+	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
+		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia),
+	);
+}
+
+/**
+ * Concrete media-limit wording in a payload-rejection error (e.g.
+ * `request_too_large: too many images`, `image count exceeds the limit of
+ * 20`). `ambiguousPayloadRejection` (dual `ContextOverflow` + `PayloadRejected`)
+ * only catches text that *also* matches a generic numeric-limit pattern — a
+ * digit-free media rejection like the first example sails through as
+ * non-ambiguous. That text is still definitive media-budget evidence: token
+ * compaction can't raise a provider's image-count limit, and some methods
+ * (snapcompact) *add* image frames, making it worse. Such rejections must
+ * stay on the terminal payload-dead-end path regardless of compaction
+ * availability (#11482).
+ *
+ * Deliberately narrower than matching bare "images"/"media"/"vision"/"frames"/
+ * "pixels" anywhere in the text: a custom provider's error that merely names a
+ * vision model (`llava-vision`) or an unrelated `Content-Type` (`media type
+ * application/json`) is not evidence the *request* was rejected for a media
+ * budget — treating it as such would permanently dead-end an unknown-window
+ * session that ordinary compaction could actually recover (#11482). Require
+ * the noun to co-occur with a count/limit signal instead — covering the
+ * common phrasings: "too many images", "image count"/"image limit", "limit
+ * of N images", "maximum (of N) images", "number/count of images",
+ * "images exceeds ... maximum", and per-image size/dimension rejections
+ * like "image is too large" or "image dimensions exceed 8000 pixels"
+ * (#11482).
+ */
+const PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN =
+	/\btoo many (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\s*(?:count|limit)\b|\blimit of \d+\s*(?:images?|frames?|pixels?)\b|\bmaximum(?: of \d+)? (?:images?|frames?|pixels?)\b|\b(?:number|count) of (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\b.{0,20}\bexceeds?\b.{0,20}\bmaximum\b|\b(?:images?|frames?) (?:is |are )?too large\b|\b(?:images?|frames?) dimensions?\b.{0,30}\bexceeds?\b.{0,30}\b(?:pixels?|\d+)\b/i;
+function hasExplicitMediaRejectionEvidence(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN.test(errorMessage);
+}
+
+/**
  * User-facing notice for a compaction dead end: maintenance freed too little
  * to retry safely. `remedies` names the recovery actions left on the emitting
  * path — by the time the post-pass dead end fires, the tiered rescue has
@@ -344,7 +421,7 @@ export interface SessionMaintenanceHost {
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
 		allowDefer: boolean,
-		options: { autoContinue: boolean; triggerContextTokens?: number },
+		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
 	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
 	setModelTemporary(
@@ -2262,7 +2339,79 @@ export class SessionMaintenance {
 			contextWindow > 0 &&
 			reportedInputTokens <= contextWindow &&
 			storedTokens < contextWindow * PAYLOAD_REJECTION_OCCUPANCY_CEILING;
-		if ((payloadRejection && !ambiguousPayloadRejection && contextWindow <= 0) || trustedPayloadRejection) {
+		// Provider-reported usage above a known window is authoritative proof of a
+		// genuine token overflow (not a byte/media-only rejection), computed once
+		// up front so both the media-exclusion decision below and the terminal
+		// dead-end check further down agree with each other.
+		const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+		// Concrete media-limit wording (e.g. "image count exceeds the limit of 20")
+		// in the error text — computed up front (independent of window or
+		// compaction availability) so both the media-exclusion decision below and
+		// the terminal dead-end check further down agree with each other.
+		const explicitMediaRejection =
+			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
+		// `payloadRejection` alone is not sufficient reason to exclude media
+		// compaction methods (snapcompact): a *usage-backed* overflow proves the
+		// rejection is a genuine token-context problem, not a byte/media budget
+		// one, so a user configured with e.g. `methodOrder: ["snapcompact"]` must
+		// still be able to use it instead of being told no recovery exists.
+		// Explicit media-limit evidence overrides that exception, though: usage
+		// proving a token overflow doesn't negate a provider *simultaneously*
+		// reporting an image-count limit, and snapcompact adds image frames before
+		// retrying — guaranteeing the retry stays over that limit (#11482).
+		const excludeMediaForPayloadRejection = payloadRejection && (!usageBackedOverflow || explicitMediaRejection);
+		// Whether a compaction method actually exists to attempt shrinking the
+		// history. Computed up front so the unknown-context-window branch below
+		// can fall through to a real attempt instead of always assuming defeat.
+		// Uses the same reason/model-specific selection as `runAutoCompaction`
+		// (not just a non-empty `methodOrder`) so an unusable-for-overflow
+		// configuration — e.g. `methodOrder: ["handoff"]`, or `snapcompact`-only
+		// on a text-only model — isn't reported as available and then silently
+		// no-ops instead of surfacing the payload-rejection notice (#11482).
+		// For a payload rejection specifically, `snapcompact` is excluded from
+		// this availability check too: it archives history onto base64 image
+		// frames, which only grows the byte size a payload/byte-limit 413 is
+		// already complaining about (#11482).
+		// (Named distinctly from the `compactionSettings` used further down in
+		// this function's later, unrelated threshold check.)
+		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionAvailable =
+			payloadCompactionSettings.enabled &&
+			(this.#usesExperimentalContextManagement() ||
+				hasUsableCompactionMethod(
+					"overflow",
+					this.#model,
+					payloadCompactionSettings,
+					excludeMediaForPayloadRejection,
+				));
+		// Unknown context window (common for custom/self-hosted models the
+		// registry has no metadata for) used to be treated the same as a
+		// confirmed media/byte-budget rejection and blocked outright — even
+		// when the payload bloat is plain message-count growth that ordinary
+		// compaction would shrink just fine (#11479). Only skip straight to the
+		// honest "can't help" notice here when there is genuinely no compaction
+		// method configured to try — an absence of proof, gated to the
+		// unknown-window case since a known window's own evidence (below) already
+		// covers it.
+		const unknownWindowDeadEnd =
+			payloadRejection && contextWindow <= 0 && !ambiguousPayloadRejection && !compactionAvailable;
+		// Explicit media evidence is a terminal signal independent of whether the
+		// context window is known: a known window's `trustedPayloadRejection` only
+		// requires local headroom, so a message like "too many images" can still
+		// fail that check (e.g. the local estimate is near the occupancy ceiling)
+		// and fall through to promotion/compaction despite proving an image-count
+		// limit neither can raise. Gated to `!usageBackedOverflow` though: when
+		// provider-reported usage *also* proves a genuine token overflow, that's a
+		// real, separately fixable problem — compaction should still get a shot at
+		// it (with media methods excluded per `excludeMediaForPayloadRejection`
+		// above), not be discarded just because the same response also named a
+		// media limit (#11482).
+		if (unknownWindowDeadEnd || trustedPayloadRejection || (explicitMediaRejection && !usageBackedOverflow)) {
+			// Every disjunct above implies `!usageBackedOverflow` (unknown window ⇒
+			// `isUsageBackedContextOverflow` is false by definition; trusted requires
+			// `reportedInputTokens <= contextWindow`; the third is explicit), so this
+			// is always the honest "NOT a token-context problem" notice — the sibling
+			// usage-backed selection lives further down, where that case is reachable.
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
 			logger.debug("Payload-shaped 413 withheld from token compaction", {
@@ -2293,17 +2442,73 @@ export class SessionMaintenance {
 			}
 
 			// No promotion target available fall through to compaction
-			const compactionSettings = this.#host.settings.getGroup("compaction");
-			if (
-				compactionSettings.enabled &&
-				(this.#usesExperimentalContextManagement() || hasConfiguredCompactionMethod(compactionSettings))
-			) {
-				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
-					autoContinue,
-				});
+			if (compactionAvailable) {
+				const compactionResult = await this.#host.runRecoveryCompactionWithRollback(
+					"overflow",
+					assistantMessage,
+					allowDefer,
+					{ autoContinue, excludeMediaMethods: excludeMediaForPayloadRejection },
+				);
+				// A statically usable method (per `hasUsableCompactionMethod`) can still
+				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
+				// heavy/droppable content on a plain text history — or `runAutoCompaction`
+				// itself can already return `automaticContinuationBlocked` without a
+				// rewrite (e.g. a single oversized latest turn `prepareCompaction` can't
+				// shrink). Either way, when a payload rejection sees no history rewrite
+				// and no scheduled continuation, `runRecoveryCompactionWithRollback` has
+				// already restored the failed turn into active context (and, unless
+				// already blocked, an unconverted no-op result here has neither a
+				// scheduled continuation nor a block: the caller would treat it as an
+				// ordinary turn end and could resubmit the same oversized history on the
+				// next auto-continue, looping the same 413 silently with no notice ever
+				// shown) (#11482).
+				if (
+					payloadRejection &&
+					!compactionResult.continuationScheduled &&
+					compactionResult.historyRewritten !== true
+				) {
+					// `runRecoveryCompactionWithRollback`'s no-rewrite path re-appends the
+					// failed turn to active context (so it isn't silently lost) before
+					// returning here. Unlike the immediate and no-method dead ends above/
+					// below, this branch discovers the no-progress outcome only *after*
+					// that restoration, so it must re-remove the turn itself — otherwise
+					// the next prompt's pre-prompt maintenance finds the same error via
+					// `#findLastAssistantMessage()` and repeats this entire no-progress
+					// compaction + warning before accepting new input (#11482). The
+					// persisted session history (separate from this active-context view)
+					// still keeps the turn visible.
+					this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+					if (compactionResult.automaticContinuationBlocked === true) {
+						// `runAutoCompaction` already blocked and emitted its own notice for
+						// this outcome (e.g. its own compaction dead end) — only the cleanup
+						// above was missing; forward its result unchanged (#11482).
+						return compactionResult;
+					}
+					// Same usage-backed/byte-shaped notice selection as the sibling
+					// "no compaction available" dead end below: a payload rejection
+					// with provider-reported usage above the window IS a genuine
+					// token-context problem even though compaction (attempted here,
+					// unsuccessfully) couldn't resolve it — say so accurately instead
+					// of always claiming "not a token problem" (#11482).
+					this.#host.emitNotice(
+						"warning",
+						usageBackedOverflow
+							? usageOverflowDeadEndNotice(reportedInputTokens, contextWindow)
+							: payloadRejectionNotice(storedTokens, contextWindow),
+						"compaction",
+					);
+					logger.debug("Payload-shaped 413 compaction attempt made no progress; blocking automatic continuation", {
+						provider: assistantMessage.provider,
+						model: assistantMessage.model,
+						message: assistantMessage.errorMessage,
+						storedTokens,
+						contextWindow,
+					});
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				return compactionResult;
 			}
 			if (payloadRejection) {
-				const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
 				this.#host.emitNotice(
 					"warning",
 					usageBackedOverflow
@@ -3431,6 +3636,12 @@ export class SessionMaintenance {
 			 * capability is no longer present at dispatch time.
 			 */
 			explicitNewContextRequest?: boolean;
+			/**
+			 * Skip `snapcompact` regardless of model image support — a byte/payload-
+			 * limit 413 recovery must not retry with an even larger, media-heavy
+			 * request (#11482).
+			 */
+			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -3462,15 +3673,16 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
-			const available =
-				candidate === "remote"
-					? canUseRemoteCompaction(this.#model, resolveMethodSettings(compactionSettings, candidate))
-					: candidate === "snapcompact"
-						? this.#model?.input.includes("image") === true
-						: candidate === "handoff"
-							? reason !== "overflow"
-							: true;
-			if (!available) continue;
+			if (
+				!isCompactionMethodUsable(
+					candidate,
+					reason,
+					this.#model,
+					compactionSettings,
+					options.excludeMediaMethods === true,
+				)
+			)
+				continue;
 			method = candidate;
 			methodIndex = index;
 			break;
