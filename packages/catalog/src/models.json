@@ -87742,6 +87742,7 @@
 			"int": 35.6,
 			"tps": 46.8,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -87796,6 +87797,7 @@
 			"tokenizer": "claude-v3",
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -87853,6 +87855,7 @@
 				"revision": "4.5.0"
 			},
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -87906,6 +87909,7 @@
 			"tokenizer": "claude-v3",
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -87964,6 +87968,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -88016,6 +88021,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -88067,6 +88073,7 @@
 			"int": 25.9,
 			"tps": 121.9,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -88135,6 +88142,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88190,6 +88198,7 @@
 				"revision": "3.0.0"
 			},
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88230,6 +88239,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88281,6 +88291,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88340,6 +88351,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88407,6 +88419,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88467,6 +88480,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88527,6 +88541,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88587,6 +88602,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
@@ -88638,6 +88654,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -88674,6 +88691,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
@@ -88710,6 +88728,7 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
+				"genericResourceExhaustedIsCapacity": true,
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
 				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,

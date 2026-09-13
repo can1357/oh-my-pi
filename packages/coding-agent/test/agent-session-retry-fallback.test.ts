@@ -227,6 +227,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage.setRuntimeApiKey("openai", "openai-test-key");
 		authStorage.setRuntimeApiKey("fireworks", "fireworks-test-key");
 		authStorage.setRuntimeApiKey("google", "google-test-key");
+		authStorage.setRuntimeApiKey("google-antigravity", "google-antigravity-test-key");
 		authStorage.setRuntimeApiKey("google-vertex", "google-vertex-test-key");
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
 		authStorage.setRuntimeApiKey("devin", "devin-test-key");
@@ -1600,6 +1601,71 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: undefined,
 			isFallback: true,
 		});
+	});
+
+	it("expires an Antigravity advisor's capacity cooldown using its policy instead of the primary model's", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("google-antigravity", "gemini-3.7-flash");
+		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled advisor fallback models to exist");
+		}
+		const primarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const fallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					throw: JSON.stringify({
+						error: {
+							code: 429,
+							status: "RESOURCE_EXHAUSTED",
+							message: "Resource has been exhausted (e.g. check quota).",
+						},
+					}),
+				},
+				{ content: ["Advisor recovered"] },
+			],
+		});
+		const requestedAdvisorModels: string[] = [];
+		const fallbackSucceeded = Promise.withResolvers<void>();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { advisor: [fallbackSelector] },
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("advisor", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "capacity-recovery", model: primarySelector }],
+			advisorStreamFn: (model, context, options) => {
+				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_succeeded") fallbackSucceeded.resolve();
+		});
+		session.setAdvisorEnabled(true);
+		await session.prompt("Recover the advisor independently of the primary deployment");
+		await session.waitForIdle();
+		await fallbackSucceeded.promise;
+
+		expect(requestedAdvisorModels).toEqual([primarySelector, fallbackSelector]);
+		const now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now + 30_000);
+		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(true);
+		clock.mockReturnValue(now + 90_000);
+		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(false);
 	});
 
 	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
@@ -3522,6 +3588,82 @@ describe("AgentSession retry fallback", () => {
 				finalError: refusalMessage,
 			},
 		]);
+	});
+
+	it.each([
+		{ provider: "google-antigravity", message: "Resource has been exhausted (e.g. check quota).", delayMs: 60_000 },
+		{ provider: "google", message: "Resource has been exhausted (e.g. check quota).", delayMs: undefined },
+		{
+			provider: "google-antigravity",
+			message: "Resource has been exhausted (e.g. quota exceeded).",
+			delayMs: undefined,
+		},
+		{
+			provider: "google-antigravity",
+			message: "Resource has been exhausted (e.g. check quota).",
+			delayMs: 50,
+			details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "0.05s" }],
+		},
+	])("applies the $provider resource-exhaustion retry policy with delay $delayMs", async testCase => {
+		const baseModel = getBundledModel("google", "gemini-1.5-flash");
+		if (!baseModel) throw new Error("Expected bundled Google test model to exist");
+		const model = buildModel({
+			...baseModel,
+			provider: testCase.provider,
+			api: testCase.provider === "google-antigravity" ? "google-gemini-cli" : baseModel.api,
+			compat: undefined,
+		});
+		const errorMessage = `Google API error (429): ${JSON.stringify({
+			error: {
+				code: 429,
+				status: "RESOURCE_EXHAUSTED",
+				message: testCase.message,
+				...("details" in testCase ? { details: testCase.details } : {}),
+			},
+		})}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(model, requestedModels, { firstError: errorMessage });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.maxDelayMs": 90_000,
+			"retry.modelFallback": false,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+
+		await session.prompt("Recover according to the deployment's resource exhaustion policy");
+		await session.waitForIdle();
+
+		if (testCase.delayMs === undefined) {
+			expect(requestedModels).toEqual([`${model.provider}/${model.id}`]);
+			expect(retryStartEvents).toHaveLength(0);
+			expect(retryEndEvents).toMatchObject([
+				{ success: false, finalError: expect.stringContaining("exceeds retry.maxDelayMs (90000ms)") },
+			]);
+			expect(getLastAssistantMessage(session).errorMessage).toBe(errorMessage);
+		} else {
+			expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+			expect(retryStartEvents).toHaveLength(1);
+			if (testCase.delayMs === 60_000) {
+				expect(retryStartEvents[0]?.delayMs).toBeGreaterThanOrEqual(45_000);
+				expect(retryStartEvents[0]?.delayMs).toBeLessThanOrEqual(75_000);
+			} else {
+				expect(retryStartEvents[0]?.delayMs).toBe(testCase.delayMs);
+			}
+			expect(retryEndEvents).toMatchObject([{ success: true, attempt: 1 }]);
+			expect(getLastAssistantMessage(session).content).toContainEqual({
+				type: "text",
+				text: `ok:${model.provider}/${model.id}`,
+			});
+		}
 	});
 
 	it("uses Google retry hints in quota errors before quota backoff", async () => {

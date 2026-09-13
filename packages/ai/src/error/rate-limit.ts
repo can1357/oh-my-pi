@@ -1,3 +1,4 @@
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
 
 /**
@@ -164,33 +165,25 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 
 /** Google's generic RESOURCE_EXHAUSTED message, carrying no cause of its own. */
 const GOOGLE_GENERIC_RESOURCE_EXHAUSTED_MESSAGE_PATTERN =
-	/^\s*resource has been exhausted\s*(?:\(\s*e\.?g\.?[^)]*\))?\s*\.?\s*$/i;
+	/^\s*resource has been exhausted\s*(?:\(\s*e\.g\.\s+check quota\s*\))?\s*\.?\s*$/i;
 
 /**
- * True for a Cloud Code Assist 429 whose JSON body carries `RESOURCE_EXHAUSTED`,
- * no `google.rpc.ErrorInfo` detail, and nothing in `error.message` beyond
- * Google's generic "Resource has been exhausted (e.g. check quota)." boilerplate.
- *
- * That parenthetical is advice, not a cause: the backend returns this exact body
- * for request-content rejections too. Measured on `daily-cloudcode-pa` with the
- * account's Google 5-hour window at 0% and the weekly at 6.4%, every model family
- * (gemini-2.5/3.8-flash, claude-sonnet-4-6, gpt-oss-120b) answered it, while the
- * same request with one character changed in the system instruction returned 200.
- * A real account cap is distinguishable — it carries an ErrorInfo detail, or
- * "exhausted your capacity on this model" / "quota will reset" in the message —
- * and keeps its QUOTA_EXHAUSTED classification above.
- *
- * Only `parseRateLimitReason` (backoff length) consults this. The rotation
- * decision stays with `USAGE_LIMIT_PATTERN`, so a sibling credential is still
- * tried before the short backoff, exactly as the Connect-form reclassification
- * in #7032 preserved it.
+ * Antigravity also returns the "check quota" boilerplate for non-quota
+ * rejections. ErrorInfo supplies a cause; RetryInfo supplies timing only.
+ * Deployment policy gates the shorter backoff, while credential rotation
+ * remains independent through USAGE_LIMIT_PATTERN.
  */
 function isBareGoogleResourceExhaustedBody(errorMessage: string): boolean {
 	const error = asRecord(parseJsonBody(errorMessage)?.error);
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
 		return false;
 	}
-	if (Array.isArray(error.details) && error.details.length > 0) return false;
+	if (
+		Array.isArray(error.details) &&
+		error.details.some(value => asRecord(value)?.["@type"] === GOOGLE_RPC_ERROR_INFO_TYPE)
+	) {
+		return false;
+	}
 	const message = error.message;
 	if (message === undefined || message === null || message === "") return true;
 	return typeof message === "string" && GOOGLE_GENERIC_RESOURCE_EXHAUSTED_MESSAGE_PATTERN.test(message);
@@ -210,13 +203,17 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
  */
-export function parseRateLimitReason(errorMessage: string): RateLimitReason {
+export function parseRateLimitReason(errorMessage: string, model?: Pick<Model, "compat">): RateLimitReason {
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return structuredReason;
-	// A detail-less Google RESOURCE_EXHAUSTED body names no cause, so the
-	// "check quota" boilerplate must not reach the generic quota branch below
-	// and buy a 30-minute cooldown for a transient (or content-rejected) call.
-	if (isBareGoogleResourceExhaustedBody(errorMessage)) return "MODEL_CAPACITY_EXHAUSTED";
+	if (
+		model?.compat &&
+		"genericResourceExhaustedIsCapacity" in model.compat &&
+		model.compat.genericResourceExhaustedIsCapacity &&
+		isBareGoogleResourceExhaustedBody(errorMessage)
+	) {
+		return "MODEL_CAPACITY_EXHAUSTED";
+	}
 	const lowerWithStatus = errorMessage.toLowerCase();
 	const lower = lowerWithStatus.replace(RESOURCE_EXHAUSTED_PATTERN, "");
 	const hasResourceExhaustedStatus = lower !== lowerWithStatus;

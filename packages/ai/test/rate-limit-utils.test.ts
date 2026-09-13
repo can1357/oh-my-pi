@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
 import {
 	calculateRateLimitBackoffMs,
@@ -10,6 +11,19 @@ import {
 	isUsageLimitStatus,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
+
+const antigravityModel = buildModel({
+	id: "gemini-2.5-flash",
+	name: "Gemini Flash",
+	provider: "google-antigravity",
+	api: "google-gemini-cli",
+	baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 100_000,
+	maxTokens: 8_000,
+});
 
 function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
 	const details: Array<Record<string, string>> = [
@@ -253,10 +267,31 @@ describe("parseRateLimitReason", () => {
 		const body = `Cloud Code Assist API error (429): ${JSON.stringify({
 			error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" },
 		})}`;
-		expect(parseRateLimitReason(body)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(parseRateLimitReason(body, antigravityModel)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
 		// Rotation is unchanged: USAGE_LIMIT_PATTERN still matches, so a sibling
 		// credential is tried before the short backoff (same contract as #7032).
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	it.each([
+		{ provider: "google", api: "google-generative-ai" },
+		{ provider: "google-vertex", api: "google-vertex" },
+		{ provider: "google-gemini-cli", api: "google-gemini-cli" },
+	] as const)("keeps generic exhaustion quota-scoped on $provider", ({ provider, api }) => {
+		const model = buildModel({ ...antigravityModel, provider, api, compat: undefined });
+		const body = JSON.stringify({
+			error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" },
+		});
+		expect(parseRateLimitReason(body, model)).toBe("QUOTA_EXHAUSTED");
+	});
+
+	it("honors an explicit opt-out of Antigravity capacity backoff", () => {
+		const model = buildModel({ ...antigravityModel, compat: { genericResourceExhaustedIsCapacity: false } });
+		const body = JSON.stringify({
+			error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" },
+		});
+		expect(parseRateLimitReason(body, model)).toBe("QUOTA_EXHAUSTED");
 	});
 
 	it("keeps a detail-less RESOURCE_EXHAUSTED body QUOTA_EXHAUSTED when the message names a cap", () => {
@@ -267,15 +302,48 @@ describe("parseRateLimitReason", () => {
 				status: "RESOURCE_EXHAUSTED",
 			},
 		})}`;
-		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(parseRateLimitReason(body, antigravityModel)).toBe("QUOTA_EXHAUSTED");
 	});
+
+	it.each(["daily quota exceeded", "quota will reset after 3h"])(
+		"preserves explicit quota evidence inside parentheses: %s",
+		cause => {
+			const body = JSON.stringify({
+				error: {
+					code: 429,
+					message: `Resource has been exhausted (e.g. ${cause}).`,
+					status: "RESOURCE_EXHAUSTED",
+				},
+			});
+			expect(parseRateLimitReason(body, antigravityModel)).toBe("QUOTA_EXHAUSTED");
+		},
+	);
 
 	it("keeps a structured ErrorInfo detail authoritative over the generic message", () => {
 		expect(
 			parseRateLimitReason(
 				googleRpc429("QUOTA_EXHAUSTED", undefined, "Resource has been exhausted (e.g. check quota)."),
+				antigravityModel,
 			),
 		).toBe("QUOTA_EXHAUSTED");
+	});
+
+	it("uses capacity backoff when generic Antigravity exhaustion carries only RetryInfo", () => {
+		const body = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "30s" }],
+			},
+		});
+		expect(parseRateLimitReason(body, antigravityModel)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	it("keeps unrecognized ErrorInfo authoritative over generic Antigravity exhaustion", () => {
+		const body = googleRpc429("DAILY_QUOTA_LIMIT", "30s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(body, antigravityModel)).toBe("QUOTA_EXHAUSTED");
 	});
 
 	it("uses structured QUOTA_EXHAUSTED before capacity message heuristics", () => {

@@ -225,6 +225,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"claude-thinking-beta-header": wire("claudeThinkingBetaHeader", ["google"]),
 	"drop-unsigned-thinking": wire("dropUnsignedThinking", ["google"]),
 	"flash-stream-leak-workaround": wire("flashStreamLeakWorkaround", ["google"]),
+	"generic-resource-exhausted-is-capacity": wire("genericResourceExhaustedIsCapacity", ["google"]),
 	"multimodal-function-response": wire("multimodalFunctionResponse", ["google"]),
 	"requires-skip-thought-signature": wire("requiresSkipThoughtSignature", ["google"]),
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [

@@ -904,6 +904,7 @@ function resolveGooglePolicy(
 	axes: ResolvedAxes,
 ): ResolvedGoogleCompat {
 	const compat: ResolvedGoogleCompat = {
+		genericResourceExhaustedIsCapacity: false,
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
 		requiresSkipThoughtSignatureOnFirstFunctionCall: false,

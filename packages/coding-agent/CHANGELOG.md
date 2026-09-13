@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity sessions and advisor fallback selectors now use short cooldowns for generic resource-exhaustion errors while preserving explicit quota waits ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

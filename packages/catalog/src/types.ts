@@ -913,6 +913,8 @@ export type ResolvedDevinCompat = Required<DevinCompat>;
  * compat cascade; sparse overrides follow the same shape.
  */
 export interface GoogleCompat {
+	/** Use capacity backoff for generic RESOURCE_EXHAUSTED bodies without ErrorInfo. */
+	genericResourceExhaustedIsCapacity?: boolean;
 	/** Whether functionCall/functionResponse parts carry the `id` field. */
 	supportsFunctionPartId?: boolean;
 	/** Add the bypass sentinel to every unsigned Gemini function call. */
