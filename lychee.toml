@@ -1,0 +1,19 @@
+# This is an upstream vendored snapshot. Its documentation is not maintained by
+# OMP, so checking it would make the repository gate depend on unrelated links.
+exclude_path = [
+	"(^|/)crates/vendor/",
+	"(^|/)CHANGELOG\\.md$",
+]
+
+# npm serves package pages through an anti-bot layer that returns 403 to Lychee,
+# while the package records themselves remain available from the npm registry.
+# Keep the human-facing npm links and exclude only this checker limitation.
+exclude = [
+	'^https://www\.npmjs\.com/package/',
+]
+
+# Include repository-maintained Markdown in hidden directories.
+hidden = true
+
+# Limit checking to Markdown-family documentation.
+extensions = ["md", "mdx", "markdown"]

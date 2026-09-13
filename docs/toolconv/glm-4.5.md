@@ -331,7 +331,7 @@ treating the hallucinated result as assistant content.
 - Special-token IDs and `special` flags (`added_tokens_decoder`, `additional_special_tokens`): https://huggingface.co/zai-org/GLM-4.5/resolve/main/tokenizer_config.json
 - Stop tokens (`eos_token_id = [151329, 151336, 151338]`): https://huggingface.co/zai-org/GLM-4.5/resolve/main/generation_config.json
 - Model card (server flags `--tool-call-parser glm45 --reasoning-parser glm45`, `enable_thinking` switch, parser links): https://huggingface.co/zai-org/GLM-4.5
-- vLLM GLM-4.5/4.6 tool parser (`Glm4MoeModelToolParser`: regexes, schema-driven string typing, JSON-string `arguments`, streaming, `skip_special_tokens`): https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/glm4_moe_tool_parser.py
+- vLLM GLM-4.5/4.6 tool parser (`Glm4MoeModelToolParser`: regexes, schema-driven string typing, JSON-string `arguments`, streaming, `skip_special_tokens`): https://github.com/vllm-project/vllm/blob/509947463375cc27e2a60d05ce5463f6dd059171/vllm/tool_parsers/glm4_moe_tool_parser.py
 - vLLM GLM-4.7 tool parser (`Glm47MoeModelToolParser`: same-line name, optional/zero args): https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/glm47_moe_tool_parser.py
 - SGLang GLM-4.5/4.6 detector (`Glm4MoeDetector`: format docstring, XML→JSON state machine, argument typing): https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/function_call/glm4_moe_detector.py
 - SGLang GLM-4.7 detector (`Glm47MoeDetector`: newline-less / back-to-back calls): https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/function_call/glm47_moe_detector.py

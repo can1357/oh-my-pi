@@ -94,6 +94,7 @@
 		"check:ts": "bun run check:tools && bun run --workspaces --sequential --if-present check",
 		"check:tools": "oxlint . && oxfmt --check 'packages/*/src/**/*.{ts,tsx}' 'packages/*/{test,bench,examples,scripts}/**/*.ts' 'packages/*/*.ts' 'scripts/**/*.ts'",
 		"check:rs": "bun scripts/run-rs-task.ts check:rs",
+		"check:links": "lychee .",
 		"lint": "bun run --parallel lint:ts lint:rs",
 		"lint:ts": "bun run --parallel lint:tools && bun run --workspaces --if-present lint",
 		"lint:tools": "oxlint .",
