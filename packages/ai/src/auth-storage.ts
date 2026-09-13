@@ -5136,7 +5136,85 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
+				const envCredentialIdRaw = $envExact("OMP_CREDENTIAL_ID");
+		if (envCredentialIdRaw !== undefined) {
+			const credentialId = Number(envCredentialIdRaw.trim());
+			if (!Number.isInteger(credentialId) || credentialId <= 0) {
+				throw new AIError.ConfigurationError(
+					`OMP_CREDENTIAL_ID must be a positive integer, got "${envCredentialIdRaw}"`,
+				);
+			}
+			const selection = this.#getStoredOAuthSelections(provider).find(
+				candidate => candidate.credentialId === credentialId,
+			);
+			if (!selection) {
+				const disabled = await this.listDisabledCredentials(provider);
+				if (disabled.some(entry => entry.id === credentialId)) {
+					throw new AIError.OAuthError(`OMP_CREDENTIAL_ID=${credentialId} is disabled`, {
+						provider,
+						kind: "configuration",
+					});
+				}
+				throw new AIError.OAuthError(
+					`OMP_CREDENTIAL_ID=${credentialId} does not match any OAuth credential for provider: ${provider}`,
+					{ provider, kind: "configuration" },
+				);
+			}
+			let exclusiveOwner: string | undefined;
+			try {
+				const raw = this.#store.getCache(`session:exclusive:${provider}:${credentialId}`);
+				if (raw) {
+					const val = JSON.parse(raw) as { sessionId?: unknown };
+					if (typeof val.sessionId === "string" && val.sessionId.length > 0) {
+						exclusiveOwner = val.sessionId;
+					}
+				}
+			} catch {
+				exclusiveOwner = undefined;
+			}
+			if (exclusiveOwner !== undefined && exclusiveOwner !== sessionId) {
+				throw new AIError.OAuthError(
+					`OMP_CREDENTIAL_ID=${credentialId} is exclusively held by another session`,
+					{ provider, kind: "configuration" },
+				);
+			}
+			const providerKey = this.#getProviderTypeKey(provider, "oauth");
+			const strategy = this.#rankingStrategyResolver?.(provider);
+			const rankingContext: CredentialRankingContext = {
+				modelId: options?.modelId,
+			};
+			const blockScope = strategy?.blockScope?.(rankingContext);
+			const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+			if (this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes)) {
+				throw new AIError.OAuthError(`OMP_CREDENTIAL_ID=${credentialId} is temporarily blocked`, {
+					provider,
+					kind: "configuration",
+				});
+			}
+			const resolved = await this.#tryOAuthCredential(
+				provider,
+				{ credential: selection.credential, index: selection.index },
+				providerKey,
+				sessionId,
+				options,
+				{
+					checkUsage: false,
+					allowBlocked: false,
+					allowFallback: false,
+					blockScope,
+					blockScopes,
+				},
+			);
+			if (!resolved) {
+				throw new AIError.OAuthError(`OAuth access unavailable for OMP_CREDENTIAL_ID=${credentialId}`, {
+					provider,
+					kind: "configuration",
+				});
+			}
+			return resolved;
+		}
+
+const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
 

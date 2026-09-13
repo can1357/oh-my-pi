@@ -74,6 +74,7 @@
 
 ### Added
 
+- Added `OMP_CREDENTIAL_ID` environment variable to pin OAuth credential selection to a specific stored credential id without round-robin fallback to sibling accounts.
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
 
 ### Fixed
