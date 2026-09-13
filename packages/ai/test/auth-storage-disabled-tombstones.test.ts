@@ -176,6 +176,20 @@ describe("disabled credential tombstone retention", () => {
 		]);
 	});
 
+	it("keeps an identity's automatic tombstone when a duplicate row of it is deduplicated", () => {
+		if (!store) throw new Error("test setup failed");
+		const oldId = store.upsertAuthCredentialForProvider("openai-codex", credential("old"))[0].id;
+		store.deleteAuthCredential(oldId, AUTOMATIC_CAUSE);
+		const liveId = store.upsertAuthCredentialForProvider("openai-codex", credential("live"))[0].id;
+		// The row AuthStorage.reload() retires when it finds two live rows for one identity.
+		store.deleteAuthCredential(liveId, "deduplicated duplicate credential");
+
+		expect(readRows(dbPath)).toEqual([
+			{ id: oldId, disabled_cause: AUTOMATIC_CAUSE },
+			{ id: liveId, disabled_cause: "deduplicated duplicate credential" },
+		]);
+	});
+
 	it("lets a deliberate removal clear a legacy tombstone the removed org-scoped login had upgraded", () => {
 		if (!store) throw new Error("test setup failed");
 		// Pre-org login (identity `email:<e>`), torn down automatically.

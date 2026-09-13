@@ -180,6 +180,18 @@ function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): Store
 	return { id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause };
 }
 
+/**
+ * The user asked for this credential to go (`omp auth logout`, the account
+ * selector, `omp auth-broker logout`). Only these removals take the older
+ * tombstones of the same identity with them: `replaced by …` and
+ * `deduplicated duplicate credential` are routine hygiene on rows that
+ * another live credential supersedes, and must not erase the forensics an
+ * automatic tombstone still holds for that identity.
+ */
+function isDeliberateRemovalCause(cause: string): boolean {
+	return /^(deleted by user|logged out by user)/i.test(cause);
+}
+
 function resolveProviderCredentialIdentityKey(provider: string, identifiers: readonly string[]): string | null {
 	const emailIdentifier = identifiers.find(identifier => identifier.startsWith("email:"));
 	if (provider === "anthropic" || provider === "openai-codex") {
@@ -1558,7 +1570,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	deleteAuthCredential(id: number, disabledCause: string): void {
 		try {
 			const cause = normalizeDisabledCause(disabledCause);
-			if (isAutomaticDisableCause(cause)) {
+			if (!isDeliberateRemovalCause(cause)) {
 				this.#deleteStmt.run(cause, id);
 				return;
 			}
@@ -1615,7 +1627,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
 		try {
 			const cause = normalizeDisabledCause(disabledCause);
-			if (isAutomaticDisableCause(cause)) {
+			if (!isDeliberateRemovalCause(cause)) {
 				this.#deleteByProviderStmt.run(cause, provider);
 				return;
 			}
