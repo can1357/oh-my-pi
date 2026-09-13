@@ -468,6 +468,16 @@ const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
 let warnedStopSequencesTrim = false;
 
 const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
+/**
+ * Caller-map key the opaque-injected-client anchor lives under. Deliberately a
+ * sibling namespace rather than a member of the `anthropic-messages` one:
+ * {@link clearAnthropicFastModeFallback} sweeps every key equal to
+ * {@link ANTHROPIC_PROVIDER_SESSION_STATE_KEY} or prefixed `anthropic-messages:`
+ * and writes a flag onto the value as an `AnthropicProviderSessionState`, so an
+ * anchor inside that namespace would be mutated through the wrong shape. No key
+ * {@link anthropicProviderSessionStateKey} can mint reaches this one.
+ */
+const ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY = "anthropic-opaque-clients";
 
 /**
  * A mid-conversation `role: "system"` message omp inserts at a fixed slot in
@@ -562,38 +572,79 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
  * forge the boundary. `endpoint` is the URL the request reaches: the
  * model-resolved one, or an injected client's own `baseURL` when it publishes
  * one. A client that publishes none is isolated by its store instead — see
- * {@link opaqueInjectedClientStates}.
+ * {@link AnthropicOpaqueClientAnchor}.
  */
 function anthropicProviderSessionStateKey(endpoint: string, modelId: string): string {
 	return `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:${endpoint}\u0000${modelId}`;
 }
 
 /**
- * Private state maps for injected clients that publish no endpoint. Such a
- * client may target any transport, so attributing its rejection to the
- * model-resolved endpoint would let an unknown proxy suppress caching for the
- * official endpoint, for a sibling client, or for a later non-injected
- * request. Isolation therefore comes from the map the state lives in, not from
- * a synthetic key minted into the caller's: the caller's map never grows an
- * entry for an opaque client, and everything the client learned is reclaimed
- * with it. A caller that holds one client across turns still has its learning
- * seeded on the next turn; one that wraps every request in a fresh object gets
- * none, which is all an unrecognizable client can be worth.
+ * Private per-client state maps for injected clients that publish no endpoint,
+ * anchored in the caller's own session map under
+ * {@link ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY}. Such a client may target any
+ * transport, so attributing its rejection to the model-resolved endpoint would
+ * let an unknown proxy suppress caching for the official endpoint, for a
+ * sibling client, or for a later non-injected request. Isolation therefore
+ * comes from the map the state lives in, not from a synthetic key minted into
+ * the caller's.
  *
- * Living outside the caller's map also means the session-wide passes over it —
- * {@link clearAnthropicFastModeFallback}, the caller's own `close()` sweep —
- * never reach these states. Nothing is stranded by that: this state's
- * `close()` only drops in-memory learning (four flags, a dropped-block set,
- * and an LRU-capped `controlStates` map), never a timer, socket or server-side
- * handle, so the collector releases exactly what `close()` would have.
+ * Keying on the client alone would buy that isolation with the caller's own.
+ * One transport built once and handed to several sessions is the ordinary SDK
+ * embedding shape, and a store keyed by the client would hand every later
+ * session whatever the first one learned. Anchoring in the session's map is
+ * what separates them, and the inner level stays weak per client: a caller that
+ * holds one client across turns has its learning seeded on the next turn, one
+ * that wraps every request in a fresh object leaves a single immediately
+ * collectable entry behind. The caller's map grows by exactly one entry however
+ * many clients appear, never one per client.
+ *
+ * That one entry is what makes teardown reachable. `close()` discards the whole
+ * `WeakMap` and installs a fresh one, so a caller sweeping its map — `/new` on a
+ * live session, SDK session disposal — resets every opaque client's learning in
+ * one step, and the anchor stays usable rather than poisoned: the same still-live
+ * client relearns from its next request. Discarding the states instead of
+ * closing them individually loses nothing, because their `close()` only drops
+ * in-memory learning (four flags, a dropped-block set, an LRU-capped
+ * `controlStates` map) and never a timer, socket or server-side handle.
+ *
+ * What the anchor still cannot serve is a selective re-arm.
+ * {@link clearAnthropicFastModeFallback} lowers one flag on every live Anthropic
+ * state, which requires enumerating them; a `WeakMap` cannot be enumerated, and
+ * holding the states strongly enough to enumerate them is the unbounded growth
+ * this shape exists to avoid. A `/fast on` re-arm therefore reaches the
+ * endpoint-keyed states only, and an opaque client keeps its fast-mode fallback
+ * until the session-close sweep resets it wholesale.
  */
-const opaqueInjectedClientStates = new WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>();
+type AnthropicOpaqueClientAnchor = ProviderSessionState & {
+	stores: WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>;
+};
 
-function opaqueInjectedClientStore(client: AnthropicMessagesClientLike): Map<string, ProviderSessionState> {
-	const existing = opaqueInjectedClientStates.get(client);
-	if (existing !== undefined) return existing;
+function isAnthropicOpaqueClientAnchor(state: ProviderSessionState | undefined): state is AnthropicOpaqueClientAnchor {
+	return state !== undefined && "stores" in state && state.stores instanceof WeakMap;
+}
+
+function opaqueInjectedClientStore(
+	providerSessionState: Map<string, ProviderSessionState>,
+	client: AnthropicMessagesClientLike,
+): Map<string, ProviderSessionState> {
+	const existing = providerSessionState.get(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY);
+	let anchor: AnthropicOpaqueClientAnchor;
+	if (isAnthropicOpaqueClientAnchor(existing)) {
+		anchor = existing;
+	} else {
+		const freshAnchor: AnthropicOpaqueClientAnchor = {
+			stores: new WeakMap(),
+			close: () => {
+				freshAnchor.stores = new WeakMap();
+			},
+		};
+		providerSessionState.set(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY, freshAnchor);
+		anchor = freshAnchor;
+	}
+	const store = anchor.stores.get(client);
+	if (store !== undefined) return store;
 	const created = new Map<string, ProviderSessionState>();
-	opaqueInjectedClientStates.set(client, created);
+	anchor.stores.set(client, created);
 	return created;
 }
 
@@ -608,7 +659,9 @@ function getAnthropicProviderSessionState(
 	if (!providerSessionState) return undefined;
 	const clientBaseUrl = client !== undefined ? injectedClientBaseUrl(client) : undefined;
 	const store =
-		client !== undefined && clientBaseUrl === undefined ? opaqueInjectedClientStore(client) : providerSessionState;
+		client !== undefined && clientBaseUrl === undefined
+			? opaqueInjectedClientStore(providerSessionState, client)
+			: providerSessionState;
 	const key = anthropicProviderSessionStateKey(clientBaseUrl ?? baseUrl, modelId);
 	const existing = store.get(key) as AnthropicProviderSessionState | undefined;
 	if (existing) {
