@@ -438,8 +438,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		const expected = rawExpected === undefined ? undefined : normalizeIssuerUrl(rawExpected);
 		if (expected === undefined || normalizeIssuerUrl(iss) !== expected) {
 			throw new AIError.OAuthError(
-			`OAuth iss mismatch (RFC 9207): expected ${rawExpected ?? this.config.authorizationUrl}, got ${iss}`,
-			{ kind: "device-auth" },
+				`OAuth iss mismatch (RFC 9207): expected ${rawExpected ?? this.config.authorizationUrl}, got ${iss}`,
+				{ kind: "device-auth" },
 			);
 		}
 	}
