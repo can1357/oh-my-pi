@@ -313,8 +313,17 @@ export class AgentLifecycleManager {
 	 *
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
+	 *
+	 * `coldRevive` lets a caller that cannot install one process-global
+	 * {@link PersistedSubagentReviverFactory} (ACP hosts several concurrent
+	 * top-level sessions, each with its own ambient auth/model/settings) supply
+	 * a reviver scoped to this single call instead. It takes precedence over
+	 * the global factory and is never persisted onto the manager.
 	 */
-	async ensureLive(id: string): Promise<AgentSession> {
+	async ensureLive(
+		id: string,
+		coldRevive?: { reviverFactory: PersistedSubagentReviverFactory; idleTtlMs?: number },
+	): Promise<AgentSession> {
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -345,7 +354,7 @@ export class AgentLifecycleManager {
 		if (ref.session) return ref.session;
 		const inflight = this.#revivals.get(id);
 		if (inflight?.ref === ref) return inflight.promise;
-		const revival = this.#resolveAndRevive(id, ref);
+		const revival = this.#resolveAndRevive(id, ref, coldRevive);
 		const pending: RevivingAgent = { ref, promise: revival };
 		this.#revivals.set(id, pending);
 		try {
@@ -362,12 +371,17 @@ export class AgentLifecycleManager {
 	 * adopt it so the agent rejoins the normal idle↔parked lifecycle. Throws
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
-	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSession> {
+	async #resolveAndRevive(
+		id: string,
+		ref: AgentRef,
+		coldRevive?: { reviverFactory: PersistedSubagentReviverFactory; idleTtlMs?: number },
+	): Promise<AgentSession> {
 		let adoption = this.#adopted.get(id);
 		let revive = adoption?.ref === ref ? adoption.revive : undefined;
 		let coldAdopted = false;
-		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
-			revive = await this.#persistedReviverFactory(ref);
+		const persistedFactory = coldRevive?.reviverFactory ?? this.#persistedReviverFactory;
+		if (!revive && ref.status === "parked" && ref.sessionFile && persistedFactory) {
+			revive = await persistedFactory(ref);
 			// Teardown can complete during the factory await. A late cold revive must
 			// not cold-adopt (and later attach a live session + TTL) into a disposed
 			// manager — reject deterministically before creating any session.
@@ -377,7 +391,11 @@ export class AgentLifecycleManager {
 				);
 			}
 			if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+				adoption = {
+					ref,
+					idleTtlMs: coldRevive ? (coldRevive.idleTtlMs ?? 0) : this.#persistedReviveTtlMs,
+					revive,
+				};
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
 			}

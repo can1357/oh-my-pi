@@ -90,6 +90,10 @@ function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
 }
 
+function throwUnsupportedAgentsAction(): never {
+	throw new Error("This extension host does not support agents actions");
+}
+
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
 }
@@ -654,6 +658,10 @@ export class ExtensionRunner {
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
+		this.runtime.agentsList = actions.agentsList ?? throwUnsupportedAgentsAction;
+		this.runtime.agentsGet = actions.agentsGet ?? throwUnsupportedAgentsAction;
+		this.runtime.agentsEnsureLive = actions.agentsEnsureLive ?? throwUnsupportedAgentsAction;
+		this.runtime.agentsPrompt = actions.agentsPrompt ?? throwUnsupportedAgentsAction;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = async toolNames => {
