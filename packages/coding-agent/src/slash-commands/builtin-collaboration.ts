@@ -423,15 +423,18 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				ctx.showError("Usage: /join <link>");
 				return;
 			}
-			if (ctx.collabHost) {
-				ctx.showError("Stop hosting first (/collab stop)");
-				return;
-			}
 			if (ctx.collabGuest) {
 				ctx.showError("Already in a collab session (/leave first)");
 				return;
 			}
 			try {
+				// Stop stale/ending ownership and cancel pending starts, not a live room.
+				if (!ctx.collabController.host) await ctx.collabController.stop("joining another session");
+				// Recheck after teardown: a concurrent manual start may have won.
+				if (ctx.collabController.host) {
+					ctx.showError("Stop hosting first (/collab stop)");
+					return;
+				}
 				await new CollabGuestLink(ctx).join(link);
 			} catch (err) {
 				ctx.showError(`Failed to join collab session: ${errorMessage(err)}`);
@@ -443,7 +446,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "signOut",
 		description: "Leave the collab session",
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.collabHost) return "Leave collab: hosting";
+			if (runtime.ctx.collabController.host) return "Leave collab: hosting";
 			if (runtime.ctx.collabGuest) return "Leave collab: guest";
 			return "Leave collab: not in collab";
 		},
