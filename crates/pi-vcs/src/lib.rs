@@ -150,7 +150,10 @@ impl Repo {
 				// but never render text, so a `max_bytes` inert for them must not
 				// be rejected (see the P2 finding on this validator).
 				if options.max_bytes.is_some() {
-					return Err(Error::Unsupported { operation: "diffMaxBytes", backend: VcsKind::Jj });
+					return Err(Error::Unsupported {
+						operation: "diffMaxBytes",
+						backend:   VcsKind::Jj,
+					});
 				}
 				workspace.diff_text(&options.files, true)
 			},

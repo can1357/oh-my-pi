@@ -534,7 +534,7 @@ struct RenderBudget {
 impl RenderBudget {
 	/// How much further this change's own output may grow before crossing
 	/// `limit`, given what earlier changes already produced.
-	fn remaining(self) -> usize {
+	const fn remaining(self) -> usize {
 		self.limit.saturating_sub(self.already)
 	}
 }
@@ -562,7 +562,10 @@ fn map_hunk_error(err: std::io::Error, budget: Option<RenderBudget>) -> Error {
 		.get_ref()
 		.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some())
 	{
-		Error::OutputTooLarge { operation: "diffText", limit: budget.map_or(0, |budget| budget.limit) }
+		Error::OutputTooLarge {
+			operation: "diffText",
+			limit:     budget.map_or(0, |budget| budget.limit),
+		}
 	} else {
 		Error::backend("git diff", err)
 	}
@@ -1716,20 +1719,22 @@ mod tests {
 		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
 
 		let mut out = String::new();
-		let lines: Vec<(DiffLineKind, &[u8])> =
-			(0..10_000).map(|_| (DiffLineKind::Add, b"x\n".as_slice())).collect();
+		let lines: Vec<(DiffLineKind, &[u8])> = (0..10_000)
+			.map(|_| (DiffLineKind::Add, b"x\n".as_slice()))
+			.collect();
 		let full_len: usize = lines.iter().map(|(_, content)| content.len()).sum();
 		let budget = Some(RenderBudget { limit: 100, already: 0 });
 		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
 		let header = HunkHeader {
 			before_hunk_start: 1,
-			before_hunk_len: 0,
-			after_hunk_start: 1,
-			after_hunk_len: 10_000,
+			before_hunk_len:   0,
+			after_hunk_start:  1,
+			after_hunk_len:    10_000,
 		};
 		let err = sink.consume_hunk(header, &lines).unwrap_err();
 		assert!(
-			err.get_ref().is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
+			err.get_ref()
+				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
 			"{err:?}"
 		);
 		assert!(
@@ -1746,7 +1751,7 @@ mod tests {
 	#[test]
 	fn binary_block_writer_stops_within_budget_instead_of_finishing_the_block() {
 		let mut out = String::new();
-		let compressed = vec![0xAB_u8; 100_000];
+		let compressed = vec![0xab_u8; 100_000];
 		let budget = Some(RenderBudget { limit: 200, already: 0 });
 		let err = append_binary_block(&mut out, "literal", compressed.len(), &compressed, budget)
 			.unwrap_err();
