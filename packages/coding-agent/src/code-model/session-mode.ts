@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { ExtensionAPI, ExtensionContext } from "../extensibility/extensions/types";
 import type { ModelChangeEntry } from "../session/session-entries";
@@ -12,6 +13,7 @@ export const CODE_MODEL_REVIEW_PROMPT = codeModelReviewPrompt.trim();
 interface ModelState {
 	provider: string;
 	id: string;
+	selector?: string;
 	effort?: ConfiguredThinkingLevel;
 }
 
@@ -34,21 +36,28 @@ export interface CodeModelSessionController {
 }
 
 function sameModel(model: Model | undefined, state: ModelState): boolean {
-	return model?.provider === state.provider && model.id === state.id;
+	if (!model) return false;
+	if (state.selector) {
+		return formatModelStringWithRouting(model) === state.selector;
+	}
+	return model.provider === state.provider && model.id === state.id;
 }
 
 function describeModelState(state: ModelState): string {
-	return `${state.provider}/${state.id} · ${state.effort ?? "default"}`;
+	const modelName = state.selector ?? `${state.provider}/${state.id}`;
+	return `${modelName} · ${state.effort ?? "default"}`;
 }
 
 function isModelState(value: unknown): value is ModelState {
 	if (!value || typeof value !== "object") return false;
 	const effort = "effort" in value ? value.effort : undefined;
+	const selector = "selector" in value ? value.selector : undefined;
 	return (
 		"provider" in value &&
 		typeof value.provider === "string" &&
 		"id" in value &&
 		typeof value.id === "string" &&
+		(selector === undefined || typeof selector === "string") &&
 		(effort === undefined || parseConfiguredThinkingLevel(typeof effort === "string" ? effort : undefined) === effort)
 	);
 }
@@ -84,7 +93,8 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 	function snapshot(ctx: ExtensionContext): ModelState {
 		const model = ctx.models.current();
 		if (!model) throw new Error("The current session requires a valid model.");
-		return { provider: model.provider, id: model.id, effort: configuredThinkingLevel() };
+		const selector = formatModelStringWithRouting(model);
+		return { provider: model.provider, id: model.id, selector, effort: configuredThinkingLevel() };
 	}
 
 	function currentMatches(ctx: ExtensionContext, target: ModelState): boolean {
@@ -111,12 +121,13 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 	}
 
 	async function apply(ctx: ExtensionContext, target: ModelState): Promise<void> {
-		const model = ctx.models
-			.list()
-			.find(candidate => candidate.provider === target.provider && candidate.id === target.id);
-		if (!model) throw new Error(`The available model catalogue must contain ${target.provider}/${target.id}.`);
+		const model = target.selector
+			? ctx.models.resolve(target.selector)
+			: ctx.models.list().find(candidate => candidate.provider === target.provider && candidate.id === target.id);
+		const identifier = target.selector ?? `${target.provider}/${target.id}`;
+		if (!model) throw new Error(`The available model catalogue must contain ${identifier}.`);
 		if (!sameModel(ctx.models.current(), target) && !(await pi.setModel(model))) {
-			throw new Error(`Check the existing authentication for ${target.provider}/${target.id}.`);
+			throw new Error(`Check the existing authentication for ${identifier}.`);
 		}
 		pi.setThinkingLevel(target.effort);
 		if (!currentMatches(ctx, target)) {
@@ -132,11 +143,13 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 		const active = ctx.models.current();
 		const interrupted =
 			previous.phase !== "coding" && (sameModel(active, previous.original) || sameModel(active, previous.coding));
+		const codingStateMatches =
+			(sameModel(active, previous.coding) || retryFallbackIsActive(ctx)) &&
+			configuredThinkingLevel() === previous.coding.effort;
 		if (
 			!options.force &&
 			!interrupted &&
-			!retryFallbackIsActive(ctx) &&
-			!currentMatches(ctx, previous.coding) &&
+			!codingStateMatches &&
 			!currentMatches(ctx, previous.original)
 		) {
 			save(undefined);
@@ -172,9 +185,11 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 			throw new Error("Configure an authenticated text-and-tool-capable coding model with /code-model.");
 		}
 		const original = snapshot(ctx);
+		const codingSelector = formatModelStringWithRouting(selection.model);
 		const coding: ModelState = {
 			provider: selection.model.provider,
 			id: selection.model.id,
+			selector: codingSelector,
 			effort: selection.effort,
 		};
 		const id = sessionId(ctx);

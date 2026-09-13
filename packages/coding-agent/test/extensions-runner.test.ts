@@ -1547,6 +1547,48 @@ describe("ExtensionRunner", () => {
 			});
 		});
 
+		it("awaits session_before_idle handlers past the generic timeout before opening the idle gate", async () => {
+			const extensionPath = path.join(tempDir.path(), "slow-before-idle.ts");
+			const markerPath = path.join(tempDir.path(), "slow-before-idle-marker.txt");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					import * as fs from "node:fs";
+					export default function(pi) {
+						pi.on("session_before_idle", async () => {
+							const { promise, resolve } = Promise.withResolvers<void>();
+							setTimeout(resolve, 50);
+							await promise;
+							fs.writeFileSync(${JSON.stringify(markerPath)}, "done\\n");
+						});
+					}
+				`,
+			);
+
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const errors: ExtensionError[] = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
+			testSetExtensionHandlerTimeoutMs(10);
+
+			await runner.emit({ type: "session_before_idle", messages: [], willContinue: false });
+
+			expect(fs.readFileSync(markerPath, "utf8")).toBe("done\n");
+			expect(warnSpy).not.toHaveBeenCalled();
+			expect(errors).toEqual([]);
+
+			warnSpy.mockRestore();
+		});
+
 		it("uses the configured tool_call timeout and fails closed so a hung extension cannot block execution (#3948)", async () => {
 			const hangExtensionPath = path.join(tempDir.path(), "hang-tool-call.ts");
 			fs.writeFileSync(

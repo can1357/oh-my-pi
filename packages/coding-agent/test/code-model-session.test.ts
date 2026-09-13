@@ -46,7 +46,11 @@ function harness(
 	const coding = model("code", "implementer");
 	const fallback = model("fallback", "backup");
 	const manual = model("manual", "choice");
-	const models = [main, coding, fallback, manual];
+	const openRouterRouted = {
+		...model("openrouter", "glm-4.7"),
+		compat: { openRouterRouting: { only: ["cerebras"] } },
+	} as unknown as Model;
+	const models = [main, coding, fallback, manual, openRouterRouted];
 	let current = main;
 	let effort: ConfiguredThinkingLevel | undefined = options.initialEffort ?? ThinkingLevel.Low;
 	let effectiveEffort: ThinkingLevel | undefined = effort === AUTO_THINKING ? ThinkingLevel.Medium : effort;
@@ -99,6 +103,11 @@ function harness(
 		models: {
 			list: () => models,
 			current: () => current,
+			resolve: (spec: string) => {
+				if (spec === "openrouter/glm-4.7@cerebras") return openRouterRouted;
+				const [provider, id] = spec.split("@")[0]?.split(":")?.[0]?.split("/") ?? [];
+				return models.find(m => m.provider === provider && m.id === id);
+			},
 		},
 		sessionManager: {
 			getSessionId: () => sessionId,
@@ -119,6 +128,7 @@ function harness(
 		handlers,
 		main,
 		manual,
+		openRouterRouted,
 		notifications,
 		pi,
 		settings,
@@ -180,6 +190,47 @@ describe("code-model session phase", () => {
 		expect(state.current()).toBe(state.main);
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
+	it("preserves manual effort when an automatic retry fallback occurs", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings);
+		await session.run("start", state.ctx);
+		// User manually updates effort during the coding phase.
+		state.pi.setThinkingLevel(ThinkingLevel.XHigh);
+		state.setFallback();
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(false);
+		expect(state.current()).toBe(state.fallback);
+		expect(state.effort()).toBe(ThinkingLevel.XHigh);
+	});
+
+	it("preserves routed model identity across coding phase and restoration", async () => {
+		const state = harness();
+		state.setCurrent(state.openRouterRouted, ThinkingLevel.Low);
+		const session = installCodeModelSession(state.pi, state.settings);
+		const started = await session.run("start", state.ctx);
+		expect(started.changed).toBe(true);
+		expect(state.current()).toBe(state.coding);
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.openRouterRouted);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
+
+	it("applies the configured coding route and restores the original model", async () => {
+		const state = harness({ role: "openrouter/glm-4.7@cerebras:high" });
+		const session = installCodeModelSession(state.pi, state.settings);
+
+		const started = await session.run("start", state.ctx);
+		expect(started.changed).toBe(true);
+		expect(state.current()).toBe(state.openRouterRouted);
+		expect(state.effort()).toBe(ThinkingLevel.High);
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
 
 	it("keeps a manually selected model when finishing", async () => {
 		const state = harness();
@@ -191,7 +242,6 @@ describe("code-model session phase", () => {
 		expect(state.current()).toBe(state.manual);
 		expect(state.effort()).toBe(ThinkingLevel.XHigh);
 	});
-
 	it("rolls back the original model state when entering fails", async () => {
 		const state = harness({ setModelAllowed: false });
 		const session = installCodeModelSession(state.pi, state.settings);
