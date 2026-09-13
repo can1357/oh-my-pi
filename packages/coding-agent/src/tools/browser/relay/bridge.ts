@@ -1404,9 +1404,7 @@ export class RelayBridge {
 		const tab = this.#tabs.get(tabId);
 		const key = this.#subscriptionTrackingKey(msg);
 		if (!tab || !key) return;
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
-		const expectedExt = this.#ext;
-		if (!expectedExt) return;
+		if (!tab.attached || tab.restoring) return;
 		const orphaned = {
 			method: msg.method,
 			params: msg.params,
@@ -1419,7 +1417,7 @@ export class RelayBridge {
 			!isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency);
 		if (!disable && !requiresFreshRoot) return;
 		await this.#awaitPendingSubscriptions(tab, key);
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
+		if (!tab.attached || tab.restoring) return;
 		const current = this.#latestSubscriptionForKey(tab, key);
 		const previous =
 			key === "Emulation.setEmulatedMedia"
@@ -1429,6 +1427,16 @@ export class RelayBridge {
 					}
 				: orphaned;
 		this.#scheduleLiveSubscriptionReconcile(tab, [{ key, previous, next: current }]);
+	}
+
+	#discardDetachedRootCleanup(tab: TabState): void {
+		// These queues only describe mutations on the debugger root that just
+		// disappeared. Keeping them across a successful detach can apply stale
+		// cleanup to the replacement root.
+		tab.pendingPreloadScriptCleanup = [];
+		tab.preloadApplicationMarkers.clear();
+		tab.pendingSubscriptionReconcile = [];
+		tab.resumeSubscriptionReconcileAfterRestore = false;
 	}
 
 	#forwardingSessionIsCurrent(
@@ -2941,8 +2949,7 @@ export class RelayBridge {
 				// detach RPC response can be lost with its extension socket after Chrome
 				// has already committed the detach, so retire every root-local cleanup ID
 				// here rather than waiting only for the RPC-success continuation.
-				tab.pendingPreloadScriptCleanup = [];
-				tab.preloadApplicationMarkers.clear();
+				this.#discardDetachedRootCleanup(tab);
 				// Chrome has confirmed that the shared debugger root is gone. Reset
 				// cached Runtime state on the event path as well as the RPC-success
 				// path: extension-side persistence can fail after detach succeeded,
@@ -3250,8 +3257,7 @@ export class RelayBridge {
 			// just destroyed. Do not drain those session-local IDs after replay: Chrome
 			// may reuse one for a preserved script on the replacement root. The old
 			// root also cannot emit any of its private marker exceptions anymore.
-			tab.pendingPreloadScriptCleanup = [];
-			tab.preloadApplicationMarkers.clear();
+			this.#discardDetachedRootCleanup(tab);
 			this.#resetRuntime(tab);
 		})().finally(() => {
 			if (tab.detaching === done) tab.detaching = null;
@@ -3890,8 +3896,7 @@ export class RelayBridge {
 				tab.subscriptionReconciling = null;
 				tab.subscriptions.clear();
 				tab.preloadScripts.clear();
-				tab.pendingPreloadScriptCleanup = [];
-				tab.preloadApplicationMarkers.clear();
+				this.#discardDetachedRootCleanup(tab);
 				this.#resetRuntime(tab);
 			})
 			.catch(err => {

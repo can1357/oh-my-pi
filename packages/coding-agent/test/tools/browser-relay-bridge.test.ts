@@ -5210,6 +5210,77 @@ describe("RelayBridge tab grouping", () => {
 		).toEqual({ identifier: "deferred-preload" });
 	});
 
+	it("retains a late root setter for cleanup when the final detach fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "in-flight Fetch.enable");
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1, "last-holder detach");
+		ack(bridge, ext, "send");
+		nack(bridge, ext, "detach", "another debugger prevented detach");
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		await attachPage(bridge, ext, adopter, adopterConn, 1);
+		await waitFor(
+			() => ext.pending("send").some(rpc => rpc.method === "Fetch.disable"),
+			"late Fetch.enable cleanup after adoption",
+		);
+	});
+
+	it("discards deferred root-state cleanup after the final detach succeeds", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "hardware override");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1, "last-holder detach");
+		ack(bridge, ext, "detach");
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		const attach = attachPage(bridge, ext, adopter, adopterConn, 1);
+		await waitFor(() => ext.pending("attach").length === 1, "new-root attach");
+		ack(bridge, ext, "attach");
+		await attach;
+		await flush();
+
+		expect(ext.rpcs("detach")).toHaveLength(1);
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setHardwareConcurrencyOverride"]);
+	});
+
 	it("retains later preload cleanups after a stale identifier fails to remove", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
