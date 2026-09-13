@@ -62,6 +62,11 @@
 - The pinned `Subagents` block now lists every live agent, collapsed to a few rows with a click expander by default; `display.pinnedAgents` switches it to `full` or `off` ([#11737](https://github.com/can1357/oh-my-pi/pull/11737) by [@H4vC](https://github.com/H4vC)).
 - The `remote` compaction method now covers Claude: Anthropic server-side compaction (`compact-2026-01-12` beta) runs behind the existing `compaction.methodOrder` / `compaction.remoteEnabled` gates for first-party Anthropic models, persists its plain-text summary with a native replay payload that later Anthropic turns send back as a `compaction` block, and falls through to the next configured method on failure like OpenAI server compaction.
 
+### Added
+
+- Added `omp sessions list` for listing saved sessions in the current project or all projects ([#11025](https://github.com/can1357/oh-my-pi/pull/11025) by [@kearril](https://github.com/kearril)).
+- Added `omp sessions roots` and `omp sessions list --cwd <path>` for browsing session work directories ([#11025](https://github.com/can1357/oh-my-pi/pull/11025) by [@kearril](https://github.com/kearril)).
+
 ### Changed
 
 - The `providers.cacheRetention` `auto` setting now keeps Anthropic OAuth subscriber sessions on 1h prompt-cache retention and API keys on 5m, instead of 5m for both ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
