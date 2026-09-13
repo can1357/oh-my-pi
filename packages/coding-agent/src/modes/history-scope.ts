@@ -88,3 +88,23 @@ export function bindHistoryScope(
 		getRecent: limit => storage.getRecent(limit, scope()),
 	};
 }
+
+/** A storage bound to a live scope, plus the key an editor re-seeds on when that scope changes. */
+export interface HistorySource {
+	storage: Pick<HistoryStorage, "add" | "getRecent">;
+	/** Identity of the scope in effect right now; distinct values mean a different data set. */
+	sourceKey: () => string;
+}
+
+/**
+ * Bind `storage` to a live `resolveScope` for a history editor: both the reads and the key the
+ * editor compares come from the same resolution, so a host cannot install one without the other
+ * — the composition is the contract, and the editor's recall scope is only correct when both
+ * halves name the same data set.
+ */
+export function bindHistorySource(storage: HistoryStorage, resolveScope: () => HistoryScope): HistorySource {
+	return {
+		storage: bindHistoryScope(storage, resolveScope),
+		sourceKey: () => historyScopeKey(resolveScope()),
+	};
+}

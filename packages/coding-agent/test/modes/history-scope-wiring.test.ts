@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { bindHistoryScope, historyScopeKey, resolveHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
+import { bindHistorySource, resolveHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import type { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -54,12 +54,15 @@ describe("history scope wiring", () => {
 		expect(panel.title).toBe("History (this session)");
 	});
 
-	it("recalls through the scope named by the history.scope setting", async () => {
-		const settings = Settings.isolated({ "history.scope": "cwd" });
+	it("recalls through the scope named by the history.scope setting, and follows the setting", async () => {
+		const settings = Settings.isolated();
+		// Same mutation the settings UI performs: the merged value is what the scope resolver reads.
+		settings.override("history.scope", "cwd");
 		const storage = HistoryStorage.open(tempDir!.join("history.db"));
 		const elsewhere = tempDir!.join("other");
 		await storage.add("HERE_PROMPT", tempDir!.path(), "session-1");
-		await storage.add("ELSEWHERE_PROMPT", elsewhere, "session-2");
+		// Same conversation, another folder: only the `session` scope reaches it.
+		await storage.add("SESSION_PROMPT", elsewhere, "session-1");
 
 		const scope = () =>
 			resolveHistoryScope(settings.get("history.scope"), {
@@ -67,9 +70,19 @@ describe("history scope wiring", () => {
 				cwd: getProjectDir(),
 			});
 		const editor = new Editor(getEditorTheme());
-		editor.setHistoryStorage(bindHistoryScope(storage, scope), () => historyScopeKey(scope()));
+		// The production composition: one binding feeds both the reads and the key the editor
+		// re-seeds on, so the setting cannot move one without the other.
+		const source = bindHistorySource(storage, scope);
+		editor.setHistoryStorage(source.storage, source.sourceKey);
 
 		editor.handleInput("\x1b[A");
 		expect(editor.getText()).toBe("HERE_PROMPT");
+
+		// Switching the setting must move the editor to the newly named data set rather than
+		// keep serving the previous one.
+		settings.override("history.scope", "session");
+		editor.setText("");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("SESSION_PROMPT");
 	});
 });

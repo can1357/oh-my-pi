@@ -210,7 +210,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import { bindHistoryScope, type HistoryScopeContext, historyScopeKey, resolveHistoryScope } from "./history-scope";
+import { bindHistorySource, type HistoryScopeContext, resolveHistoryScope } from "./history-scope";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
 	describeLoopCondition,
@@ -5478,10 +5478,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#installHistoryStorage(editor: CustomEditor): void {
 		const storage = this.historyStorage;
 		if (!storage) return;
-		editor.setHistoryStorage(
-			bindHistoryScope(storage, () => this.#historyScope()),
-			() => historyScopeKey(this.#historyScope()),
-		);
+		const source = bindHistorySource(storage, () => this.#historyScope());
+		editor.setHistoryStorage(source.storage, source.sourceKey);
 	}
 
 	setEditorComponent(
