@@ -45,21 +45,30 @@ function providerLabel(provider: string): string {
 	return truncateToWidth(provider, TRUNCATE_LENGTHS.TITLE);
 }
 
+/**
+ * The remedy is an executable command and `/login` matches its argument by
+ * exact equality, so an id the title bound would cut is never advertised as
+ * an argument; the argument-free selector reaches it instead.
+ */
+function loginRemedy(provider: string): string {
+	return providerLabel(provider) === provider
+		? `Sign in again with /login ${provider}.`
+		: "Sign in again with /login and choose the provider.";
+}
+
 /** One-line warning for a credential torn down while this session was running. */
 export function formatCredentialDisabledNotice(event: CredentialDisabledEvent): string {
 	const account = event.credentialType === "api_key" ? "API key" : accountLabel(event);
-	const provider = providerLabel(event.provider);
 	return sanitizeDisplayWarning(
-		`Signed out of ${provider} ${account}: ${causeSummary(event.disabledCause)}. Sign in again with /login ${provider}.`,
+		`Signed out of ${providerLabel(event.provider)} ${account}: ${causeSummary(event.disabledCause)}. ${loginRemedy(event.provider)}`,
 	);
 }
 
 /** Startup replay for a tombstone the user has not acted on yet (see `AuthStorage.listActionableDisabledCredentials`). */
 export function formatDisabledCredentialReplayNotice(summary: DisabledCredentialSummary, nowMs: number): string {
 	const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
-	const provider = providerLabel(summary.provider);
 	return sanitizeDisplayWarning(
-		`${provider} ${accountLabel(summary)} was signed out${ago}: ${causeSummary(summary.cause)}. Sign in again with /login ${provider}.`,
+		`${providerLabel(summary.provider)} ${accountLabel(summary)} was signed out${ago}: ${causeSummary(summary.cause)}. ${loginRemedy(summary.provider)}`,
 	);
 }
 

@@ -32,7 +32,6 @@ import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
-import { collectDisabledCredentialNotices } from "./config/credential-notices";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
@@ -611,7 +610,7 @@ async function runInteractiveMode(
 	// Same pull-after-subscribe shape: an account torn down while no session was
 	// watching (background refresh, a sibling process) is only recorded as a
 	// tombstone, so announce it here until the user signs in again.
-	for (const notice of await collectDisabledCredentialNotices(session.modelRegistry.authStorage, Date.now())) {
+	for (const notice of await session.getDisabledCredentialNotices()) {
 		mode.showWarning(notice);
 	}
 
@@ -2061,10 +2060,7 @@ export async function runRootCommand(
 			// when it was the last usable credential, the `No models available` exit
 			// below is the only thing the user would otherwise see.
 			if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui") {
-				for (const notice of await collectDisabledCredentialNotices(
-					session.modelRegistry.authStorage,
-					Date.now(),
-				)) {
+				for (const notice of await session.getDisabledCredentialNotices()) {
 					process.stderr.write(`${notice}\n`);
 				}
 			}

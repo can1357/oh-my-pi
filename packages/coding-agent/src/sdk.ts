@@ -1372,8 +1372,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
-	// The session is the user-facing surface: a teardown that happens before it
-	// exists is announced by the tombstone replay each mode runs at startup.
+	// The session is the user-facing surface, but its `notice` stream reaches
+	// only current subscribers: a teardown before the session exists, or before
+	// the caller subscribes to the returned session, reaches nobody and survives
+	// as a tombstone that `session.getDisabledCredentialNotices()` replays —
+	// pulled once after subscribing, as the CLI modes do.
 	let credentialDisabledNoticeTarget: AgentSession | undefined;
 	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
 		credentialDisabledNoticeTarget?.emitNotice("warning", formatCredentialDisabledNotice(event), "auth");

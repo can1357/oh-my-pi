@@ -118,10 +118,11 @@ describe("credential sign-out notices", () => {
 			provider: `extension-provider-${"y".repeat(120)}`,
 			disabledCause: `HTTP 400 {"error":"invalid_grant","error_description":"${"grant revoked ".repeat(40)}"}`,
 		});
-		// provider (TITLE, twice) + label (TITLE) + cause (CONTENT) + fixed wording.
-		expect(notice.length).toBeLessThan(2 * 60 + 60 + 80 + 80);
-		expect(notice).toMatch(/…/);
-		expect(notice).toMatch(/Sign in again with \/login extension-provider-y+…\.$/);
+		// provider (TITLE) + label (TITLE) + cause (CONTENT) + fixed wording.
+		expect(notice.length).toBeLessThan(60 + 60 + 80 + 80);
+		expect(notice).toMatch(/^Signed out of extension-provider-y+… x+…: /);
+		// `/login` matches its argument exactly: a cut id is not offered as one.
+		expect(notice).toMatch(/Sign in again with \/login and choose the provider\.$/);
 	});
 
 	it("strips terminal control sequences and tabs from provider-controlled notice text", async () => {

@@ -101,6 +101,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import { collectDisabledCredentialNotices } from "../config/credential-notices";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
@@ -10807,6 +10808,20 @@ export class AgentSession {
 	/** WATCHDOG.yml problems from startup discovery; shown by the UI once it is ready. */
 	getAdvisorConfigWarnings(): readonly string[] {
 		return this.#advisors.configWarnings;
+	}
+
+	/**
+	 * Notices for accounts the auth layer signed out on its own that have not
+	 * signed in again. Pull-after-subscribe like
+	 * {@link AgentSession.getAdvisorConfigWarnings}: a teardown before this
+	 * session had a listener — background model discovery while the session was
+	 * being created, an earlier session, a sibling process — reached nobody's
+	 * `notice` stream and survives only as a tombstone. Teardowns after
+	 * subscribing arrive live as `notice` events with source `auth`. Bounded and
+	 * best-effort: an unreachable broker yields no notices, never an error.
+	 */
+	getDisabledCredentialNotices(nowMs = Date.now()): Promise<string[]> {
+		return collectDisabledCredentialNotices(this.#modelRegistry.authStorage, nowMs);
 	}
 
 	/**
