@@ -137,6 +137,18 @@ export type OAuthCredential = {
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
 
+/**
+ * Broker disable condition: preserve the OAuth bearer fingerprint on the wire,
+ * and tag API-key hashes so equal key/access strings cannot match across kinds.
+ * API keys compare the stored key representation, not an environment variable
+ * or command's resolved value; changing only that value does not version the row.
+ */
+export function fingerprintCredentialForDisable(credential: AuthCredential): string {
+	return credential.type === "oauth"
+		? fingerprintOAuthBearer(credential.access)
+		: `api_key:${fingerprintOAuthBearer(credential.key)}`;
+}
+
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
 export type AuthStorageData = Record<string, AuthCredentialEntry>;
@@ -637,8 +649,8 @@ export interface AuthCredentialStore {
 	/**
 	 * Optional async write hook for disabling one stored credential. Remote stores
 	 * use it to await broker persistence before AuthStorage updates its snapshot.
-	 * A provided bearer fingerprint makes the disable conditional; `false` means
-	 * the broker reported that a peer rotated the bearer (or the row is missing).
+	 * A condition from `fingerprintCredentialForDisable` guards the access/key;
+	 * `false` means the broker found a replacement (or the row is missing).
 	 */
 	deleteAuthCredentialRemote?(id: number, disabledCause: string, expectedAccessFingerprint?: string): Promise<boolean>;
 	/**
@@ -2535,9 +2547,9 @@ export class AuthStorage {
 	}
 
 	/**
-	 * CAS-style disable used when OAuth refresh definitively fails: only disables
-	 * when persisted `data` (or the broker-held bearer) still matches the credential
-	 * we attempted to refresh.
+	 * CAS-style disable for definitive refresh failure or upstream invalidation:
+	 * only disables when persisted `data` (or the broker-held access/key) still
+	 * matches the failed credential.
 	 * Returns `false` when a peer rotated the row between our pre-check and the
 	 * disable, so the caller can reload and retry instead of clobbering the
 	 * freshly-rotated credential.
@@ -2553,8 +2565,7 @@ export class AuthStorage {
 		const target = entries[index];
 		let disabled: boolean;
 		if (this.#store.deleteAuthCredentialRemote) {
-			const expectedAccessFingerprint =
-				expectedCredential.type === "oauth" ? fingerprintOAuthBearer(expectedCredential.access) : undefined;
+			const expectedAccessFingerprint = fingerprintCredentialForDisable(expectedCredential);
 			disabled = await this.#store.deleteAuthCredentialRemote(target.id, disabledCause, expectedAccessFingerprint);
 		} else {
 			const serialized = serializeCredential(provider, expectedCredential);
@@ -2878,7 +2889,7 @@ export class AuthStorage {
 							? await this.#store.deleteAuthCredentialRemote(
 									row.id,
 									disabledCause,
-									fingerprintOAuthBearer(current.access),
+									fingerprintCredentialForDisable(current),
 								)
 							: this.#store.tryDisableAuthCredentialIfMatches(
 									row.id,
@@ -7400,10 +7411,10 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Disable an OAuth credential only while its bearer still matches. Used by
+	 * Disable a credential only while its access/key fingerprint still matches. Used by
 	 * the auth-broker server to honour `If-Match` on `POST /v1/credential/:id/disable`.
 	 */
-	async disableCredentialIfBearerMatches(
+	async disableCredentialIfFingerprintMatches(
 		id: number,
 		expectedAccessFingerprint: string,
 		disabledCause: string,
@@ -7412,7 +7423,7 @@ export class AuthStorage {
 			const target = entries.find(entry => entry.id === id);
 			if (!target) continue;
 			const credential = target.credential;
-			if (credential.type !== "oauth" || fingerprintOAuthBearer(credential.access) !== expectedAccessFingerprint) {
+			if (fingerprintCredentialForDisable(credential) !== expectedAccessFingerprint) {
 				return "stale";
 			}
 			if (await this.#disableCredentialByIdIfMatches(provider, id, credential, disabledCause)) return "disabled";

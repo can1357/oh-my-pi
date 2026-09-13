@@ -335,9 +335,9 @@ export class AuthBrokerClient {
 
 	/**
 	 * `POST /v1/credential/:id/disable`. With `expectedAccessFingerprint` the
-	 * disable is conditional (`If-Match`), and a broker that finds a different
-	 * bearer answers 412. The bare `AbortSignal` form predates the options
-	 * object and is still honoured.
+	 * disable is conditional (`If-Match`): pass `fingerprintCredentialForDisable`
+	 * for an OAuth bearer or stored API key. A different credential answers 412.
+	 * The bare `AbortSignal` form predates the options object and is still honoured.
 	 */
 	async disableCredential(
 		id: number,

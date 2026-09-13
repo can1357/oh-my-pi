@@ -18,7 +18,6 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { logger } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
-import { serializeCredential } from "../src/auth/sqlite-credential-store";
 import { withEnv } from "./helpers";
 
 /** Ambient Anthropic keys would short-circuit `getApiKey` past the stored OAuth row under test. */
@@ -34,15 +33,6 @@ function mintOAuthCredential(): OAuthCredential {
 		accountId: "account-a",
 		email: "a@example.com",
 	};
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (predicate()) return;
-		await Bun.sleep(10);
-	}
-	if (!predicate()) throw new Error("waitUntil timeout");
 }
 
 describe("credential disable bearer CAS", () => {
@@ -257,32 +247,6 @@ describe("credential disable bearer CAS", () => {
 			]);
 		});
 
-		test("sync remote disable rejects mismatched serialized credentials without disabling the row", async () => {
-			const remoteStore = await openRemote();
-			const expectedData = serializeCredential("anthropic", { ...credential, access: "different-access" })!.data;
-			expect(remoteStore.tryDisableAuthCredentialIfMatches(id, expectedData, cause)).toBe(false);
-			expect(remoteStore.listAuthCredentials("anthropic")).toMatchObject([{ id }]);
-			await remoteStore.refreshSnapshot();
-			expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential }]);
-		});
-
-		test("sync remote disable restores the peer-rotated row after optimistic removal loses bearer CAS", async () => {
-			const remoteStore = await openRemote();
-			const expectedData = serializeCredential(
-				"anthropic",
-				remoteStore.listAuthCredentials("anthropic")[0]!.credential,
-			)!.data;
-			storage.upsertCredential("anthropic", rotated);
-			expect(remoteStore.tryDisableAuthCredentialIfMatches(id, expectedData, cause)).toBe(true);
-			expect(remoteStore.listAuthCredentials("anthropic")).toEqual([]);
-			await waitUntil(() => {
-				const current = remoteStore.listAuthCredentials("anthropic")[0]?.credential;
-				return current?.type === "oauth" && current.access === rotated.access;
-			});
-			expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
-			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
-		});
-
 		test("a stale broker-backed AuthStorage cannot disable a peer-rotated invalidated bearer", () =>
 			withoutAmbientAnthropicKeys(async () => {
 				const remoteStore = await openRemote();
@@ -329,6 +293,81 @@ describe("credential disable bearer CAS", () => {
 				expect(remoteStore.listAuthCredentials("anthropic")).toEqual([]);
 				expect(await peer.getApiKey("anthropic", "s1")).toBeUndefined();
 				expect(await store.listDisabledCredentials("anthropic")).toMatchObject([{ id, cause: "deleted by user" }]);
+				expect(brokerEvents).toEqual([]);
+				expect(peerEvents).toEqual([]);
+				expect(announcements).toEqual([]);
+			}));
+
+		test("API-key invalidation preserves a replacement, then disables its current key exactly once", () =>
+			withoutAmbientAnthropicKeys(async () => {
+				const key = { type: "api_key" as const, key: "old-api-key" };
+				const replacement = { ...key, key: "new-api-key" };
+				store.updateAuthCredential(id, key);
+				await storage.reload();
+				const keyId = id;
+				const remoteStore = await openRemote();
+				peer = new AuthStorage(remoteStore, { usageProviderResolver: () => undefined });
+				peer.onCredentialDisabled(event => {
+					peerEvents.push(event);
+				});
+				await peer.reload();
+				store.updateAuthCredential(keyId, replacement);
+				await storage.reload();
+				const error = new Error("401 invalidated oauth token");
+				expect(await peer.rotateSessionCredential("anthropic", "s1", { error, apiKey: key.key })).toBe(false);
+				expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id: keyId, credential: replacement }]);
+				expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
+				// No stream or polling: the lost CAS reconciles before returning.
+				expect(await peer.getApiKey("anthropic", "s1")).toBe(replacement.key);
+				expect(brokerEvents).toEqual([]);
+				expect(peerEvents).toEqual([]);
+				expect(announcements).toEqual([]);
+
+				expect(await peer.rotateSessionCredential("anthropic", "s1", { error, apiKey: replacement.key })).toBe(
+					false,
+				);
+				expect(await peer.rotateSessionCredential("anthropic", "s1", { error, apiKey: replacement.key })).toBe(
+					false,
+				);
+				expect(store.listAuthCredentials("anthropic")).toEqual([]);
+				expect(await peer.getApiKey("anthropic", "s1")).toBeUndefined();
+				expect(brokerEvents).toEqual([expect.objectContaining({ provider: "anthropic", credentialId: keyId })]);
+				expect(peerEvents).toEqual([expect.objectContaining({ provider: "anthropic", credentialId: keyId })]);
+				expect(await store.listDisabledCredentials("anthropic")).toMatchObject([
+					{ id: keyId, cause: brokerEvents[0]!.disabledCause },
+				]);
+				// One local announcement at each endpoint, none for the stale/repeated attempts.
+				expect(announcements).toEqual([
+					expect.objectContaining({ credentialId: keyId }),
+					expect.objectContaining({ credentialId: keyId }),
+				]);
+				expect(JSON.stringify(announcements)).not.toContain(key.key);
+				expect(JSON.stringify(announcements)).not.toContain(replacement.key);
+			}));
+
+		test("stale API-key invalidation cannot disable an OAuth replacement with identical access bytes", () =>
+			withoutAmbientAnthropicKeys(async () => {
+				const key = { type: "api_key" as const, key: credential.access };
+				store.updateAuthCredential(id, key);
+				await storage.reload();
+				const keyId = id;
+				const remoteStore = await openRemote();
+				peer = new AuthStorage(remoteStore);
+				peer.onCredentialDisabled(event => {
+					peerEvents.push(event);
+				});
+				await peer.reload();
+				store.updateAuthCredential(keyId, credential);
+				await storage.reload();
+				expect(
+					await peer.rotateSessionCredential("anthropic", "s1", {
+						error: new Error("401 invalidated oauth token"),
+						apiKey: key.key,
+					}),
+				).toBe(false);
+				expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id: keyId, credential }]);
+				expect(await peer.getApiKey("anthropic", "s1")).toBe(credential.access);
+				expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
 				expect(brokerEvents).toEqual([]);
 				expect(peerEvents).toEqual([]);
 				expect(announcements).toEqual([]);

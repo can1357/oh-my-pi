@@ -9,13 +9,12 @@
  */
 import * as os from "node:os";
 import { getAppName, getInstallId, logger, redactSecrets } from "@oh-my-pi/pi-utils";
-import { resolveOAuthCredentialIdentity, serializeCredential } from "../auth/sqlite-credential-store";
+import { resolveOAuthCredentialIdentity } from "../auth/sqlite-credential-store";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
 	type AuthCredentialStore,
 	type DisabledCredentialSummary,
-	fingerprintOAuthBearer,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
@@ -737,8 +736,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Await the broker disable, conditional on the bearer when a fingerprint is
-	 * supplied. A lost CAS — a peer rotated the bearer (412) or removed the row
+	 * Await the broker disable, conditional on the access/key when a fingerprint
+	 * from `fingerprintCredentialForDisable` is supplied. A lost CAS — a peer
+	 * replaced the credential (412) or removed the row
 	 * before the broker handled this request (404) — returns false without
 	 * removing the local entry, after re-fetching the snapshot so the caller's
 	 * follow-up `reload()` already sees the peer's outcome instead of the
@@ -783,28 +783,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	/**
-	 * Compare the local serialized credential before optimistically removing it.
-	 * The broker also guards the bearer via If-Match; a rejection restores the
-	 * authoritative snapshot asynchronously. Use deleteAuthCredentialRemote to
-	 * await the broker's CAS outcome.
-	 */
-	tryDisableAuthCredentialIfMatches(id: number, expectedData: string, disabledCause: string): boolean {
-		this.#noteActivity();
-		const found = this.#snapshot.credentials.find(entry => entry.id === id);
-		if (!found || serializeCredential(found.provider, found.credential)?.data !== expectedData) return false;
-		const expectedAccessFingerprint =
-			found.credential.type === "oauth" ? fingerprintOAuthBearer(found.credential.access) : undefined;
-		this.#removeCredentialById(id);
-		this.#client.disableCredential(id, disabledCause, { expectedAccessFingerprint }).catch(error => {
-			if (error instanceof AuthBrokerError && error.status === 412) {
-				logger.debug("auth-broker disable rejected: bearer rotated", { id });
-				void this.#reconcileAfterRejectedDisable();
-				return;
-			}
-			logger.warn("auth-broker disable propagation failed", { id, error: redactSecrets(String(error)) });
-		});
-		return true;
+	/** Remote CAS must await the broker's decision; synchronous success cannot represent it. */
+	tryDisableAuthCredentialIfMatches(_id: number, _expectedData: string, _disabledCause: string): boolean {
+		throw new AIError.AuthBrokerError(
+			"RemoteAuthCredentialStore does not support synchronous conditional disables. Await deleteAuthCredentialRemote instead.",
+		);
 	}
 
 	async waitForFreshSnapshot(maxWaitMs: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {

@@ -1084,6 +1084,10 @@ omp auth-broker logout             # interactive — pick a stored credential to
 
 Credentials are saved to `agent.db` in the agent directory. `/login qianfan` opens the Qianfan console and stores the pasted API key.
 
+Automatic invalidation compares the failed stored credential before disabling it. With a conditional-disable-capable auth broker, OAuth conditions retain the existing access-token fingerprint; API-key conditions use a kind-tagged hash of the stored key string. A stale request cannot disable a replacement key or an OAuth row with identical access bytes. Rejected disables await snapshot reconciliation and do not announce a removal.
+
+For environment or `!command` references, this condition protects changes to the stored reference, not changes in its resolved output. An unchanged reference is not a new credential version: explicit row-id or session-sticky invalidation can still disable it after the resolver output changes. Runtime/config/environment overrides without a stored row are outside this row-level comparison. No raw key is sent in the condition.
+
 `login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
 
 For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.

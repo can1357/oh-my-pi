@@ -808,7 +808,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						if (fingerprint.startsWith('"') && fingerprint.endsWith('"') && fingerprint.length >= 2) {
 							fingerprint = fingerprint.slice(1, -1);
 						}
-						outcome = await opts.storage.disableCredentialIfBearerMatches(id, fingerprint, cause);
+						outcome = await opts.storage.disableCredentialIfFingerprintMatches(id, fingerprint, cause);
 					} else {
 						// Old clients stay unconditional. Old brokers ignore If-Match, so a
 						// new client against an old broker retains the old unconditional behavior.
