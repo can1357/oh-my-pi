@@ -52,15 +52,13 @@
 ### Fixed
 
 - 400-request debug dumps now redact provider-specific auth headers (`x-goog-api-key`, `x-amz-security-token`, and any header whose name carries a key/token/secret), not just a fixed allow-list, so a shared dump can no longer leak a live API key ([#12007](https://github.com/can1357/oh-my-pi/issues/12007)).
+- An Anthropic-compatible endpoint that rejects `cache_control` with a 400 no longer fails the turn. The request is replayed once without prompt-cache breakpoints, the rejection is remembered for the rest of the session per endpoint and model, the extended-cache-ttl beta is dropped alongside it, and the turn reports `prompt-cache` in `disabledFeatures` ([#11812](https://github.com/can1357/oh-my-pi/pull/11812) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.1.20] - 2026-09-13
 
 ### Fixed
 
 - Fixed Windows OAuth sign-in failing on every attempt after an upgrade when a previous run left a stale native callback registration behind; handlers registered by older binaries are now recognized as owned and rolled back instead of blocking recovery ([#11967](https://github.com/can1357/oh-my-pi/pull/11967) by [@H4vC](https://github.com/H4vC)).
-### Fixed
-
-- An Anthropic-compatible endpoint that rejects `cache_control` with a 400 no longer fails the turn. The request is replayed once without prompt-cache breakpoints, the rejection is remembered for the rest of the session per endpoint and model, the extended-cache-ttl beta is dropped alongside it, and the turn reports `prompt-cache` in `disabledFeatures` ([#11812](https://github.com/can1357/oh-my-pi/pull/11812) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.1.19] - 2026-09-12
 
