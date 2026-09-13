@@ -481,6 +481,32 @@ export class ExtensionRunner {
 	#pendingMcpNotifications: Array<Omit<McpNotificationEvent, "type">> = [];
 
 	/**
+	 * Extension-originated `sendMessage`/`sendUserMessage` calls start an async
+	 * session send the action itself never exposes a promise for — each mode's
+	 * action wiring (runtime-init.ts, acp-agent.ts, extension-ui-controller.ts)
+	 * tracks its own sends in a call-scoped queue so it can drain them before
+	 * its own startup sequence returns. That queue goes out of scope once
+	 * startup finishes, so a *later* `resources_discover` round (a
+	 * `/reload-plugins` calling {@link SessionTools.refreshSkills}) had nothing
+	 * to drain into (PR #9379 review). Sends are tracked here too, independent
+	 * of any mode's own startup queue, so a caller that triggers discovery
+	 * after startup can still settle them via {@link drainPendingSends}.
+	 */
+	#pendingSends: Promise<unknown>[] = [];
+
+	/** Tracks an extension-originated send so {@link drainPendingSends} can settle it later. */
+	trackPendingSend(task: Promise<unknown>): void {
+		this.#pendingSends.push(task);
+	}
+
+	/** Settles every send tracked via {@link trackPendingSend} since the last drain. */
+	async drainPendingSends(): Promise<void> {
+		while (this.#pendingSends.length > 0) {
+			await Promise.all(this.#pendingSends.splice(0));
+		}
+	}
+
+	/**
 	 * Timers scheduled by extensions through the sanctioned `ctx.setInterval` /
 	 * `ctx.setTimeout` helpers. Callbacks run with the same isolation as handler
 	 * dispatch — a throw is logged and routed through {@link onError} instead of

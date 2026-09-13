@@ -104,11 +104,11 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 						);
 					}
 				}
-				pendingExtensionSends.push(
-					sendTask.catch(e => {
-						reportSendError("extension_send", e instanceof Error ? e : new Error(String(e)));
-					}),
-				);
+				const trackedSend = sendTask.catch(e => {
+					reportSendError("extension_send", e instanceof Error ? e : new Error(String(e)));
+				});
+				pendingExtensionSends.push(trackedSend);
+				runner.trackPendingSend(trackedSend);
 			},
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = afterDiscovery(() => session.sendUserMessage(content, sendOptions));
@@ -117,11 +117,11 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				} else {
 					markAgentInvokingMessage?.();
 				}
-				pendingExtensionSends.push(
-					sendTask.catch(e => {
-						reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
-					}),
-				);
+				const trackedSend = sendTask.catch(e => {
+					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
+				});
+				pendingExtensionSends.push(trackedSend);
+				runner.trackPendingSend(trackedSend);
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);

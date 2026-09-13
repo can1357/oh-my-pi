@@ -199,25 +199,25 @@ export class ExtensionUiController {
 				const wasStreaming = this.ctx.session.isStreaming;
 				const normalized = normalizeCustomMessagePayload(message);
 				const sendTask = afterDiscovery(() => this.ctx.session.sendCustomMessage(normalized, options));
-				pendingExtensionSends.push(
-					sendTask
-						.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
-						.catch((err: unknown) => {
-							this.ctx.showError(
-								`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`,
-							);
-						}),
-				);
+				const trackedSend = sendTask
+					.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
+					.catch((err: unknown) => {
+						this.ctx.showError(
+							`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					});
+				pendingExtensionSends.push(trackedSend);
+				extensionRunner.trackPendingSend(trackedSend);
 			},
 			sendUserMessage: (content, options) => {
 				const sendTask = afterDiscovery(() => this.ctx.session.sendUserMessage(content, options));
-				pendingExtensionSends.push(
-					sendTask.catch((err: unknown) => {
-						this.ctx.showError(
-							`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`,
-						);
-					}),
-				);
+				const trackedSend = sendTask.catch((err: unknown) => {
+					this.ctx.showError(
+						`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+				pendingExtensionSends.push(trackedSend);
+				extensionRunner.trackPendingSend(trackedSend);
 			},
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);

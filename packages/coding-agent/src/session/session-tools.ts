@@ -1447,6 +1447,15 @@ export class SessionTools {
 		}
 		await this.refreshBaseSystemPrompt();
 		this.#host.notifyCommandMetadataChanged();
+		// The `resources_discover` handler above can call sendMessage/sendUserMessage
+		// (e.g. to announce a directory it just found) from the same shared action
+		// context startup uses; that call starts an async send the action itself
+		// never exposes a promise for. Each mode's own startup queue
+		// (runtime-init.ts/acp-agent.ts/extension-ui-controller.ts) is long out of
+		// scope by the time `/reload-plugins` runs this, so settle it through the
+		// runner's own tracking instead (PR #9379 review) — otherwise the send is
+		// left running with nothing to observe it settle.
+		await runner?.drainPendingSends();
 	}
 
 	/**
