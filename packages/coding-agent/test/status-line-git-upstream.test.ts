@@ -10,20 +10,26 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
-import { getSymbolPresetOverride, initTheme, type SymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import { setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
-// Test files share this process and the theme is process-global: remember the
-// symbol preset that was active on entry and put it back on exit, rather than
-// forcing a fixed preset on whatever runs next.
-let priorPreset: SymbolPreset | undefined;
+// Segments render through the process-global theme that every test file in this
+// process shares. Build the presets we need as standalone instances and swap
+// them in with setThemeInstance, then put the exact prior instance back: the
+// module's preset override, theme name, and color-blind state are never touched.
+let priorTheme: Theme | undefined;
+let unicodeTheme: Theme;
+let asciiTheme: Theme;
 
 beforeAll(async () => {
-	priorPreset = getSymbolPresetOverride();
-	await initTheme(false, "unicode");
+	priorTheme = theme;
+	unicodeTheme = await loadTheme("dark", { symbolPresetOverride: "unicode" });
+	asciiTheme = await loadTheme("dark", { symbolPresetOverride: "ascii" });
+	setThemeInstance(unicodeTheme);
 });
 
-afterAll(async () => {
-	await initTheme(false, priorPreset);
+afterAll(() => {
+	if (priorTheme) setThemeInstance(priorTheme);
 });
 
 type GitStatus = NonNullable<SegmentContext["git"]["status"]>;
@@ -69,16 +75,16 @@ describe("git segment upstream indicators", () => {
 		expect(text).toContain("+1");
 	});
 
-	it("falls back to ASCII arrows under the ascii symbol preset", async () => {
+	it("falls back to ASCII arrows under the ascii symbol preset", () => {
 		// The finally restores the suite's preset even when an assertion fails.
 		try {
-			await initTheme(false, "ascii");
+			setThemeInstance(asciiTheme);
 			const text = plain({ staged: 0, unstaged: 0, untracked: 0, ahead: 2, behind: 1 });
 			expect(text).toContain("^2");
 			expect(text).toContain("v1");
 			expect(text).not.toContain("⇡");
 		} finally {
-			await initTheme(false, "unicode");
+			setThemeInstance(unicodeTheme);
 		}
 	});
 });
