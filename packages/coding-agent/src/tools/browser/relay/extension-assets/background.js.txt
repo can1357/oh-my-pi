@@ -326,11 +326,11 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
 }
 
 // extension/hello-refresh.ts
-function invalidatesHelloStructurally(changeInfo) {
+function invalidatesHelloReconciliation(changeInfo) {
   return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
-function shouldSuppressHelloSnapshot(structuralDirty, urlDirty, allowStaleUrl) {
-  return structuralDirty || urlDirty && !allowStaleUrl;
+function shouldSuppressHelloSnapshot(structuralDirty, reconciliationDirty, allowStaleReconciliation) {
+  return structuralDirty || reconciliationDirty && !allowStaleReconciliation;
 }
 
 // extension/background.ts
@@ -748,21 +748,21 @@ function refreshHello(onSent) {
       helloRefresh.afterSend = onSent;
     return;
   }
-  const startRefresh = (afterSend, allowStaleUrl) => {
+  const startRefresh = (afterSend, allowStaleReconciliation) => {
     const entry = {
       socket,
       structuralDirty: false,
-      urlDirty: false,
-      allowStaleUrl,
+      reconciliationDirty: false,
+      allowStaleReconciliation,
       metaDirty: false,
       done: Promise.resolve(),
       afterSend
     };
     entry.done = buildHello().then(async (hello) => {
-      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.urlDirty, entry.allowStaleUrl))
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
         return;
-      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.urlDirty, entry.allowStaleUrl) && ws === socket && socket.readyState === WebSocket.OPEN);
-      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.urlDirty, entry.allowStaleUrl))
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation) && ws === socket && socket.readyState === WebSocket.OPEN);
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(hello));
@@ -777,8 +777,8 @@ function refreshHello(onSent) {
     }).finally(() => {
       if (helloRefresh !== entry)
         return;
-      if ((entry.structuralDirty || entry.urlDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
-        startRefresh(entry.afterSend, entry.allowStaleUrl || entry.urlDirty);
+      if ((entry.structuralDirty || entry.reconciliationDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
+        startRefresh(entry.afterSend, entry.allowStaleReconciliation || entry.reconciliationDirty);
       } else {
         helloRefresh = null;
       }
@@ -791,9 +791,9 @@ function invalidateHelloRefresh() {
   if (helloRefresh)
     helloRefresh.structuralDirty = true;
 }
-function invalidateHelloUrl() {
+function invalidateHelloReconciliation() {
   if (helloRefresh)
-    helloRefresh.urlDirty = true;
+    helloRefresh.reconciliationDirty = true;
 }
 function invalidateHelloMeta() {
   if (helloRefresh)
@@ -1110,10 +1110,8 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap) {
-    if (changeInfo.url !== undefined)
-      invalidateHelloUrl();
-    else if (invalidatesHelloStructurally(changeInfo))
-      invalidateHelloRefresh();
+    if (invalidatesHelloReconciliation(changeInfo))
+      invalidateHelloReconciliation();
     else
       invalidateHelloMeta();
     post({ t: "tabUpdated", tab: snap });

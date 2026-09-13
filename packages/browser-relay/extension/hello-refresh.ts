@@ -8,14 +8,14 @@ export interface HelloRefreshTabChange {
  * carrying their previous values must be suppressed rather than merely
  * followed by a metadata refresh.
  */
-export function invalidatesHelloStructurally(changeInfo: HelloRefreshTabChange): boolean {
+export function invalidatesHelloReconciliation(changeInfo: HelloRefreshTabChange): boolean {
 	return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
 
 export function shouldSuppressHelloSnapshot(
 	structuralDirty: boolean,
-	urlDirty: boolean,
-	allowStaleUrl: boolean,
+	reconciliationDirty: boolean,
+	allowStaleReconciliation: boolean,
 ): boolean {
-	return structuralDirty || (urlDirty && !allowStaleUrl);
+	return structuralDirty || (reconciliationDirty && !allowStaleReconciliation);
 }
