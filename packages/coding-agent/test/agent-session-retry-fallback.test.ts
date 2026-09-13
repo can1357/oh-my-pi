@@ -21,7 +21,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -364,6 +364,88 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+	});
+
+	it("re-syncs the edit-mode system prompt after a retry-fallback model swap", async () => {
+		// A session that starts on a default-hashline model and auto-falls-back to a
+		// variant-pinned model must rebuild its base prompt so the edit-mode policy
+		// tracks the model actually serving the turn (issue #11983).
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
+					mock.push({ content: ["Recovered on the pinned-variant fallback"] });
+				} else {
+					throw new Error(
+						`Unexpected model requested during edit-variant fallback test: ${model.provider}/${model.id}`,
+					);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+			"edit.modelVariants": { [fallbackModel.id]: "replace" },
+		} as Partial<Record<SettingPath, unknown>>);
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		const renderEditMode = (): string => {
+			const active = session?.model;
+			const selector = active ? `${active.provider}/${active.id}` : "";
+			return settings.getEditVariantForModel(selector) ?? "hashline";
+		};
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: [`edit:${renderEditMode()}`] }),
+		});
+
+		// Baseline: the non-variant primary resolves to the default hashline mode.
+		await session.refreshBaseSystemPrompt();
+		expect(session.agent.state.systemPrompt).toEqual(["edit:hashline"]);
+
+		// The event-time prompt is what extensions and listeners observe when a
+		// fallback lands: the re-sync must complete BEFORE `retry_fallback_applied`
+		// is broadcast, so no handler ever pairs the fallback model with the chain
+		// head's stale edit instructions (issue #11983).
+		const promptsAtFallbackEvent: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				promptsAtFallbackEvent.push(session?.agent.state.systemPrompt.join("\n") ?? "");
+			}
+		});
+
+		await session.prompt("Force a fallback onto the pinned-variant model");
+		await session.waitForIdle();
+
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(promptsAtFallbackEvent).toEqual(["edit:replace"]);
+		expect(session.agent.state.systemPrompt).toEqual(["edit:replace"]);
 	});
 
 	it("hops to the chain owned by a fallback that is the last entry of the chain it came from", async () => {

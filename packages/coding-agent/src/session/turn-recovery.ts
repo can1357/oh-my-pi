@@ -211,12 +211,13 @@ export interface TurnRecoveryHost {
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
-	/** The edit variant resolved against the currently active model. */
+	/** The edit variant resolved against the currently active model, captured before a swap. */
 	resolveActiveEditMode(): EditMode;
 	/**
-	 * Re-renders the model-dependent tool prompts when a swap changed the
-	 * active edit variant. Call after every model change that bypasses
-	 * `model-controls`; no-op when the variant is unchanged.
+	 * Re-syncs all model-dependent prompt policy after a model change that
+	 * bypassed `model-controls`: rebuilds the base system prompt when the edit
+	 * variant flipped or the model-prompt key changed (`includeModelInPrompt` /
+	 * delegation-bias policy), not just the variant.
 	 */
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
@@ -1863,13 +1864,13 @@ export class TurnRecovery {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
+		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
 			to: selector.raw,
 			role,
 		});
-		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
 	}
 
@@ -2030,13 +2031,13 @@ export class TurnRecovery {
 		await this.#host.setModelWithProviderSessionReset(baseModel);
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
+		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
 			to: baseSelector,
 			role: "fireworks-fast",
 		});
-		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
 	}
 

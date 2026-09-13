@@ -169,45 +169,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(emittedEvents).toEqual([]);
 	});
 
-	it("re-syncs the model-dependent prompt after applying a fallback candidate", async () => {
-		const fallback = getBundledModel("openai", "gpt-4o-mini");
-		if (!fallback) throw new Error("Expected bundled fallback model");
-		let activeModel = model;
-		const syncs: Array<{ previous: string; activeDuringSync: string }> = [];
-		const host = createHost(model, modelRegistry);
-		host.model = () => activeModel;
-		host.sessionManager = {
-			appendModelChange: () => {},
-			getSessionId: () => "edit-sync-session",
-		} as never;
-		host.setModelWithProviderSessionReset = async nextModel => {
-			activeModel = nextModel;
-		};
-		host.resolveActiveEditMode = () => (activeModel.id === model.id ? "hashline" : "replace");
-		host.syncAfterModelChange = async previous => {
-			syncs.push({ previous, activeDuringSync: host.resolveActiveEditMode() });
-		};
-		const recovery = new TurnRecovery(host);
-
-		const applied = await recovery.applyRetryFallbackCandidate(
-			"default",
-			{
-				raw: `${fallback.provider}/${fallback.id}`,
-				provider: fallback.provider,
-				id: fallback.id,
-				thinkingLevel: undefined,
-			},
-			`${model.provider}/${model.id}`,
-			{ apiKey: "test-key" },
-		);
-
-		expect(applied).toBe(true);
-		// The swap must hand the pre-swap variant to the sync hook after the
-		// active model has moved, so the base prompt re-resolves `edit.modelVariants`
-		// against the fallback model instead of the chain head.
-		expect(syncs).toEqual([{ previous: "hashline", activeDuringSync: "replace" }]);
-	});
-
 	it("does not commit a fallback superseded during model reconciliation", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback race model");
