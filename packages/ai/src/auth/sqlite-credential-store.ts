@@ -1393,7 +1393,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
-				if (identityKey === null && row.credential_type === "oauth" && activeOAuthCredentials.length > 0) {
+				const disabledCredential = deserializeCredential(row);
+				if (disabledCredential === null) continue;
+				// Identity-less as the tombstone listing sees it: the summary carries
+				// only the stored email/accountId/orgId fields, never a key derived
+				// from token claims, so a row the replay treats as recovered by any
+				// live OAuth credential is retired on the same terms — otherwise it
+				// resurfaces the moment that credential logs out.
+				if (
+					disabledCredential.type === "oauth" &&
+					!disabledCredential.email &&
+					!disabledCredential.accountId &&
+					!disabledCredential.orgId &&
+					activeOAuthCredentials.length > 0
+				) {
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
@@ -1405,8 +1418,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				// and shared-workspace guards in matchesReplacementCredential carry
 				// over, so this never over-deletes another member's or subscription's
 				// row.
-				const disabledCredential = deserializeCredential(row);
-				if (disabledCredential === null) continue;
 				const superseded = activeOAuthCredentials.some(active =>
 					matchesReplacementCredential(provider, disabledCredential, identityKey, active),
 				);

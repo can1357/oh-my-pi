@@ -9,6 +9,7 @@ import {
 	type CredentialDisabledEvent,
 	type DisabledCredentialSummary,
 	type StoredAuthCredential,
+	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -479,6 +480,31 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect(JSON.stringify(disableLogs)).not.toContain("sk-secret");
 		});
 
+		test("a failure body that echoes the refresh token is redacted in the log line and the summary", async () => {
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await authStorage.set("anthropic", [expiredOAuth()]);
+			vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
+				throw new Error(
+					'HTTP 400 {"error":"invalid_grant","error_description":"grant revoked","refresh_token":"rt-echoed-1234"}',
+				);
+			});
+
+			await authStorage.getApiKey("anthropic", "session-echo");
+
+			const [event] = events;
+			if (!event) throw new Error("expected a disable event");
+			expect(summarizeDisableCause(event.disabledCause)).toBe("grant revoked");
+			expect(JSON.stringify(warnSpy.mock.calls)).not.toContain("rt-echoed-1234");
+			// The verbatim cause is what the store keeps for forensics; only log and display redact.
+			expect(event.disabledCause).toContain("rt-echoed-1234");
+		});
+
 		test("a broker-issued disable by id carries the same identity", async () => {
 			const events: CredentialDisabledEvent[] = [];
 			const authStorage = openStorage({
@@ -609,14 +635,25 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-identityless-"));
 			const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
 			try {
-				// No email, account, or organization — nothing a later identity match could reconcile.
-				const bare = { type: "oauth" as const, access: "opaque-1", refresh: "r-1", expires: Date.now() + 60_000 };
+				// No email, account, or organization fields — nothing the listing could
+				// match later — even though the access token is a JWT whose `sub` claim
+				// gives the row a token-derived identity key the summary never carries.
+				const jwt = (sub: string) =>
+					`${Buffer.from('{"alg":"none"}').toBase64({ alphabet: "base64url", omitPadding: true })}.${Buffer.from(
+						JSON.stringify({ sub }),
+					).toBase64({ alphabet: "base64url", omitPadding: true })}.sig`;
+				const bare = {
+					type: "oauth" as const,
+					access: jwt("user-1"),
+					refresh: "r-1",
+					expires: Date.now() + 60_000,
+				};
 				await authStorage.set("unit-idless", [bare]);
 				const id = authStorage.exportSnapshot().credentials[0]!.id;
 				expect(authStorage.disableCredentialById(id, "oauth refresh failed: invalid_grant")).toBe(true);
 				expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([id]);
 
-				await authStorage.set("unit-idless", [{ ...bare, access: "opaque-2", refresh: "r-2" }]);
+				await authStorage.set("unit-idless", [{ ...bare, access: jwt("user-2"), refresh: "r-2" }]);
 				expect(await authStorage.listDisabledCredentials("unit-idless")).toEqual([]);
 
 				await authStorage.remove("unit-idless");

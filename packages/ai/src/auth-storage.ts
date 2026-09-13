@@ -15,6 +15,7 @@ import {
 	extractRetryHint,
 	getAgentDbPath,
 	logger,
+	redactSecrets,
 	redactUrlSecrets,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
@@ -284,10 +285,17 @@ function personalAccountId(accountId: string | undefined, orgId: string | undefi
 	return accountId && accountId !== orgId ? accountId : undefined;
 }
 
-/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause; never longer than 80 characters. */
+/**
+ * Human-sized disable cause: the upstream `error_description` when embedded,
+ * else the first clause; never longer than 80 characters. A token endpoint's
+ * failure body can echo the submitted refresh token or client secret, so
+ * credential-shaped values are redacted first — the verbatim cause stays only
+ * in the store.
+ */
 export function summarizeDisableCause(cause: string): string {
-	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
-	const stripped = description ?? cause.replace(/^oauth refresh failed:\s*/i, "");
+	const redacted = redactSecrets(cause);
+	const description = redacted.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
+	const stripped = description ?? redacted.replace(/^oauth refresh failed:\s*/i, "");
 	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
 	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
 }
@@ -2639,8 +2647,13 @@ export class AuthStorage {
 		// extension handlers are optional and the broker daemon is the only
 		// built-in subscriber, so without this an account can vanish from the
 		// pool with no trace in ~/.omp/logs. A managed MCP credential's id embeds
-		// its server URL, query string included, so the id is redacted first.
-		logger.warn("Auth credential disabled", { ...event, provider: redactUrlSecrets(event.provider) });
+		// its server URL, query string included, and a token endpoint's failure
+		// body can echo what was submitted, so both are redacted first.
+		logger.warn("Auth credential disabled", {
+			...event,
+			provider: redactUrlSecrets(event.provider),
+			disabledCause: redactSecrets(event.disabledCause),
+		});
 		if (this.#credentialDisabledListeners.size === 0) {
 			// No subscribers — buffer for later replay. Cap the backlog so a process that runs
 			// without subscribers for a long time can't grow memory unboundedly; drop oldest

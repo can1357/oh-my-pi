@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { redactUrlSecrets, sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
+import { redactSecrets, redactUrlSecrets, sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 
 describe("sanitizeText", () => {
 	it("strips ANSI CSI and removes C0/C1 control chars while keeping tab + LF", () => {
@@ -65,5 +65,34 @@ describe("redactUrlSecrets", () => {
 			"mcp_oauth:profile:default:https://host/mcp?ref=1&token=[redacted]",
 		);
 		expect(redactUrlSecrets("not a url?apiKey=zzz")).toBe("not a url?apiKey=[redacted]");
+	});
+
+	it("classifies password, credential, signature, and bare key/auth parameters as secrets", () => {
+		expect(redactUrlSecrets("https://h/mcp?password=p&credential=c&signature=s&key=k&auth=a&project_ref=keep")).toBe(
+			"https://h/mcp?password=[redacted]&credential=[redacted]&signature=[redacted]&key=[redacted]&auth=[redacted]&project_ref=keep",
+		);
+	});
+});
+
+describe("redactSecrets", () => {
+	it("redacts a token endpoint body that echoes the submitted refresh token and client secret", () => {
+		const cause =
+			'oauth refresh failed: HTTP 400 {"error":"invalid_grant","error_description":"grant revoked","refresh_token":"rt-echoed-1234","client_secret":"cs-echoed"}';
+		const redacted = redactSecrets(cause);
+		expect(redacted).not.toContain("rt-echoed-1234");
+		expect(redacted).not.toContain("cs-echoed");
+		expect(redacted).toContain('"error":"invalid_grant"');
+		expect(redacted).toContain('"error_description":"grant revoked"');
+	});
+
+	it("redacts authorization values, name=value pairs, and JWTs in free text", () => {
+		expect(redactSecrets("Authorization: Bearer abc.def; client_secret=s3cr3t; password: hunter2")).toBe(
+			"Authorization: Bearer [redacted]; client_secret=[redacted]; password: [redacted]",
+		);
+		const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+		expect(redactSecrets(`token ${jwt} expired`)).toBe("token [redacted] expired");
+		expect(redactSecrets("OAuthError: invalid_grant; refresh token expired")).toBe(
+			"OAuthError: invalid_grant; refresh token expired",
+		);
 	});
 });
