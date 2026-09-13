@@ -10848,10 +10848,12 @@ export class AgentSession {
 	 * best-effort: an unreachable broker yields no notices, never an error.
 	 */
 	getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
-		const announcedAfter = options?.announcedAfter ?? this.#announcedDisabledCredentialIds.length;
+		const announcedAfter = options?.announcedAfter;
 		// Membership is read when the lookup settles, not when it starts.
-		return collectDisabledCredentialNotices(this.#modelRegistry.authStorage, options?.nowMs ?? Date.now(), id =>
-			this.#announcedDisabledCredentialIds.includes(id, announcedAfter),
+		return collectDisabledCredentialNotices(
+			this.#modelRegistry.authStorage,
+			options?.nowMs ?? Date.now(),
+			id => announcedAfter !== undefined && this.#announcedDisabledCredentialIds.includes(id, announcedAfter),
 		);
 	}
 

@@ -11,7 +11,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
@@ -780,8 +780,8 @@ export class ExtensionRunner {
 			for (const event of pending) {
 				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
 					logger.warn("credential_disabled handler threw during initialize flush", {
-						provider: event.provider,
-						error: error instanceof Error ? error.message : String(error),
+						provider: redactUrlSecrets(event.provider),
+						error: redactSecrets(error instanceof Error ? error.message : String(error)),
 					});
 				});
 			}

@@ -32,7 +32,9 @@ import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../too
 const REPLAY_LOOKUP_BUDGET_MS = 2_000;
 
 /** Account label bounded like other TUI titles. */
-function accountLabel(identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "orgId" | "orgName">): string {
+function accountLabel(
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "projectId" | "orgId" | "orgName">,
+): string {
 	return truncateToWidth(credentialAccountLabel(identity), TRUNCATE_LENGTHS.TITLE);
 }
 
@@ -68,7 +70,7 @@ function loginRemedy(provider: string): string {
 function subjectAndRemedy(
 	provider: string,
 	credentialType: DisabledCredentialSummary["type"],
-	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "orgId" | "orgName">,
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "projectId" | "orgId" | "orgName">,
 ): { subject: string; remedy: string } {
 	if (isManagedMCPOAuthCredentialId(provider)) {
 		const serverUrl = mcpOAuthServerUrlFromCredentialId(provider);

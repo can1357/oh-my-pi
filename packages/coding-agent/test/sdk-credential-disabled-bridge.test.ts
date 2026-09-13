@@ -11,7 +11,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 interface SessionDirs {
 	cwd: string;
@@ -488,6 +488,51 @@ describe("createAgentSession credential_disabled subscription", () => {
 				enableLsp: false,
 			}),
 		).rejects.toThrow(/options\.authStorage.*modelRegistry\.authStorage/);
+	});
+
+	it("redacts credential-disabled flush failures while preserving the extension event", async () => {
+		const dirs = makeDirs("flush-redaction");
+		const authStorage = await AuthStorage.create(":memory:");
+		const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
+		const cause = "oauth refresh failed: HTTP 400 client_secret=BODYSECRET";
+		const events: CredentialDisabledEvent[] = [];
+		const factory: ExtensionFactory = pi => {
+			pi.on("credential_disabled", event => {
+				events.push(event);
+				throw new Error(event.disabledCause);
+			});
+		};
+		const warning = Promise.withResolvers<unknown>();
+		vi.spyOn(logger, "warn").mockImplementation((message, context) => {
+			if (message === "credential_disabled handler threw during initialize flush") warning.resolve(context);
+		});
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [factory]));
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emitCredentialDisabled({
+				provider,
+				disabledCause: cause,
+				credentialId: 1,
+				credentialType: "oauth",
+			});
+			runner.onError(error => {
+				throw new Error(`${error.error}; password=FLUSHSECRET`);
+			});
+			initializeRunnerForTest(runner);
+			const context = await warning.promise;
+			expect(context).toMatchObject({
+				provider: "mcp_oauth:profile:default:https://host.test/mcp?key=[redacted]&region=west",
+				error: expect.stringContaining("HTTP 400"),
+			});
+			for (const secret of ["QUERYSECRET", "BODYSECRET", "FLUSHSECRET"]) {
+				expect(JSON.stringify(context)).not.toContain(secret);
+			}
+			expect(events).toEqual([expect.objectContaining({ provider, disabledCause: cause })]);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("routes handler errors through onError when listener is registered synchronously after initialize()", async () => {

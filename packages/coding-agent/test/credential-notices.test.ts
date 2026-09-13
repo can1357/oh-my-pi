@@ -27,6 +27,57 @@ const oauthCredential = (expires: number) => ({
 });
 
 describe("credential sign-out notices", () => {
+	it("replays a racing teardown without a subscription mark, but deduplicates one observed live", async () => {
+		const { Agent } = await import("@oh-my-pi/pi-agent-core");
+		const { AgentSession } = await import("@oh-my-pi/pi-coding-agent/session/agent-session");
+		const { ModelRegistry } = await import("@oh-my-pi/pi-coding-agent/config/model-registry");
+		const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
+		const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
+		authStorage = await AuthStorage.create(":memory:");
+		const session = new AgentSession({
+			agent: new Agent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+		});
+		try {
+			for (const subscribed of [false, true]) {
+				const lookup =
+					Promise.withResolvers<Awaited<ReturnType<AuthStorage["listActionableDisabledCredentials"]>>>();
+				vi.spyOn(authStorage, "listActionableDisabledCredentials").mockReturnValueOnce(lookup.promise);
+				const live: AgentSessionEvent[] = [];
+				const mark = session.disabledCredentialNoticeMark;
+				const unsubscribe = subscribed
+					? session.subscribe(event => {
+							live.push(event);
+						})
+					: () => {};
+				const replay = session.getDisabledCredentialNotices(subscribed ? { announcedAfter: mark } : undefined);
+				session.announceCredentialDisabled({
+					provider: "anthropic",
+					credentialId: 99,
+					credentialType: "oauth",
+					email: "race@example.com",
+					disabledCause: "invalid_grant",
+				});
+				lookup.resolve([
+					{ provider: "anthropic", id: 99, type: "oauth", email: "race@example.com", cause: "invalid_grant" },
+				]);
+				const notices = await replay;
+				if (subscribed) {
+					expect(notices).toEqual([]);
+					expect(live.filter(event => event.type === "notice")).toHaveLength(1);
+				} else {
+					expect(notices).toHaveLength(1);
+					expect(notices[0]).toContain("race@example.com");
+				}
+				unsubscribe();
+			}
+		} finally {
+			await session.dispose();
+		}
+	});
 	let tempDir = "";
 	let authStorage: AuthStorage | undefined;
 
@@ -163,7 +214,7 @@ describe("credential sign-out notices", () => {
 
 		const [notice] = await collectDisabledCredentialNotices(authStorage, Date.now());
 		expect(notice).toContain("whoami@example.com was signed out");
-		expect(notice).toContain("revoked!");
+		// Unescaped controls make this JSON malformed; its body is withheld.
 		expect(notice).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
 		expect(notice).toContain("/login anthropic");
 		expect(

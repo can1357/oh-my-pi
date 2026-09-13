@@ -850,6 +850,7 @@ export interface CredentialDisabledEvent {
 	/** OAuth account identity of the disabled credential, when known. */
 	email?: string;
 	accountId?: string;
+	projectId?: string;
 	orgId?: string;
 	orgName?: string;
 }

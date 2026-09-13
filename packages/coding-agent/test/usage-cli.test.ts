@@ -1,14 +1,23 @@
-import { describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import { describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type DisabledCredentialSummary,
+	SqliteAuthCredentialStore,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	runUsageCommand,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import { getAgentDir, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -45,6 +54,95 @@ function makeLimit(opts: {
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
+
+describe("runUsageCommand disabled credential output", () => {
+	for (const json of [false, true]) {
+		it(`keeps secrets out of ${json ? "JSON" : "text"} and masks echoed identities only with --redact`, async () => {
+			const profile = TempDir.createSync("@omp-usage-redaction-");
+			const originalAgentDir = getAgentDir();
+			const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+			const originalExitCode = process.exitCode;
+			setAgentDir(profile.path());
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
+			const projectId = "private-project-42";
+			const cause = `oauth refresh failed: HTTP 400 ${JSON.stringify({
+				error: "invalid_grant",
+				refresh_token: "BODYSECRET",
+				error_description: `${projectId} denied; client_secret=ECHOSECRET`,
+			})}`;
+			let authStorage: AuthStorage | undefined;
+			try {
+				for (const redact of [false, true]) {
+					const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await authStorage.set(provider, {
+						type: "oauth",
+						access: "SYNTHETICACCESS",
+						refresh: "SYNTHETICREFRESH",
+						expires: 1,
+						projectId,
+					});
+					const id = authStorage.exportSnapshot().credentials[0]!.id;
+					expect(authStorage.disableCredentialById(id, cause)).toBe(true);
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					let forensic: Promise<DisabledCredentialSummary[]> | undefined;
+					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						forensic = store.listDisabledCredentials();
+						return true;
+					});
+					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					await runUsageCommand({ json, redact });
+					authStorage = undefined; // The command closes its real in-memory store.
+					stdout.mockRestore();
+					expect(stderr.mock.calls).toEqual([]);
+					stderr.mockRestore();
+					expect(await forensic).toEqual([expect.objectContaining({ provider, projectId, cause })]);
+					const text = stripVTControlCharacters(output);
+					for (const secret of [
+						"QUERYSECRET",
+						"BODYSECRET",
+						"ECHOSECRET",
+						"SYNTHETICACCESS",
+						"SYNTHETICREFRESH",
+					]) {
+						expect(text).not.toContain(secret);
+					}
+					expect(text).toContain("region=west");
+					expect(text).toContain("denied");
+					if (redact) {
+						expect(text).not.toContain(projectId);
+						expect(text).toContain("pr*");
+					} else {
+						expect(text).toContain(`${projectId} denied`);
+					}
+					if (json) {
+						const payload = JSON.parse(output) as { disabledCredentials: DisabledCredentialSummary[] };
+						expect(payload.disabledCredentials).toHaveLength(1);
+						expect(payload.disabledCredentials[0]).toMatchObject({ id, projectId: redact ? "pr*" : projectId });
+						expect(payload.disabledCredentials[0]!.cause).toContain("invalid_grant");
+					} else {
+						expect(text).toContain("disabled");
+						expect(text).not.toContain("No credentials found");
+					}
+					vi.restoreAllMocks();
+				}
+			} finally {
+				authStorage?.close();
+				vi.restoreAllMocks();
+				process.exitCode = originalExitCode;
+				setAgentDir(originalAgentDir);
+				if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+				await profile.remove();
+			}
+		});
+	}
+});
 
 describe("buildRedactionMap", () => {
 	it("masks everything past a two-char anchor when the anchor is unique", () => {
@@ -471,6 +569,27 @@ describe("formatUsageBreakdown", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
 		expect(text).toContain("Anthropic");
 		expect(text).toContain("✗ last@example.test — disabled: token endpoint said no (re-login to restore)");
+	});
+
+	it("masks overlapping diagnostic identities literally before truncating the cause", () => {
+		const projectId = "private-project";
+		const orgName = "private-project-confidential-organization";
+		const longIdentity = "$&-" + "private".repeat(20);
+		const redaction = buildRedactionMap([projectId, orgName, longIdentity]);
+		const disabled: DisabledCredentialSummary[] = [
+			{
+				id: 51,
+				provider: "google-gemini-cli",
+				type: "oauth",
+				projectId,
+				orgName,
+				cause: `oauth refresh failed: ${orgName} ${longIdentity} denied`,
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown([], [], 1000, redaction, disabled));
+		expect(text).toContain(`${redaction.get(orgName)} ${redaction.get(longIdentity)} denied`);
+		expect(text).not.toContain("confidential-organization");
+		expect(text).not.toContain("private");
 	});
 
 	it("warns about Anthropic's ~30d grant lifetime only inside the final week", () => {

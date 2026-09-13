@@ -20,9 +20,12 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import {
+	copyOAuthCredentialIdentity,
 	isAutomaticDisableCause,
+	isOAuthCredentialIdentityRecovered,
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
+	resolveOAuthCredentialIdentity,
 	SqliteAuthCredentialStore,
 	serializeCredential,
 	USAGE_REPORT_TTL_MS,
@@ -210,6 +213,8 @@ export interface DisabledCredentialSummary {
 	type: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
+	/** Google project the credential was scoped to (`google-gemini-cli`, `google-antigravity`). */
+	projectId?: string;
 	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
@@ -226,63 +231,29 @@ export interface CredentialAccountIdentity {
 	type?: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
+	projectId?: string;
 	orgId?: string;
 }
 
 /**
- * Whether a tombstone still represents lost capacity the user has to act on:
- * an OAuth credential torn down automatically (refresh failure, upstream
- * invalidation) whose identity has not signed in again. Rows the user replaced,
- * deleted, or logged out deliberately are lifecycle noise.
+ * Whether an automatically disabled OAuth credential still needs a re-login.
+ * Recovery shares persistence's provider-specific identity priority, one-way
+ * organization upgrades, and alternate-identity matching. Only email is case
+ * insensitive; all identity fields are trimmed. An API key proves no recovery.
  *
- * Recovery follows the persistence matcher: an org-scoped tombstone is only
- * recovered inside its organization; a tombstone naming a person (email, or
- * an account id that is not merely the shared workspace id) needs that person
- * back — the same email when both sides carry one, otherwise the same personal
- * account id; a tombstone with no per-user identity is recovered by any live
- * credential of its organization, or of its provider when it has no
- * organization either, since nothing could ever match it and it would
- * otherwise nag forever.
+ * Summaries expose identity fields, not tokens. If matching requires an alternate
+ * token claim absent from those fields, keep the notice rather than infer recovery.
  */
 export function isActionableCredentialDisable(
 	summary: DisabledCredentialSummary,
 	activeAccounts: readonly CredentialAccountIdentity[],
 ): boolean {
-	if (summary.type !== "oauth") return false;
-	if (!isAutomaticDisableCause(summary.cause)) return false;
-	const summaryEmail = summary.email?.toLowerCase();
-	const summaryOrgId = summary.orgId?.toLowerCase();
-	const summaryPersonId = personalAccountId(summary.accountId?.toLowerCase(), summaryOrgId);
-	if (!summaryEmail && !summaryPersonId && !summaryOrgId) {
-		return !activeAccounts.some(account => account.provider === summary.provider && account.type !== "api_key");
-	}
+	if (summary.type !== "oauth" || !isAutomaticDisableCause(summary.cause)) return false;
+	const identity = resolveOAuthCredentialIdentity(summary.provider, summary);
 	return !activeAccounts.some(account => {
-		if (account.provider !== summary.provider) return false;
-		const accountEmail = account.email?.toLowerCase();
-		const accountOrgId = account.orgId?.toLowerCase();
-		// An org-scoped tombstone names a subscription; only a credential in that
-		// organization recovers it — an org-less login never replaces an
-		// org-scoped row (the reverse upgrade does).
-		if (summaryOrgId && accountOrgId !== summaryOrgId) return false;
-		// When both sides name a person, that decides.
-		if (summaryEmail && accountEmail) return summaryEmail === accountEmail;
-		const accountPersonId = personalAccountId(account.accountId?.toLowerCase(), accountOrgId);
-		if (summaryPersonId && accountPersonId) return summaryPersonId === accountPersonId;
-		// A tombstone naming a person is not recovered by a colleague whose email
-		// is unknown; only one with no per-user identity is recovered by the
-		// organization alone.
-		return !summaryEmail && !summaryPersonId && Boolean(summaryOrgId && summaryOrgId === accountOrgId);
+		if (account.provider !== summary.provider || account.type === "api_key") return false;
+		return isOAuthCredentialIdentityRecovered(identity, resolveOAuthCredentialIdentity(account.provider, account));
 	});
-}
-
-/**
- * An account id that merely repeats the organization id carries no per-user
- * identity: openai-codex stores the ChatGPT workspace id as both `accountId`
- * and `orgId` for every member, so it cannot prove that one member signed in
- * again. The persistence matcher refuses the same base identifier.
- */
-function personalAccountId(accountId: string | undefined, orgId: string | undefined): string | undefined {
-	return accountId && accountId !== orgId ? accountId : undefined;
 }
 
 /**
@@ -301,15 +272,16 @@ export function summarizeDisableCause(cause: string): string {
 }
 
 /**
- * Display label for an OAuth account: email or account id, qualified by the
- * organization when it is a distinct value. `mask` runs over each part so
- * redacting surfaces (`omp usage --redact`) can substitute placeholders.
+ * Display label for an OAuth account: email, account id, or Google project,
+ * qualified by the organization when it is a distinct value. `mask` runs over
+ * each part so redacting surfaces (`omp usage --redact`) can substitute
+ * placeholders.
  */
 export function credentialAccountLabel(
-	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "orgId" | "orgName">,
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "projectId" | "orgId" | "orgName">,
 	mask: (part: string) => string = part => part,
 ): string {
-	const base = identity.email ?? identity.accountId ?? "OAuth account";
+	const base = identity.email ?? identity.accountId ?? identity.projectId ?? "OAuth account";
 	const org = identity.orgName ?? identity.orgId;
 	if (!org || org === base) return mask(base);
 	return `${mask(base)} · ${mask(org)}`;
@@ -701,6 +673,7 @@ export interface CredentialDisabledEvent {
 	credentialType: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
+	projectId?: string;
 	orgId?: string;
 	orgName?: string;
 }
@@ -719,9 +692,7 @@ function credentialDisabledEvent(
 		credentialType: credential.type,
 	};
 	if (credential.type === "oauth") {
-		if (credential.email) event.email = credential.email;
-		if (credential.accountId) event.accountId = credential.accountId;
-		if (credential.orgId) event.orgId = credential.orgId;
+		copyOAuthCredentialIdentity(event, credential);
 		if (credential.orgName) event.orgName = credential.orgName;
 	}
 	return event;
@@ -2678,8 +2649,8 @@ export class AuthStorage {
 	): void {
 		const logListenerError = (error: unknown): void => {
 			logger.warn("onCredentialDisabled listener threw", {
-				provider: event.provider,
-				error: String(error),
+				provider: redactUrlSecrets(event.provider),
+				error: redactSecrets(String(error)),
 			});
 		};
 		try {
@@ -7264,13 +7235,12 @@ export class AuthStorage {
 			if (provider !== undefined && entryProvider !== provider) continue;
 			for (const entry of entries) {
 				if (entry.credential.type !== "oauth") continue;
-				activeAccounts.push({
+				const account: CredentialAccountIdentity = {
 					provider: entryProvider,
 					type: "oauth",
-					email: entry.credential.email,
-					accountId: entry.credential.accountId,
-					orgId: entry.credential.orgId,
-				});
+				};
+				copyOAuthCredentialIdentity(account, entry.credential);
+				activeAccounts.push(account);
 			}
 		}
 		return disabled.filter(summary => isActionableCredentialDisable(summary, activeAccounts));

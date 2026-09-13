@@ -100,6 +100,107 @@ describe("redactUrlSecrets", () => {
 });
 
 describe("redactSecrets", () => {
+	it("normalizes terminal styling before classifying JSON and credential names", () => {
+		expect(redactSecrets("oauth refresh failed: grant\trevoked\x1b[31m!")).toBe(
+			"oauth refresh failed: grant\trevoked!",
+		);
+		expect(
+			redactSecrets("client_\x1b[31msecret\x1b[0m=styled-secret; https://host/mcp?token=url-secret&ref=keep"),
+		).toBe("client_secret=[redacted]; https://host/mcp?token=[redacted]&ref=keep");
+	});
+
+	it("walks embedded JSON using decoded names and replaces whole secret subtrees", () => {
+		const body =
+			'{"key":"bare-key-secret","oauth_code":"oauth-secret","tokenValue":123456,"client_\\u0073ecret":{"value":"nested-secret","list":["array-secret"]},"items":[{"refresh_token":"child-secret","status":"keep"}],"error":"invalid_grant"}';
+		const output = redactSecrets("HTTP 400 " + body + "; retry denied");
+		expect(output.startsWith("HTTP 400 ")).toBe(true);
+		expect(output.endsWith("; retry denied")).toBe(true);
+		expect(JSON.parse(output.slice(9, -14))).toEqual({
+			key: "[redacted]",
+			oauth_code: "[redacted]",
+			tokenValue: "[redacted]",
+			client_secret: "[redacted]",
+			items: [{ refresh_token: "[redacted]", status: "keep" }],
+			error: "invalid_grant",
+		});
+	});
+
+	it("redacts decoded JSON strings without corrupting escapes or quoted braces", () => {
+		const input = JSON.stringify({
+			error_description: "client_secret=\"alpha beta\" rejected; Authorization: Basic 'gamma delta'",
+			detail: 'server said "} still inside the string"',
+			nested: JSON.stringify({ oauth_code: "nested-encoded-secret", status: "keep" }),
+		});
+		expect(JSON.parse(redactSecrets(input))).toEqual({
+			error_description: "client_secret=\"[redacted]\" rejected; Authorization: Basic '[redacted]'",
+			detail: 'server said "} still inside the string"',
+			nested: JSON.stringify({ oauth_code: "[redacted]", status: "keep" }),
+		});
+		const encoded = JSON.stringify(JSON.stringify({ key: "encoded-secret", status: "keep" }));
+		const encodedOutput = redactSecrets("HTTP 400 " + encoded);
+		expect(encodedOutput).not.toContain("encoded-secret");
+		expect(JSON.parse(JSON.parse(encodedOutput.slice(9)))).toEqual({ key: "[redacted]", status: "keep" });
+	});
+
+	it("does not retain overwritten duplicate JSON fields containing secrets", () => {
+		const output = redactSecrets('{"detail":"client_secret=overwritten-secret","detail":"safe"}');
+		expect(output).not.toContain("overwritten-secret");
+		expect(JSON.parse(output)).toEqual({ detail: "safe" });
+	});
+
+	it("consumes quoted authorization and mixed quoted assignment values", () => {
+		expect(
+			redactSecrets("Authorization: Bearer \"alpha beta\"; Authorization: Basic 'gamma delta'; status=keep"),
+		).toBe("Authorization: Bearer \"[redacted]\"; Authorization: Basic '[redacted]'; status=keep");
+		expect(redactSecrets("client_secret=abc'def")).toBe("client_secret=[redacted]");
+		expect(redactSecrets('client_secret=abc"def ghi"; status=keep')).toBe("client_secret=[redacted]; status=keep");
+		expect(redactSecrets('client_secret={"value": "nested prose secret"}; status=keep')).toBe(
+			"client_secret=[redacted]; status=keep",
+		);
+	});
+
+	it("consumes escaped quote delimiters and unterminated values with dangling escapes", () => {
+		const escaped = 'client_secret=\\"alpha beta\\"; status=keep';
+		expect(redactSecrets(escaped)).toBe('client_secret=\\"[redacted]\\"; status=keep');
+		for (const prefix of [
+			'client_secret="',
+			"client_secret='",
+			'Authorization: Bearer "',
+			"Authorization: Basic '",
+		]) {
+			expect(redactSecrets(prefix + "truncated-secret\\")).toBe(prefix + "[redacted]" + prefix.at(-1));
+		}
+	});
+
+	it("withholds malformed JSON rather than exposing nested or escaped tails", () => {
+		for (const body of [
+			'{"client_secret":{"value":"nested-secret"},"status":"keep",}',
+			'{"client_\\u0073ecret":"escaped-secret"',
+			'{"error_description":"client_secret=\\"truncated-secret\\',
+		]) {
+			expect(redactSecrets("HTTP 400 " + body)).toBe("HTTP 400 [redacted]");
+		}
+	});
+
+	it("preserves safe URL neighbors in prose and JSON rather than treating them as secret assignment tails", () => {
+		const url = "https://host/mcp?token=url-secret&ref=keep%20this#password=fragment-secret&mode=keep";
+		const safeUrl = "https://host/mcp?token=[redacted]&ref=keep%20this#password=[redacted]&mode=keep";
+		expect(redactSecrets("request {" + url + "} failed; client_secret=body-secret")).toBe(
+			"request {" + safeUrl + "} failed; client_secret=[redacted]",
+		);
+		expect(JSON.parse(redactSecrets(JSON.stringify({ url, status: "keep" })))).toEqual({
+			url: safeUrl,
+			status: "keep",
+		});
+	});
+
+	it("consumes quoted secrets and punctuation-bearing unquoted values", () => {
+		for (const value of ['"abc def"', "'abc,def'", '"abc;def"', "abc,def", '"abc def', "'abc,def"]) {
+			const result = redactSecrets("client_secret=" + value);
+			expect(result).not.toContain("abc");
+			expect(result).not.toContain("def");
+		}
+	});
 	it("redacts a token endpoint body that echoes the submitted refresh token and client secret", () => {
 		const cause =
 			'oauth refresh failed: HTTP 400 {"error":"invalid_grant","error_description":"grant revoked","refresh_token":"rt-echoed-1234","client_secret":"cs-echoed"}';

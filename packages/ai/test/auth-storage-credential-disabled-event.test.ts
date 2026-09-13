@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -8,6 +9,9 @@ import {
 	AuthStorage,
 	type CredentialDisabledEvent,
 	type DisabledCredentialSummary,
+	isActionableCredentialDisable,
+	type OAuthCredential,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai/auth-storage";
@@ -450,6 +454,39 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect(disableLogs).toEqual([["Auth credential disabled", expected]]);
 		});
 
+		test("listener throws and rejections redact provider and error without changing event evidence", async () => {
+			const failures = Promise.withResolvers<void>();
+			let failureCount = 0;
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(message => {
+				if (message === "onCredentialDisabled listener threw" && ++failureCount === 2) failures.resolve();
+			});
+			const authStorage = openStorage();
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
+			const cause = "oauth refresh failed: HTTP 400 client_secret=BODYSECRET";
+			const events: CredentialDisabledEvent[] = [];
+			authStorage.onCredentialDisabled(event => {
+				events.push(event);
+				throw new Error(event.disabledCause);
+			});
+			authStorage.onCredentialDisabled(async event => {
+				throw new Error(event.disabledCause);
+			});
+			await authStorage.set(provider, expiredOAuth());
+			expect(authStorage.disableCredentialById(1, cause)).toBe(true);
+			await failures.promise;
+			expect(events).toEqual([expect.objectContaining({ provider, disabledCause: cause })]);
+			const logs = warnSpy.mock.calls.filter(([message]) => message === "onCredentialDisabled listener threw");
+			expect(logs).toHaveLength(2);
+			for (const [, context] of logs) {
+				expect(context).toMatchObject({
+					provider: "mcp_oauth:profile:default:https://host.test/mcp?key=[redacted]&region=west",
+					error: expect.stringContaining("HTTP 400"),
+				});
+				expect(JSON.stringify(context)).not.toContain("QUERYSECRET");
+				expect(JSON.stringify(context)).not.toContain("BODYSECRET");
+			}
+		});
+
 		test("a managed MCP credential id is redacted in the log line but not in the event", async () => {
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const events: CredentialDisabledEvent[] = [];
@@ -545,6 +582,171 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 	});
 
 	describe("listActionableDisabledCredentials", () => {
+		const oauthIdentity = (fields: Partial<OAuthCredential> = {}): OAuthCredential => ({
+			type: "oauth",
+			access: "access",
+			refresh: "refresh",
+			expires: 4_000_000_000_000,
+			...fields,
+		});
+
+		test.each<{
+			name: string;
+			provider: string;
+			old: Partial<OAuthCredential>;
+			fresh: Partial<OAuthCredential>;
+			recovered: boolean;
+		}>([
+			{
+				name: "account-priority provider does not recover a different account sharing the email",
+				provider: "google-gemini-cli",
+				old: { accountId: "account-a", email: "same@example.com" },
+				fresh: { accountId: "account-b", email: "same@example.com" },
+				recovered: false,
+			},
+			{
+				name: "same-org alternate personal account recovers a changed email",
+				provider: "anthropic",
+				old: { email: "old@example.com", accountId: "person-1", orgId: "org-1" },
+				fresh: { email: "new@example.com", accountId: "person-1", orgId: "org-1" },
+				recovered: true,
+			},
+			{
+				name: "shared workspace account cannot identify the returning member",
+				provider: "openai-codex",
+				old: { accountId: "org-1", orgId: "org-1" },
+				fresh: { accountId: "org-1", orgId: "org-1", email: "member@example.com" },
+				recovered: false,
+			},
+			{
+				name: "project ids remain case sensitive",
+				provider: "google-gemini-cli",
+				old: { projectId: "Project-A" },
+				fresh: { projectId: "project-a" },
+				recovered: false,
+			},
+			{
+				name: "email is trimmed and case insensitive within a trimmed organization",
+				provider: "anthropic",
+				old: { email: " PERSON@example.com ", orgId: " org-1 " },
+				fresh: { email: "person@example.com", orgId: "org-1" },
+				recovered: true,
+			},
+			{
+				name: "project ids are trimmed",
+				provider: "google-gemini-cli",
+				old: { projectId: " project-a " },
+				fresh: { projectId: "project-a" },
+				recovered: true,
+			},
+			{
+				name: "account ids remain case sensitive",
+				provider: "google-gemini-cli",
+				old: { accountId: "Account-A" },
+				fresh: { accountId: "account-a" },
+				recovered: false,
+			},
+			{
+				name: "organization ids remain case sensitive and separate subscriptions",
+				provider: "anthropic",
+				old: { email: "same@example.com", orgId: "Org-A" },
+				fresh: { email: "same@example.com", orgId: "org-a" },
+				recovered: false,
+			},
+			{
+				name: "org-scoped login recovers its legacy unscoped account",
+				provider: "openai-codex",
+				old: { accountId: " person-1 " },
+				fresh: { accountId: "person-1", email: "person@example.com", orgId: "org-1" },
+				recovered: true,
+			},
+			{
+				name: "org-less login cannot recover an org-scoped subscription",
+				provider: "openai-codex",
+				old: { email: "person@example.com", orgId: "org-1" },
+				fresh: { email: "person@example.com" },
+				recovered: false,
+			},
+			{
+				name: "an org-only tombstone is recovered by the same organization",
+				provider: "anthropic",
+				old: { orgId: "org-1" },
+				fresh: { email: "person@example.com", orgId: "org-1" },
+				recovered: true,
+			},
+			{
+				name: "blank identities are recovered by a live OAuth credential",
+				provider: "anthropic",
+				old: { email: " ", accountId: " ", projectId: " ", orgId: " " },
+				fresh: { email: "person@example.com" },
+				recovered: true,
+			},
+		])("recovery and persistence agree: $name", async ({ provider, old, fresh, recovered }) => {
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			try {
+				const [row] = store.upsertAuthCredentialForProvider(provider, oauthIdentity(old));
+				store.deleteAuthCredential(row!.id, "invalid_grant");
+				const [summary] = await store.listDisabledCredentials(provider);
+				expect(isActionableCredentialDisable(summary!, [{ provider, type: "oauth", ...fresh }])).toBe(!recovered);
+				store.upsertAuthCredentialForProvider(provider, oauthIdentity(fresh));
+				expect((await store.listDisabledCredentials(provider)).some(entry => entry.id === row!.id)).toBe(
+					!recovered,
+				);
+			} finally {
+				store.close();
+			}
+		});
+
+		test("an API key does not recover named or identity-less OAuth tombstones", async () => {
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			try {
+				const named = store.upsertAuthCredentialForProvider(
+					"anthropic",
+					oauthIdentity({ email: "person@example.com" }),
+				)[0]!;
+				store.deleteAuthCredential(named.id, "invalid_grant");
+				const idless = store.upsertAuthCredentialForProvider("anthropic", oauthIdentity())[0]!;
+				store.deleteAuthCredential(idless.id, "invalid_grant");
+				const summaries = await store.listDisabledCredentials();
+				for (const summary of summaries) {
+					expect(
+						isActionableCredentialDisable(summary, [
+							{ provider: "anthropic", type: "api_key", email: "person@example.com" },
+						]),
+					).toBe(true);
+				}
+				store.upsertAuthCredentialForProvider("anthropic", { type: "api_key", key: "key" });
+				expect((await store.listDisabledCredentials()).map(row => row.id)).toEqual(summaries.map(row => row.id));
+			} finally {
+				store.close();
+			}
+		});
+
+		test("preserves a project-only tombstone until the same project signs in", async () => {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "project-tombstone-"));
+			const storage = await AuthStorage.create(path.join(dir, "agent.db"));
+			try {
+				const credential = {
+					type: "oauth" as const,
+					access: "a",
+					refresh: "r",
+					expires: Date.now() + 60000,
+					projectId: "project-a",
+				};
+				await storage.set("google-gemini-cli", [credential]);
+				const id = storage.exportSnapshot().credentials[0]!.id;
+				storage.disableCredentialById(id, "invalid_grant");
+				await storage.set("google-gemini-cli", [{ ...credential, access: "b", projectId: "project-b" }]);
+				expect((await storage.listActionableDisabledCredentials()).map(row => row.projectId)).toEqual([
+					"project-a",
+				]);
+				await storage.set("google-gemini-cli", [credential]);
+				expect(await storage.listActionableDisabledCredentials()).toEqual([]);
+			} finally {
+				storage.close();
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
 		const tombstone = (overrides: Partial<DisabledCredentialSummary>): DisabledCredentialSummary => ({
 			id: 7,
 			provider: "anthropic",
@@ -607,7 +809,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				tombstone({ id: 2, email: "alice@example.com", accountId: "ws-team", orgId: "ws-team" }),
 				// A member of another workspace whose email is unknown: the shared id proves nothing.
 				tombstone({ id: 6, email: "carol@example.com", accountId: "ws-other", orgId: "ws-other" }),
-				// Same workspace under a member whose email is unknown: recovered by the shared id.
+				// A workspace id alone cannot prove which member signed in again.
 				tombstone({ id: 3, email: undefined, accountId: "ws-team", orgId: "ws-team" }),
 			]);
 			await authStorage.set("anthropic", [
@@ -619,7 +821,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			]);
 
 			const actionable = await authStorage.listActionableDisabledCredentials();
-			expect(actionable.map(summary => summary.id).toSorted()).toEqual([1, 2, 4, 6]);
+			expect(actionable.map(summary => summary.id).toSorted()).toEqual([1, 2, 3, 4, 6]);
 		});
 
 		test("treats an identity-less tombstone as recovered by any live credential of its provider", async () => {
@@ -648,20 +850,34 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([7]);
 		});
 
+		test("a token-identified tombstone waits for its own account rather than any OAuth login", async () => {
+			const storage = await AuthStorage.create(":memory:");
+			const jwt = (sub: string) =>
+				`eyJhbGciOiJub25lIn0.${Buffer.from(JSON.stringify({ sub })).toString("base64url")}.sig`;
+			try {
+				const credential = oauthIdentity({ access: jwt("user-1") });
+				await storage.set("unit-token-identity", [credential]);
+				const id = storage.exportSnapshot().credentials[0]!.id;
+				storage.disableCredentialById(id, "invalid_grant");
+				await storage.set("unit-token-identity", [oauthIdentity({ access: jwt("user-2") })]);
+				expect((await storage.listActionableDisabledCredentials()).map(row => row.id)).toEqual([id]);
+				expect((await storage.listDisabledCredentials()).map(row => row.id)).toEqual([id]);
+				await storage.set("unit-token-identity", [credential]);
+				expect((await storage.listDisabledCredentials()).map(row => row.id)).not.toContain(id);
+				expect(await storage.listActionableDisabledCredentials()).toEqual([]);
+			} finally {
+				storage.close();
+			}
+		});
+
 		test("retires an identity-less tombstone on re-login so a later logout cannot resurrect it", async () => {
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-identityless-"));
 			const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
 			try {
-				// No email, account, or organization fields — nothing the listing could
-				// match later — even though the access token is a JWT whose `sub` claim
-				// gives the row a token-derived identity key the summary never carries.
-				const jwt = (sub: string) =>
-					`${Buffer.from('{"alg":"none"}').toBase64({ alphabet: "base64url", omitPadding: true })}.${Buffer.from(
-						JSON.stringify({ sub }),
-					).toBase64({ alphabet: "base64url", omitPadding: true })}.sig`;
+				// Opaque tokens carry no recoverable identity either.
 				const bare = {
 					type: "oauth" as const,
-					access: jwt("user-1"),
+					access: "opaque-access-1",
 					refresh: "r-1",
 					expires: Date.now() + 60_000,
 				};
@@ -670,7 +886,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				expect(authStorage.disableCredentialById(id, "oauth refresh failed: invalid_grant")).toBe(true);
 				expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([id]);
 
-				await authStorage.set("unit-idless", [{ ...bare, access: jwt("user-2"), refresh: "r-2" }]);
+				await authStorage.set("unit-idless", [{ ...bare, access: "opaque-access-2", refresh: "r-2" }]);
 				expect(await authStorage.listDisabledCredentials("unit-idless")).toEqual([]);
 
 				await authStorage.remove("unit-idless");

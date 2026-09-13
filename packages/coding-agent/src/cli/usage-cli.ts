@@ -22,7 +22,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, redactSecrets, redactUrlSecrets, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
@@ -169,6 +169,7 @@ function collectIdentityStrings(
 	for (const summary of disabled) {
 		add(summary.email);
 		add(summary.accountId);
+		add(summary.projectId);
 		add(summary.orgId);
 		add(summary.orgName);
 	}
@@ -203,7 +204,7 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
 }
 
 function formatProviderName(provider: string): string {
-	return provider
+	return redactUrlSecrets(provider)
 		.split(/[-_]/g)
 		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
 		.join(" ");
@@ -660,9 +661,11 @@ export function formatUsageBreakdown(
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
 			const label = credentialAccountLabel(summary, part => redaction?.get(part) ?? part);
+			// Mask before summarizing: truncation must not leave a partial identity behind.
+			const cause = redaction ? maskDiagnosticIdentities(summary.cause, redaction) : summary.cause;
 			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
 			lines.push(
-				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(summarizeDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
+				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(summarizeDisableCause(cause))}`)} ${chalk.dim("(re-login to restore)")}`,
 			);
 		}
 
@@ -873,6 +876,16 @@ export function selectReportableAccounts(
 	return accounts.filter(account => hasUsageProvider(account.provider));
 }
 
+/** Error bodies can echo identities as well as credential-shaped secrets. */
+function maskDiagnosticIdentities(text: string, redaction: Map<string, string>): string {
+	const identities = [...redaction.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
+	if (identities.length === 0) return text;
+	// Match the longest identity once; do not re-mask replacements or interpret `$&` in a mask.
+	return text.replace(new RegExp(identities.map(identity => RegExp.escape(identity)).join("|"), "g"), identity =>
+		redaction.get(identity)!,
+	);
+}
+
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
@@ -983,7 +996,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const provider = cmd.provider?.toLowerCase();
 			await authStorage.invalidateUsageCache(provider);
 			if (provider) {
-				process.stdout.write(`Invalidated cached usage reports for provider "${provider}".\n`);
+				process.stdout.write(`Invalidated cached usage reports for provider "${redactUrlSecrets(provider)}".\n`);
 			} else {
 				process.stdout.write("Invalidated cached usage reports for all providers.\n");
 			}
@@ -1038,7 +1051,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				return;
 			}
 			if (entries.length === 0) {
-				const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+				const scope = cmd.provider ? ` for provider "${redactUrlSecrets(cmd.provider)}"` : "";
 				process.stderr.write(
 					chalk.yellow(
 						`No usage history recorded${scope} yet. Snapshots accumulate whenever usage is fetched (TUI footer, /usage, omp usage).\n`,
@@ -1114,12 +1127,20 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled.filter(summary => isActionableCredentialDisable(summary, accounts));
+			let disabledForJson = disabled
+				.filter(summary => isActionableCredentialDisable(summary, accounts))
+				.map(summary => ({
+					...summary,
+					provider: redactUrlSecrets(summary.provider),
+					cause: redactSecrets(summary.cause),
+				}));
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
 					email: maskIdentity(redaction, summary.email),
 					accountId: maskIdentity(redaction, summary.accountId),
+					projectId: maskIdentity(redaction, summary.projectId),
+					cause: maskDiagnosticIdentities(summary.cause, redaction),
 					orgId: maskIdentity(redaction, summary.orgId),
 					orgName: maskIdentity(redaction, summary.orgName),
 				}));
@@ -1135,8 +1156,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		if (filteredReports.length === 0 && accounts.length === 0) {
-			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+		if (
+			filteredReports.length === 0 &&
+			accounts.length === 0 &&
+			!disabled.some(summary => isActionableCredentialDisable(summary, accounts))
+		) {
+			const scope = cmd.provider ? ` for provider "${redactUrlSecrets(cmd.provider)}"` : "";
 			// Credentials exist but every one is for a provider without a usage
 			// endpoint — say so rather than implying nothing is logged in.
 			const message =
