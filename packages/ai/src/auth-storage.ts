@@ -6165,6 +6165,32 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Copy every stored credential affinity from one live session to another.
+	 *
+	 * The target receives its own sticky entries, so request resolution, usage
+	 * blocking, credential rotation, metadata, and persisted pins all continue
+	 * through the target session id without retaining a live dependency on the
+	 * source session.
+	 */
+	inheritSessionCredentials(sourceSessionId: string, targetSessionId: string): number {
+		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return 0;
+		let inherited = 0;
+		for (const provider of this.#data.keys()) {
+			const credential = this.#getSessionCredential(provider, sourceSessionId);
+			if (!credential) continue;
+			this.#recordSessionCredential(
+				provider,
+				targetSessionId,
+				credential.type,
+				credential.index,
+				credential.lastUsedAtMs,
+			);
+			inherited += 1;
+		}
+		return inherited;
+	}
+
+	/**
 	 * Resolve every stored OAuth credential for `provider` independently.
 	 *
 	 * Refreshes credentials through the same broker/local path as

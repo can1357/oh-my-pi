@@ -175,6 +175,8 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
+	/** Current session whose stored credential affinities should seed a child session. */
+	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */

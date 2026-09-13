@@ -398,6 +398,12 @@ export interface CreateAgentSessionOptions {
 	 * provider routing.
 	 */
 	getApiKey?: AgentOptions["getApiKey"];
+	/**
+	 * Session whose stored credential affinities are copied into this session
+	 * before any child credential operation.
+	 * @internal
+	 */
+	credentialSourceSessionId?: string;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -1459,6 +1465,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		await sessionManager.setAdditionalDirectories(merged);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+	if (options.credentialSourceSessionId) {
+		modelRegistry.authStorage.inheritSessionCredentials(options.credentialSourceSessionId, providerSessionId);
+	}
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
@@ -1728,6 +1737,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let contextFiles = initialContextFiles;
 
 	let agent: Agent;
+	const effectiveGetApiKey =
+		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
 	let session!: AgentSession;
 	let hasSession = false;
 	let hasRegistered = false;
@@ -1805,7 +1816,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
+			// Explicit resolvers retain their existing pass-through contract. Ordinary
+			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,
+			getCredentialSourceSessionId: options.getApiKey ? undefined : () => agent.sessionId,
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
@@ -3618,7 +3632,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			kimiApiFormat,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			getToolContext: tc => toolContextStore.getContext(tc),
-			getApiKey: options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId)),
+			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
