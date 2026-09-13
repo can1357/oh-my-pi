@@ -89,17 +89,36 @@ describe("credential sign-out notices", () => {
 		expect(Date.now() - startedAt).toBeLessThan(5_000);
 	});
 
+	it("names at most a screenful of signed-out accounts at startup and counts the rest", async () => {
+		authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
+		vi.spyOn(authStorage, "listActionableDisabledCredentials").mockResolvedValue(
+			Array.from({ length: 11 }, (_, index) => ({
+				id: index + 1,
+				provider: "openai-codex",
+				type: "oauth" as const,
+				email: `user${index + 1}@example.com`,
+				cause: "oauth refresh failed: invalid_grant",
+			})),
+		);
+
+		const notices = await collectDisabledCredentialNotices(authStorage, Date.now());
+		expect(notices).toHaveLength(9);
+		expect(notices[7]).toContain("user8@example.com");
+		expect(notices[8]).toBe("… 3 more signed-out accounts; see omp usage.");
+	});
+
 	it("bounds a runaway provider description without cutting the remedy", () => {
 		const notice = formatCredentialDisabledNotice({
-			provider: "anthropic",
 			credentialId: 1,
 			credentialType: "oauth",
 			email: `${"x".repeat(200)}@example.com`,
+			provider: `extension-provider-${"y".repeat(120)}`,
 			disabledCause: `HTTP 400 {"error":"invalid_grant","error_description":"${"grant revoked ".repeat(40)}"}`,
 		});
-		expect(notice.length).toBeLessThan(260);
+		// provider (TITLE, twice) + label (TITLE) + cause (CONTENT) + fixed wording.
+		expect(notice.length).toBeLessThan(2 * 60 + 60 + 80 + 80);
 		expect(notice).toMatch(/…/);
-		expect(notice).toMatch(/Sign in again with \/login anthropic\.$/);
+		expect(notice).toMatch(/Sign in again with \/login extension-provider-y+…\.$/);
 	});
 
 	it("strips terminal control sequences and tabs from provider-controlled notice text", async () => {

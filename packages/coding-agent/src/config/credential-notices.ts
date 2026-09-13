@@ -20,8 +20,8 @@ import {
 	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger } from "@oh-my-pi/pi-utils";
-import { sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
+import { formatDuration, logger, pluralize } from "@oh-my-pi/pi-utils";
+import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
 /**
  * Startup budget for the tombstone replay. A broker client otherwise inherits
@@ -40,28 +40,36 @@ function causeSummary(cause: string): string {
 	return truncateToWidth(summarizeDisableCause(cause), TRUNCATE_LENGTHS.CONTENT);
 }
 
+/** Provider ids come from the registry or an extension; bound them like titles too. */
+function providerLabel(provider: string): string {
+	return truncateToWidth(provider, TRUNCATE_LENGTHS.TITLE);
+}
+
 /** One-line warning for a credential torn down while this session was running. */
 export function formatCredentialDisabledNotice(event: CredentialDisabledEvent): string {
 	const account = event.credentialType === "api_key" ? "API key" : accountLabel(event);
+	const provider = providerLabel(event.provider);
 	return sanitizeDisplayWarning(
-		`Signed out of ${event.provider} ${account}: ${causeSummary(event.disabledCause)}. Sign in again with /login ${event.provider}.`,
+		`Signed out of ${provider} ${account}: ${causeSummary(event.disabledCause)}. Sign in again with /login ${provider}.`,
 	);
 }
 
 /** Startup replay for a tombstone the user has not acted on yet (see `AuthStorage.listActionableDisabledCredentials`). */
 export function formatDisabledCredentialReplayNotice(summary: DisabledCredentialSummary, nowMs: number): string {
 	const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+	const provider = providerLabel(summary.provider);
 	return sanitizeDisplayWarning(
-		`${summary.provider} ${accountLabel(summary)} was signed out${ago}: ${causeSummary(summary.cause)}. Sign in again with /login ${summary.provider}.`,
+		`${provider} ${accountLabel(summary)} was signed out${ago}: ${causeSummary(summary.cause)}. Sign in again with /login ${provider}.`,
 	);
 }
 
 /**
  * Notices for accounts that were signed out automatically and have not been
  * signed in again, replayed once when a session starts. Best-effort and
- * bounded: a broker that predates the tombstone endpoint, is unreachable, or
- * does not answer within {@link REPLAY_LOOKUP_BUDGET_MS} yields no notices
- * instead of delaying or breaking startup.
+ * bounded in time and size: a broker that predates the tombstone endpoint,
+ * is unreachable, or does not answer within {@link REPLAY_LOOKUP_BUDGET_MS}
+ * yields no notices instead of delaying or breaking startup, and at most
+ * {@link PREVIEW_LIMITS.COLLAPSED_ITEMS} accounts are named.
  */
 export async function collectDisabledCredentialNotices(authStorage: AuthStorage, nowMs: number): Promise<string[]> {
 	try {
@@ -69,7 +77,13 @@ export async function collectDisabledCredentialNotices(authStorage: AuthStorage,
 			undefined,
 			AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS),
 		);
-		return disabled.map(summary => formatDisabledCredentialReplayNotice(summary, nowMs));
+		// Bounded like other collapsed lists: `omp usage` has the full set.
+		const notices = disabled
+			.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
+			.map(summary => formatDisabledCredentialReplayNotice(summary, nowMs));
+		const hidden = disabled.length - notices.length;
+		if (hidden > 0) notices.push(`… ${hidden} more signed-out ${pluralize("account", hidden)}; see omp usage.`);
+		return notices;
 	} catch (error) {
 		logger.debug("Disabled credential replay skipped", { error: String(error) });
 		return [];

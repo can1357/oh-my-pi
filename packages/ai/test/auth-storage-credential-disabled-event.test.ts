@@ -43,6 +43,7 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 	#rows: StoredAuthCredential[] = [];
 	#nextId = 1;
 	listDisabledCredentials?: (provider?: string) => Promise<DisabledCredentialSummary[]>;
+	refreshSnapshot?: (signal?: AbortSignal) => Promise<unknown>;
 
 	close(): void {}
 
@@ -548,6 +549,21 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 
 			const actionable = await authStorage.listActionableDisabledCredentials();
 			expect(actionable.map(summary => summary.id)).toEqual([2]);
+		});
+
+		test("reports tombstones without recovery suppression when the snapshot cannot be revalidated", async () => {
+			const store = new MemoryAuthCredentialStore();
+			store.listDisabledCredentials = async () => [tombstone({})];
+			store.refreshSnapshot = async () => {
+				throw new Error("auth broker unreachable");
+			};
+			stores.push(store);
+			const authStorage = new AuthStorage(store);
+			// The loaded snapshot says the identity is live again, but that snapshot
+			// may be the very cache the disable already outdated.
+			await authStorage.set("anthropic", [expiredOAuth()]);
+
+			expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([7]);
 		});
 
 		test("sees a disable performed by a sibling process instead of trusting its own loaded snapshot", async () => {

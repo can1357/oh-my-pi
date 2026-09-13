@@ -7197,9 +7197,11 @@ export class AuthStorage {
 	 * The tombstone listing is always current, so the active side must be too:
 	 * a sibling process may have disabled a row this instance still holds in
 	 * memory, and a broker client may be running on a disk-cached snapshot.
-	 * Both are revalidated first (best-effort: an unreachable broker keeps the
-	 * loaded snapshot rather than failing the listing); `signal` bounds the
-	 * whole lookup.
+	 * Both are revalidated first; `signal` bounds the whole lookup. When the
+	 * revalidation itself fails (unreachable or slow broker) the loaded
+	 * snapshot is not trusted to prove a re-login, so the automatic tombstones
+	 * are reported without identity suppression: a stale reminder beats the
+	 * silent sign-out this exists to catch.
 	 */
 	async listActionableDisabledCredentials(
 		provider?: string,
@@ -7210,7 +7212,10 @@ export class AuthStorage {
 		try {
 			await this.revalidateCredentials(signal);
 		} catch (error) {
-			logger.debug("Credential snapshot revalidation skipped before tombstone replay", { error: String(error) });
+			logger.debug("Credential snapshot revalidation failed before tombstone replay; reporting without recovery", {
+				error: String(error),
+			});
+			return disabled.filter(summary => isActionableCredentialDisable(summary, []));
 		}
 		const activeAccounts: CredentialAccountIdentity[] = [];
 		for (const [entryProvider, entries] of this.#data) {
