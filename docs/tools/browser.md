@@ -25,7 +25,10 @@ const tab = await browser.open({
 });
 
 const observation = await tab.observe();
-await tab.id(observation.elements[0].id).click();
+const first = observation.elements[0];
+if (first.actionable !== false) {
+  await tab.id(first.id).click();
+}
 const title = await tab.title();
 
 const length = await tab.run(
@@ -56,6 +59,7 @@ Direct helpers cross the host bridge and return real structured values:
 Direct `waitFor` and `waitForSelector` return booleans. `tab.id(number)` and `tab.ref("e5")` instead return `BrowserElement` handles. Handles support `click`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, and `evaluate`. A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
 
 Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, and `pierce/…` query handlers. Playwright-only pseudos such as `:has-text()` and `:visible` are rejected. `tab.select` is required for `<select>` elements; `tab.fill` does not support them.
+- `observe()` entries with `actionable: false` are informational and have no usable `id`; check `entry.actionable !== false` before passing `entry.id` to `tab.id`.
 
 `observe()` assigns numeric ids consumed by `tab.id`. `ariaSnapshot()` assigns `[ref=eN]` ids consumed by `tab.ref`. Navigation and re-rendering invalidate handles; re-observe and act in the same Eval cell.
 
@@ -84,12 +88,12 @@ The return value stays structured. Nonempty text emitted by inner `display(...)`
 
 ## Python API
 
-Python exposes the same handles and direct method names. `open` and `close` use keyword arguments, while `browser.tab` and `tab.id`/`tab.ref` are synchronous handle lookups. Keyword arguments on direct helpers become a trailing JavaScript options object.
-
 ```python
 tab = await browser.open(name="main", url="https://example.com")
 observation = await tab.observe(viewportOnly=True)
-await tab.id(observation["elements"][0]["id"]).click()
+first = observation["elements"][0]
+if first.get("actionable", True):
+    await tab.id(first["id"]).click()
 title = await tab.run("return await tab.title();", timeout=30)
 await tab.close()
 ```
@@ -118,7 +122,7 @@ Host result details preserve structured `value` separately from displayed conten
 
 Relay and attached modes operate on real logged-in sessions; sites attribute actions to the user. Name a target or create a dedicated tab. Never navigate the user's visible tab or take a consequential action without direct authorization.
 
-Each named tab has one worker and permits one active run. A timed-out or aborted run can recycle the worker and invalidate handles. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
+Each named tab permits one active run. Firefox aliases on the same endpoint share a worker and serialize operations. A timed-out or aborted run can invalidate handles. Firefox navigation timeouts discard the affected worker and its aliases even if run code catches the error; reopen the intended target explicitly before the next operation. The attached Firefox browser remains open. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
 
 ## Common recovery
 

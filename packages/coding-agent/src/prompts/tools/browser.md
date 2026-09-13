@@ -35,7 +35,10 @@ Application modes:
 ```javascript
 const tab = await browser.open({ name: "docs", url: "https://example.com" });
 const observed = await tab.observe();
-await tab.id(observed.elements[0].id).click();
+const first = observed.elements[0];
+if (first.actionable !== false) {
+  await tab.id(first.id).click();
+}
 const title = await tab.run(async ({ tab }, suffix) => (await tab.title()) + suffix, { args: ["!"] });
 await tab.close();
 ```
@@ -43,7 +46,9 @@ await tab.close();
 ```python
 tab = await browser.open(name="docs", url="https://example.com")
 observed = await tab.observe()
-await tab.id(observed["elements"][0]["id"]).click()
+first = observed["elements"][0]
+if first.get("actionable", True):
+    await tab.id(first["id"]).click()
 title = await tab.run("return await tab.title();", timeout=30)
 await tab.close()
 ```
@@ -54,4 +59,5 @@ await tab.close()
 - Default to `tab.observe()`; use screenshots for visual confirmation.
 - `tab.run` has full Bun/Node and tool-bridge access; it is not sandboxed.
 - Relay and CDP actions operate on real user sessions.
+- `observe()` entries with `actionable: false` are informational and have no usable `id`; check `entry.actionable !== false` before passing `entry.id` to `tab.id`.
 </critical>

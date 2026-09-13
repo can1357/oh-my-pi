@@ -1096,6 +1096,7 @@ export class CmuxTab {
 	#rememberObservedElements(observation: Observation): void {
 		this.#elementRefs.clear();
 		for (const element of observation.elements) {
+			if (element.id === undefined) continue;
 			this.#elementRefs.set(element.id, {
 				ref: `@e${element.id}`,
 				name: element.name,

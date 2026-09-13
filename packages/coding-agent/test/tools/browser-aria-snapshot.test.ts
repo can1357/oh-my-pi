@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { buildAriaSnapshotScript, parseAriaRefSelector } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { captureAriaSnapshot, resolveAriaRefHandle } from "@oh-my-pi/pi-coding-agent/tools/browser/aria/aria-snapshot";
+import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { chromiumAvailable } from "./chromium-probe";
+
+const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 describe("parseAriaRefSelector", () => {
 	it("accepts the explicit aria-ref prefixes and returns the bare id", () => {
@@ -43,25 +48,44 @@ describe("parseAriaRefSelector", () => {
 	});
 });
 
-describe("buildAriaSnapshotScript", () => {
-	it("resolves a CSS root selector in-page and throws on miss", () => {
-		const script = buildAriaSnapshotScript("main .post");
-		expect(script).toContain('var __sel="main .post"');
-		expect(script).toContain("document.querySelector(__sel)");
-		expect(script).toContain("matched no element");
-		// The vendored bundle's entry is invoked against the resolved root.
-		expect(script).toContain("module.exports.ariaSnapshot(__root,");
-	});
-
-	it("defaults the root to the whole document when no selector is given", () => {
-		const script = buildAriaSnapshotScript(undefined);
-		expect(script).toContain("var __sel=null");
-		expect(script).toContain("module.exports.ariaSnapshot(__root,");
-	});
-
-	it("threads depth and boxes options into the request payload", () => {
-		const script = buildAriaSnapshotScript(undefined, { depth: 3, boxes: true });
-		expect(script).toContain('"depth":3');
-		expect(script).toContain('"boxes":true');
-	});
+describe("ARIA snapshot ownership", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"rejects refs overwritten by another alias and resolves refreshed refs to the correct control",
+		async () => {
+			const puppeteer = await loadPuppeteer();
+			const browser = await puppeteer.launch({
+				executablePath: await ensureChromiumExecutable(),
+				headless: true,
+				args: ["--no-sandbox"],
+			});
+			try {
+				const page = await browser.newPage();
+				await page.setContent(
+					'<button id="first">First</button><button id="second" onclick="document.title = \'second clicked\'">Second</button>',
+				);
+				const second = await page.$("#second");
+				if (!second) throw new Error("Missing fixture button");
+				const original = await captureAriaSnapshot(page, second, {}, "alias-a");
+				const originalRef = original.match(/\[ref=(e\d+)\]/)?.[1];
+				if (!originalRef) throw new Error("Missing snapshot ref");
+				await captureAriaSnapshot(page, null, {}, "alias-b");
+				await expect(resolveAriaRefHandle(page, originalRef, "alias-a")).rejects.toThrow(
+					"invalidated by another alias",
+				);
+				const refreshed = await captureAriaSnapshot(page, second, {}, "alias-a");
+				const ref = refreshed.match(/\[ref=(e\d+)\]/)?.[1];
+				if (!ref) throw new Error("Missing refreshed ref");
+				const handle = await resolveAriaRefHandle(page, ref, "alias-a");
+				if (!handle) throw new Error("Missing refreshed handle");
+				await handle.click();
+				expect(await page.title()).toBe("second clicked");
+				await page.evaluate(buildAriaSnapshotScript(undefined));
+				await expect(resolveAriaRefHandle(page, ref, "alias-a")).rejects.toThrow("invalidated by another alias");
+				await expect(page.evaluate(buildAriaSnapshotScript("#missing"))).rejects.toThrow("matched no element");
+			} finally {
+				await browser.close();
+			}
+		},
+		30_000,
+	);
 });

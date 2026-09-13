@@ -79,7 +79,7 @@ export function cmuxSnapshotToObservation(
 	viewport: Observation["viewport"],
 	geometry: CmuxGeometry,
 ): Observation {
-	const elements: ObservationEntry[] = [];
+	const elements: Array<ObservationEntry & { id: number }> = [];
 	const refs = result.refs ?? {};
 	for (const ref in refs) {
 		const value = refs[ref];

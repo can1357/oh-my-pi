@@ -10,6 +10,7 @@ import type {
 	Dialog,
 	ElementHandle,
 	ElementScreenshotOptions,
+	Frame,
 	HTTPResponse,
 	KeyboardTypeOptions,
 	KeyInput,
@@ -42,6 +43,7 @@ import {
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
+import { pickElectronTarget } from "./attach";
 import {
 	applyStealthPatches,
 	applyViewport,
@@ -541,6 +543,7 @@ function redactUrlCredentials(url: string): string {
 }
 
 class RequestInterceptionCleanupError extends ToolError {}
+class NavigationCleanupError extends ToolError {}
 
 interface RunPageScope {
 	page: Page;
@@ -552,16 +555,26 @@ interface RunPageScope {
  * Puppeteer's Page wraps an internal emitter, so `removeAllListeners("request")`
  * would also remove its forwarding listener; the facade removes only user handlers.
  */
-function createRunPageScope(page: Page): RunPageScope {
+function createRunPageScope(page: Page, onNavigationTimeout?: () => void): RunPageScope {
 	const requestHandlers: unknown[] = [];
 	const on = page.on;
 	const off = page.off;
 	const once = page.once;
 	const removeAllListeners = page.removeAllListeners;
+	const goto = page.goto;
+	const reload = page.reload;
+	const goBack = page.goBack;
+	const goForward = page.goForward;
+	const setContent = page.setContent;
 	const onDescriptor = Object.getOwnPropertyDescriptor(page, "on");
 	const offDescriptor = Object.getOwnPropertyDescriptor(page, "off");
 	const onceDescriptor = Object.getOwnPropertyDescriptor(page, "once");
 	const removeAllDescriptor = Object.getOwnPropertyDescriptor(page, "removeAllListeners");
+	const gotoDescriptor = Object.getOwnPropertyDescriptor(page, "goto");
+	const reloadDescriptor = Object.getOwnPropertyDescriptor(page, "reload");
+	const goBackDescriptor = Object.getOwnPropertyDescriptor(page, "goBack");
+	const goForwardDescriptor = Object.getOwnPropertyDescriptor(page, "goForward");
+	const setContentDescriptor = Object.getOwnPropertyDescriptor(page, "setContent");
 
 	Object.defineProperties(page, {
 		on: {
@@ -607,12 +620,40 @@ function createRunPageScope(page: Page): RunPageScope {
 		removeAllListeners: {
 			configurable: true,
 			value: (type?: unknown): Page => {
-				Reflect.apply(removeAllListeners, page, [type]);
-				if (type === undefined || type === "request") requestHandlers.length = 0;
+				if (type === undefined || type === "request") {
+					for (const handler of requestHandlers) Reflect.apply(off, page, ["request", handler]);
+					requestHandlers.length = 0;
+				} else Reflect.apply(removeAllListeners, page, [type]);
 				return page;
 			},
 		},
+		goto: {
+			configurable: true,
+			value: async (...args: Parameters<Page["goto"]>) => {
+				try {
+					return await Reflect.apply(goto, page, args);
+				} catch (error) {
+					if (error instanceof Error && error.name === "TimeoutError") onNavigationTimeout?.();
+					throw error;
+				}
+			},
+		},
 	});
+	for (const [name, method] of [
+		["reload", reload],
+		["goBack", goBack],
+		["goForward", goForward],
+		["setContent", setContent],
+	] as const) {
+		Object.defineProperty(page, name, {
+			configurable: true,
+			value: (...args: unknown[]) =>
+				Reflect.apply(method, page, args).catch((error: unknown) => {
+					if (error instanceof Error && error.name === "TimeoutError") onNavigationTimeout?.();
+					throw error;
+				}),
+		});
+	}
 
 	return {
 		page,
@@ -625,6 +666,16 @@ function createRunPageScope(page: Page): RunPageScope {
 			else Reflect.deleteProperty(page, "once");
 			if (removeAllDescriptor) Object.defineProperty(page, "removeAllListeners", removeAllDescriptor);
 			else Reflect.deleteProperty(page, "removeAllListeners");
+			if (gotoDescriptor) Object.defineProperty(page, "goto", gotoDescriptor);
+			else Reflect.deleteProperty(page, "goto");
+			if (reloadDescriptor) Object.defineProperty(page, "reload", reloadDescriptor);
+			else Reflect.deleteProperty(page, "reload");
+			if (goBackDescriptor) Object.defineProperty(page, "goBack", goBackDescriptor);
+			else Reflect.deleteProperty(page, "goBack");
+			if (goForwardDescriptor) Object.defineProperty(page, "goForward", goForwardDescriptor);
+			else Reflect.deleteProperty(page, "goForward");
+			if (setContentDescriptor) Object.defineProperty(page, "setContent", setContentDescriptor);
+			else Reflect.deleteProperty(page, "setContent");
 			for (const handler of requestHandlers) Reflect.apply(off, page, ["request", handler]);
 			requestHandlers.length = 0;
 			try {
@@ -646,7 +697,8 @@ function createRunPageScope(page: Page): RunPageScope {
 }
 
 function errorPayload(error: unknown): RunErrorPayload {
-	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
+	const recoverTab =
+		error instanceof RequestInterceptionCleanupError || error instanceof NavigationCleanupError || undefined;
 	if (error instanceof ToolAbortError) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
 	}
@@ -684,9 +736,10 @@ function privateTargetId(target: Target): string | undefined {
 	return typeof raw._targetId === "string" ? raw._targetId : undefined;
 }
 
-async function targetIdForTarget(target: Target): Promise<string> {
+async function targetIdForTarget(target: Target, allowCdp: boolean = true): Promise<string> {
 	const fastTargetId = privateTargetId(target);
 	if (fastTargetId) return fastTargetId;
+	if (!allowCdp) throw new ToolError("Target id unavailable without CDP");
 	const session = await target.createCDPSession();
 	try {
 		const info = (await session.send("Target.getTargetInfo")) as { targetInfo?: { targetId?: string } };
@@ -697,7 +750,12 @@ async function targetIdForTarget(target: Target): Promise<string> {
 	}
 }
 
-async function targetIdForPage(page: Page): Promise<string> {
+async function targetIdForPage(page: Page, allowCdp: boolean = true): Promise<string> {
+	if (!allowCdp) {
+		const frame = page.mainFrame() as unknown as { _id?: unknown };
+		if (typeof frame._id === "string") return frame._id;
+		throw new ToolError("Browsing context id unavailable from Firefox WebDriver BiDi page");
+	}
 	return await targetIdForTarget(page.target());
 }
 
@@ -770,6 +828,244 @@ async function collectObservationEntries(
 	for (const child of node.children ?? []) {
 		await collectObservationEntries(core, child, entries, options);
 	}
+}
+
+interface AriaSnapshotLine {
+	ref?: string;
+	role: string;
+	name?: string;
+	states: string[];
+}
+
+function decodeAriaSnapshotName(value: string): string {
+	const jsonCompatible = value.replace(/\\x([0-9A-Fa-f]{2})/g, (_match, hex: string) => `\\u00${hex}`);
+	return JSON.parse(`"${jsonCompatible}"`) as string;
+}
+
+export function parseAriaSnapshotLines(snapshot: string): AriaSnapshotLine[] {
+	const entries: AriaSnapshotLine[] = [];
+	for (const rawLine of snapshot.split("\n")) {
+		const prefix = /^\s*-\s+/.exec(rawLine)?.[0];
+		if (!prefix) continue;
+		let content = rawLine.slice(prefix.length);
+		if (content.startsWith("'") && content.endsWith("'")) {
+			content = content.slice(1, -1).replaceAll("''", "'");
+		}
+		const roleMatch = /^([^\s[":]+):?/.exec(content);
+		const role = roleMatch?.[1];
+		if (!role || role.startsWith("/")) continue;
+		const quotedNameMatch = /^[^\s[":]+:?\s+"((?:[^"\\]|\\.)*)"/.exec(content);
+		const slashNameMatch = quotedNameMatch ? null : /^[^\s[":]+:?\s+(\/(?:[^/\\]|\\.)*\/)/.exec(content);
+		const nameMatch = quotedNameMatch ?? slashNameMatch;
+		const metadata = content.slice(nameMatch?.[0].length ?? roleMatch![0].length);
+		const ref = /\[ref=(e\d+)\]/.exec(metadata)?.[1];
+		const bareMetadata = metadata.replace(/\[[^\]]*\]/g, " ");
+		const states = [
+			...[...metadata.matchAll(/\[([^\]]+)\]/g)]
+				.map(match => match[1]!)
+				.filter(state => !state.startsWith("ref=") && !state.startsWith("cursor=") && !state.startsWith("box=")),
+			...[
+				...bareMetadata.matchAll(/\b(level|checked|pressed|selected|expanded|disabled|focused|active)=(\S+)/g),
+			].map(match => `${match[1]}=${match[2]}`),
+		];
+		const name =
+			quotedNameMatch !== null
+				? decodeAriaSnapshotName(quotedNameMatch[1]!)
+				: (slashNameMatch?.[1]?.replace(/\\\//g, "/") ??
+					(role === "text" ? content.slice(roleMatch![0].length).trim() || undefined : undefined));
+		entries.push({ ref, role, name, states });
+	}
+	return entries;
+}
+
+export function isInteractiveAriaSnapshotNode(role: string, states: readonly string[]): boolean {
+	return (
+		INTERACTIVE_AX_ROLES.has(role) ||
+		states.some(state => {
+			const key = state.split("=", 1)[0];
+			return (
+				key === "checked" ||
+				key === "pressed" ||
+				key === "selected" ||
+				key === "expanded" ||
+				key === "focused" ||
+				key === "active"
+			);
+		})
+	);
+}
+
+export function resolveAriaState(nativeValue: unknown, ariaValue: string | null): boolean | "mixed" | undefined {
+	if (typeof nativeValue === "boolean") return nativeValue;
+	if (ariaValue === "true") return true;
+	if (ariaValue === "false") return false;
+	if (ariaValue === "mixed") return "mixed";
+	return undefined;
+}
+
+export function normalizeAriaSnapshotStates(states: readonly string[]): string[] {
+	const normalized = states.map(state => {
+		if (state === "active") return "focused";
+		if (state === "checked" || state === "pressed" || state === "selected" || state === "expanded") {
+			return `${state}=true`;
+		}
+		return state;
+	});
+	return [...new Set(normalized)];
+}
+
+async function collectBiDiObservationEntries(
+	core: WorkerCore,
+	page: Page,
+	snapshot: string,
+	options: { viewportOnly: boolean; includeAll: boolean; refOwner: string },
+): Promise<ObservationEntry[]> {
+	const entries: ObservationEntry[] = [];
+	for (const node of parseAriaSnapshotLines(snapshot)) {
+		if (!options.includeAll && !isInteractiveAriaSnapshotNode(node.role, node.states)) continue;
+		if (!node.ref) {
+			if (options.viewportOnly) continue;
+			entries.push({
+				role: node.role,
+				name: node.name,
+				states: normalizeAriaSnapshotStates(node.states),
+				actionable: false,
+			});
+			continue;
+		}
+		const handle = await resolveAriaRefHandle(page, node.ref, options.refOwner);
+		if (!handle) continue;
+		let inViewport = true;
+		if (options.viewportOnly) {
+			try {
+				inViewport = await handle.isIntersectingViewport();
+			} catch {
+				inViewport = false;
+			}
+		}
+		if (!inViewport) {
+			await handle.dispose().catch(() => undefined);
+			continue;
+		}
+		const details = (await handle.evaluate(element => {
+			const input = element as unknown as {
+				value?: unknown;
+				disabled?: boolean;
+				required?: boolean;
+				readOnly?: boolean;
+				selectedOptions?: { 0?: { textContent: string | null } };
+				multiple?: boolean;
+				tagName?: string;
+				checked?: boolean;
+				pressed?: boolean;
+				selected?: boolean;
+				expanded?: boolean;
+				ariaDescription?: string | null;
+				ariaKeyShortcuts?: string | null;
+				ownerDocument: {
+					getElementById(id: string): { textContent: string | null } | null;
+				};
+				getAttribute(name: string): string | null;
+				matches?(selector: string): boolean;
+			};
+			const nativeValue =
+				typeof input.value === "string" || typeof input.value === "number" ? input.value : undefined;
+			const selectedOptionLabel = input.selectedOptions?.[0]?.textContent?.trim();
+			const describedBy = input.getAttribute("aria-describedby");
+			const description = describedBy
+				?.split(/\s+/)
+				.map(id => input.ownerDocument.getElementById(id)?.textContent?.trim())
+				.filter((text): text is string => Boolean(text))
+				.join(" ");
+			return {
+				value:
+					input.getAttribute("aria-valuetext") ??
+					selectedOptionLabel ??
+					nativeValue ??
+					input.getAttribute("aria-valuenow") ??
+					undefined,
+				description: description || input.ariaDescription || input.getAttribute("aria-description") || undefined,
+				keyshortcuts: input.ariaKeyShortcuts ?? undefined,
+				disabled: input.disabled === true,
+				required: input.required === true || input.getAttribute("aria-required") === "true",
+				multiple: input.multiple === true,
+				tagName: input.tagName,
+				ariaMultiline: input.getAttribute("aria-multiline"),
+				ariaMultiselectable: input.getAttribute("aria-multiselectable"),
+				readonly: input.readOnly === true || input.getAttribute("aria-readonly") === "true",
+				checked: input.checked,
+				pressed: input.pressed,
+				selected: input.selected,
+				expanded: input.expanded,
+				ariaChecked: input.getAttribute("aria-checked"),
+				ariaPressed: input.getAttribute("aria-pressed"),
+				ariaSelected: input.getAttribute("aria-selected"),
+				ariaModal: input.getAttribute("aria-modal"),
+				nativeModal: input.tagName === "DIALOG" && input.matches?.(":modal") === true,
+				ariaExpanded: input.getAttribute("aria-expanded"),
+			};
+		})) as {
+			value?: string | number;
+			description?: string;
+			keyshortcuts?: string;
+			disabled: boolean;
+			required: boolean;
+			multiple: boolean;
+			tagName?: string;
+			readonly: boolean;
+			checked?: boolean;
+			pressed?: boolean;
+			selected?: boolean;
+			expanded?: boolean;
+			ariaChecked: string | null;
+			ariaPressed: string | null;
+			ariaSelected: string | null;
+			ariaExpanded: string | null;
+			ariaModal: string | null;
+			nativeModal: boolean;
+			ariaMultiline: string | null;
+			ariaMultiselectable: string | null;
+		};
+		const states = normalizeAriaSnapshotStates(node.states);
+		const checked = resolveAriaState(details.checked, details.ariaChecked);
+		const pressed = resolveAriaState(details.pressed, details.ariaPressed);
+		const selected = resolveAriaState(details.selected, details.ariaSelected);
+		const expanded = resolveAriaState(details.expanded, details.ariaExpanded);
+		if (details.disabled && !states.includes("disabled")) states.push("disabled");
+		if (details.required && !states.includes("required")) states.push("required");
+		if (details.readonly && !states.includes("readonly")) states.push("readonly");
+		if ((details.ariaModal === "true" || details.nativeModal) && !states.includes("modal")) states.push("modal");
+		if (checked !== undefined && !states.some(state => state.split("=", 1)[0] === "checked")) {
+			states.push(`checked=${String(checked)}`);
+		}
+		if ((details.tagName === "TEXTAREA" || details.ariaMultiline === "true") && !states.includes("multiline")) {
+			states.push("multiline");
+		}
+		if ((details.multiple || details.ariaMultiselectable === "true") && !states.includes("multiselectable")) {
+			states.push("multiselectable");
+		}
+		if (pressed !== undefined && !states.some(state => state.split("=", 1)[0] === "pressed")) {
+			states.push(`pressed=${String(pressed)}`);
+		}
+		if (selected !== undefined && !states.some(state => state.split("=", 1)[0] === "selected")) {
+			states.push(`selected=${String(selected)}`);
+		}
+		if (expanded !== undefined && !states.some(state => state.split("=", 1)[0] === "expanded")) {
+			states.push(`expanded=${String(expanded)}`);
+		}
+		const id = core.nextElementId();
+		core.cacheElement(id, handle);
+		entries.push({
+			id,
+			role: node.role,
+			name: node.name,
+			value: details.value,
+			description: details.description,
+			keyshortcuts: details.keyshortcuts,
+			states,
+		});
+	}
+	return entries;
 }
 
 async function resolveActionableQueryHandlerClickTarget(handles: ElementHandle[]): Promise<ElementHandle | null> {
@@ -951,23 +1247,45 @@ export function describeInflight(inflight: Map<number, InflightOp>): string {
 		.join(", ");
 }
 
+export async function findBiDiPageByTargetId(pages: Page[], targetId: string): Promise<Page> {
+	for (const candidate of pages) {
+		const candidateId = await targetIdForPage(candidate, false).catch(() => "");
+		if (candidateId === targetId) return candidate;
+	}
+	throw new ToolError(`Target ${targetId} is no longer available on the attached Firefox browser`);
+}
+
 export class WorkerCore {
 	#transport: Transport;
 	#browser?: Browser;
 	#page?: Page;
 	#targetId?: string;
-	#elementCache = new Map<number, ElementHandle>();
-	#elementCounter = 0;
+	#elementCaches = new Map<string, { handles: Map<number, ElementHandle>; counter: number; targetId?: string }>();
+	#activeElementCacheKey = "default";
+	readonly #ariaRefOwnerPrefix = crypto.randomUUID();
 	#active: ActiveRun | null = null;
-	#runtime: JsRuntime | null = null;
+	#cleanupRequired = false;
+	#activeSelection?: { id: string; ac: AbortController };
+	#runtimes = new Map<string, JsRuntime>();
 	#unsub: () => void;
 	#isolated: boolean;
 	#uninstallRejectionGuard: () => void;
 	#mode?: WorkerInitPayload["mode"];
 	#activateForScreenshot = true;
+	#webDriverBiDi = false;
 	#dialogPolicy?: DialogPolicy;
+	#dialogPolicyOwner?: string;
 	#dialogHandler?: (dialog: Dialog) => void;
+	#dialogObserver?: (dialog: Dialog) => void;
+	#frameNavigationObserver?: (frame: Frame) => void;
 	#openDialog?: OpenDialogInfo;
+	#initializing?: Promise<void>;
+	#closing = false;
+	#closed = false;
+
+	get #ariaRefOwner(): string {
+		return `${this.#ariaRefOwnerPrefix}:${this.#activeElementCacheKey}`;
+	}
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1032,23 +1350,54 @@ export class WorkerCore {
 		return failure;
 	}
 
+	#elementCacheState(): { handles: Map<number, ElementHandle>; counter: number; targetId?: string } {
+		let state = this.#elementCaches.get(this.#activeElementCacheKey);
+		if (!state) {
+			state = { handles: new Map(), counter: 0, targetId: this.#targetId };
+			this.#elementCaches.set(this.#activeElementCacheKey, state);
+		}
+		return state;
+	}
+
 	nextElementId(): number {
-		this.#elementCounter += 1;
-		return this.#elementCounter;
+		const state = this.#elementCacheState();
+		state.counter += 1;
+		return state.counter;
 	}
 
 	cacheElement(id: number, handle: ElementHandle): void {
-		this.#elementCache.set(id, handle);
+		this.#elementCacheState().handles.set(id, handle);
 	}
 
 	async #handleMessage(msg: WorkerInbound): Promise<void> {
 		switch (msg.type) {
-			case "init":
-				await this.#init(msg.payload);
+			case "init": {
+				const initializing = this.#init(msg.payload);
+				this.#initializing = initializing;
+				await initializing;
 				return;
+			}
 			case "run":
 				await this.#run(msg);
 				return;
+			case "select":
+				await this.#selectBiDiContext(msg);
+				return;
+			case "abort-select":
+				if (this.#activeSelection?.id === msg.id) this.#activeSelection.ac.abort(new ToolAbortError());
+				return;
+			case "release-runtime": {
+				const runtime = this.#runtimes.get(msg.name);
+				this.#runtimes.delete(msg.name);
+				runtime?.dispose();
+				if (this.#dialogPolicyOwner === msg.name) {
+					// Keep the passive observer so Puppeteer does not auto-dismiss prompts.
+					this.#applyDialogPolicy(undefined);
+					this.#dialogPolicyOwner = undefined;
+				}
+				this.#clearElementCache(msg.name);
+				return;
+			}
 			case "abort":
 				if (this.#active?.id === msg.id) {
 					const reason = msg.expectedCleanup
@@ -1061,6 +1410,10 @@ export class WorkerCore {
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
 			case "close":
+				this.#closing = true;
+				await this.#browser?.disconnect().catch(() => undefined);
+				this.#browser = undefined;
+				await this.#initializing?.catch(() => undefined);
 				await this.#close();
 				return;
 		}
@@ -1069,14 +1422,20 @@ export class WorkerCore {
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
 			this.#mode = payload.mode;
+			this.#webDriverBiDi = payload.mode === "attach" && payload.protocol === "webDriverBiDi";
 			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			this.#browser = await puppeteer.connect({
 				browserWSEndpoint: payload.browserWSEndpoint,
+				protocol: this.#webDriverBiDi ? "webDriverBiDi" : undefined,
 				defaultViewport: null,
 				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 			});
-
+			if (this.#closing || this.#closed) {
+				await this.#browser.disconnect().catch(() => undefined);
+				this.#browser = undefined;
+				return;
+			}
 			// Realm setup is done: puppeteer loaded and browser connected. Sent before
 			// page acquisition so the supervisor's cold-start budget bounds only the
 			// realm setup; page creation and the first navigation run under the ready
@@ -1093,11 +1452,17 @@ export class WorkerCore {
 				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
 				if (payload.emulateViewport !== false) await applyViewport(this.#page, payload.viewport);
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
+			} else if (this.#webDriverBiDi) {
+				this.#page = payload.targetId
+					? await findBiDiPageByTargetId(await this.#browser.pages(), payload.targetId)
+					: await pickElectronTarget(this.#browser, {
+							matcher: payload.targetMatcher,
+							preferVisible: payload.activateForScreenshot === false,
+						});
+				this.#observeDialogs();
+				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			} else {
 				const target = await this.#findAttachedTarget(payload.targetId);
-				// Post-timeout recycle: unblock the target BEFORE adopting the page — an open
-				// modal dialog or hung navigation can stall `target.page()` / ready info, and a
-				// stalled init used to time out and force-kill the tab.
 				if (payload.recover) await this.#recoverAttachedTarget(target);
 				const page = await target.page();
 				if (!page) throw new ToolError(`Target ${payload.targetId} is no longer available on the attached browser`);
@@ -1113,7 +1478,10 @@ export class WorkerCore {
 					timeout: payload.timeoutMs,
 				});
 			}
-			this.#targetId = await targetIdForPage(this.#page);
+			// Firefox's initial about:home page is privileged; apply an explicitly
+			// requested viewport after navigation reaches the requested document.
+			if (this.#webDriverBiDi && payload.viewport) await applyViewport(this.#page, payload.viewport);
+			this.#targetId = await targetIdForPage(this.#page, !this.#webDriverBiDi);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
 			// A failed headless init leaves the worker's page orphaned in the shared
@@ -1125,6 +1493,62 @@ export class WorkerCore {
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
 		}
+	}
+	async #selectBiDiContext(msg: Extract<WorkerInbound, { type: "select" }>): Promise<void> {
+		const ac = new AbortController();
+		this.#activeSelection = { id: msg.id, ac };
+		try {
+			if (!this.#webDriverBiDi || !this.#browser) {
+				throw new ToolError("Tab selection is available only for Firefox WebDriver BiDi");
+			}
+			await this.#selectBiDiPage(msg.name, msg.targetId, msg.targetMatcher, msg.dialogs);
+			throwIfAborted(ac.signal);
+			if (msg.url) this.#clearElementCache(msg.name);
+			if (msg.url) {
+				await this.#requirePage().goto(msg.url, {
+					waitUntil: msg.waitUntil ?? "load",
+					timeout: msg.timeoutMs,
+				});
+			}
+			throwIfAborted(ac.signal);
+			if (msg.viewport) await applyViewport(this.#requirePage(), msg.viewport);
+			throwIfAborted(ac.signal);
+			this.#transport.send({ type: "selected", id: msg.id, info: await this.#currentReadyInfo() });
+		} catch (error) {
+			const reported =
+				error instanceof Error && error.name === "TimeoutError"
+					? new NavigationCleanupError(error.message, { cause: error })
+					: error;
+			this.#transport.send({ type: "select-failed", id: msg.id, error: errorPayload(reported) });
+		} finally {
+			if (this.#activeSelection?.id === msg.id) this.#activeSelection = undefined;
+		}
+	}
+
+	async #selectBiDiPage(
+		cacheKey: string,
+		targetId?: string,
+		targetMatcher?: string,
+		dialogs?: DialogPolicy,
+	): Promise<void> {
+		const browser = this.#requireBrowser();
+		let page = targetId ? await findBiDiPageByTargetId(await browser.pages(), targetId) : undefined;
+		page ??= await pickElectronTarget(browser, {
+			matcher: targetMatcher,
+			preferVisible: true,
+		});
+		const selectedTargetId = await targetIdForPage(page, false);
+		const cache = this.#elementCaches.get(cacheKey);
+		if (cache?.targetId !== undefined && cache.targetId !== selectedTargetId) this.#clearElementCache(cacheKey);
+		if (this.#page !== page) {
+			this.#detachDialogListeners();
+			this.#dialogPolicy = undefined;
+			this.#page = page;
+			this.#targetId = selectedTargetId;
+			this.#observeDialogs();
+		}
+		this.#applyDialogPolicy(dialogs);
+		this.#dialogPolicyOwner = cacheKey;
 	}
 
 	async #findAttachedTarget(targetId: string): Promise<Target> {
@@ -1187,17 +1611,32 @@ export class WorkerCore {
 	 */
 	#observeDialogs(): void {
 		const page = this.#requirePage();
-		page.on("dialog", dialog => {
+		this.#dialogObserver = dialog => {
 			this.#openDialog = { type: dialog.type(), message: dialog.message() };
-		});
-		page.on("framenavigated", frame => {
+		};
+		this.#frameNavigationObserver = frame => {
 			if (frame === page.mainFrame()) this.#openDialog = undefined;
-		});
+		};
+		page.on("dialog", this.#dialogObserver);
+		page.on("framenavigated", this.#frameNavigationObserver);
+	}
+
+	#detachDialogListeners(): void {
+		const page = this.#page;
+		if (page && !page.isClosed()) {
+			if (this.#dialogHandler) page.off("dialog", this.#dialogHandler);
+			if (this.#dialogObserver) page.off("dialog", this.#dialogObserver);
+			if (this.#frameNavigationObserver) page.off("framenavigated", this.#frameNavigationObserver);
+		}
+		this.#dialogHandler = undefined;
+		this.#dialogObserver = undefined;
+		this.#frameNavigationObserver = undefined;
+		this.#openDialog = undefined;
 	}
 
 	async #currentReadyInfo(): Promise<ReadyInfo> {
 		const page = this.#requirePage();
-		const targetId = this.#targetId ?? (await targetIdForPage(page));
+		const targetId = this.#targetId ?? (await targetIdForPage(page, !this.#webDriverBiDi));
 		this.#targetId = targetId;
 		return {
 			url: redactUrlCredentials(page.url()),
@@ -1207,10 +1646,13 @@ export class WorkerCore {
 		};
 	}
 
-	#applyDialogPolicy(policy: DialogPolicy): void {
+	#applyDialogPolicy(policy?: DialogPolicy): void {
 		const page = this.#requirePage();
-		if (this.#dialogPolicy === policy && this.#dialogHandler) return;
+		if (this.#dialogPolicy === policy && (policy === undefined || this.#dialogHandler)) return;
 		if (this.#dialogHandler) page.off("dialog", this.#dialogHandler);
+		this.#dialogPolicy = undefined;
+		this.#dialogHandler = undefined;
+		if (!policy) return;
 		const handler = (dialog: Dialog): void => {
 			const action = policy === "accept" ? dialog.accept() : dialog.dismiss();
 			void action.then(
@@ -1274,12 +1716,19 @@ export class WorkerCore {
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
 		let runPage: RunPageScope | undefined;
+		this.#activeElementCacheKey = msg.name;
 		try {
+			if (this.#webDriverBiDi && (msg.targetId || msg.targetMatcher)) {
+				await this.#selectBiDiPage(msg.name, msg.targetId, msg.targetMatcher, msg.dialogs);
+			}
 			throwIfAborted(signal);
-			runPage = createRunPageScope(this.#requirePage());
+			runPage = createRunPageScope(
+				this.#requirePage(),
+				this.#webDriverBiDi ? () => (this.#cleanupRequired = true) : undefined,
+			);
 			const browser = this.#requireBrowser();
 			const tabApi = this.#createTabApi(msg.name, msg.timeoutMs, signal, msg.session, output, screenshots, active);
-			const runtime = this.#ensureRuntime(msg.session);
+			const runtime = this.#ensureRuntime(msg.name, msg.session);
 			runtime.setCwd(msg.session.cwd);
 			const onFloatingRejection = (reason: unknown): void => this.#recordFloatingRejection(active, reason);
 			runtime.setRunScope({
@@ -1371,27 +1820,36 @@ export class WorkerCore {
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
 		if (failure) {
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
+			const error = errorPayload(failure.error);
+			if (this.#cleanupRequired) error.recoverTab = true;
+			this.#transport.send({ type: "result", id: msg.id, ok: false, error });
 			return;
 		}
 		if (completed) {
-			await this.#postReadyInfo();
+			if (!this.#cleanupRequired) await this.#postReadyInfo();
 			this.#transport.send({
 				type: "result",
 				id: msg.id,
 				ok: true,
-				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots },
+				payload: {
+					displays: output.finish(),
+					returnValue: cloneSafe(returnValue),
+					screenshots,
+					recoverTab: this.#cleanupRequired,
+				},
 			});
 		}
 	}
 
-	#ensureRuntime(session: SessionSnapshot): JsRuntime {
-		if (this.#runtime) return this.#runtime;
-		this.#runtime = new JsRuntime({
+	#ensureRuntime(name: string, session: SessionSnapshot): JsRuntime {
+		const existing = this.#runtimes.get(name);
+		if (existing) return existing;
+		const runtime = new JsRuntime({
 			initialCwd: session.cwd,
-			sessionId: `browser-tab-${this.#targetId ?? "unknown"}`,
+			sessionId: `browser-tab-${name}`,
 		});
-		return this.#runtime;
+		this.#runtimes.set(name, runtime);
+		return runtime;
 	}
 
 	#hooksForActiveRun(): RuntimeHooks | null {
@@ -1598,12 +2056,10 @@ export class WorkerCore {
 						);
 					} catch (err) {
 						if (err instanceof Error && err.name === "TimeoutError") {
-							// Abandon the hung navigation NOW — a still-pending load stalls every
-							// later op on this page and cascades into more opaque timeouts.
 							await this.#stopLoading();
-							throw new ToolError(
-								`tab.goto(${JSON.stringify(url)}) timed out after ${budgetBound}ms; pending navigation stopped — retry with a longer tool timeout or waitUntil:"domcontentloaded"`,
-							);
+							if (this.#webDriverBiDi) this.#cleanupRequired = true;
+							const message = `tab.goto(${JSON.stringify(url)}) timed out after ${budgetBound}ms; pending navigation stopped — retry with a longer tool timeout or waitUntil:"domcontentloaded"`;
+							throw this.#webDriverBiDi ? new NavigationCleanupError(message) : new ToolError(message);
 						}
 						throw err;
 					}
@@ -1625,7 +2081,7 @@ export class WorkerCore {
 								);
 						}
 						try {
-							return await untilAborted(sig, () => captureAriaSnapshot(page, root, opts));
+							return await untilAborted(sig, () => captureAriaSnapshot(page, root, opts, this.#ariaRefOwner));
 						} finally {
 							await root?.dispose().catch(() => undefined);
 						}
@@ -1838,12 +2294,23 @@ export class WorkerCore {
 		this.#clearElementCache();
 		const includeAll = options.includeAll ?? false;
 		const viewportOnly = options.viewportOnly ?? false;
-		const snapshot = (await untilAborted(options.signal, () =>
-			page.accessibility.snapshot({ interestingOnly: !includeAll }),
-		)) as SerializedAXNode | null;
-		if (!snapshot) throw new ToolError("Accessibility snapshot unavailable");
-		const entries: ObservationEntry[] = [];
-		await collectObservationEntries(this, snapshot, entries, { includeAll, viewportOnly });
+		let entries: ObservationEntry[];
+		if (this.#webDriverBiDi) {
+			const refOwner = this.#ariaRefOwner;
+			const ariaSnapshot = await untilAborted(options.signal, () => captureAriaSnapshot(page, null, {}, refOwner));
+			entries = await collectBiDiObservationEntries(this, page, ariaSnapshot, {
+				includeAll,
+				viewportOnly,
+				refOwner,
+			});
+		} else {
+			const snapshot = (await untilAborted(options.signal, () =>
+				page.accessibility.snapshot({ interestingOnly: !includeAll }),
+			)) as SerializedAXNode | null;
+			if (!snapshot) throw new ToolError("Accessibility snapshot unavailable");
+			entries = [];
+			await collectObservationEntries(this, snapshot, entries, { includeAll, viewportOnly });
+		}
 		const scroll = (await untilAborted(options.signal, () =>
 			page.evaluate(() => {
 				const win = globalThis as unknown as {
@@ -1888,10 +2355,11 @@ export class WorkerCore {
 		// or hand back a sibling tab's pixels. Activate first; best-effort so an
 		// already-active or freshly-closed target never fails the capture.
 		//
-		// For a user-driven browser, redundant activation would steal window focus.
-		// The supervisor disables it only after adopting the visible tab; if the user
-		// later switches away, reject capture rather than risk sibling-tab pixels.
-		await preparePageForScreenshot(page, signal, this.#activateForScreenshot);
+		// For a user-driven Chromium browser, redundant activation would steal
+		// focus, so a hidden adopted tab fails capture. WebDriver BiDi can activate
+		// the exact browsing context at the point of an explicit screenshot request;
+		// adoption itself remains non-intrusive.
+		await preparePageForScreenshot(page, signal, this.#activateForScreenshot || this.#webDriverBiDi);
 		const fullPage = opts.selector ? false : (opts.fullPage ?? false);
 		const captureType = "png";
 		const captureMime = "image/png" as const;
@@ -2116,7 +2584,7 @@ export class WorkerCore {
 	}
 
 	async #resolveCachedHandle(id: number): Promise<ElementHandle> {
-		const handle = this.#elementCache.get(id);
+		const handle = this.#elementCacheState().handles.get(id);
 		if (!handle) throw new ToolError(`Unknown element id ${id}. Run tab.observe() to refresh the element list.`);
 		try {
 			const isConnected = (await handle.evaluate(el => el.isConnected)) as boolean;
@@ -2134,7 +2602,7 @@ export class WorkerCore {
 
 	async #resolveAriaRef(id: string): Promise<ElementHandle> {
 		const ref = parseAriaRefSelector(id) ?? id.trim();
-		const handle = await resolveAriaRefHandle(this.#requirePage(), ref);
+		const handle = await resolveAriaRefHandle(this.#requirePage(), ref, this.#ariaRefOwner);
 		if (!handle) {
 			throw new ToolError(
 				`Unknown ARIA ref ${JSON.stringify(ref)}. Run tab.ariaSnapshot() to refresh refs (they renumber each snapshot).`,
@@ -2154,19 +2622,20 @@ export class WorkerCore {
 			this.#requirePage().locator(normalizeSelector(selector)).setTimeout(timeoutMs).waitHandle({ signal: sig }),
 		)) as ElementHandle;
 	}
-	#clearElementCache(): void {
-		if (this.#elementCache.size === 0) {
-			this.#elementCounter = 0;
-			return;
-		}
-		const handles = [...this.#elementCache.values()];
-		this.#elementCache.clear();
-		this.#elementCounter = 0;
-		for (const handle of handles) void handle.dispose().catch(() => undefined);
+	#clearElementCache(key: string = this.#activeElementCacheKey): void {
+		const state = this.#elementCaches.get(key);
+		if (!state) return;
+		this.#elementCaches.delete(key);
+		for (const handle of state.handles.values()) void handle.dispose().catch(() => undefined);
 	}
 
-	/** Best-effort `Page.stopLoading` so an abandoned navigation cannot stall later ops. */
+	#clearAllElementCaches(): void {
+		for (const key of [...this.#elementCaches.keys()]) this.#clearElementCache(key);
+	}
+
+	/** Best-effort `Page.stopLoading` so an abandoned Chromium navigation cannot stall later ops. */
 	async #stopLoading(): Promise<void> {
+		if (this.#webDriverBiDi) return;
 		try {
 			const session = await this.#requirePage().createCDPSession();
 			try {
@@ -2182,13 +2651,17 @@ export class WorkerCore {
 	}
 
 	async #close(): Promise<void> {
+		if (this.#closed) return;
+		this.#closed = true;
 		this.#unsub();
+		for (const runtime of this.#runtimes.values()) runtime.dispose();
+		this.#runtimes.clear();
 		this.#uninstallRejectionGuard();
-		this.#clearElementCache();
+		this.#clearAllElementCaches();
 		const page = this.#page;
-		if (this.#dialogHandler && page && !page.isClosed()) page.off("dialog", this.#dialogHandler);
+		this.#detachDialogListeners();
 		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
-		if (this.#browser?.connected) this.#browser.disconnect();
+		if (this.#browser?.connected) await this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();
 	}

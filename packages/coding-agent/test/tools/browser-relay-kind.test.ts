@@ -11,6 +11,26 @@ describe("resolveRelayKind", () => {
 		expect(resolveRelayKind({ settingEnabled: true }, {})).toEqual({ kind: "relay", cdpUrl: DEFAULT_RELAY_URL });
 	});
 
+	it("preserves Chromium as the default relay browser", () => {
+		expect(resolveRelayKind({ settingEnabled: true, browser: "chromium" }, {})).toEqual({
+			kind: "relay",
+			cdpUrl: DEFAULT_RELAY_URL,
+		});
+	});
+
+	it("selects a configurable Firefox WebDriver BiDi endpoint", () => {
+		expect(resolveRelayKind({ settingEnabled: true, browser: "firefox" }, {})).toEqual({
+			kind: "firefox-relay",
+			webSocketUrl: "ws://127.0.0.1:9222/session",
+		});
+		expect(
+			resolveRelayKind({ settingEnabled: true, browser: "firefox", url: "ws://localhost:9333/session" }, {}),
+		).toEqual({
+			kind: "firefox-relay",
+			webSocketUrl: "ws://localhost:9333/session",
+		});
+	});
+
 	it("uses the configured URL and trims trailing slashes", () => {
 		expect(resolveRelayKind({ settingEnabled: true, url: "http://127.0.0.1:9333///" }, {})).toEqual({
 			kind: "relay",

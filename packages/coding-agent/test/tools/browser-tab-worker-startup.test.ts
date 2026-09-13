@@ -16,7 +16,6 @@ import {
 	releaseTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
-
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
 // proves the binary execs (`chrome --version` exits 0 with no X server).
