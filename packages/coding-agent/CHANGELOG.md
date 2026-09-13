@@ -490,6 +490,10 @@
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
 
+### Fixed
+
+- Reduced repeated file-diagnostics latency with explicit TypeScript reports, Tailwind project applicability checks, and concurrent independent servers; explicit incomplete checks no longer report clean results ([#12142](https://github.com/can1357/oh-my-pi/pull/12142) by [@ukint-vs](https://github.com/ukint-vs)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes
