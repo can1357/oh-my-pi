@@ -771,6 +771,9 @@ export class SessionAdvisors {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.reset("conversation-boundary");
+			// A reset aborts any pending usage-limit wait; clear its budget so the new
+			// conversation starts with a fresh retry allowance (issue #11947).
+			a.usageLimitRetries = 0;
 			a.adviseTool.resetDeliveredNotes();
 			a.emissionGuard.reset();
 			this.#attachAdvisorRecorderFeed(a);
@@ -1381,7 +1384,12 @@ export class SessionAdvisors {
 
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
 	#resetAllAdvisorRuntimes(reason?: string): void {
-		for (const a of this.#advisors) a.runtime.reset(reason);
+		for (const a of this.#advisors) {
+			a.runtime.reset(reason);
+			// Match the conversation-boundary re-prime: a reset must not carry a
+			// pending wait's usage-limit budget into the reset conversation.
+			a.usageLimitRetries = 0;
+		}
 	}
 
 	#stopAdvisorRuntime(): void {
