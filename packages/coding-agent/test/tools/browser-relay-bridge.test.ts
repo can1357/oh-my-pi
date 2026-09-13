@@ -4794,6 +4794,77 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 	});
 
+	it("does not apply old-root preload cleanup IDs after a fresh-root replay", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const departing = new FakeCdpSocket();
+		const departingConn = bridge.cdpConnected(departing);
+		const departingSession = await attachPage(bridge, ext, departing, departingConn, 1);
+		const survivor = new FakeCdpSocket();
+		const survivorConn = bridge.cdpConnected(survivor);
+		const survivorSession = await attachPage(bridge, ext, survivor, survivorConn, 1);
+
+		bridge.cdpMessage(
+			departingConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: departingSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__departing = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1);
+		ack(bridge, ext, "send", { identifier: "reused-on-new-root" });
+		bridge.cdpMessage(
+			survivorConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: survivorSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__survivor = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1);
+		ack(bridge, ext, "send", { identifier: "survivor-old-root" });
+		await flush();
+
+		// Lose a mutating command result to require a fresh debugger root, then
+		// remove one owner while the extension is offline. Its cleanup ID belongs
+		// only to the old root and may be reused by Chrome on the replacement root.
+		bridge.cdpMessage(
+			survivorConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: survivorSession, method: "Fetch.enable" }),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Fetch.enable"));
+		bridge.extClosed(ext);
+		bridge.cdpClosed(departingConn);
+		await flush();
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => replacement.pending("detach").length === 1, "fresh-root detach");
+		ack(bridge, replacement, "detach");
+		await waitFor(() => replacement.pending("attach").length === 1, "fresh-root attach");
+		ack(bridge, replacement, "attach");
+		await waitFor(
+			() => replacement.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"surviving preload replay",
+		);
+		ack(bridge, replacement, "send", { identifier: "reused-on-new-root" });
+		await flush();
+
+		expect(
+			replacement
+				.rpcs("send")
+				.filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")
+				.map(rpc => rpc.params),
+		).toEqual([]);
+	});
+
 	it("forces a fresh root when a replacement interrupts the post-registration loader probe", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -5010,6 +5081,64 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext, "send");
 		await flush();
 		expect(ext.rpcs("detach")).toHaveLength(0);
+	});
+
+	it("resumes deferred owner cleanup when a client adopts a tab after detach fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__ownerScript = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "preload install");
+		ack(bridge, ext, "send", { identifier: "deferred-preload" });
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "America/New_York" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "timezone override");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1, "last-holder detach");
+		nack(bridge, ext, "detach", "another debugger prevented detach");
+		await flush();
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toEqual([]);
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		await attachPage(bridge, ext, adopter, adopterConn, 1);
+		await waitFor(
+			() =>
+				ext.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument") &&
+				ext
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.method === "Emulation.setTimezoneOverride" &&
+							(rpc.params as { timezoneId?: string } | undefined)?.timezoneId === "",
+					),
+			"deferred cleanup after adoption",
+		);
+		expect(
+			ext.pending("send").find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")?.params,
+		).toEqual({ identifier: "deferred-preload" });
 	});
 
 	it("retains later preload cleanups after a stale identifier fails to remove", async () => {

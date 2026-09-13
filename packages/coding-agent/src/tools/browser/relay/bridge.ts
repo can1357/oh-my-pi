@@ -3240,6 +3240,12 @@ export class RelayBridge {
 			await this.#rpc({ op: "detach", tabId: tab.tabId });
 			this.#assertExtensionCurrent(expectedExt);
 			tab.attached = false;
+			// Every queued preload identifier belongs to the debugger root that was
+			// just destroyed. Do not drain those session-local IDs after replay: Chrome
+			// may reuse one for a preserved script on the replacement root. The old
+			// root also cannot emit any of its private marker exceptions anymore.
+			tab.pendingPreloadScriptCleanup = [];
+			tab.preloadApplicationMarkers.clear();
 			this.#resetRuntime(tab);
 		})().finally(() => {
 			if (tab.detaching === done) tab.detaching = null;
@@ -3831,6 +3837,15 @@ export class RelayBridge {
 			runtimeEnabling: null,
 			runtimeEpoch: 0,
 		});
+		// A last-holder detach can fail while owner cleanup is deliberately
+		// deferred: without a holder, issuing root mutations would race the detach.
+		// If another client later adopts the still-attached tab, resume both queues
+		// now that their mutations once again have a live downstream consumer.
+		const tab = this.#tabs.get(tabId);
+		if (tab?.pendingSubscriptionReconcile.length) {
+			this.#scheduleLiveSubscriptionReconcile(tab, [...tab.pendingSubscriptionReconcile]);
+		}
+		if (tab?.pendingPreloadScriptCleanup.length) this.#scheduleLivePreloadScriptCleanup(tab);
 		return sessionId;
 	}
 
