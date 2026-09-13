@@ -5,6 +5,8 @@
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
+- GitHub Copilot model-policy 403s (plan, model policy, org restriction) no longer delete stored credentials, so the provider stays listed in `/model` after a per-model access denial instead of disappearing until the next `/login` ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
+- Supervised daemon completions now include a neutral diagnostic when a process exits with a nonzero code without a reported termination reason.
 
 ### Added
 
@@ -187,6 +189,26 @@
 ### Fixed
 
 - Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
+### Added
+
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load; a socket that never authenticates is now closed after the client authentication timeout so it cannot keep the broker alive.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
+- Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged. A subscription replaced on the same artifact path waits for the previous sink to close before its capture opens, and a fresh capture truncates the file instead of overwriting it in place.
+- Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged.
+- Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime; `ps` and `describe` list each process's watchers, and monitoring a detached process now explains the alternatives (`logs` with `follow: true`, or a non-detached start). Monitors are released at every conversation boundary, including a same-id `/clear`, and a process completion retained for an owner survives only a session switch or exit, never a reset or new session.
+
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load; a socket that never authenticates is now closed after the client authentication timeout so it cannot keep the broker alive.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
+- Fixed a failed progress preview delivery leaving a mirrored output artifact unfinalized (open descriptor, missing capped tail).
+- Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting. At the background-job cap auto runs inline to completion with a notice (explicit `async: true` still errors), a command whose timeout cannot outlive the grace never promotes, and promotion waits at most one second for stalled output deliveries.
+- Backgrounded Bash and Eval results now name the command or cell in the notice (`Backgrounded as job bg_5 (uv run verify.py); …`), so parallel calls whose results return out of call order stay attributable to the right job instead of being paired positionally.
+- Added collapsible async progress in the transcript: progress blocks show the latest lines (bounded by rows and bytes) behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red that stay visible even while tool activity is hidden.
 
 ## [18.1.12] - 2026-09-06
 
@@ -532,6 +554,11 @@
 - Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
 - Fixed idle compaction discarding context while the session was still waiting on a backgrounded async job ([#10223](https://github.com/can1357/oh-my-pi/pull/10223) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Fixed LSP idle timeout clobbering in multi-workspace sessions and unmanaged timer spawning on pure config reads ([#10237](https://github.com/can1357/oh-my-pi/pull/10237) by [@harshaygadekar](https://github.com/harshaygadekar)).
+- Fixed an issue where custom model overrides were lost during configuration updates
+- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
+- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
 
 ## [18.0.11] - 2026-08-29
 
@@ -830,6 +857,14 @@
 - Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+- Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
+- Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
+
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
 
 ## [18.0.4] - 2026-08-24
 

@@ -19,9 +19,11 @@ import type { Theme } from "../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
+import { shortenEmbeddedPaths } from "../utils/paths";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+export { shortenEmbeddedPaths };
 
 /**
  * Normalize stray carriage returns in model-authored display text. Some models
@@ -96,6 +98,8 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */
 	OUTPUT_EXPANDED: 10,
+	/** UTF-8 bytes of visible text shown by a collapsed progress block (with `DEFAULT_TERMINAL_PREVIEW_LINES`) */
+	PROGRESS_COLLAPSED_BYTES: 2_000,
 	/** Computer script lines shown in collapsed view */
 	COMPUTER_CODE_COLLAPSED: 10,
 	/** Max hunks shown when collapsed (edit tool) */
@@ -323,6 +327,10 @@ export function previewWindowRows(): number {
  * streaming and after completion so the block never jumps; only `expanded`
  * (ctrl+o) uncaps it.
  *
+ * `maxBytes` additionally bounds the UTF-8 bytes of visible text (ANSI
+ * excluded) in the tail window, so max-width lines cannot turn a `max`-row
+ * window into kilobytes; the newest line always stays.
+ *
  * `prefix` (raw, e.g. a dim tree gutter) is prepended to the marker line so
  * nested previews stay aligned. `expandHint: false` drops the "ctrl+o: Expand"
  * suffix for callers that cap even inside the expanded view (task recent
@@ -331,12 +339,24 @@ export function previewWindowRows(): number {
 export function capPreviewLines(
 	lines: string[],
 	theme: Theme,
-	options: { max?: number; expanded?: boolean; prefix?: string; expandHint?: boolean } = {},
+	options: { max?: number; maxBytes?: number; expanded?: boolean; prefix?: string; expandHint?: boolean } = {},
 ): string[] {
 	if (options.expanded) return lines;
 	const max = options.max ?? previewWindowRows();
-	if (lines.length <= max) return lines;
-	const visible = max <= 1 ? [] : lines.slice(lines.length - (max - 1));
+	let fit = Math.min(lines.length, max);
+	if (options.maxBytes !== undefined) {
+		let bytes = 0;
+		fit = 0;
+		for (let i = lines.length - 1; i >= lines.length - Math.min(lines.length, max); i--) {
+			bytes += Buffer.byteLength(Bun.stripANSI(lines[i]!), "utf8");
+			if (bytes > options.maxBytes && fit > 0) break;
+			fit++;
+		}
+	}
+	if (fit >= lines.length) return lines;
+	// The marker occupies one of the `max` rows.
+	const visibleCount = Math.min(fit, max - 1);
+	const visible = visibleCount <= 0 ? [] : lines.slice(lines.length - visibleCount);
 	const hidden = lines.length - visible.length;
 	const hint = options.expandHint === false ? "" : formatExpandHint(theme, false, true);
 	const marker = `… ${hidden} earlier ${pluralize("line", hidden)}${hint ? ` ${hint}` : ""}`;
@@ -836,34 +856,6 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten home-prefixed paths inside free text, preserving surrounding
- * punctuation so error strings with embedded paths stay readable. */
-export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
-	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
-	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const homePattern = new RegExp(
-		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
-		windowsStyle ? "gi" : "g",
-	);
-	const textWithShortenedHome =
-		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
-	return textWithShortenedHome
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			const shortened = shortenPath(segment.slice(leading.length, end), homeDir);
-			const normalized = shortened.startsWith("~")
-				? shortened.replaceAll(path.win32.sep, path.posix.sep)
-				: shortened;
-			return `${leading}${normalized}${trailing}`;
-		})
-		.join(" ");
-}
-
 /** Sanitize warning text before showing it in TUI, including embedded home paths. */
 export function sanitizeDisplayWarning(text: string): string {
 	return shortenEmbeddedPaths(
@@ -882,7 +874,6 @@ export function sanitizeDisplayWarnings(warnings: readonly string[]): string[] {
 	if (hidden > 0) visible.push(`… ${hidden} more ${pluralize("warning", hidden)}`);
 	return visible;
 }
-
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;
 	const resolvedProjectDir = path.resolve(projectDir);

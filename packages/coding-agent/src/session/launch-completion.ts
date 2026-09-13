@@ -1,7 +1,12 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import { displayExitReason } from "../launch/exit-reason";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
+
+function modelExitReason(reason: string | undefined): string | undefined {
+	return displayExitReason(reason);
+}
 
 /** Yield-queue kind for broker-owned supervised process completions. */
 export const LAUNCH_COMPLETION_MESSAGE_TYPE = "launch-completion";
@@ -26,6 +31,7 @@ export function buildLaunchCompletionBatchMessage(entries: LaunchCompletionEntry
 					state: daemon.state,
 					exitCode: daemon.exitCode,
 					hasExitCode: daemon.exitCode !== undefined,
+					exitReason: modelExitReason(daemon.exitReason),
 				}),
 			)
 			.join("\n"),

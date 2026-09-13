@@ -2425,12 +2425,13 @@ function b() {
 
 			expect(result.details?.async?.state).toBe("running");
 			expect(result.details?.async?.type).toBe("bash");
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
-
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected an auto-backgrounded job id");
 			}
+			expect(getTextOutput(result)).toContain(
+				`Backgrounded as job ${jobId} (printf 'start\\n'; sleep 0.03; printf 'done\\n')`,
+			);
 			const runningJob = asyncJobManager.getJob(jobId);
 			expect(runningJob?.status).toBe("running");
 			const updatesAtBackground = updates.slice();
