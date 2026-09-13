@@ -263,6 +263,61 @@ describe("agent state file", () => {
 		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 
+	it("still removes the file at teardown when its queued removal has not landed", async () => {
+		// Switching the setting off and exiting straight away: shutdown does not wait for the queue,
+		// so teardown owes the removal that the setting change only queued.
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("attention");
+		await agentStateFileSettled();
+
+		const entered = Promise.withResolvers<void>();
+		const held = Promise.withResolvers<number>();
+		spyOn(Bun, "write").mockImplementationOnce(() => {
+			entered.resolve();
+			return held.promise;
+		});
+		setTerminalTitleState("working");
+		await entered.promise;
+
+		try {
+			setAgentStateFileEnabled(false);
+			disposeTerminalTitleState();
+			expect(await Bun.file(stateFile()).exists()).toBe(false);
+		} finally {
+			held.resolve(0);
+		}
+		await agentStateFileSettled();
+	});
+
+	it("keeps the exit registration until a queued removal has landed", async () => {
+		// A signal exit runs the postmortem callbacks and leaves. Cancelling the registration as soon
+		// as the setting goes off, before its removal lands, would leave the last state behind.
+		const cancel = vi.fn();
+		spyOn(postmortem, "register").mockReturnValue(cancel);
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("attention");
+		await agentStateFileSettled();
+
+		const entered = Promise.withResolvers<void>();
+		const held = Promise.withResolvers<number>();
+		spyOn(Bun, "write").mockImplementationOnce(() => {
+			entered.resolve();
+			return held.promise;
+		});
+		setTerminalTitleState("working");
+		await entered.promise;
+
+		try {
+			setAgentStateFileEnabled(false);
+			expect(cancel).not.toHaveBeenCalled();
+		} finally {
+			held.resolve(0);
+		}
+		await agentStateFileSettled();
+		expect(cancel).toHaveBeenCalledTimes(1);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
+	});
+
 	it("registers its removal for an exit that never reaches dispose, and only for a real one", async () => {
 		// SIGTERM/SIGHUP and the fatal handler run the postmortem callbacks and leave, so the
 		// removal has to be one of them. It must also be exitOnly: a keep-alive pass is not this
