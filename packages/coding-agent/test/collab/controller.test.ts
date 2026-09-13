@@ -278,6 +278,51 @@ describe("interactive collaboration startup", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
 	});
 
+	it("resumes the saved auto-host policy after the dedicated join command fails", async () => {
+		const finished = new Error("finished observing failed join");
+		beginStartupComposer({ terminal: new VirtualTerminal(), version: "test", cache: false });
+		spyOn(InteractiveMode.prototype, "getUserInput").mockImplementation(async function (this: InteractiveMode) {
+			mode = this;
+			await this.collabController.idle();
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
+			await this.session.newSession();
+			await this.collabController.idle();
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+				{ access: "view", generation: 2, sessionId: this.sessionManager.getSessionId() },
+			]);
+			throw finished;
+		});
+		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
+		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
+		try {
+			const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
+			const parsed = parseArgs(rawArgs);
+			parsed.join = "invalid-collab-link";
+			await expect(
+				runRootCommand(parsed, rawArgs, {
+					settings: activeSettings,
+					discoverAuthStorage: async () => authStorage,
+					createAgentSession: async options => {
+						if (!options?.preloadedExtensions || !options.eventBus) throw new Error("Missing startup context");
+						await options.sessionManager?.close();
+						return {
+							session: testSession.session,
+							setToolUIContext: () => {},
+							extensionsResult: options.preloadedExtensions,
+							eventBus: options.eventBus,
+						};
+					},
+				}),
+			).rejects.toBe(finished);
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			authStorage.close();
+		}
+	});
+
 	it.each(["hooks", "replay", "cleanup rejection"] as const)(
 		"withdraws an early host before terminal teardown when startup fails during %s",
 		async failurePoint => {
@@ -355,6 +400,29 @@ describe("interactive collaboration startup", () => {
 });
 
 describe("CollabController", () => {
+	it("observes local restoration without hosting guest replicas", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "view" });
+		controller = new CollabController(ctx);
+		ctx.collabGuest = {} as NonNullable<InteractiveModeContext["collabGuest"]>;
+		controller.autoStart();
+		await controller.idle();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		switchSession(state, "remote-replica-resync");
+		await controller.idle();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		ctx.collabGuest = undefined;
+		switchSession(state, "restored-local-session");
+		await controller.idle();
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ sessionId: "restored-local-session", access: "view" },
+		]);
+		switchSession(state, "next-local-session");
+		await controller.idle();
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ sessionId: "next-local-session", access: "view", generation: 2 },
+		]);
+	});
+
 	it("auto-start installs the room synchronously and retains an early dialog for the first writer", async () => {
 		const { ctx } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);

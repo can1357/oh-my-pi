@@ -341,7 +341,18 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					ctx.showError(`Usage: /collab list — for links or JSON use \`${APP_NAME} collab link|list\``);
 					return;
 				}
-				const hosts = await listCollabHosts();
+				let hosts: Awaited<ReturnType<typeof listCollabHosts>>;
+				try {
+					hosts = await listCollabHosts();
+				} catch (err) {
+					ctx.showError(
+						truncateToWidth(
+							sanitizeDisplayLine(`Failed to list collab hosts: ${errorMessage(err)}`),
+							TRUNCATE_LENGTHS.LINE,
+						),
+					);
+					return;
+				}
 				if (hosts.length === 0) {
 					ctx.showStatus("No active Collab hosts");
 					return;

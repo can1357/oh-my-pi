@@ -75,7 +75,7 @@ export class CollabController {
 		// next `/new`, `/resume`, or branch without restarting omp.
 		this.#observeSessionChanges();
 		const access = this.autoStartMode;
-		if (access === "off" || this.#shutdown || this.host) return;
+		if (access === "off" || this.#shutdown || this.host || this.#ctx.collabGuest) return;
 		const started = this.#launchReporting(access);
 		this.#ops = this.#ops.then(() => started);
 	}
@@ -230,7 +230,7 @@ export class CollabController {
 		const stopping = previous?.stop("session switched");
 		this.#ops = this.#ops.then(async () => {
 			await stopping;
-			if (this.#shutdown || this.host) return;
+			if (this.#shutdown || this.host || this.#ctx.collabGuest) return;
 			const access = this.autoStartMode;
 			if (access !== "off") await this.#launchReporting(access);
 		});

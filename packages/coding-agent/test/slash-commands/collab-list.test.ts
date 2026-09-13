@@ -51,6 +51,18 @@ function createHarness() {
 }
 
 describe("/collab list slash command", () => {
+	it("reports a bounded safe error and accepts another command after listing fails", async () => {
+		vi.spyOn(registry, "listCollabHosts").mockRejectedValue(new Error(`denied\n\x1b[2J${"x".repeat(1000)}`));
+		const harness = createHarness();
+		await executeBuiltinSlashCommand("/collab list", harness.runtime);
+		const error = String(harness.showError.mock.calls.at(-1)?.[0] ?? "");
+		expect(error).toContain("denied");
+		expect(error).not.toMatch(/[\r\n\x1b]/);
+		expect(error.length).toBeLessThanOrEqual(200);
+		await executeBuiltinSlashCommand("/collab status", harness.runtime);
+		expect(harness.showStatus).toHaveBeenCalled();
+	});
+
 	it("renders host identity and state without any link", async () => {
 		const listSpy = vi.spyOn(registry, "listCollabHosts").mockResolvedValue([snapshot({ inputRequired: true })]);
 		const harness = createHarness();

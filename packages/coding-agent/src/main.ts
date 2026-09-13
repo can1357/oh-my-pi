@@ -622,6 +622,9 @@ async function runInteractiveMode(
 		// `/join` so collab guards and error rendering stay in one place.
 		if (joinLink !== undefined) {
 			await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
+			// Join failure returns to the local session; success still needs the
+			// controller observing its eventual restoration without hosting replicas.
+			mode.collabController.autoStart();
 		}
 	} catch (error) {
 		// Init publishes before startup dialogs, so any later startup failure
