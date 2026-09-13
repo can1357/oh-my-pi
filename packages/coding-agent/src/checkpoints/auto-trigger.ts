@@ -161,7 +161,7 @@ export function subscribeInternalBeforeToolCall(fn: InternalBeforeToolListener):
  * tool that is about to run.
  */
 export async function emitInternalBeforeToolCall(event: InternalBeforeToolEvent): Promise<void> {
-	for (const fn of [...internalBeforeToolListeners]) {
+	for (const fn of internalBeforeToolListeners) {
 		try {
 			await fn(event);
 		} catch (error) {

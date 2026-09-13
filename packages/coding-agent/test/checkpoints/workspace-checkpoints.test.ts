@@ -13,7 +13,6 @@ import {
 	WorkspaceCheckpointService,
 } from "../../src/checkpoints";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import * as git from "../../src/checkpoints/git-plumbing";
 
 /**
  * Every case runs against a real `git init` repository in a temp dir with the
