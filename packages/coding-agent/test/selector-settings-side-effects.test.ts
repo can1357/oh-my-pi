@@ -17,9 +17,24 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/mode
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
-import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import {
+	agentStateFileSettled,
+	setAgentStateFileEnabled,
+	setTerminalTitleState,
+} from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { getTerminalId, setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
+import {
+	__resetDirsFromEnvForTests,
+	getTerminalSessionsDir,
+	removeSyncWithRetries,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 
 let settingsState: SettingsTestState | undefined;
 
@@ -1861,6 +1876,40 @@ describe("selector setting side effects", () => {
 			expect(setModel).not.toHaveBeenCalled();
 		} finally {
 			hub.dispose();
+		}
+	});
+	it("applies tui.stateFile at once, rather than at the next start", async () => {
+		// The setting is read once during init as well, so without this path turning it on writes
+		// nothing until a restart and turning it off keeps writing and leaves the file behind.
+		const ENV_KEYS = ["TMUX_PANE", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+		const originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+		const agentRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-state-file-setting-"));
+		process.env.TMUX_PANE = "%omp-state-file-setting-test";
+		process.env.PI_CODING_AGENT_DIR = path.join(agentRoot, "agent");
+		restoreEnvValue("OMP_PROFILE", undefined);
+		restoreEnvValue("PI_PROFILE", undefined);
+		__resetDirsFromEnvForTests();
+
+		const stateFile = (): string => path.join(getTerminalSessionsDir(), `${getTerminalId()}.state.json`);
+
+		try {
+			const controller = new SelectorController({} as unknown as InteractiveModeContext);
+			setTerminalTitleState("attention");
+
+			controller.handleSettingChange("tui.stateFile", true);
+			await agentStateFileSettled();
+			expect(await Bun.file(stateFile()).exists()).toBe(true);
+			expect((await Bun.file(stateFile()).json()).state).toBe("attention");
+
+			controller.handleSettingChange("tui.stateFile", false);
+			await agentStateFileSettled();
+			expect(await Bun.file(stateFile()).exists()).toBe(false);
+		} finally {
+			setAgentStateFileEnabled(false);
+			await agentStateFileSettled();
+			for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
+			__resetDirsFromEnvForTests();
+			await fs.promises.rm(agentRoot, { recursive: true, force: true });
 		}
 	});
 });

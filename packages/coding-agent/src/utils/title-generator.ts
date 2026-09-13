@@ -2,12 +2,13 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
-import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
+import { getTerminalId, isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
+import { getTerminalSessionsDir, isTerminalHeadless, logger, postmortem, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -18,6 +19,7 @@ import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
+import { replaceFileAtomically } from "./atomic-file";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: true });
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -589,6 +591,157 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer.unref?.();
 }
 
+/** Whether the run state is also offered as a file, driven by the `tui.stateFile` setting. */
+let agentStateFileEnabled = false;
+
+/** Path of this terminal's state file, or null when no terminal can be identified. */
+function agentStateFilePath(): string | null {
+	const terminalId = getTerminalId();
+	return terminalId ? path.join(getTerminalSessionsDir(), `${terminalId}.state.json`) : null;
+}
+
+/**
+ * The path this process published its state under, kept rather than recomputed. At exit the terminal
+ * may no longer read the same - a closed bare PTY resolves as "/dev/pts/N (deleted)" - and a removal
+ * under a recomputed name would leave the published file behind.
+ */
+let agentStateFileTarget: string | null = null;
+
+/**
+ * Serializes state-file work so two updates cannot land out of order, and so a caller never waits
+ * on the disk. Every update chains onto this; nothing awaits it except a test.
+ */
+let agentStateFileWork: Promise<void> = Promise.resolve();
+
+/**
+ * Bumped by every removal, so an update that was already in flight can tell that the agent it
+ * describes is gone. A boolean is not enough: the update yields at each await, and a removal
+ * landing in one of those gaps must invalidate it even though it passed the check on entry.
+ */
+let agentStateFileGeneration = 0;
+
+/**
+ * Whether a removal was queued and has not landed. Teardown and a signal exit still owe it: the
+ * process may end before the queue gets its turn, and the setting is already off by then.
+ */
+let agentStateFileRemovalPending = false;
+
+/**
+ * Offer the run state as a file beside this terminal's breadcrumb, so a program that is not the
+ * terminal can read it.
+ *
+ * The title already carries this state, but only a terminal emulator can see a title. Anything
+ * else driving omp - a supervisor, a status bar, a multiplexer script - has to guess from whether
+ * output is still moving, and that cannot tell a long think from a question nobody answered.
+ *
+ * Asynchronous and queued: a state directory on a slow filesystem must not stall rendering, and
+ * on an NFS home a synchronous write would do exactly that on every turn. Ordering is kept by the
+ * chain rather than by the event loop, so the last state written is the last state that happened.
+ */
+function writeAgentStateFile(state: TerminalTitleState): void {
+	if (!agentStateFileEnabled) return;
+	agentStateFileTarget ??= agentStateFilePath();
+	const file = agentStateFileTarget;
+	if (!file) return;
+	const body = `${JSON.stringify({ state, pid: process.pid, at: new Date().toISOString() })}\n`;
+	const pending = `${file}.${process.pid}.tmp`;
+	const generation = agentStateFileGeneration;
+	const overtaken = (): boolean => generation !== agentStateFileGeneration;
+	agentStateFileWork = agentStateFileWork
+		.then(async () => {
+			// A removal overtook this update: the agent it describes is gone and must not be
+			// resurrected. Checked again after every await, because a removal is synchronous and
+			// lands in exactly those gaps.
+			if (overtaken()) return;
+			// Written then renamed: a reader polling this must never catch half a state.
+			// Bun.write creates the directory, so no mkdir before it.
+			await Bun.write(pending, body);
+			if (overtaken()) {
+				await fs.promises.rm(pending, { force: true });
+				return;
+			}
+			// The shared helper rather than a bare rename: on Windows, replacing an existing file can
+			// fail with EPERM, and the catch below would swallow it and leave the old state published.
+			try {
+				await replaceFileAtomically(pending, file);
+			} finally {
+				// A removal may have run while the replacement was in flight. On success it found nothing
+				// to delete; on failure the helper rolled the old file back into place. Either way the
+				// file now describes a process that is gone.
+				if (overtaken()) await fs.promises.rm(file, { force: true });
+			}
+		})
+		.catch(err => {
+			logger.debug("Agent state file write failed", { err });
+		});
+}
+
+/**
+ * Invalidate every update still in flight, and return this terminal's state file path.
+ *
+ * The generation moves at once, whichever way the file is then removed: an update that yields
+ * after this must not publish a state for an agent that has been switched off or is exiting.
+ */
+function invalidateAgentStateFile(): string | null {
+	agentStateFileGeneration += 1;
+	// Recomputed only when nothing was published, which is also when a different name costs nothing.
+	return agentStateFileTarget ?? agentStateFilePath();
+}
+
+/**
+ * Remove this terminal's state file, so nothing reads a state from a process that is gone.
+ *
+ * Synchronous on purpose, and only for process exit and runtime teardown: a signal path may never
+ * give an awaited unlink its turn. A live setting change uses {@link queueAgentStateFileRemoval}.
+ */
+function removeAgentStateFile(): void {
+	const file = invalidateAgentStateFile();
+	if (!file) return;
+	try {
+		fs.rmSync(file, { force: true });
+		fs.rmSync(`${file}.${process.pid}.tmp`, { force: true });
+		agentStateFileRemovalPending = false;
+		if (!agentStateFileEnabled) agentStateFileTarget = null;
+	} catch (err) {
+		logger.debug("Agent state file removal failed", { err });
+	}
+}
+
+/**
+ * Remove this terminal's state file through the queue, for a setting turned off at runtime.
+ *
+ * That path runs on the TUI event loop, where a synchronous unlink on a stalled NFS home would
+ * freeze the interface. Queued behind the updates, it also runs after any write already in
+ * flight, and before a write from switching the setting straight back on.
+ */
+function queueAgentStateFileRemoval(): void {
+	const file = invalidateAgentStateFile();
+	if (!file) return;
+	const generation = agentStateFileGeneration;
+	agentStateFileRemovalPending = true;
+	agentStateFileWork = agentStateFileWork
+		.then(async () => {
+			await fs.promises.rm(file, { force: true });
+			await fs.promises.rm(`${file}.${process.pid}.tmp`, { force: true });
+			// Only after it landed, and only if no newer removal took over: until then exit still owes it.
+			if (generation !== agentStateFileGeneration) return;
+			agentStateFileRemovalPending = false;
+			if (!agentStateFileEnabled) {
+				agentStateFileCleanupCancel?.();
+				agentStateFileCleanupCancel = undefined;
+				agentStateFileTarget = null;
+			}
+		})
+		.catch(err => {
+			logger.debug("Agent state file removal failed", { err });
+		});
+}
+
+/** Resolves once every queued state-file update has landed. For tests. */
+export function agentStateFileSettled(): Promise<void> {
+	return agentStateFileWork;
+}
+
 /**
  * Reflect the agent run state in the terminal title's separator: `working`
  * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
@@ -600,6 +753,32 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
+	writeAgentStateFile(state);
+}
+
+/** Cancels the postmortem registration that removes the file, while one is registered. */
+let agentStateFileCleanupCancel: (() => void) | undefined;
+
+/** Enable/disable the state file (driven by the `tui.stateFile` setting). */
+export function setAgentStateFileEnabled(enabled: boolean): void {
+	agentStateFileEnabled = enabled;
+	if (enabled) {
+		// A signal exit never reaches disposeTerminalTitleState(): SIGTERM/SIGHUP and the fatal
+		// handler run the postmortem callbacks and leave. Without this the file outlives the
+		// process and goes on reporting `working` or `attention` for ever, which is worse than
+		// having no file at all.
+		//
+		// exitOnly, because a keep-alive cleanup pass is not the end of this agent: its state is
+		// still true and deleting it there would blind a reader mid-session.
+		agentStateFileCleanupCancel ??= postmortem.register("agent-state-file", removeAgentStateFile, {
+			exitOnly: true,
+		});
+		writeAgentStateFile(terminalTitleRuntime.state);
+	} else {
+		// The exit registration stays until the queued removal has landed, which cancels it: a signal
+		// in between would otherwise leave the last state behind.
+		queueAgentStateFileRemoval();
+	}
 }
 
 /** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
@@ -615,6 +794,13 @@ export function disposeTerminalTitleState(): void {
 	stopTerminalTitleSpinner();
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
+	// A state file that outlives its process would report "waiting" forever - including one whose
+	// removal was queued by switching the setting off and has not landed when the process ends.
+	if (agentStateFileEnabled || agentStateFileRemovalPending) {
+		agentStateFileCleanupCancel?.();
+		agentStateFileCleanupCancel = undefined;
+		removeAgentStateFile();
+	}
 }
 
 /**
