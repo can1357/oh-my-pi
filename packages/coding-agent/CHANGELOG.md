@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Daemon project presence records now carry the live session's id and name, and follow it across session transitions such as `/new` ([#8682](https://github.com/can1357/oh-my-pi/pull/8682) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

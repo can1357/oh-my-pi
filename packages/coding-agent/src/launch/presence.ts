@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { replaceFileAtomically } from "../utils/atomic-file";
 import { canonicalProjectDir, daemonRuntimeDir } from "./paths";
 
 const CLIENTS_DIR = "clients";
@@ -29,13 +30,20 @@ const DAEMON_RUNTIME_STALE_GRACE_MS = 5 * 60_000;
 
 /** Handle keeping one omp process registered in a project daemon scope. */
 export interface DaemonProjectPresence {
+	update(session: DaemonProjectPresenceSession | undefined): Promise<void>;
 	close(): Promise<void>;
 }
 
+/** Session identity this presence record may carry, if the caller has one open. */
+export interface DaemonProjectPresenceSession {
+	sessionId: string;
+	title?: string;
+}
 /** Register this omp process so project daemons survive while it remains alive. */
 export async function registerDaemonProjectPresence(
 	projectDir: string,
 	runtimeOverride?: string,
+	session?: DaemonProjectPresenceSession,
 ): Promise<DaemonProjectPresence> {
 	const canonical = await canonicalProjectDir(projectDir);
 	const runtimeDir = runtimeOverride ?? daemonRuntimeDir(canonical);
@@ -43,17 +51,59 @@ export async function registerDaemonProjectPresence(
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
-	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
-	await fs.chmod(presencePath, 0o600);
 	let closed = false;
+	const writeRecord = async (currentSession?: DaemonProjectPresenceSession): Promise<void> => {
+		if (closed) return;
+		const tempPath = `${presencePath}.${crypto.randomUUID()}.tmp`;
+		try {
+			await Bun.write(
+				tempPath,
+				JSON.stringify({
+					pid: process.pid,
+					id,
+					projectDir: canonical,
+					// Optional: an older omp on this machine never writes these, and any
+					// reader must treat their absence as "alive, session unknown" rather
+					// than as a malformed record (see hasLiveDaemonProjectPresence below,
+					// which never inspects them).
+					...(currentSession?.sessionId ? { sessionId: currentSession.sessionId } : {}),
+					...(currentSession?.title ? { title: currentSession.title } : {}),
+				}),
+			);
+			await fs.chmod(tempPath, 0o600);
+			if (closed) {
+				await fs.rm(tempPath, { force: true });
+				return;
+			}
+			await replaceFileAtomically(tempPath, presencePath);
+		} catch (error) {
+			await fs.rm(tempPath, { force: true }).catch(() => {});
+			throw error;
+		}
+	};
+
+	let writeChain = Promise.resolve();
+	const update = async (nextSession?: DaemonProjectPresenceSession): Promise<void> => {
+		if (closed) return;
+		writeChain = writeChain.catch(() => {}).then(() => writeRecord(nextSession));
+		return writeChain;
+	};
+
+	await writeRecord(session);
+
 	const close = async (): Promise<void> => {
 		if (closed) return;
 		closed = true;
 		cancelCleanup();
+		try {
+			await writeChain;
+		} catch {
+			// ignore
+		}
 		await fs.rm(presencePath, { force: true });
 	};
 	const cancelCleanup = postmortem.register(`daemon-presence:${id}`, () => close());
-	return { close };
+	return { update, close };
 }
 
 /** Return whether a registered omp process in this runtime directory is still alive. */
