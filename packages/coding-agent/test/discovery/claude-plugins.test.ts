@@ -777,6 +777,50 @@ describe("listClaudePluginRoots", () => {
 		expect(names).toContain("child-skill");
 	});
 
+	test("a manifest-declared skills dir that is itself a collection keeps loading its children (regression: PR #9379 review, selfIsBoundary)", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "declared-collection-plugin");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "my-collection", "child-skill"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"declared-collection-plugin@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		// A manifest declaring "skills" directly at a directory that is ITSELF a
+		// collection (a root SKILL.md plus a child skill directory), not a single
+		// skill leaf.
+		await fs.writeFile(
+			path.join(pluginPath, ".claude-plugin", "plugin.json"),
+			JSON.stringify({ skills: "my-collection" }),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "my-collection", "SKILL.md"),
+			"---\nname: declared-root-skill\ndescription: Root of the declared collection\n---\nBody\n",
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "my-collection", "child-skill", "SKILL.md"),
+			"---\nname: declared-child-skill\ndescription: Child inside the declared collection\n---\nBody\n",
+		);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const names = result.all.map(skill => skill.name);
+		expect(names).toContain("declared-root-skill");
+		expect(names).toContain("declared-child-skill");
+	});
+
 	test("a symlinked install path still discovers manifest skills under containment (PR #9379 round-6 review)", async () => {
 		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const realPluginPath = path.join(tempDir, "plugins", "real-linked-plugin");
