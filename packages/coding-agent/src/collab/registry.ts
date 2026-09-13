@@ -34,6 +34,14 @@ export const COLLAB_REGISTRY_VERSION = 1;
 const MAX_REQUEST_BYTES = 4 * 1024;
 /** Reject responses beyond this size. */
 const MAX_RESPONSE_BYTES = 64 * 1024;
+/**
+ * Longest string any snapshot field is sent with. Session names, imported
+ * session ids, and working directories have no length limit of their own;
+ * bounding them here keeps every valid snapshot response (five such fields,
+ * worst case fully escaped) well inside {@link MAX_RESPONSE_BYTES}, so an
+ * unusual title never makes an otherwise healthy host invisible.
+ */
+const MAX_SNAPSHOT_FIELD_CHARS = 1024;
 /** Per-entry connect+response deadline during listing. */
 const DEFAULT_QUERY_TIMEOUT_MS = 1_500;
 /** Concurrency bound for querying discovery entries. */
@@ -42,7 +50,11 @@ const LIST_CONCURRENCY = 8;
 /** Access a link grants: `view` (bare room key) or `control` (room key + write token). */
 export type CollabAccess = "view" | "control";
 
-/** Non-capability host state, computed by the host process at query time. */
+/**
+ * Non-capability host state, computed by the host process at query time.
+ * Free-form strings (session id and name, cwd, model) are bounded to
+ * {@link MAX_SNAPSHOT_FIELD_CHARS} characters on the wire.
+ */
 export interface CollabHostSnapshot {
 	/** Random per-process identity; stable across the host's room generations. */
 	instanceId: string;
@@ -227,6 +239,23 @@ function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
 	};
 }
 
+function boundField(value: string): string {
+	return value.length > MAX_SNAPSHOT_FIELD_CHARS ? value.slice(0, MAX_SNAPSHOT_FIELD_CHARS) : value;
+}
+
+/** The snapshot as sent on the wire: every free-form string bounded to {@link MAX_SNAPSHOT_FIELD_CHARS}. */
+function boundSnapshot(snapshot: CollabHostSnapshot): CollabHostSnapshot {
+	return {
+		...snapshot,
+		sessionId: boundField(snapshot.sessionId),
+		sessionName: snapshot.sessionName === null ? null : boundField(snapshot.sessionName),
+		cwd: boundField(snapshot.cwd),
+		model: snapshot.model
+			? { provider: boundField(snapshot.model.provider), id: boundField(snapshot.model.id) }
+			: null,
+	};
+}
+
 /** One request per connection: authenticate, dispatch the op, respond, close. */
 function handleConnection(socket: net.Socket, token: string, source: CollabHostRegistrySource): void {
 	let buffer = "";
@@ -277,7 +306,7 @@ function handleConnection(socket: net.Socket, token: string, source: CollabHostR
 			return;
 		}
 		if (op === "snapshot") {
-			respond({ ok: true, v: COLLAB_REGISTRY_VERSION, snapshot });
+			respond({ ok: true, v: COLLAB_REGISTRY_VERSION, snapshot: boundSnapshot(snapshot) });
 			return;
 		}
 		if (op !== "link") {
@@ -694,6 +723,20 @@ export async function resolveCollabHostLink(
 	}
 	if (result.status === "skip" && result.error === "access_unavailable") {
 		throw new CollabLinkError("access_unavailable", `host ${snapshot.instanceId} does not publish ${access} access`);
+	}
+	if (result.status === "dead") {
+		// Every room generation has its own endpoint, so a host that rotated
+		// since the listing is simply gone from this one rather than answering
+		// `stale_generation` itself. Look the instance up again before giving up.
+		const rotated = (await listLiveEntries(options)).some(
+			entry => entry.snapshot.instanceId === snapshot.instanceId && entry.snapshot.generation > snapshot.generation,
+		);
+		if (rotated) {
+			throw new CollabLinkError(
+				"stale_generation",
+				`host ${snapshot.instanceId} started a new room since it was listed; list again and retry`,
+			);
+		}
 	}
 	throw new CollabLinkError("unreachable", `host ${snapshot.instanceId} did not answer the link request`);
 }

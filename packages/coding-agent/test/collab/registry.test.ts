@@ -258,6 +258,58 @@ describe("collab registry", () => {
 		});
 	});
 
+	it("surfaces stale_generation when the room rotated to a new endpoint between resolution's listing and link request", async () => {
+		const dir = await tempDir();
+		const first = makeFixture({ instanceId: "rotating-endpoint", sessionId: "generation-1" });
+		const pub = await publish(dir, first);
+		const second = makeFixture({ instanceId: "rotating-endpoint", sessionId: "generation-2", generation: 2 });
+
+		// The listing inside resolution answers from generation 1; the room then
+		// rotates — the old endpoint is withdrawn and generation 2 publishes under
+		// its own — before the link request connects.
+		const realConnect = net.createConnection;
+		let connections = 0;
+		const connect = spyOn(net, "createConnection").mockImplementation(((options: net.NetConnectOpts) => {
+			if (++connections !== 2) return realConnect(options);
+			const socket = new net.Socket();
+			void pub
+				.close()
+				.then(() => publish(dir, second))
+				.then(() => socket.connect(options));
+			return socket;
+		}) as typeof net.createConnection);
+		try {
+			await expect(resolveCollabHostLink("rotating-endpoint", "control", { dir })).rejects.toMatchObject({
+				name: "CollabLinkError",
+				code: "stale_generation",
+			});
+		} finally {
+			connect.mockRestore();
+		}
+
+		// Listing again yields the successor, and only its link.
+		expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: "rotating-endpoint", generation: 2 }]);
+		expect(await resolveCollabHostLink("rotating-endpoint", "control", { dir })).toMatchObject({
+			generation: 2,
+			url: second.controlUrl,
+		});
+	});
+
+	it("keeps a host with an oversized session name or cwd listable by bounding snapshot fields on the wire", async () => {
+		const dir = await tempDir();
+		// Each of these alone would push the snapshot JSON past the 64 KiB response cap.
+		const f = makeFixture({ sessionName: "n".repeat(100_000), cwd: `/deep/${"d".repeat(100_000)}` });
+		await publish(dir, f);
+
+		const hosts = await listCollabHosts({ dir });
+		expect(hosts).toHaveLength(1);
+		expect(hosts[0]!.sessionName).toBe("n".repeat(1024));
+		expect(hosts[0]!.cwd).toBe(`/deep/${"d".repeat(1024 - "/deep/".length)}`);
+		expect(await resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).toMatchObject({
+			url: f.controlUrl,
+		});
+	});
+
 	it("resolves a unique PID and rejects it as ambiguous when a second instance shares the process", async () => {
 		const dir = await tempDir();
 		const first = makeFixture({ instanceId: "pid-first" });
