@@ -608,11 +608,22 @@ impl GitRepo {
 		if self.is_reftable() {
 			// One spawn: `%(upstream)` applies the fetch refspecs (and `.`
 			// remotes) natively, replacing two `config --get` round-trips.
-			return cli_try(self.root(), &[
-				"for-each-ref",
-				"--format=%(upstream)",
-				&format!("refs/heads/{branch}"),
-			]);
+			// Only the terminating newline is stripped: git preserves quoted
+			// padding in the merge value verbatim, and a padded name resolves
+			// to no upstream — trimming would invent one.
+			let out = super::cli::run_sync(
+				self.root(),
+				&[
+					"for-each-ref".to_owned(),
+					"--format=%(upstream)".to_owned(),
+					format!("refs/heads/{branch}"),
+				],
+				super::cli::SYNC_TIMEOUT,
+			)?;
+			if out.exit_code != 0 {
+				return Ok(None);
+			}
+			return Ok(nonempty(out.stdout.strip_suffix('\n').unwrap_or(&out.stdout)));
 		}
 		// One fresh open per call (previously two `config_get` round-trips):
 		// branch/remote tracking config must observe out-of-band mutations,
