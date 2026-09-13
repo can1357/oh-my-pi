@@ -452,11 +452,26 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * Which agent a session runs as. Process-wide events reach every session's extension runner —
+ * `mcp_notification` frames in particular fan out to subagents too (see `docs/extensions.md`,
+ * MCP notifications) — so a handler that must act once for the whole process checks
+ * `isSubagent` and acts only from the top-level session.
+ */
+export interface ExtensionAgentIdentity {
+	/** Registry id: `"Main"` for the top-level session, the task-derived id for a subagent. */
+	readonly id: string;
+	/** True inside a session spawned by `task`/`agent()`/`workpool()`. */
+	readonly isSubagent: boolean;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
+	/** The agent this session runs as; see {@link ExtensionAgentIdentity}. */
+	agent: ExtensionAgentIdentity;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */

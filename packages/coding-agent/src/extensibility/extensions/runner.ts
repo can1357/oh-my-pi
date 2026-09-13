@@ -17,6 +17,7 @@ import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
@@ -36,6 +37,7 @@ import type {
 	ContextEventResult,
 	ContextUsage,
 	Extension,
+	ExtensionAgentIdentity,
 	ExtensionActions,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
@@ -607,6 +609,8 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		/** Defaults to the top-level identity; `createAgentSession` always passes the session's own. */
+		private readonly agent: ExtensionAgentIdentity = { id: MAIN_AGENT_ID, isSubagent: false },
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -1170,6 +1174,7 @@ export class ExtensionRunner {
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
+			agent: this.agent,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
