@@ -48,10 +48,10 @@ export class CollabController {
 		this.instanceId = randomBytes(8).toString("hex");
 	}
 
-	/** The live room, if any; a room that is ending or ended is reported as absent. */
+	/** The live room for the current session; stale or ending rooms are absent. */
 	get host(): CollabHost | undefined {
 		const host = this.#host;
-		return host && !host.ending ? host : undefined;
+		return host && !host.ending && host.sessionId === this.#ctx.sessionManager.getSessionId() ? host : undefined;
 	}
 
 	/** Registry generation of the most recently started room; 0 before the first. */
@@ -124,8 +124,9 @@ export class CollabController {
 		const existing = this.host;
 		if (existing && (existing.access === "control" || options.access === "view")) return existing;
 		const stopEpoch = this.#stopEpoch;
-		// Abort an in-flight view connection before queuing behind its startup.
-		const stopping = existing && this.#stopHost(existing, "restarting with control access");
+		// Abort an in-flight or stale room before queuing behind its startup.
+		const stopping =
+			this.#host && this.#stopHost(this.#host, existing ? "restarting with control access" : "session switched");
 		const started = this.#ops.then(async () => {
 			await stopping;
 			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
@@ -263,8 +264,8 @@ export class CollabController {
 	 * auto-start policy to the new session.
 	 */
 	#onSessionChanged(): void {
-		const previous = this.host;
-		if (previous && previous.sessionId === this.#ctx.sessionManager.getSessionId()) return;
+		const previous = this.#host;
+		if (this.host) return;
 		const stopEpoch = this.#stopEpoch;
 		// Stop synchronously so a room still connecting is aborted now rather than
 		// after the queued start settles; the chain then waits for that stop.

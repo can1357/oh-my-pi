@@ -910,6 +910,22 @@ describe("CollabController", () => {
 		);
 	});
 
+	it("replaces a room after session identity changes without notifying observers", async () => {
+		const { ctx, state } = makeControllerContext();
+		controller = new CollabController(ctx);
+		const first = await controller.start({ access: "control" });
+		// Persistence can fail after SessionManager adopts the new ID but before
+		// AgentSession notifies its session-change observers.
+		state.sessionId = `sess-${crypto.randomUUID()}`;
+		const replacement = await controller.start({ access: "control" });
+		expect(replacement).not.toBe(first);
+		expect(first.stopped).toBe(true);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ sessionId: state.sessionId, generation: 2 },
+		]);
+		await joinAsWriter(replacement);
+	});
+
 	it("treats a room whose stop is still draining as absent and starts a fresh one on /collab", async () => {
 		const { ctx } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);
@@ -1349,6 +1365,23 @@ describe("CollabController", () => {
 			expect(pending.stopped).toBe(true);
 			expect(ctx.collabHost).toBeUndefined();
 			expect(publishSpy).toHaveBeenCalledTimes(0);
+		});
+
+		it("manual recovery aborts a stale pending start without a session-change notification", async () => {
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+			const first = ctx.collabHost;
+			if (!first) throw new Error("auto-start did not install a host");
+			state.sessionId = `sess-${crypto.randomUUID()}`;
+			globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+			const replacement = await controller.start({ access: "control" });
+			expect(first.stopped).toBe(true);
+			expect(replacement).not.toBe(first);
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+				{ sessionId: state.sessionId, generation: 2 },
+			]);
+			await joinAsWriter(replacement);
 		});
 
 		it("a session switch aborts the pending start and installs the new session's room at once", async () => {
