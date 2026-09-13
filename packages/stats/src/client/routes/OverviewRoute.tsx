@@ -346,7 +346,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				</div>
 
 				<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
-					{overview && (
+					{v.tape && overview && (
 						<div className="omp-metrics-herd" role="region" aria-label="Key metrics">
 							<div className="omp-kpi">
 								<div className="omp-kpi-label">Requests</div>
@@ -543,73 +543,210 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 							</AsyncBoundary>
 						</div>
 					</div>
-					<div className="omp-scope-side">
-						{v.errors && !(errorsRes.data && errorsRes.data.length === 0) && (
-							<div
-								className="omp-section"
-								style={{
-									background: "var(--surface)",
-									border: "1px solid var(--border)",
-									borderRadius: "var(--radius-lg)",
-									padding: 12,
-								}}
-							>
-								<div className="omp-section-head">
-									<div>
-										<div className="omp-section-title">Health · Recent errors</div>
-										<p className="omp-section-desc">Latest failures — only prominent when unhealthy</p>
-									</div>
-									<a
-										href={`#/errors?range=${range}`}
-										className="stats-button stats-button-secondary"
-										style={{ fontSize: 11, padding: "5px 9px" }}
-									>
-										View all →
-									</a>
+				</div>
+			)}
+
+			{(v.errors || v.liveFeed) && (
+				<div className="omp-scope-side">
+					{v.errors && !(errorsRes.data && errorsRes.data.length === 0) && (
+						<div
+							className="omp-section"
+							style={{
+								background: "var(--surface)",
+								border: "1px solid var(--border)",
+								borderRadius: "var(--radius-lg)",
+								padding: 12,
+							}}
+						>
+							<div className="omp-section-head">
+								<div>
+									<div className="omp-section-title">Health · Recent errors</div>
+									<p className="omp-section-desc">Latest failures — only prominent when unhealthy</p>
 								</div>
-								<div className="omp-section-rule" />
-								<div className="omp-section-body">
-									<AsyncBoundary loading={errorsRes.loading} error={errorsRes.error} data={errorsRes.data}>
-										{errorsRes.data && (
-											<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-												{errorsRes.data.slice(0, 5).map(err => (
-													<div
-														key={err.id ?? `${err.sessionFile}-${err.entryId}`}
-														role={err.id ? "button" : undefined}
-														tabIndex={err.id ? 0 : undefined}
-														onClick={() => err.id && onRequestClick(err.id)}
-														onKeyDown={
-															err.id
-																? e => {
-																		if (e.key === "Enter" || e.key === " ") {
-																			e.preventDefault();
-																			err.id && onRequestClick(err.id);
-																		}
+								<a
+									href={`#/errors?range=${range}`}
+									className="stats-button stats-button-secondary"
+									style={{ fontSize: 11, padding: "5px 9px" }}
+								>
+									View all →
+								</a>
+							</div>
+							<div className="omp-section-rule" />
+							<div className="omp-section-body">
+								<AsyncBoundary loading={errorsRes.loading} error={errorsRes.error} data={errorsRes.data}>
+									{errorsRes.data && (
+										<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+											{errorsRes.data.slice(0, 5).map(err => (
+												<div
+													key={err.id ?? `${err.sessionFile}-${err.entryId}`}
+													role={err.id ? "button" : undefined}
+													tabIndex={err.id ? 0 : undefined}
+													onClick={() => err.id && onRequestClick(err.id)}
+													onKeyDown={
+														err.id
+															? e => {
+																	if (e.key === "Enter" || e.key === " ") {
+																		e.preventDefault();
+																		err.id && onRequestClick(err.id);
 																	}
-																: undefined
-														}
+																}
+															: undefined
+													}
+													style={{
+														display: "flex",
+														gap: 10,
+														padding: "8px 10px",
+														border: "1px solid var(--border)",
+														borderRadius: "var(--radius-md)",
+														background: "var(--surface-2)",
+														cursor: err.id ? "pointer" : undefined,
+													}}
+												>
+													<span
 														style={{
-															display: "flex",
-															gap: 10,
-															padding: "8px 10px",
-															border: "1px solid var(--border)",
-															borderRadius: "var(--radius-md)",
-															background: "var(--surface-2)",
-															cursor: err.id ? "pointer" : undefined,
+															width: 7,
+															height: 7,
+															borderRadius: 999,
+															background: "var(--danger)",
+															marginTop: 6,
+															flexShrink: 0,
 														}}
-													>
-														<span
+													/>
+													<div style={{ minWidth: 0, flex: 1 }}>
+														<div
 															style={{
-																width: 7,
-																height: 7,
-																borderRadius: 999,
-																background: "var(--danger)",
-																marginTop: 6,
-																flexShrink: 0,
+																fontSize: 12,
+																fontWeight: 600,
+																color: "var(--text)",
+																whiteSpace: "nowrap",
+																overflow: "hidden",
+																textOverflow: "ellipsis",
 															}}
-														/>
-														<div style={{ minWidth: 0, flex: 1 }}>
-															<div
+														>
+															{err.model}
+															<span
+																style={{
+																	fontWeight: 400,
+																	color: "var(--dim)",
+																	fontFamily: "var(--font-mono)",
+																	fontSize: 11,
+																	marginLeft: 6,
+																}}
+															>
+																{err.provider}
+															</span>
+														</div>
+														<div
+															style={{
+																fontSize: 11,
+																color: "var(--danger)",
+																fontFamily: "var(--font-mono)",
+																whiteSpace: "nowrap",
+																overflow: "hidden",
+																textOverflow: "ellipsis",
+																marginTop: 2,
+															}}
+															title={err.errorMessage ?? ""}
+														>
+															{err.errorMessage ?? "Unknown error"}
+														</div>
+														<div
+															style={{
+																fontSize: 11,
+																color: "var(--dim)",
+																fontFamily: "var(--font-mono)",
+																marginTop: 2,
+															}}
+														>
+															{format(new Date(err.timestamp), "MMM d, HH:mm")} ·{" "}
+															{formatDurationMs(err.duration)}
+														</div>
+													</div>
+												</div>
+											))}
+										</div>
+									)}
+								</AsyncBoundary>
+							</div>
+						</div>
+					)}
+					{v.liveFeed && !(recentRes.data && recentRes.data.length === 0) && (
+						<div
+							className="omp-section"
+							style={{
+								background: "var(--surface)",
+								border: "1px solid var(--border)",
+								borderRadius: "var(--radius-lg)",
+								padding: 12,
+							}}
+						>
+							<div className="omp-section-head">
+								<div>
+									<div className="omp-section-title">Live feed</div>
+									<p className="omp-section-desc">Newest requests</p>
+								</div>
+							</div>
+							<div className="omp-section-rule" />
+							<div className="omp-section-body">
+								<AsyncBoundary
+									loading={recentRes.loading}
+									error={recentRes.error}
+									data={recentRes.data}
+									fallback={
+										<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+											{Array.from({ length: 4 }).map((_, i) => (
+												<div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+													<Skeleton variant="circle" width={8} height={8} />
+													<div style={{ flex: 1 }}>
+														<Skeleton variant="text" width="60%" height={14} />
+														<Skeleton variant="text" width="40%" height={10} />
+													</div>
+												</div>
+											))}
+										</div>
+									}
+								>
+									<div style={{ display: "flex", flexDirection: "column" }}>
+										{previewRequests.map(req => {
+											const isError = !!req.errorMessage;
+											const openDetails = () => req.id && onRequestClick(req.id);
+											return (
+												<div
+													key={req.id ?? `${req.sessionFile}-${req.entryId}`}
+													role={req.id ? "button" : undefined}
+													tabIndex={req.id ? 0 : undefined}
+													onClick={openDetails}
+													onKeyDown={
+														req.id
+															? e => {
+																	if (e.key === "Enter" || e.key === " ") {
+																		e.preventDefault();
+																		openDetails();
+																	}
+																}
+															: undefined
+													}
+													style={{
+														display: "flex",
+														gap: 10,
+														padding: "8px 2px",
+														borderBottom: "1px solid var(--border)",
+														cursor: req.id ? "pointer" : undefined,
+													}}
+												>
+													<span
+														style={{
+															width: 6,
+															height: 6,
+															borderRadius: 999,
+															background: isError ? "var(--danger)" : "var(--success)",
+															marginTop: 7,
+															flexShrink: 0,
+														}}
+													/>
+													<div style={{ minWidth: 0, flex: 1 }}>
+														<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+															<span
 																style={{
 																	fontSize: 12,
 																	fontWeight: 600,
@@ -619,194 +756,60 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 																	textOverflow: "ellipsis",
 																}}
 															>
-																{err.model}
-																<span
-																	style={{
-																		fontWeight: 400,
-																		color: "var(--dim)",
-																		fontFamily: "var(--font-mono)",
-																		fontSize: 11,
-																		marginLeft: 6,
-																	}}
-																>
-																	{err.provider}
-																</span>
-															</div>
-															<div
+																{req.model}
+															</span>
+															<span
 																style={{
+																	fontFamily: "var(--font-mono)",
 																	fontSize: 11,
-																	color: "var(--danger)",
+																	color: "var(--dim)",
+																	flexShrink: 0,
+																}}
+															>
+																{format(new Date(req.timestamp), "HH:mm:ss")}
+															</span>
+														</div>
+														<div
+															style={{
+																display: "flex",
+																justifyContent: "space-between",
+																gap: 8,
+																fontSize: 11,
+																color: "var(--muted)",
+															}}
+														>
+															<span
+																style={{
 																	fontFamily: "var(--font-mono)",
 																	whiteSpace: "nowrap",
 																	overflow: "hidden",
 																	textOverflow: "ellipsis",
-																	marginTop: 2,
 																}}
-																title={err.errorMessage ?? ""}
 															>
-																{err.errorMessage ?? "Unknown error"}
-															</div>
-															<div
+																{req.provider}
+															</span>
+															<span
 																style={{
-																	fontSize: 11,
-																	color: "var(--dim)",
 																	fontFamily: "var(--font-mono)",
-																	marginTop: 2,
+																	fontVariantNumeric: "tabular-nums",
+																	whiteSpace: "nowrap",
 																}}
 															>
-																{format(new Date(err.timestamp), "MMM d, HH:mm")} ·{" "}
-																{formatDurationMs(err.duration)}
-															</div>
+																{req.usage.totalTokens > 0
+																	? `${formatCompact(req.usage.totalTokens)} tok`
+																	: ""}{" "}
+																{req.usage.totalTokens > 0 ? `· ${formatMessageCost(req, 2)}` : ""}
+															</span>
 														</div>
 													</div>
-												))}
-											</div>
-										)}
-									</AsyncBoundary>
-								</div>
-							</div>
-						)}
-						{v.liveFeed && !(recentRes.data && recentRes.data.length === 0) && (
-							<div
-								className="omp-section"
-								style={{
-									background: "var(--surface)",
-									border: "1px solid var(--border)",
-									borderRadius: "var(--radius-lg)",
-									padding: 12,
-								}}
-							>
-								<div className="omp-section-head">
-									<div>
-										<div className="omp-section-title">Live feed</div>
-										<p className="omp-section-desc">Newest requests</p>
+												</div>
+											);
+										})}
 									</div>
-								</div>
-								<div className="omp-section-rule" />
-								<div className="omp-section-body">
-									<AsyncBoundary
-										loading={recentRes.loading}
-										error={recentRes.error}
-										data={recentRes.data}
-										fallback={
-											<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-												{Array.from({ length: 4 }).map((_, i) => (
-													<div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
-														<Skeleton variant="circle" width={8} height={8} />
-														<div style={{ flex: 1 }}>
-															<Skeleton variant="text" width="60%" height={14} />
-															<Skeleton variant="text" width="40%" height={10} />
-														</div>
-													</div>
-												))}
-											</div>
-										}
-									>
-										<div style={{ display: "flex", flexDirection: "column" }}>
-											{previewRequests.map(req => {
-												const isError = !!req.errorMessage;
-												const openDetails = () => req.id && onRequestClick(req.id);
-												return (
-													<div
-														key={req.id ?? `${req.sessionFile}-${req.entryId}`}
-														role={req.id ? "button" : undefined}
-														tabIndex={req.id ? 0 : undefined}
-														onClick={openDetails}
-														onKeyDown={
-															req.id
-																? e => {
-																		if (e.key === "Enter" || e.key === " ") {
-																			e.preventDefault();
-																			openDetails();
-																		}
-																	}
-																: undefined
-														}
-														style={{
-															display: "flex",
-															gap: 10,
-															padding: "8px 2px",
-															borderBottom: "1px solid var(--border)",
-															cursor: req.id ? "pointer" : undefined,
-														}}
-													>
-														<span
-															style={{
-																width: 6,
-																height: 6,
-																borderRadius: 999,
-																background: isError ? "var(--danger)" : "var(--success)",
-																marginTop: 7,
-																flexShrink: 0,
-															}}
-														/>
-														<div style={{ minWidth: 0, flex: 1 }}>
-															<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-																<span
-																	style={{
-																		fontSize: 12,
-																		fontWeight: 600,
-																		color: "var(--text)",
-																		whiteSpace: "nowrap",
-																		overflow: "hidden",
-																		textOverflow: "ellipsis",
-																	}}
-																>
-																	{req.model}
-																</span>
-																<span
-																	style={{
-																		fontFamily: "var(--font-mono)",
-																		fontSize: 11,
-																		color: "var(--dim)",
-																		flexShrink: 0,
-																	}}
-																>
-																	{format(new Date(req.timestamp), "HH:mm:ss")}
-																</span>
-															</div>
-															<div
-																style={{
-																	display: "flex",
-																	justifyContent: "space-between",
-																	gap: 8,
-																	fontSize: 11,
-																	color: "var(--muted)",
-																}}
-															>
-																<span
-																	style={{
-																		fontFamily: "var(--font-mono)",
-																		whiteSpace: "nowrap",
-																		overflow: "hidden",
-																		textOverflow: "ellipsis",
-																	}}
-																>
-																	{req.provider}
-																</span>
-																<span
-																	style={{
-																		fontFamily: "var(--font-mono)",
-																		fontVariantNumeric: "tabular-nums",
-																		whiteSpace: "nowrap",
-																	}}
-																>
-																	{req.usage.totalTokens > 0
-																		? `${formatCompact(req.usage.totalTokens)} tok`
-																		: ""}{" "}
-																	{req.usage.totalTokens > 0 ? `· ${formatMessageCost(req, 2)}` : ""}
-																</span>
-															</div>
-														</div>
-													</div>
-												);
-											})}
-										</div>
-									</AsyncBoundary>
-								</div>
+								</AsyncBoundary>
 							</div>
-						)}
-					</div>
+						</div>
+					)}
 				</div>
 			)}
 

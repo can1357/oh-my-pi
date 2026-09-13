@@ -514,10 +514,10 @@ export async function getModelDashboardStats(
 
 export async function getCostDashboardStats(range?: string | null): Promise<Pick<DashboardStats, "costSeries">> {
 	await initDb();
-	const { costSeriesDays, cutoff, bucketOrigin } = getTimeRangeConfig(range);
+	const { costSeriesDays, timeSeriesBucketMs, cutoff, bucketOrigin } = getTimeRangeConfig(range);
 
 	return {
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff, bucketOrigin),
+		costSeries: getCostTimeSeries(costSeriesDays, cutoff, bucketOrigin, timeSeriesBucketMs),
 	};
 }
 
@@ -581,11 +581,11 @@ export async function getTotalMessageCount(): Promise<number> {
 
 export async function getBehaviorDashboardStats(range?: string | null): Promise<BehaviorDashboardStats> {
 	await initDb();
-	const { cutoff, bucketOrigin } = getTimeRangeConfig(range);
+	const { cutoff, timeSeriesBucketMs, bucketOrigin } = getTimeRangeConfig(range);
 	return {
 		overall: getBehaviorOverall(cutoff),
 		byModel: getBehaviorByModel(cutoff),
-		behaviorSeries: getBehaviorTimeSeries(cutoff, bucketOrigin),
+		behaviorSeries: getBehaviorTimeSeries(cutoff, bucketOrigin, timeSeriesBucketMs),
 	};
 }
 

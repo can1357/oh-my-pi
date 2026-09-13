@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { getDashboardStats } from "@oh-my-pi/omp-stats/aggregator";
-import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
+import { getBehaviorDashboardStats, getCostDashboardStats, getDashboardStats } from "@oh-my-pi/omp-stats/aggregator";
+import { initDb, insertMessageStats, insertUserMessageStats } from "@oh-my-pi/omp-stats/db";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -84,6 +84,62 @@ describe("today range bucket alignment in fractional-UTC timezone", () => {
 			expect(stats.timeSeries[0].requests).toBe(2);
 			expect(stats.timeSeries[0].timestamp).toBeGreaterThanOrEqual(midnight.getTime());
 			expect(activeDaysFromSeries(stats.timeSeries)).toBe(1);
+		} finally {
+			if (previousTz === undefined) delete process.env.TZ;
+			else process.env.TZ = previousTz;
+		}
+	});
+
+	it("keeps cost and behavior series on the same local-midnight hourly grid", async () => {
+		// The cost and behavior series previously kept a fixed 86400000 ms
+		// bucket width. With a local-midnight origin that stamps fractional-
+		// UTC zones on the wrong grid — and a DST-fallback local day spans 25
+		// elapsed hours, so fixed-width daily buckets split the last hour
+		// into a second, next-day-labeled bucket. Today must pass its hourly
+		// bucket width through to both series.
+		const previousTz = process.env.TZ;
+		process.env.TZ = "Asia/Kolkata";
+		try {
+			await initDb();
+			expect(new Date().getTimezoneOffset()).toBe(-330);
+			const midnight = new Date();
+			midnight.setHours(0, 0, 0, 0);
+			const early = midnight.getTime() + 10 * 60 * 1000; // local 00:10 today
+			insertMessageStats([makeMessage(early, "today-cost-early")]);
+			insertUserMessageStats([
+				{
+					sessionFile: "/tmp/session.jsonl",
+					entryId: "today-behavior-early",
+					folder: "/tmp/project",
+					timestamp: early,
+					model: "gpt-5.4",
+					provider: "openai-codex",
+					chars: 10,
+					words: 2,
+					yelling: 0,
+					profanity: 0,
+					anguish: 0,
+					negation: 0,
+					repetition: 0,
+					blame: 0,
+				},
+			]);
+
+			const [costStats, behaviorStats] = await Promise.all([
+				getCostDashboardStats("today"),
+				getBehaviorDashboardStats("today"),
+			]);
+
+			const midnightDate = new Date(early).toDateString();
+			for (const series of [costStats.costSeries, behaviorStats.behaviorSeries]) {
+				for (const point of series) {
+					// same local calendar day as the request that produced it.
+					expect((point.timestamp - midnight.getTime()) % HOUR_MS).toBe(0);
+					expect(new Date(point.timestamp).toDateString()).toBe(midnightDate);
+				}
+			}
+			expect(costStats.costSeries.length).toBeGreaterThan(0);
+			expect(behaviorStats.behaviorSeries.length).toBeGreaterThan(0);
 		} finally {
 			if (previousTz === undefined) delete process.env.TZ;
 			else process.env.TZ = previousTz;

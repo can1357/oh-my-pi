@@ -1321,7 +1321,7 @@ export function getToolCallCountsBySession(): Map<string, number> {
 		counts.set(row.sessionFile, row.calls);
 	}
 	return counts;
-export function getRequestsPaginated(limit: number, offset: number): { items: MessageStats[]; total: number } {
+}
 export function getRequestsPaginated(
 	limit: number,
 	offset: number,
@@ -1348,8 +1348,16 @@ export function getRequestsPaginated(
 /**
  * Get daily cost time series data for the last N days, broken down by model.
  * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
+ * @param bucketMs - Bucket width (ms); defaults to a calendar day. A local-
+ *   midnight origin with a fixed 24h width mislabels DST-fallback days, so
+ *   Today's hourly series passes its own bucket width.
  */
-export function getCostTimeSeries(days = 90, cutoff?: number | null, origin = 0): CostTimeSeriesPoint[] {
+export function getCostTimeSeries(
+	days = 90,
+	cutoff?: number | null,
+	origin = 0,
+	bucketMs = 86_400_000,
+): CostTimeSeriesPoint[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== null;
@@ -1357,7 +1365,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null, origin = 0)
 
 	const stmt = db.prepare(`
 		SELECT
-			((timestamp - ?) / 86400000) * 86400000 + ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			model,
 			provider,
 			SUM(cost_total) as cost,
@@ -1373,7 +1381,11 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null, origin = 0)
 		ORDER BY bucket ASC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(origin, origin, seriesCutoff) : stmt.all(origin, origin)) as CostTimeSeriesRow[];
+	const rows = (
+		hasCutoff
+			? stmt.all(origin, bucketMs, bucketMs, origin, seriesCutoff)
+			: stmt.all(origin, bucketMs, bucketMs, origin)
+	) as CostTimeSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		model: row.model,
@@ -1775,12 +1787,16 @@ interface BehaviorSeriesRow {
  * Daily behavioral time series, grouped by responding model+provider.
  * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch day alignment.
  */
-export function getBehaviorTimeSeries(cutoff?: number | null, origin = 0): BehaviorTimeSeriesPoint[] {
+export function getBehaviorTimeSeries(
+	cutoff?: number | null,
+	origin = 0,
+	bucketMs = 86_400_000,
+): BehaviorTimeSeriesPoint[] {
 	if (!db) return [];
 	const hasCutoff = cutoff !== null && cutoff !== undefined && cutoff > 0;
 	const stmt = db.prepare(`
 		SELECT
-			((timestamp - ?) / 86400000) * 86400000 + ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			COALESCE(model, ?) as model,
 			COALESCE(provider, ?) as provider,
 			COUNT(*) as messages,
@@ -1798,8 +1814,8 @@ export function getBehaviorTimeSeries(cutoff?: number | null, origin = 0): Behav
 	`);
 	const rows = (
 		hasCutoff
-			? stmt.all(origin, origin, UNKNOWN_MODEL, UNKNOWN_MODEL, cutoff)
-			: stmt.all(origin, origin, UNKNOWN_MODEL, UNKNOWN_MODEL)
+			? stmt.all(origin, bucketMs, bucketMs, origin, UNKNOWN_MODEL, UNKNOWN_MODEL, cutoff)
+			: stmt.all(origin, bucketMs, bucketMs, origin, UNKNOWN_MODEL, UNKNOWN_MODEL)
 	) as BehaviorSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,

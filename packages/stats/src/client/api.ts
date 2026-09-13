@@ -129,7 +129,9 @@ export async function getRequestsPaginated(
 			{ signal },
 		);
 		if (res && Array.isArray(res.requests) && typeof res.total === "number") return res;
-		// Fallback: legacy returned array
+		// Fallback: legacy returned an unpaged array. Slice the requested page;
+		// total can only be the array length (a complete list here — the legacy
+		// shape has no way to express "more exist beyond what was returned").
 		if (Array.isArray(res as unknown as MessageStats[])) {
 			const arr = res as unknown as MessageStats[];
 			return { requests: arr.slice(offset, offset + limit), total: arr.length };
@@ -137,8 +139,14 @@ export async function getRequestsPaginated(
 		return { requests: [], total: 0 };
 	} catch (err) {
 		if (err instanceof ApiError && err.status === 404) {
-			const legacy = await fetchJson<MessageStats[]>(`${LEGACY_BASE}/stats/recent?limit=${limit}`, { signal });
-			return { requests: legacy.slice(offset, offset + limit), total: legacy.length };
+			// The legacy endpoint cannot paginate, so fetch enough rows to cover
+			// the requested page. `total` can only ever be the fetched prefix
+			// length — report it as such instead of claiming the page is all
+			// there is (an exact total is unknowable without the v1 API).
+			const fetched = await fetchJson<MessageStats[]>(`${LEGACY_BASE}/stats/recent?limit=${offset + limit}`, {
+				signal,
+			});
+			return { requests: fetched.slice(offset, offset + limit), total: fetched.length };
 		}
 		throw err;
 	}

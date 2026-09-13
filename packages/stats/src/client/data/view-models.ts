@@ -116,7 +116,9 @@ export interface FolderRowView extends FolderStats {
 export function buildCostSummary(costSeries: CostTimeSeriesPoint[]): CostSummaryView {
 	const totalCost = costSeries.reduce((sum, p) => sum + p.cost, 0);
 	const unpricedRequests = costSeries.reduce((sum, point) => sum + point.unpricedRequests, 0);
-	const dayBuckets = new Set(costSeries.map(p => p.timestamp)).size;
+	// Distinct LOCAL CALENDAR days, not distinct bucket timestamps: hourly
+	// Today buckets would otherwise report 24 "days".
+	const dayBuckets = new Set(costSeries.map(p => new Date(p.timestamp).toDateString())).size;
 	const avgDailyCost = dayBuckets > 0 ? totalCost / dayBuckets : 0;
 
 	const modelTotals = new Map<string, number>();
