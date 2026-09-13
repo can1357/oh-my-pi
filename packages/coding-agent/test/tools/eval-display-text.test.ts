@@ -228,4 +228,32 @@ describe("EvalTool display() text surfacing", () => {
 		expect(text).toContain("ch elided");
 		expect(text).not.toContain(huge);
 	});
+
+	it("restores the full display value when the artifact write fails", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-display-fail-");
+		// Parent directory is never created, so the spill FileSink cannot open —
+		// OutputSink swallows the error, so persistence must be treated as
+		// unconfirmed and the full value restored into details.
+		const artifactPath = tempDir.join("missing", "eval.log");
+		const huge = `start-${"x".repeat(100_000)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		const tool = new EvalTool({
+			...makeSession(),
+			allocateOutputArtifact: async () => ({ id: "doomed-display", path: artifactPath }),
+		});
+		const result = await tool.execute("call-huge-failed-spill", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(await Bun.file(artifactPath).exists()).toBe(false);
+		expect(result.details?.jsonOutputs?.[0]).toEqual({ payload: huge });
+		expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+	});
 });

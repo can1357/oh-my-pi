@@ -713,6 +713,25 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const jsonOutputs: unknown[] = [];
 			const images: ImageContent[] = [];
 			const statusEvents: EvalStatusEvent[] = [];
+			// Oversized displays land in `jsonOutputs` as bounded previews and stream
+			// their full value to the output artifact. Until the artifact write is
+			// confirmed (see `commitDisplaySpills`), the full value is kept here so a
+			// silently failed spill can restore it instead of stranding it.
+			const spilledDisplays: Array<{ index: number; fullValue: unknown }> = [];
+			const commitDisplaySpills = (summary: OutputSummary | undefined): void => {
+				if (spilledDisplays.length === 0) return;
+				// Artifact persistence confirmed: keep the bounded preview. Otherwise
+				// restore the full value so `details` never points at an artifact that
+				// was never (fully) written.
+				if (summary?.artifactId !== undefined) {
+					spilledDisplays.length = 0;
+					return;
+				}
+				for (const spill of spilledDisplays) {
+					jsonOutputs[spill.index] = spill.fullValue;
+				}
+				spilledDisplays.length = 0;
+			};
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,
@@ -862,6 +881,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						jsonOutputs.push(formatted.detailsValue);
 						cellDisplayTexts.push(`${label}${formatted.previewText}`);
 						if (formatted.spillFullValue) {
+							spilledDisplays.push({ index: jsonOutputs.length - 1, fullValue: output.data });
 							outputSink.push(`${label}${formatted.fullText}\n`, {
 								inline: `${label}${formatted.previewText}\n`,
 								emitInline: false,
@@ -925,6 +945,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const outputText = combinedOutput || errorMsg;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+					commitDisplaySpills(summaryForMeta);
 					const details: EvalToolDetails = {
 						language: languages[0],
 						languages,
@@ -951,6 +972,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						: `Command exited with code ${result.exitCode}`;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+					commitDisplaySpills(summaryForMeta);
 					const details: EvalToolDetails = {
 						language: languages[0],
 						languages,
@@ -980,6 +1002,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					? `(displayed ${images.length} image${images.length === 1 ? "" : "s"}; no text output)`
 					: "(no output)");
 			const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+			commitDisplaySpills(summaryForMeta);
 
 			const details: EvalToolDetails = {
 				language: languages[0],

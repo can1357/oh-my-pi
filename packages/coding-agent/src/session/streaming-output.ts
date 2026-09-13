@@ -829,6 +829,10 @@ export class OutputSink {
 	#artifactTailRing = "";
 	#artifactTailRingBytes = 0;
 	#artifactTailIncomingBytes = 0;
+	// Set when the spill file could not be created, or a final flush/close threw
+	// after creation. `dump()` withholds `artifactId` in that case so callers
+	// never advertise `artifact://<id>` for output that was never fully written.
+	#artifactWriteFailed = false;
 
 	constructor(options?: OutputSinkOptions) {
 		const {
@@ -1187,6 +1191,7 @@ export class OutputSink {
 				this.#pendingFileWrites = undefined;
 			}
 		} catch {
+			this.#artifactWriteFailed = true;
 			try {
 				await this.#file?.sink?.end();
 			} catch {
@@ -1384,7 +1389,7 @@ export class OutputSink {
 			columnDroppedBytes: this.#columnDroppedBytes > 0 ? this.#columnDroppedBytes : undefined,
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
-			artifactId: this.#file?.artifactId,
+			artifactId: this.#artifactWriteFailed ? undefined : this.#file?.artifactId,
 		};
 	}
 
@@ -1408,17 +1413,19 @@ export class OutputSink {
 		// write error). Closing the descriptor MUST still happen — otherwise the
 		// fd leaks and the replay error masks the original tool error that put us
 		// on this path. Both failures are swallowed so dispose() never throws.
+		let flushFailed = false;
 		try {
 			this.#flushArtifactTailIfCapped();
 		} catch {
-			/* ignore */
+			flushFailed = true;
 		} finally {
 			try {
 				await file.sink.end();
 			} catch {
-				/* ignore */
+				flushFailed = true;
 			}
 		}
+		if (flushFailed) this.#artifactWriteFailed = true;
 	}
 
 	/**
