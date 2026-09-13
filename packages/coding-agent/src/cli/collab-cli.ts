@@ -13,6 +13,7 @@ import {
 	listCollabHosts,
 	resolveCollabHostLink,
 } from "../collab/registry";
+import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
 import { shortenPath } from "../tools/render-utils";
 
 export interface CollabListCommandArgs {
@@ -60,7 +61,11 @@ export async function runCollabListCommand(
 
 	print(chalk.green(`${hosts.length} active Collab ${hosts.length === 1 ? "host" : "hosts"}`));
 	for (const host of hosts) {
-		const session = host.sessionName ? `${host.sessionName} (${host.sessionId})` : host.sessionId;
+		// Session names and POSIX paths come from other processes and may carry
+		// tabs, newlines, or escape bytes; keep each on one clean line.
+		const name = host.sessionName ? sanitizeDisplayLine(host.sessionName) : "";
+		const session = name ? `${name} (${host.sessionId})` : host.sessionId;
+		const cwd = sanitizeDisplayLine(shortenPath(host.cwd));
 		const guests = host.participants - 1;
 		const details = [
 			`pid ${host.pid}`,
@@ -73,7 +78,7 @@ export async function runCollabListCommand(
 		];
 		if (host.inputRequired) details.push("input required");
 		print("");
-		print(`${host.instanceId}  ${session}  ${chalk.dim(shortenPath(host.cwd))}`);
+		print(`${host.instanceId}  ${session}  ${chalk.dim(cwd)}`);
 		print(`  ${chalk.dim(details.join(" · "))}`);
 	}
 	print(chalk.dim("Get a link: omp collab link <instanceId|pid> [--view]"));

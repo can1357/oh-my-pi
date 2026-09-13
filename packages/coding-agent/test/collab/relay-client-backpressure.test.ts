@@ -87,6 +87,35 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("hands a goodbye queued behind backpressure to the open socket when closing", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({
+			wsUrl: "ws://localhost:8788/r/backpressure",
+			role: "host",
+			key: {} as CryptoKey,
+		});
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0];
+		if (!ws) throw new Error("CollabSocket did not construct a WebSocket");
+		ws.open();
+
+		// The host's stop sequence: send the goodbye, flush, close. Under
+		// backpressure the sealed frame is only queued when flush resolves.
+		socket.send({ t: "bye", reason: "session switched" });
+		await socket.flush();
+		expect(ws.sent).toHaveLength(0);
+		socket.close();
+
+		// Closing is terminal, so the queued goodbye goes out ahead of the close
+		// frame instead of being discarded with the queue.
+		expect(ws.sent).toHaveLength(1);
+		expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSED);
+	});
+
 	it("drains reconnect backlog through the same backpressure gate", async () => {
 		vi.useFakeTimers();
 		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);

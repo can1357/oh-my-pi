@@ -495,4 +495,22 @@ describe("collab registry", () => {
 
 		expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"refuses a symlinked registry directory instead of listing or pruning through it",
+		async () => {
+			// A planted symlink must not turn listing (which prunes malformed
+			// `*.json`) into a way to delete files in an unrelated directory.
+			const target = await tempDir();
+			const bystander = path.join(target, "important.json");
+			await Bun.write(bystander, "{not registry metadata");
+			const link = path.join(await tempDir(), "collab-hosts");
+			await fs.symlink(target, link);
+
+			expect(await listCollabHosts({ dir: link })).toEqual([]);
+			expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
+			await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
+			expect(await fs.readdir(target)).toEqual(["important.json"]);
+		},
+	);
 });

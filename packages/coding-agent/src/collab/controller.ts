@@ -11,7 +11,9 @@
  */
 import { randomUUID } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
 import type { InteractiveModeContext } from "../modes/types";
+import { TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { CollabHost } from "./host";
 import type { CollabAccess } from "./registry";
 
@@ -31,13 +33,13 @@ export class CollabController {
 	#host: CollabHost | undefined;
 	/** Serializes stop/start sequences so a rotation never interleaves with another. */
 	#ops: Promise<void> = Promise.resolve();
-	#unsubscribeSessionChange: () => void;
+	/** Installed when the first room starts; a process that never hosts never subscribes. */
+	#unsubscribeSessionChange: (() => void) | undefined;
 	#shutdown = false;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
 		this.instanceId = randomUUID();
-		this.#unsubscribeSessionChange = ctx.session.registerSessionChangeCallback(() => this.#onSessionChanged());
 	}
 
 	/** The live room, if any (a room that ended on its own is reported as absent). */
@@ -84,12 +86,20 @@ export class CollabController {
 		await this.host?.stop(reason);
 	}
 
+	/** Resolves once no stop/start sequence is in flight. */
+	idle(): Promise<void> {
+		return this.#ops;
+	}
+
 	/** Stop hosting for good; no further rooms are started for this process. */
 	async shutdown(reason: string): Promise<void> {
 		this.#shutdown = true;
-		this.#unsubscribeSessionChange();
-		await this.#ops;
+		this.#unsubscribeSessionChange?.();
+		this.#unsubscribeSessionChange = undefined;
+		// Stop before draining the chain: a room still connecting is aborted at
+		// once instead of holding shutdown for the relay connect timeout.
 		await this.stop(reason);
+		await this.#ops;
 	}
 
 	#resolveRelayUrl(relay?: string): string {
@@ -111,6 +121,9 @@ export class CollabController {
 	async #launch(access: CollabAccess, relay?: string): Promise<CollabHost> {
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
+		this.#unsubscribeSessionChange ??= this.#ctx.session.registerSessionChangeCallback(() =>
+			this.#onSessionChanged(),
+		);
 		const host = new CollabHost(this.#ctx, { instanceId: this.instanceId, generation: ++this.#generation, access });
 		this.#host = host;
 		this.#ctx.collabHost = host;
@@ -131,7 +144,10 @@ export class CollabController {
 		} catch (err) {
 			if (this.#shutdown) return;
 			logger.warn("Collab auto-start failed", { error: String(err) });
-			const message = err instanceof Error ? err.message : String(err);
+			const message = truncateToWidth(
+				sanitizeDisplayLine(err instanceof Error ? err.message : String(err)),
+				TRUNCATE_LENGTHS.LINE,
+			);
 			this.#ctx.showStatus(`Collab auto-start failed: ${message}`, { dim: true });
 		}
 	}
@@ -145,8 +161,11 @@ export class CollabController {
 	#onSessionChanged(): void {
 		const previous = this.host;
 		if (previous && previous.sessionId === this.#ctx.sessionManager.getSessionId()) return;
+		// Stop synchronously so a room still connecting is aborted now rather than
+		// after the queued start settles; the chain then waits for that stop.
+		const stopping = previous?.stop("session switched");
 		this.#ops = this.#ops.then(async () => {
-			if (previous) await previous.stop("session switched");
+			await stopping;
 			if (this.#shutdown || this.host) return;
 			const access = this.autoStartMode;
 			if (access !== "off") await this.#launchReporting(access);

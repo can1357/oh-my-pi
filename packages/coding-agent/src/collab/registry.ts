@@ -307,6 +307,24 @@ function handleConnection(socket: net.Socket, token: string, source: CollabHostR
 }
 
 /**
+ * The registry directory must be a real directory owned by the current user
+ * (POSIX). Both publication and listing check this: listing prunes malformed
+ * entries, so following a symlink into an unrelated directory would let a
+ * planted link turn `omp collab list` into a deletion tool.
+ */
+async function assertPrivateDir(dir: string): Promise<fs.Stats | null> {
+	if (process.platform === "win32") return null;
+	const stat = await fs.promises.lstat(dir);
+	if (stat.isSymbolicLink()) throw new Error(`collab registry directory is a symlink: ${dir}`);
+	if (!stat.isDirectory()) throw new Error(`collab registry path is not a directory: ${dir}`);
+	const uid = process.getuid?.();
+	if (uid !== undefined && stat.uid !== uid) {
+		throw new Error(`collab registry directory is not owned by the current user: ${dir}`);
+	}
+	return stat;
+}
+
+/**
  * Create the registry directory owner-only. `mkdir` with a mode leaves an
  * existing directory's permissions alone, so an already-present directory is
  * tightened explicitly; a symlink or a directory owned by another user is
@@ -314,14 +332,8 @@ function handleConnection(socket: net.Socket, token: string, source: CollabHostR
  */
 async function ensurePrivateDir(dir: string): Promise<void> {
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-	if (process.platform === "win32") return;
-	const stat = await fs.promises.lstat(dir);
-	if (stat.isSymbolicLink()) throw new Error(`collab registry directory is a symlink: ${dir}`);
-	const uid = process.getuid?.();
-	if (uid !== undefined && stat.uid !== uid) {
-		throw new Error(`collab registry directory is not owned by the current user: ${dir}`);
-	}
-	if ((stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
+	const stat = await assertPrivateDir(dir);
+	if (stat && (stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
 }
 
 /**
@@ -538,6 +550,7 @@ async function listLiveEntries(options?: CollabListOptions): Promise<LiveEntry[]
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
 	let names: string[];
 	try {
+		await assertPrivateDir(dir);
 		names = await fs.promises.readdir(dir);
 	} catch (err) {
 		if (isEnoent(err)) return [];

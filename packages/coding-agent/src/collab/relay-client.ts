@@ -108,8 +108,10 @@ export class CollabSocket {
 
 	/**
 	 * Resolves once every frame passed to {@link send} so far has been sealed
-	 * and handed to the transport (or dropped because the socket closed). Lets
-	 * a caller send a final frame before {@link close} without racing the seal.
+	 * and either written to the transport or queued behind backpressure.
+	 * {@link close} hands that queue to an open socket before closing it, so
+	 * `send(final); await flush(); close()` delivers the final frame whenever
+	 * the connection is up; frames queued while reconnecting are dropped.
 	 */
 	flush(): Promise<void> {
 		return this.#sendChain;
@@ -165,16 +167,22 @@ export class CollabSocket {
 		this.#clearBackpressureDrain();
 		const wasClosed = this.#closed;
 		this.#closed = true;
-		this.#pendingSends.length = 0;
 		const ws = this.#ws;
 		this.#ws = null;
 		if (ws) {
 			try {
+				// Closing is terminal, so backpressure no longer matters: everything
+				// still queued (typically a final `bye`) goes into the socket buffer
+				// ahead of the close frame instead of being discarded.
+				if (ws.readyState === WebSocket.OPEN) {
+					for (const envelope of this.#pendingSends) ws.send(envelope);
+				}
 				ws.close(1000);
 			} catch {
 				// already closing/closed
 			}
 		}
+		this.#pendingSends.length = 0;
 		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
 	}
 

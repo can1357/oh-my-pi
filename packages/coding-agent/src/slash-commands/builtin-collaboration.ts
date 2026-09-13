@@ -9,9 +9,10 @@ import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
+import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
 import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "../modes/utils/copy-targets";
 import { restartBrowserForModeChange } from "../tools/browser";
-import { shortenPath } from "../tools/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
 import { refreshStatusLine } from "./builtin-modes";
@@ -348,7 +349,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				const plural = hosts.length === 1 ? "" : "s";
 				const lines = [theme.fg("success", `${hosts.length} active local Collab host${plural}`)];
 				for (const host of hosts) {
-					const session = host.sessionName ? `${host.sessionName} (${host.sessionId})` : host.sessionId;
+					// Registry strings come from other processes: strip controls,
+					// collapse newlines, and bound the width before they hit the TUI.
+					const name = host.sessionName ? sanitizeDisplayLine(host.sessionName) : "";
+					const session = truncateToWidth(
+						name ? `${name} (${host.sessionId})` : host.sessionId,
+						TRUNCATE_LENGTHS.LONG,
+					);
 					const guests = host.participants - 1;
 					const detail = [
 						`pid ${host.pid}`,
@@ -356,7 +363,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						host.access,
 						host.relayConnected ? "relay connected" : "relay reconnecting",
 						...(host.inputRequired ? ["input required"] : []),
-						shortenPath(host.cwd),
+						truncateToWidth(sanitizeDisplayLine(shortenPath(host.cwd)), TRUNCATE_LENGTHS.TITLE),
 					].join(", ");
 					lines.push(
 						` ${bullet} ${session} ${theme.fg("muted", `— ${detail}`)}`,
@@ -372,26 +379,27 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			const knownStartVerb = verb === "start" || verb === "view";
 			const view = verb === "view";
-			if (ctx.collabHost) {
-				showCollabLink(
-					ctx,
-					ctx.collabHost,
-					view ? "Read-only collab session active" : "Collab session active",
-					view,
-				);
+			const access = view ? "view" : "control";
+			const existing = ctx.collabHost;
+			// Re-print the current room unless control was asked of a room the
+			// registry publishes as view-only: that request replaces the room.
+			if (existing && (existing.access === "control" || view)) {
+				showCollabLink(ctx, existing, view ? "Read-only collab session active" : "Collab session active", view);
 				return;
 			}
 			let host: CollabHost;
 			try {
-				host = await ctx.collabController.start({
-					access: view ? "view" : "control",
-					relay: knownStartVerb ? rest : args,
-				});
+				host = await ctx.collabController.start({ access, relay: knownStartVerb ? rest : args });
 			} catch (err) {
 				ctx.showError(`Failed to start collab session: ${errorMessage(err)}`);
 				return;
 			}
-			showCollabLink(ctx, host, "Collab session started!", view);
+			showCollabLink(
+				ctx,
+				host,
+				existing ? "Collab session restarted with control access" : "Collab session started!",
+				view,
+			);
 		},
 	},
 	{

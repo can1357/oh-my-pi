@@ -28,6 +28,7 @@ afterAll(() => {
 function fakeHost(options?: {
 	webLink?: string;
 	webViewLink?: string;
+	access?: "view" | "control";
 }): NonNullable<InteractiveModeContext["collabHost"]> {
 	return {
 		link: "relay.example.com/r/full-control",
@@ -35,6 +36,7 @@ function fakeHost(options?: {
 		webLink: options?.webLink ?? "https://my.omp.sh/#full-control",
 		webViewLink: options?.webViewLink ?? "https://my.omp.sh/#read-only",
 		participants: [{ name: "host", role: "host" }],
+		access: options?.access ?? "control",
 	} as unknown as NonNullable<InteractiveModeContext["collabHost"]>;
 }
 
@@ -135,6 +137,33 @@ describe("/collab slash command QR code rendering", () => {
 		expect(presented[1]).toBeInstanceOf(CollabQrCodeComponent);
 		const component = presented[1] as CollabQrCodeComponent;
 		expect(component.render(120).join("\n")).toMatch(/\x1b\[(?:47|40)m/);
+	});
+
+	it("replaces a view-only room with a control room when /collab asks for control", async () => {
+		const startSpy = mockStartedHostLinks();
+		const harness = createRuntimeHarness({ collabHost: fakeHost({ access: "view" }) });
+
+		const handled = await executeBuiltinSlashCommand("/collab", harness.runtime);
+
+		expect(handled).toBe(true);
+		// A new room was started rather than the view-only room's internal control link being re-printed.
+		expect(startSpy).toHaveBeenCalledTimes(1);
+		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
+		expect(harness.ctx.collabHost?.access).toBe("control");
+		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
+		expect(statusText).toContain("restarted with control access");
+		expect(statusText).toContain("my.omp.sh/#started-full");
+	});
+
+	it("re-prints the view link of a view-only room for /collab view without restarting", async () => {
+		const startSpy = mockStartedHostLinks();
+		const harness = createRuntimeHarness({ collabHost: fakeHost({ access: "view" }) });
+
+		await executeBuiltinSlashCommand("/collab view", harness.runtime);
+
+		expect(startSpy).not.toHaveBeenCalled();
+		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
+		expect(statusText).toContain("my.omp.sh/#read-only");
 	});
 
 	it("prints a one-shot read-only browser QR when hosting", async () => {

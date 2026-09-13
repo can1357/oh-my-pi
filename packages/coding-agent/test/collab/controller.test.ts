@@ -21,7 +21,7 @@ import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-co
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 const RELAY_URL = "ws://localhost:8788";
 const WEB_URL = "https://collab.example";
@@ -327,5 +327,62 @@ describe("CollabController", () => {
 		await controller.shutdown("again");
 		expect(publishSpy).toHaveBeenCalledTimes(1);
 		expect(ctx.collabHost).toBeUndefined();
+	});
+
+	describe("while the relay has not opened yet", () => {
+		/** Fake socket that never reaches OPEN: the relay is up but unresponsive. */
+		class NeverOpens extends FakeWebSocket {
+			constructor(url: string) {
+				super(url);
+				// The base class opens on a microtask unless the socket already left CONNECTING.
+				this.readyState = FakeWebSocket.CLOSING;
+			}
+		}
+
+		beforeEach(() => {
+			globalThis.WebSocket = NeverOpens as unknown as typeof WebSocket;
+		});
+
+		it("shutdown aborts the pending start instead of waiting for the connect timeout", async () => {
+			const { ctx } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+			const pending = ctx.collabHost;
+			if (!pending) throw new Error("auto-start did not install a host");
+
+			// Bounded by the test timeout: a stall here means shutdown waited on
+			// the 15 s relay connect timeout instead of aborting the start.
+			await controller.shutdown("host exited");
+
+			expect(pending.stopped).toBe(true);
+			expect(ctx.collabHost).toBeUndefined();
+			expect(publishSpy).toHaveBeenCalledTimes(0);
+		});
+
+		it("a session switch aborts the pending start and installs the new session's room at once", async () => {
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+			const first = ctx.collabHost;
+			if (!first) throw new Error("auto-start did not install a host");
+			const firstTornDown = Promise.withResolvers<void>();
+			state.tornDown.push(firstTornDown.resolve);
+
+			switchSession(state, `sess-next-${crypto.randomUUID()}`);
+
+			// The stale room ends without waiting for its 15 s connect timeout
+			// (bounded by the test timeout) …
+			await firstTornDown.promise;
+			expect(first.stopped).toBe(true);
+			// … and once its stop settles, the successor owns the context, so a
+			// dialog raised now is retained by the new session's room. Only
+			// microtask hops separate the two; no timer or I/O is involved.
+			for (let flush = 0; flush < 10 && ctx.collabHost === undefined; flush++) await Promise.resolve();
+			const second = ctx.collabHost;
+			expect(second).toBeDefined();
+			expect(second).not.toBe(first);
+			expect(second!.generation).toBe(2);
+			expect(second!.sessionId).toBe(state.sessionId);
+		});
 	});
 });
