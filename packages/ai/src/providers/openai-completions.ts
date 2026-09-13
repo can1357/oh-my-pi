@@ -2,6 +2,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { aimlapiClientHeaders } from "@oh-my-pi/pi-catalog/wire/aimlapi";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -1555,7 +1556,9 @@ function createRequestSetup(
 				? getKimiCommonHeaders
 				: model.provider === "cline-pass"
 					? () => clinePassClientHeaders(promptCacheSessionId)
-					: undefined,
+					: model.provider === "aimlapi"
+						? () => aimlapiClientHeaders(model.baseUrl)
+						: undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});
