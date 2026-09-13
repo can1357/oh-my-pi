@@ -3,6 +3,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
@@ -422,21 +423,56 @@ export class WorkPool {
 		manager.watchJobs([jobId]);
 	}
 
-	#settleTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): string {
-		this.#finishTurn(agent, batch, result);
+	async #settleTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<string> {
+		await this.#finishTurn(agent, batch, result);
 		const delivery = this.#renderTurnResult(agent, batch, result);
 		if (batch.status !== "completed") throw new Error(delivery);
 		return delivery;
 	}
 
-	#finishTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): void {
+	async #finishTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<void> {
 		batch.status = result.aborted ? "cancelled" : result.exitCode !== 0 || result.error ? "failed" : "completed";
 		batch.output = result.output;
 		for (const item of batch.items) item.status = batch.status;
 		agent.turns++;
 		agent.jobId = undefined;
 		const ref = AgentRegistry.global().get(agent.id);
-		ref?.session?.setWorkPoolYieldItems([]);
+		// Retained idle workers can wake through IRC, so clear the runtime schema and cached inline declaration together.
+		// A refresh failure must not strand the pool in #waitForDrain(): items are
+		// already terminal, so keep the turn result, drop the worker instead of
+		// reusing it with a stale keyed declaration, and still notify drain.
+		let yieldCleared = true;
+		try {
+			await ref?.session?.setWorkPoolYieldItems([]);
+		} catch (error) {
+			yieldCleared = false;
+			logger.warn("workpool: failed to clear yield contract", {
+				pool: this.name,
+				agent: agent.id,
+				batch: batch.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			// The runtime already flipped to the ordinary schema while the prompt
+			// still advertises the keyed one. The worker must not survive as a
+			// messageable session: release the lifecycle adoption (guarded by the
+			// registry ref so a newer same-id ref is never taken down) so neither
+			// pool reuse nor an IRC wake can reach the inconsistent contract. The
+			// tombstone keeps the ref terminal so a later persisted-agent scan
+			// cannot resurrect the transcript as parked with a stale pooled
+			// declaration and an empty runtime set.
+			if (ref) {
+				try {
+					await AgentLifecycleManager.global().release(agent.id, ref, { tombstone: true });
+				} catch (releaseError) {
+					logger.warn("workpool: failed to release worker after yield clear failure", {
+						pool: this.name,
+						agent: agent.id,
+						batch: batch.id,
+						error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+					});
+				}
+			}
+		}
 		if (this.freshAgents) {
 			agent.state = "dead";
 			const index = this.agents.indexOf(agent);
@@ -446,7 +482,7 @@ export class WorkPool {
 			this.#notifyDrained();
 			return;
 		}
-		if (ref && (ref.status === "idle" || ref.status === "parked")) {
+		if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked")) {
 			this.#drain(agent);
 		} else {
 			agent.state = "dead";

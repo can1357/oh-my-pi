@@ -250,15 +250,13 @@ describe("Codex model discovery", () => {
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			expect(model.contextWindow).toBe(272_000);
 			const builtModel = buildModel(model);
-			// Codex credits keep this base rate and do not charge for cache
-			// writes; unlike the API card, there is no long-context tier. The
-			// stale 272K wire window floors to the documented 1.05M at build
-			// time — live traffic succeeds past the wire's 872K maximum — so
-			// Astra is not gated behind `/extended-context`.
+			// Codex credits have no long-context pricing tier. Catalog composition
+			// retains the standard window; the registry expands it only when
+			// extended context is enabled.
 			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
 			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
 			expect(builtModel).toMatchObject({
-				contextWindow: 1_050_000,
+				contextWindow: 272_000,
 				maxTokens: 128_000,
 			});
 		}

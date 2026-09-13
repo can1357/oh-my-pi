@@ -7,12 +7,14 @@ import {
 	buildBrowserItems,
 	ModelBrowser,
 	type RoleAssignments,
+	resolveRoleAssignments,
 	sortModelItems,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
-type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps">;
+type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
+	Partial<Pick<Model, "cost">>;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -44,6 +46,25 @@ function makeBrowser(
 	browser.setItems(items);
 	return browser;
 }
+
+describe("resolveRoleAssignments", () => {
+	test("shows configured smol for an unconfigured tiny role", () => {
+		const smol = makeModel("demo", "custom-smol");
+		const priorityHead = makeModel("demo", "gemini-3.8-flash");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/default",
+				smol: "demo/custom-smol",
+			},
+		});
+
+		const roles = resolveRoleAssignments(settings, [smol, priorityHead], [smol, priorityHead]);
+
+		expect(roles.smol?.model).toBe(smol);
+		expect(roles.tiny?.model).toBe(smol);
+		expect(roles.tiny?.autoSelected).toBe(true);
+	});
+});
 
 describe("ModelBrowser search ranking", () => {
 	test("an exact query match outranks the MRU model", () => {
@@ -141,6 +162,60 @@ describe("ModelBrowser search ranking", () => {
 		browser.setQuery("muse");
 
 		expect(browser.getSelected()?.selector).toBe("fireworks/muse-glimmer-30b");
+	});
+
+	test("typing free finds a zero-cost model whose id never says free", () => {
+		// Regression: the cost column renders "free" for zero-cost models, but
+		// the haystack was only "provider/id" — so nvidia's genuinely free
+		// models were unfindable while openrouter's ":free" ids matched by
+		// accident of naming.
+		const browser = makeBrowser(
+			[
+				makeModel("nvidia", "nemotron-3-nano"),
+				makeModel("anthropic", "claude-sonnet-4-5", {
+					cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+				}),
+			],
+			[],
+		);
+
+		browser.setQuery("free");
+
+		expect(browser.visibleCount).toBe(1);
+		expect(browser.getSelected()?.selector).toBe("nvidia/nemotron-3-nano");
+	});
+
+	test("an id that literally says free outranks a model that is merely free", () => {
+		// Both match; the contiguous-literal tier must keep the ":free" id on
+		// top rather than collapsing every zero-cost model into one tier.
+		const browser = makeBrowser(
+			[makeModel("nvidia", "nemotron-3-nano"), makeModel("kilo", "liquid/lfm-2.5-2.6b:free")],
+			[],
+		);
+
+		browser.setQuery("free");
+
+		expect(browser.visibleCount).toBe(2);
+		expect(browser.getSelected()?.selector).toBe("kilo/liquid/lfm-2.5-2.6b:free");
+	});
+
+	test("the cost keyword composes with multi-token search", () => {
+		// The keyword is appended as its own word, so it survives AND-token
+		// matching — narrowing a model name by cost, not just a bare "free".
+		const browser = makeBrowser(
+			[
+				makeModel("nvidia", "moonshotai/kimi-k3"),
+				makeModel("moonshot", "moonshotai/kimi-k3", {
+					cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+				}),
+			],
+			[],
+		);
+
+		browser.setQuery("kimi k3 free");
+
+		expect(browser.visibleCount).toBe(1);
+		expect(browser.getSelected()?.selector).toBe("nvidia/moonshotai/kimi-k3");
 	});
 });
 

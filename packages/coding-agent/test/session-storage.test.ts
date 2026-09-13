@@ -246,6 +246,81 @@ describe("FileSessionStorage.writeTextSync", () => {
 		expect(second.ino).not.toBe(first.ino);
 		expect(await Bun.file(sessionPath).text()).toBe("second\n");
 	});
+
+	it("keeps open readers on the old file when replacement initially fails with EPERM", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original snapshot\n");
+		const reader = fs.openSync(sessionPath, "r");
+		const original = fs.fstatSync(reader);
+		const rename = fs.renameSync;
+		let failed = false;
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+			if (!failed && target === sessionPath) {
+				failed = true;
+				throw Object.assign(new Error("replace blocked"), { code: "EPERM" });
+			}
+			rename(source, target);
+		});
+		try {
+			storage.writeTextSync(sessionPath, "replacement snapshot\n");
+			expect(fs.readFileSync(reader, "utf8")).toBe("original snapshot\n");
+			expect(fs.statSync(sessionPath).ino).not.toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("replacement snapshot\n");
+			expect(await fsp.readdir(tempDir)).toEqual(["session.jsonl"]);
+		} finally {
+			renameSpy.mockRestore();
+			fs.closeSync(reader);
+		}
+	});
+
+	it("restores the original identity and content if the EPERM replacement retry fails", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const original = fs.statSync(sessionPath);
+		const rename = fs.renameSync;
+		let attempts = 0;
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+			if (typeof source === "string" && source.endsWith(".tmp") && target === sessionPath) {
+				attempts++;
+				throw Object.assign(new Error(attempts === 1 ? "replace blocked" : "retry failed"), {
+					code: attempts === 1 ? "EPERM" : "EIO",
+				});
+			}
+			rename(source, target);
+		});
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("retry failed");
+			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+			expect(await fsp.readdir(tempDir)).toEqual(["session.jsonl"]);
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
+
+	it("preserves the original when staging the replacement fails with EPERM", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const original = fs.statSync(sessionPath);
+		const write = fs.writeFileSync;
+		const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, content, options) => {
+			if (typeof file === "string" && path.dirname(file) === tempDir && file.endsWith(".tmp")) {
+				throw Object.assign(new Error("staging denied"), { code: "EPERM" });
+			}
+			write(file, content, options);
+		});
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("staging denied");
+			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+			expect(await fsp.readdir(tempDir)).toEqual(["session.jsonl"]);
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
 });
 
 describe("FileSessionStorage.updateSessionTitle", () => {

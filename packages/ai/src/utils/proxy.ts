@@ -380,14 +380,15 @@ export async function connectProxiedSocket(
 		}
 
 		const tlsOptions = options?.tls;
-		tunnelSocket = tls.connect({
+		const newTunnelSocket: tls.TLSSocket = tls.connect({
 			...tlsOptions,
 			socket: rawSocket,
 			servername: tlsOptions?.servername ?? targetHost,
 			ALPNProtocols: tlsOptions?.ALPNProtocols ?? ["h2"],
 		});
-		tunnelSocket.once("secureConnect", onTunnelReady);
-		tunnelSocket.once("error", onTunnelError);
+		tunnelSocket = newTunnelSocket;
+		newTunnelSocket.once("secureConnect", onTunnelReady);
+		newTunnelSocket.once("error", onTunnelError);
 	};
 	const onProxyReady = (): void => {
 		if (!rawSocket) return;

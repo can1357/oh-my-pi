@@ -1,12 +1,13 @@
 /**
- * Fire Pass (Fireworks Kimi K2.6 Turbo subscription) wiring.
+ * Fire Pass (Fireworks subscription) wiring.
  *
- * Fire Pass keys (`fpk_…`) authorize only the `accounts/fireworks/routers/kimi-k2p6-turbo`
- * router and reject `/v1/models`. The bundled catalog stores a friendly public id
- * (`kimi-k2.6-turbo`) and the openai-completions provider translates it to the wire
- * form at request time.
+ * Fire Pass keys (`fpk_…`) authorize only router endpoints (e.g. `accounts/fireworks/routers/glm-5p2-fast`)
+ * and reject `/v1/models`. The bundled catalog stores friendly public ids (`glm-5.2-fast`, `kimi-k3-fast`)
+ * and the openai-completions provider translates them to router wire form at request time.
  */
 import { describe, expect, it } from "bun:test";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -20,20 +21,27 @@ function sseResponse(events: unknown[]): Response {
 }
 
 describe("Fire Pass provider", () => {
-	it("ships a bundled Kimi K2.6 Turbo entry on the firepass provider", () => {
-		const model = getBundledModel("firepass", "kimi-k2.6-turbo");
-		expect(model).toBeDefined();
-		expect(model.provider).toBe("firepass");
-		expect(model.api).toBe("openai-completions");
-		expect(model.baseUrl).toBe("https://api.fireworks.ai/inference/v1");
-		expect(model.reasoning).toBe(true);
+	it("ships bundled GLM 5.2 Fast and Kimi K3 Fast entries on the firepass provider", () => {
+		const glm = getBundledModel("firepass", "glm-5.2-fast");
+		expect(glm).toBeDefined();
+		expect(glm?.provider).toBe("firepass");
+		expect(glm?.contextWindow).toBe(1048576);
+		expect(glm?.reasoning).toBe(true);
+
+		const kimi = getBundledModel("firepass", "kimi-k3-fast");
+		expect(kimi).toBeDefined();
+		expect(kimi?.provider).toBe("firepass");
+		expect(kimi?.contextWindow).toBe(1048576);
+		expect(kimi?.reasoning).toBe(true);
 	});
 
-	it("translates the friendly id to the router wire id when calling chat completions", async () => {
-		const model = getBundledModel<"openai-completions">("firepass", "kimi-k2.6-turbo");
-		const captured: { body: string | null } = { body: null };
+	it("translates glm-5.2-fast and kimi-k3-fast to router wire endpoints", async () => {
+		const glm = getBundledModel<"openai-completions">("firepass", "glm-5.2-fast");
+		const kimi = getBundledModel<"openai-completions">("firepass", "kimi-k3-fast");
+
+		const bodies: string[] = [];
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
-			captured.body = typeof init?.body === "string" ? init.body : null;
+			if (typeof init?.body === "string") bodies.push(init.body);
 			return sseResponse([
 				{ choices: [{ delta: { content: "ok" }, index: 0 }] },
 				{ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] },
@@ -45,125 +53,47 @@ describe("Fire Pass provider", () => {
 			systemPrompt: [],
 			messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
 		};
-		const stream = streamOpenAICompletions(model as Model<"openai-completions">, context, {
+
+		for await (const _ of streamOpenAICompletions(glm as Model<"openai-completions">, context, {
 			apiKey: "fpk_test",
 			fetch: fetchMock,
-		});
-		for await (const _event of stream) {
-			/* drain */
+		})) {
 		}
 
-		expect(captured.body).not.toBeNull();
-		const parsed = JSON.parse(captured.body ?? "{}") as { model?: unknown };
-		expect(parsed.model).toBe("accounts/fireworks/routers/kimi-k2p6-turbo");
+		for await (const _ of streamOpenAICompletions(kimi as Model<"openai-completions">, context, {
+			apiKey: "fpk_test",
+			fetch: fetchMock,
+		})) {
+		}
+
+		expect(bodies.length).toBe(2);
+		expect(JSON.parse(bodies[0] ?? "{}").model).toBe("accounts/fireworks/routers/glm-5p2-fast");
+		expect(JSON.parse(bodies[1] ?? "{}").model).toBe("accounts/fireworks/routers/kimi-k3-fast");
 	});
 
-	it("forwards the catalog-exposed xhigh effort verbatim to the Fire Pass router", async () => {
-		// The Fire Pass router's own validation message enumerates the accepted
-		// reasoning_effort set as `low | medium | high | xhigh | max | none`, and
-		// `xhigh` is a distinct tier from `max` (different reasoning-token budgets
-		// for the same prompt). The bundled entry must therefore advertise xhigh
-		// without a thinking effortMap that would silently downgrade it to max —
-		// see PR #1199 discussion r3265122224 for the live API capture.
-		const model = getBundledModel<"openai-completions">("firepass", "kimi-k2.6-turbo");
-		expect(model.thinking?.effortMap?.xhigh).toBeUndefined();
+	it("validates login against accounts/fireworks/routers/glm-5p2-fast", async () => {
+		const login = getProviderDefinition("firepass")?.login;
+		expect(login).toBeDefined();
 
-		const captured: { body: string | null } = { body: null };
+		let capturedBody: string | null = null;
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
-			captured.body = typeof init?.body === "string" ? init.body : null;
-			return sseResponse([
-				{ choices: [{ delta: { content: "ok" }, index: 0 }] },
-				{ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] },
-				"[DONE]",
-			]);
+			capturedBody = typeof init?.body === "string" ? init.body : null;
+			return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
 		};
 
-		const context: Context = {
-			systemPrompt: [],
-			messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
-		};
-		const stream = streamOpenAICompletions(model as Model<"openai-completions">, context, {
-			apiKey: "fpk_test",
-			reasoning: "xhigh",
+		const ctrl: OAuthController = {
 			fetch: fetchMock,
-		});
-		for await (const _event of stream) {
-			/* drain */
-		}
-
-		expect(captured.body).not.toBeNull();
-		const parsed = JSON.parse(captured.body ?? "{}") as { reasoning_effort?: unknown };
-		expect(parsed.reasoning_effort).toBe("xhigh");
-	});
-
-	it("falls back to the catalog max_tokens when the caller omits it (Kimi K2 docs guidance)", async () => {
-		// https://docs.fireworks.ai/models/kimi-k2 — "always set max_tokens explicitly" because
-		// the Kimi K2 family otherwise emits very long reasoning traces. The openai-completions
-		// provider injects the catalog default via its Kimi-family safety net; the firepass
-		// catalog id (`kimi-k2.6-turbo`) and wire id (`accounts/fireworks/routers/kimi-k2p6-turbo`)
-		// must both fall under that net so users never hit the runaway path.
-		const model = getBundledModel<"openai-completions">("firepass", "kimi-k2.6-turbo");
-		expect(model.maxTokens).toBeGreaterThan(0);
-
-		const captured: { body: string | null } = { body: null };
-		const fetchMock: FetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
-			captured.body = typeof init?.body === "string" ? init.body : null;
-			return sseResponse([
-				{ choices: [{ delta: { content: "ok" }, index: 0 }] },
-				{ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] },
-				"[DONE]",
-			]);
+			onPrompt: async () => "fpk_test",
+			onAuth: () => {},
+			onProgress: () => {},
 		};
 
-		const context: Context = {
-			systemPrompt: [],
-			messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
-		};
-		const stream = streamOpenAICompletions(model as Model<"openai-completions">, context, {
-			apiKey: "fpk_test",
-			fetch: fetchMock,
-			// Intentionally omit maxTokens — the provider must inject the catalog default.
-		});
-		for await (const _event of stream) {
-			/* drain */
-		}
-
-		expect(captured.body).not.toBeNull();
-		const parsed = JSON.parse(captured.body ?? "{}") as { max_tokens?: unknown };
-		expect(parsed.max_tokens).toBe(model.maxTokens);
-	});
-
-	it("applies the Kimi max_tokens default to canonical Fire Pass router ids", async () => {
-		const bundled = getBundledModel<"openai-completions">("firepass", "kimi-k2.6-turbo");
-		const model: Model<"openai-completions"> = {
-			...bundled,
-			id: "accounts/fireworks/routers/kimi-k2p6-turbo",
-		};
-		const captured: { body: string | null } = { body: null };
-		const fetchMock: FetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
-			captured.body = typeof init?.body === "string" ? init.body : null;
-			return sseResponse([
-				{ choices: [{ delta: { content: "ok" }, index: 0 }] },
-				{ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] },
-				"[DONE]",
-			]);
-		};
-
-		const context: Context = {
-			systemPrompt: [],
-			messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
-		};
-		const stream = streamOpenAICompletions(model, context, {
-			apiKey: "fpk_test",
-			fetch: fetchMock,
-		});
-		for await (const _event of stream) {
-			/* drain */
-		}
-
-		expect(captured.body).not.toBeNull();
-		const parsed = JSON.parse(captured.body ?? "{}") as { max_tokens?: unknown; model?: unknown };
-		expect(parsed.model).toBe("accounts/fireworks/routers/kimi-k2p6-turbo");
-		expect(parsed.max_tokens).toBe(model.maxTokens);
+		const result = await login!(ctrl);
+		expect(result).toBe("fpk_test");
+		expect(capturedBody).not.toBeNull();
+		expect(JSON.parse(capturedBody ?? "{}").model).toBe("accounts/fireworks/routers/glm-5p2-fast");
 	});
 });

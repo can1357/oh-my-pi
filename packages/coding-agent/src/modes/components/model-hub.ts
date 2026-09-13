@@ -28,20 +28,28 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
-import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
+import {
+	formatModelSelectorValue,
+	type ModelRoleLookup,
+	parseModelString,
+	splitUpstreamRouting,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
+} from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import { thinkingLevelGlyph } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
 	buildBrowserItems,
 	ModelBrowser,
 	type ModelBrowserItem,
+	modelSearchText,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
-	thinkingLevelGlyph,
 } from "./model-browser";
 import { bottomBorder, dividerSplit, row, splitBodyWidth, splitRow, topBorderSplit } from "./overlay-box";
 import { renderSegmentTrack } from "./segment-track";
@@ -141,6 +149,8 @@ type StripState =
 			kind: "role" | "scope" | "thinking";
 			item: ModelBrowserItem;
 			role?: string;
+			/** Set when a thinking strip edits a fallback-chain entry instead of a role assignment. */
+			fallbackIndex?: number;
 			scope?: ModelRoleSelectionScope;
 			chips: StripChip[];
 			index: number;
@@ -655,7 +665,7 @@ export class ModelHubComponent implements Component {
 			this.#composeEntries();
 			return;
 		}
-		const matches = fuzzyFilter(this.#availableItems, query, ({ provider, id }) => `${provider}/${id}`);
+		const matches = fuzzyFilter(this.#availableItems, query, modelSearchText);
 		const counts = new Map<string, number>();
 		for (const item of matches) {
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
@@ -953,16 +963,7 @@ export class ModelHubComponent implements Component {
 			this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
 				? this.#thinkingLevelForScope(role, scope)
 				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
-		const chips: StripChip[] = options.map(level => {
-			const label = getConfiguredThinkingLevelMetadata(level).label;
-			const glyph = thinkingLevelGlyph(level);
-			return {
-				label,
-				styled: glyph ? `${theme.fg("accent", glyph)} ${label}` : label,
-				action: "thinking",
-				thinkingLevel: level,
-			};
-		});
+		const chips = this.#thinkingChips(options);
 		const preselect = options.indexOf(current);
 		this.#strip = {
 			kind: "thinking",
@@ -973,6 +974,144 @@ export class ModelHubComponent implements Component {
 			index: preselect >= 0 ? preselect : 0,
 			returnToRoles,
 		};
+	}
+
+	/** Build the footer chips for a thinking strip from its level options. */
+	#thinkingChips(options: ConfiguredThinkingLevel[]): StripChip[] {
+		return options.map(level => {
+			const label = getConfiguredThinkingLevelMetadata(level).label;
+			const glyph = thinkingLevelGlyph(level, theme);
+			return {
+				label,
+				styled: glyph ? `${theme.fg("accent", glyph)} ${label}` : label,
+				action: "thinking",
+				thinkingLevel: level,
+			};
+		});
+	}
+
+	/**
+	 * Fallback-entry model lookup through the registry — the same
+	 * case-insensitive, alias-aware resolution the runtime uses, so
+	 * `OpenAI/GPT-5.5` edits the model it runs. Covers locked providers too:
+	 * effort support is a catalog fact, not an auth fact, and the row already
+	 * exists, so the strip changes no scope.
+	 */
+	#findFallbackModel(provider: string, id: string): ModelBrowserItem | undefined {
+		const model = this.#registry.find(provider, id);
+		if (!model) return undefined;
+		return { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` };
+	}
+
+	/**
+	 * Split a fallback-chain entry into its model base, explicit effort, and
+	 * `@upstream` routing. An exact literal id wins over routing
+	 * (`google-vertex/claude-opus-4-8@default` is a real model, not a route —
+	 * mirroring the runtime's exact-first precedence); otherwise the routing
+	 * slug is kept verbatim so saves can re-attach it (`openrouter/id@fireworks`
+	 * looks up `openrouter/id` but persists with the route intact).
+	 */
+	#parseFallbackEntry(raw: string):
+		| {
+				provider: string;
+				id: string;
+				thinkingLevel?: ConfiguredThinkingLevel;
+				upstream: string | undefined;
+		  }
+		| undefined {
+		const trimmed = raw.trim();
+		const parse = (pattern: string) =>
+			parseModelString(pattern, {
+				allowMaxSuffix: true,
+				allowAutoAlias: true,
+				isLiteralModelId: (provider, id) => this.#findFallbackModel(provider, id) !== undefined,
+			});
+		const literal = parse(trimmed);
+		if (literal && this.#findFallbackModel(literal.provider, literal.id)) return { ...literal, upstream: undefined };
+		const routing = splitUpstreamRouting(trimmed);
+		if (!routing) {
+			if (!literal) return undefined;
+			return { ...literal, upstream: undefined };
+		}
+		const parsed = parse(routing.base.trim());
+		if (!parsed) return undefined;
+		return { ...parsed, upstream: routing.upstream };
+	}
+
+	/**
+	 * Resolve a fallback-chain entry to its browser item, explicit effort, and
+	 * routing. Undefined when the row is inert: `provider/*` wildcards (always
+	 * inherit) or models known neither live nor from the catalog.
+	 */
+	#resolveFallbackEntry(
+		role: string,
+		index: number,
+	):
+		| { item: ModelBrowserItem; thinkingLevel: ConfiguredThinkingLevel | undefined; upstream: string | undefined }
+		| undefined {
+		const raw = this.#fallbackChains()[role]?.[index];
+		if (!raw || raw.endsWith("/*")) return undefined;
+		const parsed = this.#parseFallbackEntry(raw);
+		if (!parsed) return undefined;
+		const item = this.#findFallbackModel(parsed.provider, parsed.id);
+		if (!item) return undefined;
+		return { item, thinkingLevel: parsed.thinkingLevel, upstream: parsed.upstream };
+	}
+
+	/**
+	 * Open the thinking strip for a fallback-chain entry (`t` on a `↳` row).
+	 * Wildcard entries (`provider/*`) always inherit by design, so `t` is inert on them.
+	 */
+	#openFallbackThinkingStrip(row: { role: string; chainIndex: number }): void {
+		const resolved = this.#resolveFallbackEntry(row.role, row.chainIndex);
+		if (!resolved) return;
+		const { item } = resolved;
+		// No `auto` chip: a hand-written `:auto` suffix collapses to inherit at
+		// apply time, so offering it would promise per-prompt classification the
+		// fallback never performs. A primary running `auto` is inherited anyway
+		// through the bare form.
+		const options: ConfiguredThinkingLevel[] = [
+			ThinkingLevel.Inherit,
+			ThinkingLevel.Off,
+			...getSupportedEfforts(item.model),
+		];
+		const current =
+			resolved.thinkingLevel === undefined || resolved.thinkingLevel === AUTO_THINKING
+				? ThinkingLevel.Inherit
+				: resolved.thinkingLevel;
+		const chips = this.#thinkingChips(options);
+		this.#strip = {
+			kind: "thinking",
+			item,
+			role: row.role,
+			fallbackIndex: row.chainIndex,
+			chips,
+			index: Math.max(0, options.indexOf(current)),
+			returnToRoles: true,
+		};
+	}
+
+	/** Persist a fallback entry's thinking choice: an explicit effort is suffixed, inherit is stored bare. */
+	#setFallbackThinking(role: string, index: number, level: ConfiguredThinkingLevel): void {
+		const chain = [...(this.#fallbackChains()[role] ?? [])];
+		if (index >= chain.length) return;
+		const resolved = this.#resolveFallbackEntry(role, index);
+		if (!resolved) return;
+		// Save the registry-canonical spelling (`OpenAI/GPT-5.5` persists as
+		// `openai/gpt-5.5:off`), re-attaching `@upstream` routing ahead of the
+		// effort suffix (`id@up:low` is the canonical order).
+		const base = `${resolved.item.provider}/${resolved.item.id}`;
+		const routed = resolved.upstream ? `${base}@${resolved.upstream}` : base;
+		const next = formatModelSelectorValue(routed, level);
+		chain[index] = next;
+		for (let i = chain.length - 1; i >= 0; i--) {
+			if (i !== index && chain[i] === next) chain.splice(i, 1);
+		}
+		this.#setFallbackChain(role, chain);
+		const rowIndex = this.#rolesRows.findIndex(
+			row => row.kind === "fallback" && row.role === role && row.selector === next,
+		);
+		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
 
 	#closeStrip(): void {
@@ -1028,6 +1167,12 @@ export class ModelHubComponent implements Component {
 				return;
 			case "thinking":
 				if (strip.role && chip.thinkingLevel !== undefined) {
+					if (strip.kind === "thinking" && strip.fallbackIndex !== undefined) {
+						this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
+						this.#strip = null;
+						this.#chipRanges = [];
+						return;
+					}
 					this.#callbacks.onAssign(
 						strip.item.model,
 						strip.role,
@@ -1064,7 +1209,12 @@ export class ModelHubComponent implements Component {
 		this.#browser.setQuery("");
 		if (index !== null) {
 			const selector = this.#fallbackChains()[role]?.[index];
-			if (selector) this.#browser.selectSelector(selector);
+			// Suffixed entries (`provider/id:low`) carry effort the browser rows
+			// don't show; match on the base so the current model preselects.
+			if (selector) {
+				const parsed = this.#parseFallbackEntry(selector);
+				this.#browser.selectSelector(parsed ? `${parsed.provider}/${parsed.id}` : selector);
+			}
 		}
 	}
 
@@ -1097,6 +1247,7 @@ export class ModelHubComponent implements Component {
 	/** Write the picked model into the target chain slot, dedupe, and land back on its Roles row. */
 	#commitFallback(item: ModelBrowserItem, target: { role: string; index: number | null }): void {
 		const chain = [...(this.#fallbackChains()[target.role] ?? [])];
+		// New picks are stored bare, i.e. inherit-the-primary; `t` on the row specializes the effort.
 		const selector = item.selector;
 		if (target.index !== null && target.index < chain.length) {
 			chain[target.index] = selector;
@@ -1510,6 +1661,8 @@ export class ModelHubComponent implements Component {
 					selector: `${scopedModel.provider}/${scopedModel.id}`,
 				};
 				this.#openThinkingStrip(item, role, true, scope);
+			} else if (row?.kind === "fallback") {
+				this.#openFallbackThinkingStrip(row);
 			}
 			return;
 		}
@@ -1882,7 +2035,7 @@ export class ModelHubComponent implements Component {
 				dot = theme.fg(info.color ?? "muted", theme.status.enabled);
 				tagStyled = theme.fg(info.color ?? "muted", tag);
 				value = `${theme.fg("dim", `${assignment.model.provider}/`)}${selected ? theme.fg("accent", assignment.model.id) : assignment.model.id}`;
-				const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
+				const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
 				const label = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
 				if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
 					levelStyled = theme.fg("dim", glyph ? `${glyph} ${label}` : label);
@@ -2009,7 +2162,12 @@ export class ModelHubComponent implements Component {
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
-				return "↑/↓ rows · Enter replace · f add another · x remove · [/] reorder · ← providers";
+				// Advertise `t` only when the entry resolves: wildcards always
+				// inherit and unknown models have no ladder to offer, so the
+				// action would be inert there.
+				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
+				const thinking = editable ? " · t thinking" : "";
+				return `↑/↓ rows · Enter replace · f add another · x remove${thinking} · [/] reorder · ← providers`;
 			}
 			if (row?.kind === "chainKey") {
 				return "↑/↓ rows · Enter/f add fallback · x clear chain · ← providers";

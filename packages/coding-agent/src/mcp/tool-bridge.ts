@@ -399,6 +399,9 @@ async function reconnectWithAbort(
 	}
 }
 
+/** Registry prefix every minted MCP tool name carries. */
+const MCP_TOOL_NAME_PREFIX = "mcp__";
+
 /**
  * Longest tool name strict validators accept. OpenAI Responses/Completions and
  * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
@@ -442,7 +445,118 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
 	}
 
-	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+	return capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedServerName}_${normalizedToolName}`);
+}
+
+/**
+ * Registry keys a model-emitted MCP tool name may have meant, in priority
+ * order. Empty when the name is not `mcp__`-prefixed or is already canonical.
+ *
+ * {@link createMCPToolName} joins the sanitized server and tool with a SINGLE
+ * underscore, but OMP presents itself as Claude Code, whose convention is
+ * `mcp__<server>__<tool>` — so a primed model reliably emits the doubled
+ * separator, often keeping the raw unsanitized server spelling as well
+ * (`mcp__seedpatch-client__bank` for a server named `seedpatch-client`). Those
+ * names are strictly unregistered, so dispatch dead-ends on a tool the session
+ * really does expose.
+ *
+ * Candidates, because the doubled separator carries information the collapsed
+ * form loses:
+ *
+ * 1. Split at a `__` and re-mint through the whole of `createMCPToolName`.
+ *    Re-minting (rather than only sanitizing) is what reproduces
+ *    redundant-server-prefix stripping — server `puppeteer` + tool
+ *    `puppeteer_screenshot` registers as `mcp__puppeteer_screenshot`, not
+ *    `mcp__puppeteer_puppeteer_screenshot` — and the 64-char
+ *    {@link capMCPToolNameLength} hash. EVERY `__` is tried as the boundary:
+ *    a *sanitized* server segment can never contain one, but the model
+ *    routinely emits the RAW server name, which can (`foo__bar`), so the first
+ *    occurrence is not necessarily the split. Earlier boundaries rank first
+ *    since a server name without `__` is overwhelmingly the common case.
+ * 2. Sanitize the whole suffix, for a single-separator name whose punctuation
+ *    still differs from the minted key (`mcp__seedpatch-client_bank`). This
+ *    candidate is capped too: without a boundary there is nothing to re-mint,
+ *    but the registered key was still length-capped, so an overlong spelling
+ *    would otherwise never match its hashed form. Unlike a split, it has no
+ *    minted fallback shape to reproduce, so a suffix that sanitizes away yields
+ *    nothing.
+ *
+ * This is normalization, not fuzzy matching: every candidate is derived from
+ * the emitted name by the same rules that minted the registry, never selected
+ * from siblings. `sanitizeMCPToolNamePart` is idempotent and registry keys are
+ * already in its output form, so an already-registered name yields no
+ * candidates at all and stays on the exact-match path. Callers try each
+ * candidate as an exact lookup and keep failing when none is registered.
+ */
+export function canonicalMCPToolNameCandidates(name: string): string[] {
+	if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return [];
+	const suffix = name.slice(MCP_TOOL_NAME_PREFIX.length);
+	if (suffix.length === 0) return [];
+	const candidates: string[] = [];
+	const add = (candidate: string): void => {
+		if (candidate !== name && !candidates.includes(candidate)) candidates.push(candidate);
+	};
+
+	// A split needs both halves NONEMPTY — not to survive sanitization.
+	// `createMCPToolName` substitutes its `server`/`tool` placeholder for a part
+	// that sanitizes away, and it is the same function registration uses, so a
+	// server named `123` (valid per `validateServerName`) really does register as
+	// `mcp__server_bank`. Re-minting therefore reproduces that key instead of
+	// inventing one, and requiring the halves to survive sanitization would drop
+	// exactly the names that need recovering. Only a genuinely absent half
+	// (`mcp____bank`, `mcp__srv__`) describes no split at all.
+	for (let boundary = suffix.indexOf("__"); boundary >= 0; boundary = suffix.indexOf("__", boundary + 1)) {
+		const serverName = suffix.slice(0, boundary);
+		const toolName = suffix.slice(boundary + 2);
+		if (serverName.length > 0 && toolName.length > 0) add(createMCPToolName(serverName, toolName));
+	}
+	// The whole-suffix candidate has no boundary, so there is no minted fallback
+	// shape to reproduce: a suffix that sanitizes away is a dead end.
+	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "");
+	if (sanitizedSuffix.length > 0) {
+		add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
+	}
+	return candidates;
+}
+
+/**
+ * Resolve a Claude Code-spelled MCP call through an EXPLICIT lookup.
+ *
+ * The lookup is a required argument rather than something read from ambient
+ * state, because the set a call must resolve against is the one offered to the
+ * agent that emitted it. A resolver closing over one agent's tools and then
+ * shared with another — the primary session's resolver also handed to the
+ * isolated auto-learn capture agent, say — would let a capture response reach a
+ * main-session tool it was never offered. Naming the source at every call site
+ * makes that mistake unrepresentable.
+ *
+ * A caller whose tools span several presentation sets (mounted `xd://` devices
+ * plus advertised top-level tools) MUST pass one lookup covering the union.
+ * Checking each set with its own call and taking the first hit would let set
+ * order silently break the uniqueness rule below.
+ *
+ * Resolution requires a UNIQUE match. Two different boundaries can both name a
+ * registered tool — server `foo` + tool `bar__foo_bar_baz` and server
+ * `foo__bar` + tool `foo_bar_baz` mint distinct keys yet share the spelling
+ * `mcp__foo__bar__foo_bar_baz` — and nothing in the emitted name says which was
+ * meant. Picking whichever boundary sorts first would execute an MCP operation
+ * the model did not ask for, side effects included, so an ambiguous alias
+ * resolves to nothing and the call stays a recoverable `not found`.
+ *
+ * Returns `undefined` unless exactly one {@link canonicalMCPToolNameCandidates}
+ * entry resolves, so an already-registered name never reaches here and a
+ * non-MCP name can never resolve at all.
+ */
+export function resolveMCPToolAlias<T extends { readonly name: string }>(
+	name: string,
+	lookup: (candidate: string) => T | undefined,
+): T | undefined {
+	const matches: T[] = [];
+	for (const candidate of canonicalMCPToolNameCandidates(name)) {
+		const match = lookup(candidate);
+		if (match !== undefined && !matches.some(seen => seen.name === match.name)) matches.push(match);
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface MCPToolOriginSource {
@@ -512,9 +626,9 @@ export function deduplicateMCPToolsByName<T extends MCPToolOriginSource>(tools: 
  * The original MCP tool name may have had the server name as a prefix.
  */
 export function parseMCPToolName(name: string): { serverName: string; toolName: string } | null {
-	if (!name.startsWith("mcp__")) return null;
+	if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return null;
 
-	const rest = name.slice(5);
+	const rest = name.slice(MCP_TOOL_NAME_PREFIX.length);
 	const underscoreIdx = rest.indexOf("_");
 	if (underscoreIdx === -1) return null;
 

@@ -30,7 +30,7 @@ import {
 	type CatalogProviderDescriptor,
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
-import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { getCatalogProviderEntry, PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	ABLITERATION_STATIC_MODELS,
@@ -44,6 +44,7 @@ import {
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
 	fetchWellKnownModels,
+	FIREPASS_STATIC_MODELS,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
@@ -266,7 +267,10 @@ function applyGlobalModelsDevFallback(
 			model.provider === "baseten" ||
 			// Meta's first-party rows come from the reviewed seed; a same-id
 			// gateway row would overwrite their display names.
-			model.provider === "meta"
+			model.provider === "meta" ||
+			// Providers whose discovery is the deployment truth and whose
+			// corrections live in KDL opt out of same-id reference fills.
+			getCatalogProviderEntry(model.provider)?.skipCrossProviderReferenceFills === true
 		) {
 			return model;
 		}
@@ -662,7 +666,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
 	}
-	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
+	// Seed Fire Pass router models so the provider is usable when generation has
+	// no live key. Dedicated `fpk_...` keys only authorize router endpoints, not
+	// `/v1/models`, so dynamic discovery is never performed.
+	if (!authoritativeCatalogProviders.has("firepass")) {
+		allModels.push(...FIREPASS_STATIC_MODELS);
+	}
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
 	// built-in catalog. The descriptor deliberately has NO `catalogDiscovery`, so it is
 	// excluded from the generator's discovery loop (`isCatalogDescriptor` filter above):
@@ -729,6 +738,7 @@ async function generateModels() {
 		...authoritativeCatalogProviders,
 		...authoritativeSpecialDiscoveryProviders,
 		...modelsDevSnapshotExcludedProviders,
+		"firepass",
 	]);
 
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
@@ -739,7 +749,6 @@ async function generateModels() {
 		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
 		previousSnapshotExcludedProviders,
 	);
-
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.

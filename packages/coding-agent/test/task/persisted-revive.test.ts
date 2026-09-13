@@ -17,6 +17,7 @@ import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const tempDirs: TempDir[] = [];
 
@@ -56,6 +57,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	let lastAssistantText: string | undefined;
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
+		...createSessionDefaults(),
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
@@ -67,7 +69,6 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		trackIrcReply: (pending: Promise<void>) => {
 			trackedReplies.push(pending);
 		},
-		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () =>
 			lastAssistantText === undefined
 				? undefined
@@ -89,7 +90,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean; agent?: string },
+	contract?: { tools?: string[]; readOnly?: boolean; agent?: string; isolated?: boolean },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -104,6 +105,7 @@ async function createPersistedSession(
 		advisor,
 		readOnly: contract?.readOnly,
 		agent: contract?.agent,
+		isolated: contract?.isolated,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -276,6 +278,21 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+	});
+
+	it("leaves isolated sessions transcript-only even when the workspace still exists", async () => {
+		// Isolated runs are never resumable: the worktree is merged + cleaned,
+		// and the parent is told messaging is impossible. A retained workspace
+		// (capture/persist failure) still passes the cwd probe, so the stamped
+		// contract — not directory existence — must gate revival. Otherwise a
+		// restart + Hub message revives the agent in the parent cwd, outside
+		// isolation.
+		const cwd = makeTempDir("@pi-isolated-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { isolated: true });
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		expect(reviver).toBeUndefined();
 	});
 
 	it("restores the persisted agent definition name on cold revival so agent-scoped rules keep matching", async () => {

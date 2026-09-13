@@ -1127,6 +1127,40 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
 	});
 
+	test("uses configured smol for unconfigured tiny before priority defaults", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				smol: "baseten/custom-smol:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
+	});
+
+	test("breaks the tiny/smol fallback cycle via a default alias", () => {
+		const settings = Settings.isolated({ modelRoles: { default: "@tiny" } });
+		const baseline = resolveAgentModelPatterns({ agentModel: "@smol", settings: Settings.isolated() });
+
+		const tiny = resolveAgentModelPatterns({ agentModel: "@tiny", settings });
+		const smol = resolveAgentModelPatterns({ agentModel: "@smol", settings });
+
+		expect(baseline.length).toBeGreaterThan(0);
+		expect(tiny).not.toContain("@tiny");
+		expect(smol).not.toContain("@tiny");
+		expect(tiny).toEqual(baseline);
+		expect(smol).toEqual(tiny);
+	});
+
+	test("preserves thinking suffix when breaking the smol fallback cycle", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "@tiny:high" } });
+		const baseline = resolveAgentModelPatterns({ agentModel: "@smol", settings: Settings.isolated() });
+
+		const tiny = resolveAgentModelPatterns({ agentModel: "@tiny", settings });
+
+		expect(tiny).toEqual(baseline.map(pattern => `${pattern}:high`));
+	});
+
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },
