@@ -530,6 +530,64 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(true);
 	});
 
+	it("detects a strict JSON decoder refusing cache_control as an unknown field", () => {
+		// Go `DisallowUnknownFields` wording — a schema rejection with none of the
+		// extra-input/not-permitted vocabulary.
+		expect(isCacheControlUnsupported(makeStatusError(400, '400 json: unknown field "cache_control"'))).toBe(true);
+	});
+
+	it("detects an OpenAI-compatible unknown_parameter error code naming cache_control", () => {
+		// The code arrives snake_cased, so word boundaries around a bare
+		// `unknown` never fire on it.
+		expect(
+			isCacheControlUnsupported(makeStatusError(400, "400 unknown_parameter: messages[0].content[0].cache_control")),
+		).toBe(true);
+	});
+
+	it("detects a validator reporting cache_control as not recognized", () => {
+		expect(
+			isCacheControlUnsupported(
+				makeStatusError(400, "400 invalid_request_error: The property 'cache_control' was not recognized."),
+			),
+		).toBe(true);
+	});
+
+	it("detects a validator calling cache_control an invalid field for the endpoint", () => {
+		expect(
+			isCacheControlUnsupported(
+				makeStatusError(400, "400 invalid_request_error: cache_control is not a valid field for this endpoint"),
+			),
+		).toBe(true);
+	});
+
+	it("keeps caching enabled when a 400 rejects the number of cache_control blocks", () => {
+		// Anthropic's breakpoint cap: the endpoint does support prompt caching, so
+		// disabling it for the rest of the session would be the wrong fallback.
+		expect(
+			isCacheControlUnsupported(
+				makeStatusError(
+					400,
+					"400 invalid_request_error: messages: at most 4 blocks with cache_control may be provided",
+				),
+			),
+		).toBe(false);
+	});
+
+	it("keeps caching enabled when a 400 rejects a cache_control value rather than the field", () => {
+		// The field is accepted here; only the retention value is refused. Dropping
+		// every breakpoint for the rest of the session is not the remedy, so the
+		// unknown-member negations require a schema-member noun ("field",
+		// "parameter", "key", …) and never fire on "not a valid value".
+		expect(
+			isCacheControlUnsupported(
+				makeStatusError(
+					400,
+					`400 invalid_request_error: messages.0.content.0.cache_control.ttl: "2h" is not a valid value`,
+				),
+			),
+		).toBe(false);
+	});
+
 	it("ignores an empty-text-block 400 that names cache_control", () => {
 		expect(
 			isCacheControlUnsupported(makeStatusError(400, "400 cache_control is not permitted on an empty text block")),
