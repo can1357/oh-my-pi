@@ -313,6 +313,7 @@ describe("async progress messages", () => {
 		expect(content(completionMessage)).toContain("Background job bg_8 (bg_8) completed with exit code 0.");
 		expect(progress).toContain("Background command progress bg_8");
 		expect(completion).toContain("Background command completed bg_8 (exit 0)");
+		expect(completion).toContain("done");
 		expect(progress).not.toContain("[bash]");
 		expect(completion).not.toContain("[bash]");
 	});
@@ -363,7 +364,8 @@ describe("async progress messages", () => {
 		]);
 		if (!completionMessage) throw new Error("Expected completion message");
 
-		const raw = buildAsyncResultBlock(completionMessage).render(80).join("\n");
+		const block = buildAsyncResultBlock(completionMessage);
+		const raw = block.render(80).join("\n");
 		const rendered = Bun.stripANSI(raw);
 
 		expect(completionMessage.details?.jobs[0]).toMatchObject({
@@ -373,7 +375,32 @@ describe("async progress messages", () => {
 		});
 		expect(content(completionMessage)).toContain("Background job bg_failed (bg_failed) failed with exit code 7.");
 		expect(rendered).toContain("Background command failed bg_failed (exit 7)");
+		expect(rendered).toContain("Command exited with code 7");
+		block.setToolActivityVisible(false);
+		expect(Bun.stripANSI(block.render(80).join("\n"))).toContain("Command exited with code 7");
 		expect(raw).toContain(theme.fg("error", `${theme.status.error} Background command failed`));
 		expect(raw).not.toContain(theme.fg("success", `${theme.status.done} Background command completed`));
+	});
+
+	test("strips the task-result envelope from completion previews", () => {
+		const taskJob: AsyncJob = {
+			...job("task_1"),
+			type: "task",
+			status: "completed",
+		};
+		const completionMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "task_1",
+				result: '<task-result id="task_1"><output>\nworker done\n</output></task-result>',
+				job: taskJob,
+				durationMs: 5_000,
+				epoch: 0,
+			},
+		]);
+		if (!completionMessage) throw new Error("Expected completion message");
+
+		const rendered = Bun.stripANSI(buildAsyncResultBlock(completionMessage).render(80).join("\n"));
+		expect(rendered).toContain("worker done");
+		expect(rendered).not.toContain("<task-result");
 	});
 });
