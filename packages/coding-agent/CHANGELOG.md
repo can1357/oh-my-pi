@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added an opt-in Prometheus text-exposition `/metrics` endpoint to the auth-broker for scraping LLM usage into a monitoring backend, authorized by a scrape-scoped read-only token distinct from the master bearer. It is off unless enabled via `--enable-metrics`, `OMP_AUTH_BROKER_METRICS`, or `auth.broker.metrics` (flag beats env beats config), so upgrading an existing broker adds neither the endpoint nor a new on-disk secret; the setting resolves from the agent directory, so a checked-in project config cannot turn it on. The scrape token can be provisioned through `OMP_AUTH_BROKER_METRICS_TOKEN` or `OMP_AUTH_BROKER_METRICS_TOKEN_FILE` instead of minted to disk, and `omp auth-broker token --metrics` resolves it through the same precedence `serve` uses. Subscription config gains a nested `providers` map so two providers sharing an account label no longer collide, and a duplicate JSON object key is now rejected rather than silently keeping the last value ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

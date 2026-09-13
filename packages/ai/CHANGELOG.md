@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added a Prometheus text-exposition `/metrics` endpoint to the auth-broker server, authorized by a scrape-scoped read-only token distinct from the master bearer, rendering LLM usage for a monitoring backend ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Added a `metricsEnabled` auth-broker server option that gates registration of the `/metrics` route; it defaults to OFF so an embedder does not gain a usage endpoint on a dependency bump, and enabling it without a token that can authorize it refuses to boot rather than serving the exposition unauthenticated ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.19] - 2026-09-12
 
 ### Added

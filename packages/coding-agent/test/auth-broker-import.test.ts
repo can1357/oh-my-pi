@@ -6,6 +6,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
 
@@ -21,11 +22,17 @@ function silenceStdout(): () => string {
 describe("auth-broker import (CLIProxyAPI)", () => {
 	let agentDir = "";
 	let cliproxyDir = "";
-	let originalAgentDir: string | undefined;
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR, not OMP_AGENT_DIR, so restoring
+	// the latter left this suite's (since-deleted) temp dir installed as the
+	// process-wide agent dir. A later suite's refreshDirsFromEnv() then resolved
+	// against it, writing its fixtures under one root and reading config from
+	// another. The shared helper snapshots and restores the whole env, including
+	// PI_CODING_AGENT_DIR, and resets the settings singleton with it.
+	let settingsState: SettingsTestState | undefined;
 	const savedEnv: Record<string, string | undefined> = {};
 
 	beforeEach(async () => {
-		originalAgentDir = process.env.OMP_AGENT_DIR;
+		settingsState = beginSettingsTest();
 		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
 		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
 		delete process.env.OMP_AUTH_BROKER_URL;
@@ -37,8 +44,8 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 
 	afterEach(async () => {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
-		if (originalAgentDir === undefined) delete process.env.OMP_AGENT_DIR;
-		else process.env.OMP_AGENT_DIR = originalAgentDir;
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
 		await removeWithRetries(agentDir);
 		await removeWithRetries(cliproxyDir);
 		for (const key of ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"] as const) {
@@ -206,7 +213,13 @@ describe("auth-broker import (broker-routed)", () => {
 	const token = "broker-import-bearer";
 	const savedEnv: Record<string, string | undefined> = {};
 
+	// This block also installs a process-wide agent dir via `setAgentDir()` and
+	// previously restored nothing at all, leaking a since-deleted temp dir into
+	// every later suite in the same worker.
+	let settingsState: SettingsTestState | undefined;
+
 	beforeEach(async () => {
+		settingsState = beginSettingsTest();
 		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
 		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-import-client-"));
@@ -228,6 +241,8 @@ describe("auth-broker import (broker-routed)", () => {
 	});
 
 	afterEach(async () => {
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
 		await handle?.close();
 		brokerStorage?.close();
 		brokerStore?.close();

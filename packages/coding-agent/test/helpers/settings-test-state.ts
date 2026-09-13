@@ -1,10 +1,9 @@
 import { vi } from "bun:test";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { isTuiTight, setTuiTight } from "@oh-my-pi/pi-tui";
-import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 export interface SettingsTestState {
-	agentDir: string;
 	env: Record<string, string | undefined>;
 	projectDir: string;
 	tuiTight: boolean;
@@ -19,7 +18,6 @@ export function beginSettingsTest(): SettingsTestState {
 		env[key] = Bun.env[key];
 	}
 	const state: SettingsTestState = {
-		agentDir: getAgentDir(),
 		env,
 		projectDir: getProjectDir(),
 		tuiTight: isTuiTight(),
@@ -35,9 +33,17 @@ export function restoreSettingsTestState(state: SettingsTestState | undefined): 
 
 	restoreEnv(state.env);
 	setProjectDir(state.projectDir);
-	setAgentDir(state.agentDir);
+	// The agent dir is rebuilt from the restored environment rather than
+	// re-installed by value. `setAgentDir()` is not a restore: it forces default
+	// (unprofiled) mode, DELETING `OMP_PROFILE`/`PI_PROFILE` and clearing the
+	// active profile. A suite that ran under a profile would have that profile
+	// stripped here after the env restore had already put it back, leaking
+	// profile-less resolution into every later file in the worker. Resolving
+	// from the env instead reproduces whichever mode the snapshot was taken in —
+	// profile, explicit `PI_CODING_AGENT_DIR`, or plain default — and rebuilds
+	// the resolver's own profile state to match.
+	__resetDirsFromEnvForTests();
 	setTuiTight(state.tuiTight);
-	restoreEnvValue("PI_CODING_AGENT_DIR", state.env.PI_CODING_AGENT_DIR);
 }
 
 function restoreEnv(snapshot: Record<string, string | undefined>): void {

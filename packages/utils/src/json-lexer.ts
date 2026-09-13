@@ -411,3 +411,101 @@ export class JsonLexer {
 		return undefined;
 	}
 }
+
+/**
+ * The first object key repeated within one object of `src`, in source order, or
+ * `undefined` when none is.
+ *
+ * `JSON.parse` keeps only the last value for a repeated key, and a `reviver` is
+ * called once per SURVIVING member — the discarded duplicate never reaches it —
+ * so a duplicate cannot be recovered after parsing. A loader that must reject a
+ * repeated key rather than silently adopt its last spelling has to scan the raw
+ * text, which is what this does: it walks the tokens with {@link JsonLexer} and
+ * tracks a seen-set per open object. Array members are positional and cannot
+ * collide, so an open array suppresses the check until it closes.
+ *
+ * Keys are compared DECODED, because that is the form `JSON.parse` collapses
+ * them to before dropping one: `"a\u002db"` and `"a-b"` are the same member.
+ *
+ * This is a scan beside a real parse, never a replacement for one: it neither
+ * throws nor reports a duplicate for malformed input, leaving syntax errors to
+ * the caller's parser so a broken document reports as the parse error it is. A
+ * quoted string in key position therefore counts as a member only once its `:`
+ * arrives — a trailing `"a"` with no colon never became one, so nothing was
+ * dropped for it to collide with. A string left unterminated at the end of
+ * input is not a candidate either.
+ *
+ * Holding to that contract needs more than the scan can see on its own: the
+ * lexer walks structure, not grammar, so `{"a":1,"a":2` (unclosed) and
+ * `{"a":1,"a":}` (missing value) both reach a genuine second `"a":` and would
+ * be reported as duplicates even though a real parse refuses them. The first
+ * repeat is therefore RETAINED, not returned, and confirmed with one
+ * `JSON.parse` of the whole document once the scan finishes. That parse runs
+ * only on the rare duplicate path — a document with no repeated key returns
+ * without it.
+ */
+export function findDuplicateJsonKey(src: string): string | undefined {
+	// `incoming` closes double-quoted strings on the first unescaped quote, like
+	// standard JSON, and reports truncation instead of throwing — the two
+	// properties this scan needs. `strict` would throw on the truncated input
+	// the caller's parser is responsible for rejecting.
+	const lex = new JsonLexer(src, "incoming");
+	// One seen-set per open object; `undefined` marks an open array.
+	const stack: (Set<string> | undefined)[] = [];
+	let expectKey = false;
+	// A complete key string that has not reached its `:` yet. A quoted string in
+	// key position becomes a MEMBER only once that colon arrives, and only a
+	// member can have been dropped by a later duplicate. Committing on the
+	// string alone reports the trailing `"a"` of `{"a":1,"a"` as a repeat of the
+	// real `"a"`, which contradicts the documented contract that this scan
+	// reports no duplicate for input a real parse would refuse.
+	let pendingKey: string | undefined;
+	// The first repeat found, held until the document is known to be valid.
+	let candidate: string | undefined;
+	while (!lex.atEnd) {
+		const cp = lex.peek();
+		if (cp === QUOTE) {
+			const { value, complete } = lex.string(QUOTE);
+			if (expectKey) {
+				if (complete) pendingKey = value;
+				expectKey = false;
+			}
+			continue;
+		}
+		if (cp === LBRACE) {
+			stack.push(new Set());
+			expectKey = true;
+		} else if (cp === LBRACKET) {
+			stack.push(undefined);
+			expectKey = false;
+		} else if (cp === RBRACE || cp === RBRACKET) {
+			stack.pop();
+			expectKey = false;
+			pendingKey = undefined;
+		} else if (cp === COLON) {
+			if (pendingKey !== undefined) {
+				const keys = stack[stack.length - 1];
+				if (keys !== undefined) {
+					if (keys.has(pendingKey)) candidate ??= pendingKey;
+					keys.add(pendingKey);
+				}
+				pendingKey = undefined;
+			}
+		} else if (cp === COMMA) {
+			// A comma inside an object introduces the next key; inside an array, or
+			// at the top level, it introduces a positional value.
+			expectKey = stack[stack.length - 1] !== undefined;
+			pendingKey = undefined;
+		}
+		lex.pos++;
+	}
+	if (candidate === undefined) return undefined;
+	try {
+		JSON.parse(src);
+	} catch {
+		// Malformed: the caller's parser owns this, and reporting a duplicate here
+		// would misclassify a syntax error.
+		return undefined;
+	}
+	return candidate;
+}

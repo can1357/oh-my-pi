@@ -49,7 +49,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "./usage";
-import { resolveUsedFraction } from "./usage";
+import { canonicalizePlan, resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
@@ -1096,11 +1096,7 @@ function getUsagePlanType(report: UsageReport | null): string | undefined {
 	if (!metadata) return undefined;
 	const planType = metadata.planType;
 	if (typeof planType !== "string") return undefined;
-	const normalized = planType
-		.trim()
-		.toLowerCase()
-		.replace(/[\s-]+/g, "_");
-	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+	return canonicalizePlan(planType);
 }
 
 function classifyOpenAICodexPlan(report: UsageReport | null): OpenAICodexPlanClass {
