@@ -338,6 +338,38 @@ describe("CollabController", () => {
 		);
 	});
 
+	it("treats a room whose stop is still draining as absent and starts a fresh one on /collab", async () => {
+		const { ctx } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await settled(publishSpy, 1);
+		const first = ctx.collabHost;
+		if (!first) throw new Error("first room missing");
+
+		// Hold the goodbye drain open so the stop stays in flight.
+		const drain = Promise.withResolvers<void>();
+		const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
+		const stopping = controller.stop("host stopped");
+
+		// `/collab` and `/join` consult these slots: a room that already refuses
+		// frames and is about to close must not be re-printed or reported as hosting.
+		expect(first.ending).toBe(true);
+		expect(first.stopped).toBe(false);
+		expect(ctx.collabHost).toBeUndefined();
+		expect(controller.host).toBeUndefined();
+
+		const starting = controller.start({ access: "control" });
+		drain.resolve();
+		flush.mockRestore();
+		await stopping;
+		const second = await starting;
+
+		expect(second).not.toBe(first);
+		expect(second.generation).toBe(2);
+		expect(ctx.collabHost).toBe(second);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 2 }]);
+	});
+
 	describe("while the first room is still connecting", () => {
 		/** Resolves once the first relay socket exists; it stays in CONNECTING, later sockets open normally. */
 		let firstSocketStalled: PromiseWithResolvers<void>;

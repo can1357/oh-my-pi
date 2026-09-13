@@ -43,10 +43,10 @@ export class CollabController {
 		this.instanceId = randomBytes(8).toString("hex");
 	}
 
-	/** The live room, if any (a room that ended on its own is reported as absent). */
+	/** The live room, if any; a room that is ending or ended is reported as absent. */
 	get host(): CollabHost | undefined {
 		const host = this.#host;
-		return host && !host.stopped ? host : undefined;
+		return host && !host.ending ? host : undefined;
 	}
 
 	/** Registry generation of the most recently started room; 0 before the first. */
@@ -93,8 +93,9 @@ export class CollabController {
 		return this.#launch(options.access, options.relay);
 	}
 
+	/** Stop the current room; also awaits a stop that is already in flight. */
 	async stop(reason: string): Promise<void> {
-		await this.host?.stop(reason);
+		await this.#host?.stop(reason);
 	}
 
 	/** Resolves once no stop/start sequence is in flight. */
