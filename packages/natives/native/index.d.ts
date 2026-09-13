@@ -523,20 +523,6 @@ export declare class VcsGitRepo {
   readTree(treeish: string, indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Write index tree. */
   writeTree(indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
-  /** Snapshot the working tree into a throwaway-index tree object. */
-  captureWorktreeTree(excludes: Array<string>, indexPath: string, signal?: unknown | undefined | null): Promise<string>
-  /** Wrap a tree in a commit object without moving HEAD or any branch. */
-  commitTreeObject(treeSha: string, parents: Array<string>, authorName: string, authorEmail: string, authorDate: string | undefined | null, message: string, signal?: unknown | undefined | null): Promise<string>
-  /** `diff-tree --name-status -z` between two trees (raw records). */
-  treeStatus(base: string, head: string, signal?: unknown | undefined | null): Promise<string>
-  /** Refs under `prefix` as `name\0sha` lines (`for-each-ref` equivalent). */
-  checkpointRefList(prefix: string, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** Point a ref at a sha (`update-ref` equivalent; never moves HEAD). */
-  checkpointRefUpdate(name: string, sha: string, signal?: unknown | undefined | null): Promise<undefined>
-  /** Delete a ref; missing refs are not an error. */
-  checkpointRefDelete(name: string, signal?: unknown | undefined | null): Promise<undefined>
-  /** `ls-tree -r -l -z` raw records for checkpoint disk accounting. */
-  treeBlobsRaw(treeish: string, signal?: unknown | undefined | null): Promise<string>
   /** Apply patch. */
   applyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<undefined>
   /** Check patch applicability. */
