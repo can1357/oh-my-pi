@@ -500,11 +500,13 @@ impl GitRepo {
 
 	/// Resolve the full ref name of `branch`'s configured upstream, from
 	/// `branch.<name>.remote` + `branch.<name>.merge`. A `.` remote tracks a
-	/// local branch; anything else maps through the remote's fetch refspecs,
-	/// so custom destinations (e.g. `+refs/heads/*:refs/custom/origin/*`)
-	/// resolve to the remote-tracking ref that actually exists. When no fetch
-	/// refspec maps the merge ref, git reports no upstream — `None`, even if a
-	/// stale `refs/remotes/<remote>/*` still exists.
+	/// local ref, with the merge name dwimmed like git does (`main` →
+	/// `refs/heads/main`, `v1` → `refs/tags/v1`); anything else maps the full
+	/// merge ref through the remote's fetch refspecs, so custom destinations
+	/// (e.g. `+refs/heads/*:refs/custom/origin/*`) resolve to the
+	/// remote-tracking ref that actually exists. When no fetch refspec maps the
+	/// merge ref, git reports no upstream — `None`, even if a stale
+	/// `refs/remotes/<remote>/*` still exists.
 	fn upstream_ref(&self, branch: &str) -> Result<Option<String>> {
 		if self.is_reftable() {
 			// One spawn: `%(upstream)` applies the fetch refspecs (and `.`
@@ -531,9 +533,24 @@ impl GitRepo {
 		let Some(merge) = get(&format!("branch.{branch}.merge")) else {
 			return Ok(None);
 		};
-		// A `.` remote tracks the local merge ref directly, without fetch refspecs.
+		// A `.` remote tracks a local ref without fetch refspecs. git dwims the
+		// merge name through the usual lookup rules and keeps an unresolvable
+		// one verbatim, which `read_ref` then reports as absent.
 		if remote == "." {
-			return Ok(Some(merge));
+			return Ok(Some(match repo.try_find_reference(merge.as_str()) {
+				Ok(Some(reference)) => reference.name().as_bstr().to_string(),
+				Ok(None) => merge,
+				Err(gix::reference::find::Error::Find(
+					gix::refs::file::find::Error::RefnameValidation(_),
+				)) => merge,
+				Err(err) => return Err(Error::backend("git config", err)),
+			}));
+		}
+		// Remote-tracking upstreams match the fetch refspecs by full name only:
+		// git leaves a shorthand `branch.<name>.merge` unexpanded (`%(upstream)`
+		// is empty), whereas gix would assume `refs/heads/`.
+		if !merge.starts_with("refs/") {
+			return Ok(None);
 		}
 		let full = format!("refs/heads/{branch}");
 		let Ok(name) = <&gix::refs::FullNameRef>::try_from(&full) else {
@@ -1677,6 +1694,48 @@ mod tests {
 		git(root, &["config", "branch.tracking-local.merge", "refs/heads/main"])?;
 		commit(root, "a1", "a1\n", "a1")?;
 		// One commit past the local main it tracks.
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_dwims_shorthand_merge_for_dot_remote() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["checkout", "-b", "feat"])?;
+		git(root, &["config", "branch.feat.remote", "."])?;
+		git(root, &["config", "branch.feat.merge", "main"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		let upstream =
+			|root: &Path| git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/feat"]);
+		// git dwims a shorthand merge name for a `.` remote.
+		assert_eq!(upstream(root)?.trim(), "refs/heads/main");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Tags dwim too; annotated, so the walk also has to peel it.
+		git(root, &["tag", "-a", "v1", "-m", "v1", "main"])?;
+		git(root, &["config", "branch.feat.merge", "v1"])?;
+		assert_eq!(upstream(root)?.trim(), "refs/tags/v1");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// An unresolvable name is kept verbatim by git and names no ref.
+		git(root, &["config", "branch.feat.merge", "nonexistent"])?;
+		assert_eq!(upstream(root)?.trim(), "nonexistent");
+		assert_eq!(repo.ahead_behind()?, None);
+
+		// Remote-tracking upstreams are never expanded from shorthand: git
+		// reports no upstream even though refs/remotes/origin/main exists, and
+		// the full name still resolves through the fetch refspec.
+		git(root, &["remote", "add", "origin", "."])?;
+		git(root, &["fetch", "origin"])?;
+		git(root, &["config", "branch.feat.remote", "origin"])?;
+		git(root, &["config", "branch.feat.merge", "main"])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		assert_eq!(repo.status_summary()?.ahead, None);
+		git(root, &["config", "branch.feat.merge", "refs/heads/main"])?;
+		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/main");
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
 		Ok(())
 	}
