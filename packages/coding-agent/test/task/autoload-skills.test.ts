@@ -417,3 +417,62 @@ describe("autoloadSkills in executor", () => {
 		);
 	});
 });
+
+describe("subagent session_init persistence ordering (regression: PR #9379 review)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	const baseOptions = {
+		cwd: "/tmp",
+		agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" } as AgentDefinition,
+		task: "do work",
+		index: 0,
+		id: "subagent-1",
+		settings: Settings.isolated(),
+		modelRegistry: {
+			refresh: async () => {},
+		} as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry,
+		enableLsp: false,
+	};
+
+	it("persists session_init.systemPrompt after startup skill discovery has run, not before", async () => {
+		// A mutable "live" system prompt: discoverStartupSkillPaths appends to it,
+		// mirroring session-tools.ts's refreshBaseSystemPrompt rebuilding
+		// session.agent.state.systemPrompt when a resources_discover handler
+		// contributes a directory.
+		const systemPromptParts = ["base prompt"];
+		const appendSessionInitCalls: Array<{ systemPrompt: string }> = [];
+
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-1",
+				toolName: "yield",
+				result: { content: [{ type: "text", text: "done" }], details: { status: "success", data: {} } },
+				isError: false,
+			});
+		});
+		session.agent.state.systemPrompt = systemPromptParts;
+		session.sessionManager.appendSessionInit = (init: { systemPrompt: string }) => {
+			appendSessionInitCalls.push(init);
+		};
+		session.discoverStartupSkillPaths = vi.fn(async () => {
+			systemPromptParts.push("discovered skill notice");
+		});
+		session.extensionRunner = {
+			initialize: vi.fn(),
+			onError: vi.fn(),
+			emit: vi.fn(async () => undefined),
+		} as unknown as AgentSession["extensionRunner"];
+
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		await runSubprocess({ ...baseOptions });
+
+		expect(appendSessionInitCalls).toHaveLength(1);
+		// Persisted verbatim by persisted-revive.ts on every cold revival — must
+		// reflect the post-discovery prompt, not the pre-discovery snapshot.
+		expect(appendSessionInitCalls[0]?.systemPrompt).toBe("base prompt\n\ndiscovered skill notice");
+	});
+});

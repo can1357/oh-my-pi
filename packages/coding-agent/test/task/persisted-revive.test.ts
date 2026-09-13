@@ -178,6 +178,36 @@ describe("persisted subagent revival", () => {
 		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
 	});
 
+	it("merges discovered startup skill paths on cold revival (regression: PR #9379 review, persisted-revive.ts mergeDiscoveredSkillPaths)", async () => {
+		const cwd = makeTempDir("@pi-revive-skill-discovery-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		const extensionRunner = { initialize: vi.fn(), onError: vi.fn(), emit: vi.fn(async () => undefined) };
+		const revived = createRevivedSession([], extensionRunner);
+		const discoverStartupSkillPaths = vi.fn(async () => {});
+		// `createRevivedSession`'s stub is a plain test double with a known
+		// shape (not external/unchecked input), so a one-line assertion is the
+		// narrowest way to replace its no-op discovery method with a spy.
+		const revivedSession = revived.session as AgentSession & { discoverStartupSkillPaths: () => Promise<void> };
+		revivedSession.discoverStartupSkillPaths = discoverStartupSkillPaths;
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: revivedSession } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// A revived subagent re-runs its own resources_discover on session_start;
+		// without mergeDiscoveredSkillPaths the merge is a no-op even though
+		// discoverStartupSkillPaths itself is called.
+		expect(capturedOptions?.mergeDiscoveredSkillPaths).toBe(true);
+		expect(discoverStartupSkillPaths).toHaveBeenCalledTimes(1);
+	});
+
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
 		const sessionFile = await createPersistedSession(cwd, true);

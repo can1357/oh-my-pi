@@ -3697,26 +3697,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? enabledSubagentTools.filter(name => name !== "write")
 					: enabledSubagentTools;
 
-			session.sessionManager.appendSessionInit({
-				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
-				task,
-				tools: persistedSubagentTools,
-				agent: agent.name,
-				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
-				resolvedModel: progress.resolvedModel,
-				readOnly: isReadOnlyAgent(agent),
-				spawns: spawnsEnv,
-				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
-				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				// Isolated runs are never revivable (worktree merged + cleaned):
-				// stamp the contract so cold revival leaves them transcript-only
-				// even when the workspace was retained for recovery.
-				isolated: worktree !== undefined || undefined,
-			});
-
 			abortSignal.addEventListener(
 				"abort",
 				() => {
@@ -3806,6 +3786,33 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// session moves on.
 				await drainPendingExtensionMessages();
 			}
+
+			// Persist the subagent's revival contract only after startup skill
+			// discovery has had a chance to run: `discoverStartupSkillPaths()`
+			// above rebuilds `session.agent.state.systemPrompt` when a
+			// `resources_discover` handler contributed a directory, and a
+			// cold-revived session (persisted-revive.ts) replays this exact
+			// string verbatim — capturing it before discovery ran would freeze
+			// every future revival on the pre-discovery prompt (PR #9379 review).
+			session.sessionManager.appendSessionInit({
+				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
+				task,
+				tools: persistedSubagentTools,
+				agent: agent.name,
+				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+				resolvedModel: progress.resolvedModel,
+				readOnly: isReadOnlyAgent(agent),
+				spawns: spawnsEnv,
+				readSummarize: agent.readSummarize,
+				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
+				outputSchema,
+				outputSchemaMode: options.outputSchemaMode,
+				restrictToolNames: restrictToolNames || undefined,
+				// Isolated runs are never revivable (worktree merged + cleaned):
+				// stamp the contract so cold revival leaves them transcript-only
+				// even when the workspace was retained for recovery.
+				isolated: worktree !== undefined || undefined,
+			});
 
 			unsubscribe = monitor.attach(session);
 
