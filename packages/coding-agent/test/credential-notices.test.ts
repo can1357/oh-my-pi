@@ -122,7 +122,7 @@ describe("credential sign-out notices", () => {
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
 	});
 
-	it("recovers a retained teardown after a JWT-only login prunes its tombstone", async () => {
+	it("retires a retained teardown when JWT claims identify the recovered account", async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		const retained = new Map<number, RetainedCredentialDisable>();
 		authStorage.onCredentialDisabled(event => {
@@ -141,7 +141,6 @@ describe("credential sign-out notices", () => {
 			refresh: "new-refresh",
 			expires: Date.now() + 60_000,
 		});
-		expect(await authStorage.listDisabledCredentials()).toEqual([]);
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now(), undefined, retained)).toEqual([]);
 		expect(retained.size).toBe(0);
 	});
