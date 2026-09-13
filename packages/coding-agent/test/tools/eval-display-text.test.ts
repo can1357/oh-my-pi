@@ -204,4 +204,28 @@ describe("EvalTool display() text surfacing", () => {
 		expect(await Bun.file(artifactPath).text()).toContain(huge);
 		expect(result.details?.meta?.truncation?.artifactId).toBe("large-display");
 	});
+
+	it("retains the full display value in details when no artifact is available", async () => {
+		const huge = `start-${"x".repeat(100_000)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		// makeSession() has no allocateOutputArtifact, mirroring a non-persistent
+		// SDK session: there is no session JSONL to bloat, so the full structured
+		// value must survive in details for SDK consumers.
+		const tool = new EvalTool(makeSession());
+		const result = await tool.execute("call-huge-no-artifact", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(result.details?.jsonOutputs?.[0]).toEqual({ payload: huge });
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(text).toContain("ch elided");
+		expect(text).not.toContain(huge);
+	});
 });

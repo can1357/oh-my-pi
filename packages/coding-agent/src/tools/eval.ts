@@ -144,10 +144,19 @@ interface FormattedDisplayJson {
 	fullText: string;
 	previewText: string;
 	detailsValue: unknown;
-	truncated: boolean;
+	/** Full value must be mirrored to the output artifact; `detailsValue` holds only a preview. */
+	spillFullValue: boolean;
 }
 
-function formatDisplayJson(value: unknown): FormattedDisplayJson {
+/**
+ * Format one structured `display()` value for the model text and the tool
+ * `details`. The model-visible preview is always capped at
+ * {@link MAX_DISPLAY_TEXT_BYTES}. When the value exceeds that cap, the full
+ * value is retained in `details` only if `canSpill` is false (no persistence,
+ * so nothing to bloat); otherwise `details` keeps a bounded metadata object and
+ * the caller mirrors the full value to the session output artifact.
+ */
+function formatDisplayJson(value: unknown, canSpill: boolean): FormattedDisplayJson {
 	let fullText: string;
 	try {
 		fullText = JSON.stringify(value, null, 2) ?? String(value);
@@ -156,11 +165,17 @@ function formatDisplayJson(value: unknown): FormattedDisplayJson {
 	}
 	const totalBytes = Buffer.byteLength(fullText, "utf-8");
 	if (totalBytes <= MAX_DISPLAY_TEXT_BYTES) {
-		return { fullText, previewText: fullText, detailsValue: value, truncated: false };
+		return { fullText, previewText: fullText, detailsValue: value, spillFullValue: false };
 	}
 
 	const head = truncateHeadBytes(fullText, MAX_DISPLAY_TEXT_BYTES - DISPLAY_ELISION_RESERVE_BYTES);
 	const previewText = `${head.text}\n[…${fullText.length - head.text.length}ch elided…]`;
+	// Without an artifact to mirror into, keep the full value in details: there
+	// is no session JSONL to bloat, and discarding it would strand large
+	// displays from SDK consumers that read `details.jsonOutputs`.
+	if (!canSpill) {
+		return { fullText, previewText, detailsValue: value, spillFullValue: false };
+	}
 	return {
 		fullText,
 		previewText,
@@ -169,7 +184,7 @@ function formatDisplayJson(value: unknown): FormattedDisplayJson {
 			truncated: true,
 			totalBytes,
 		},
-		truncated: true,
+		spillFullValue: true,
 	};
 }
 
@@ -842,11 +857,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				let cellHasMarkdown = false;
 				for (const output of result.displayOutputs) {
 					if (output.type === "json") {
-						const formatted = formatDisplayJson(output.data);
+						const formatted = formatDisplayJson(output.data, artifactPath !== undefined);
 						const label = `display[${cellDisplayTexts.length + 1}]:\n`;
 						jsonOutputs.push(formatted.detailsValue);
 						cellDisplayTexts.push(`${label}${formatted.previewText}`);
-						if (formatted.truncated) {
+						if (formatted.spillFullValue) {
 							outputSink.push(`${label}${formatted.fullText}\n`, {
 								inline: `${label}${formatted.previewText}\n`,
 								emitInline: false,
