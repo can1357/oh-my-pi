@@ -9,6 +9,7 @@
 ### Fixed
 
 - Prompt history reads are no longer always global: `Up` and `Ctrl+R` can be scoped to the current conversation, folder or repository, so a project's prompts stop appearing in another once a scope is configured ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Collab guests no longer get host-only commands (`/new`, `/model …`) in their `Up` history: a command the guest gates refuse is not recorded.
 
 ## [18.1.20] - 2026-09-13
 

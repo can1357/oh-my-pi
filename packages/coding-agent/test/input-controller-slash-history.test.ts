@@ -262,8 +262,8 @@ describe("input controller — collab guest history", () => {
 			sendPrompt: vi.fn(),
 		} as unknown as InteractiveModeContext["collabGuest"];
 		harness.ctx.shutdown = vi.fn(async () => {});
-		controllerFor(harness.ctx);
-		return harness;
+		const controller = controllerFor(harness.ctx);
+		return { ...harness, controller };
 	}
 
 	it("keeps a command the guest gates refuse out of history", async () => {
@@ -291,6 +291,18 @@ describe("input controller — collab guest history", () => {
 		const aliased = guestCtx();
 		await aliased.editor.onSubmit?.("/q");
 		expect(aliased.addToHistory).toHaveBeenCalledWith("/q");
+	});
+
+	it("applies the same guard on the follow-up path", async () => {
+		const refused = guestCtx();
+		refused.editor.setText("/new");
+		await refused.controller.handleFollowUp();
+		expect(refused.addToHistory).not.toHaveBeenCalled();
+
+		const allowed = guestCtx();
+		allowed.editor.setText("/hotkeys");
+		await allowed.controller.handleFollowUp();
+		expect(allowed.addToHistory).toHaveBeenCalledWith("/hotkeys");
 	});
 });
 
