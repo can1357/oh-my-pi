@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity. Actionable summaries use canonical claims and fresh recovery state, respect broker account pools, and redact diagnostic causes while protected forensic data remains intact ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic OAuth failure tombstones survive re-login for 30 days after disable without stale recovery reminders. Single-account removal clears only matching history, preserving unidentified tombstones; whole-provider logout clears that provider's prior history locally and through the broker, even with no active credentials. Remote provider logout requires the broker's new provider-logout endpoint. Provider-wide and single-account removal propagate persistence failures without hiding durable credentials ([#11911](https://github.com/can1357/oh-my-pi/pull/11911) by [@alphastorm](https://github.com/alphastorm)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

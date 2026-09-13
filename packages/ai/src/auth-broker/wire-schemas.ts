@@ -37,6 +37,8 @@ import type {
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
 	HealthzResponse,
+	ProviderLogoutRequest,
+	ProviderLogoutResponse,
 	RefresherSchedule,
 	SnapshotEntry,
 	SnapshotResponse,
@@ -353,6 +355,17 @@ export const credentialDisableResponseSchema: FluentType<CredentialDisableRespon
 	ok: "boolean",
 });
 
+/** Whole-provider logout must name one provider; it never takes an automatic disable cause. */
+export const providerLogoutRequestSchema: FluentType<ProviderLogoutRequest> = type({
+	"+": "reject",
+	provider: type("string").atLeastLength(1),
+});
+
+export const providerLogoutResponseSchema: FluentType<ProviderLogoutResponse> = type({
+	"+": "reject",
+	ok: "boolean",
+});
+
 /** One disabled-credential tombstone — identity + cause, never token material. */
 export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSummary> = type({
 	"+": "reject",
@@ -361,6 +374,7 @@ export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSumma
 	type: "'oauth' | 'api_key'",
 	"email?": "string",
 	"accountId?": "string",
+	"projectId?": "string",
 	"orgId?": "string",
 	"orgName?": "string",
 	cause: "string",

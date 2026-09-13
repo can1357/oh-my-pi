@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test";
+import { logger } from "@oh-my-pi/pi-utils";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
 	AuthStorage,
+	type CredentialDisabledEvent,
 	type OAuthCredential,
 	registerOAuthProvider,
 	SqliteAuthCredentialStore,
@@ -20,14 +23,81 @@ import { removeWithRetries } from "../../utils/src/temp";
 const DISABLE_CAUSE =
 	'oauth refresh failed: OAuthError: Anthropic token refresh request failed. url=https://api.anthropic.com/v1/oauth/token; body={"error": "invalid_grant", "error_description": "Refresh token expired"}';
 
-function mintOAuth(email: string): OAuthCredential {
+test("broker refresh and disable diagnostics withhold provider echoes while forensic causes and events remain raw", async () => {
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-diagnostic-"));
+	const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+	const echo = JSON.stringify({
+		error: "invalid_grant",
+		refresh_token: "diag-refresh-echo",
+		client_secret: "diag-client-echo",
+		error_description: "grant revoked",
+	});
+	const endpoint = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(echo, { status: 400 }) });
+	const logs = ["info", "warn", "debug", "error"].map(level =>
+		spyOn(logger, level as "warn").mockImplementation(() => {}),
+	);
+	const storage = new AuthStorage(store, {
+		refreshOAuthCredential: async () => {
+			const response = await fetch(`http://127.0.0.1:${endpoint.port}/token`);
+			throw new Error(`OAuth refresh failed: HTTP ${response.status} ${await response.text()}`);
+		},
+	});
+	const events: unknown[] = [];
+	storage.onCredentialDisabled(event => {
+		events.push(event);
+	});
+	let broker: AuthBrokerServerHandle | undefined;
+	try {
+		store.saveOAuth("anthropic", { ...mintOAuth("forensic@example.test"), expires: 0 });
+		const row = store.listAuthCredentials("anthropic")[0];
+		await storage.reload();
+		broker = startAuthBroker({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: ["diag-broker-auth"],
+			disableRefresher: true,
+		});
+		const headers = { Authorization: "Bearer diag-broker-auth", "Content-Type": "application/json" };
+		const refresh = await fetch(`${broker.url}/v1/credential/${row.id}/refresh`, { method: "POST", headers });
+		expect(refresh.status).toBe(500);
+		const response = await refresh.text();
+		const raw = await store.listDisabledCredentials();
+		expect(raw[0]?.cause).toContain(echo);
+		expect(JSON.stringify(events)).toContain("diag-refresh-echo");
+		const local = await storage.listDisabledCredentials();
+		const remote = await (await fetch(`${broker.url}/v1/credentials/disabled`, { headers })).text();
+		storage.upsertCredential("manual-provider", { type: "api_key", key: "diag-manual-key" });
+		const manual = store.listAuthCredentials("manual-provider")[0];
+		const cause = "manual client_secret=diag-disable-cause";
+		for (const id of [manual.id, 999999]) {
+			const disabled = await fetch(`${broker.url}/v1/credential/${id}/disable`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ cause }),
+			});
+			expect(disabled.status).toBe(id === manual.id ? 200 : 404);
+		}
+		expect((await store.listDisabledCredentials("manual-provider"))[0]?.cause).toBe(cause);
+		const diagnostics = JSON.stringify({ response, local, remote, logs: logs.flatMap(log => log.mock.calls) });
+		for (const secret of ["diag-refresh-echo", "diag-client-echo", "diag-disable-cause"])
+			expect(diagnostics).not.toContain(secret);
+	} finally {
+		for (const log of logs) log.mockRestore();
+		await broker?.close();
+		endpoint.stop(true);
+		storage.close();
+		await removeWithRetries(tempDir);
+	}
+});
+
+function mintOAuth(email?: string): OAuthCredential {
 	return {
 		type: "oauth",
 		access: `access-${email}`,
 		refresh: `refresh-${email}`,
 		expires: Date.now() + 60_000,
 		email,
-		accountId: `account-${email}`,
+		accountId: email ? `account-${email}` : undefined,
 	};
 }
 
@@ -63,7 +133,6 @@ describe("disabled credential tombstones", () => {
 			type: "oauth",
 			email: "dead@example.test",
 			accountId: "account-dead@example.test",
-			cause: DISABLE_CAUSE,
 		});
 		expect(typeof summary.disabledAtMs).toBe("number");
 		// Tombstones are display-only: no token bytes may leak through them.
@@ -132,9 +201,144 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 			provider: "anthropic",
 			type: "oauth",
 			email: "gone@example.test",
-			cause: DISABLE_CAUSE,
 		});
 		expect(JSON.stringify(disabled[0])).not.toContain("refresh-gone");
+	});
+
+	test.each([true, false])("provider logout clears unidentified history with active account: %s", async active => {
+		serverStore!.saveOAuth("anthropic", mintOAuth());
+		const prior = serverStore!.listAuthCredentials("anthropic")[0]!;
+		serverStore!.deleteAuthCredential(prior.id, DISABLE_CAUSE);
+		serverStore!.saveOAuth("openai-codex", mintOAuth("peer-dead@example.test"));
+		const peerPrior = serverStore!.listAuthCredentials("openai-codex")[0]!;
+		serverStore!.deleteAuthCredential(peerPrior.id, DISABLE_CAUSE);
+		serverStore!.saveOAuth("openai-codex", mintOAuth("peer-live@example.test"));
+		if (active) serverStore!.saveOAuth("anthropic", mintOAuth("b@example.test"));
+		await serverStorage!.reload();
+		await clientStorage!.revalidateCredentials();
+		const activeRows = serverStore!.listAuthCredentials("anthropic");
+		const peerRows = serverStore!.listAuthCredentials("openai-codex");
+		const peerHistory = await clientStorage!.listDisabledCredentials("openai-codex");
+		expect((await clientStorage!.listDisabledCredentials("anthropic")).map(row => row.id)).toEqual([prior.id]);
+		const serverEvents: CredentialDisabledEvent[] = [];
+		const clientEvents: CredentialDisabledEvent[] = [];
+		serverStorage!.onCredentialDisabled(event => {
+			serverEvents.push(event);
+		});
+		clientStorage!.onCredentialDisabled(event => {
+			clientEvents.push(event);
+		});
+
+		await clientStorage!.remove("anthropic");
+
+		expect(clientStorage!.listStoredCredentials("anthropic")).toEqual([]);
+		expect(serverStorage!.listStoredCredentials("anthropic")).toEqual([]);
+		expect(serverStore!.listAuthCredentials("anthropic")).toEqual([]);
+		expect(
+			(await clientStorage!.listDisabledCredentials("anthropic")).map(row => ({ id: row.id, cause: row.cause })),
+		).toEqual(activeRows.map(row => ({ id: row.id, cause: "deleted by user" })));
+		expect(serverStore!.listAuthCredentials("openai-codex")).toEqual(peerRows);
+		expect(await clientStorage!.listDisabledCredentials("openai-codex")).toEqual(peerHistory);
+		const db = new Database(path.join(tempDir, "broker.db"), { readonly: true });
+		try {
+			expect(
+				db.query("SELECT id, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id").all("anthropic"),
+			).toEqual(activeRows.map(row => ({ id: row.id, disabled_cause: "deleted by user" })));
+		} finally {
+			db.close();
+		}
+		expect(serverEvents).toEqual([]);
+		expect(clientEvents).toEqual([]);
+	});
+
+	test("removing one named account preserves unidentified automatic history", async () => {
+		serverStore!.saveOAuth("anthropic", mintOAuth());
+		const prior = serverStore!.listAuthCredentials("anthropic")[0]!;
+		serverStore!.deleteAuthCredential(prior.id, DISABLE_CAUSE);
+		serverStore!.saveOAuth("anthropic", mintOAuth("b@example.test"));
+		await serverStorage!.reload();
+		await clientStorage!.revalidateCredentials();
+		const active = clientStorage!.listStoredCredentials("anthropic")[0]!;
+
+		expect(await clientStorage!.removeCredential("anthropic", active.id)).toBe(true);
+
+		expect(serverStore!.listAuthCredentials("anthropic")).toEqual([]);
+		expect((await clientStorage!.listActionableDisabledCredentials("anthropic")).map(row => row.id)).toEqual([
+			prior.id,
+		]);
+	});
+
+	test("provider logout requires bearer authorization and an explicit provider", async () => {
+		serverStorage!.upsertCredential("anthropic", mintOAuth("b@example.test"));
+		const before = serverStore!.listAuthCredentials();
+		const unauthorized = new AuthBrokerClient({ url: handle!.url, token: "wrong-token" });
+		await expect(unauthorized.logoutProvider("anthropic")).rejects.toMatchObject({ status: 401 });
+		const invalid = await fetch(`${handle!.url}/v1/provider/logout`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ provider: "" }),
+		});
+		await invalid.arrayBuffer();
+		expect(invalid.status).toBe(400);
+		expect(serverStore!.listAuthCredentials()).toEqual(before);
+	});
+
+	test("provider logout rejects an older broker without falling back to per-row removal", async () => {
+		serverStorage!.upsertCredential("anthropic", mintOAuth("b@example.test"));
+		const upstreamUrl = handle!.url;
+		const oldBroker = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				const url = new URL(req.url);
+				if (url.pathname === "/v1/provider/logout") return new Response("not found", { status: 404 });
+				return fetch(new Request(`${upstreamUrl}${url.pathname}${url.search}`, req));
+			},
+		});
+		const oldClient = new AuthStorage(
+			new RemoteAuthCredentialStore({
+				client: new AuthBrokerClient({ url: oldBroker.url.href, token }),
+				streamSnapshots: false,
+			}),
+		);
+		try {
+			await oldClient.revalidateCredentials();
+			const before = oldClient.listStoredCredentials("anthropic");
+			await expect(oldClient.remove("anthropic")).rejects.toMatchObject({ status: 404 });
+			expect(oldClient.listStoredCredentials("anthropic")).toEqual(before);
+			expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).toEqual(before.map(row => row.id));
+			expect(await serverStorage!.listDisabledCredentials("anthropic")).toEqual([]);
+		} finally {
+			oldClient.close();
+			oldBroker.stop(true);
+		}
+	});
+
+	test("provider logout propagates persistence failure without clearing history or snapshots", async () => {
+		serverStore!.saveOAuth("anthropic", mintOAuth());
+		const prior = serverStore!.listAuthCredentials("anthropic")[0]!;
+		serverStore!.deleteAuthCredential(prior.id, DISABLE_CAUSE);
+		serverStore!.saveOAuth("anthropic", mintOAuth("b@example.test"));
+		await serverStorage!.reload();
+		await clientStorage!.revalidateCredentials();
+		const before = clientStorage!.listStoredCredentials("anthropic");
+		const db = new Database(path.join(tempDir, "broker.db"));
+		try {
+			db.run(`CREATE TRIGGER reject_logout BEFORE UPDATE ON auth_credentials
+				WHEN NEW.disabled_cause = 'deleted by user'
+				BEGIN SELECT RAISE(ABORT, 'logout write rejected'); END`);
+
+			await expect(clientStorage!.remove("anthropic")).rejects.toMatchObject({ status: 500 });
+
+			expect(clientStorage!.listStoredCredentials("anthropic")).toEqual(before);
+			expect(serverStorage!.listStoredCredentials("anthropic").map(row => row.id)).toEqual(
+				before.map(row => row.id),
+			);
+			expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).toEqual(before.map(row => row.id));
+			expect((await clientStorage!.listDisabledCredentials("anthropic")).map(row => row.id)).toEqual([prior.id]);
+		} finally {
+			db.close();
+		}
 	});
 
 	test("revalidateCredentials re-hydrates broker-side identity changes past a stale snapshot", async () => {

@@ -87,6 +87,16 @@ export interface CredentialDisableResponse {
 	ok: boolean;
 }
 
+/** POST /v1/provider/logout request body — deliberate whole-provider removal. */
+export interface ProviderLogoutRequest {
+	provider: string;
+}
+
+/** POST /v1/provider/logout response body. */
+export interface ProviderLogoutResponse {
+	ok: boolean;
+}
+
 /** GET /v1/credentials/disabled response body — tombstones of auto-disabled rows. */
 export interface DisabledCredentialsResponse {
 	generatedAt: number;

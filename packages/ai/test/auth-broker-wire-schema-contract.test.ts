@@ -113,6 +113,8 @@ const schemaNames = [
 	"credentialRefreshResponseSchema",
 	"credentialDisableRequestSchema",
 	"credentialDisableResponseSchema",
+	"providerLogoutRequestSchema",
+	"providerLogoutResponseSchema",
 	"disabledCredentialSummarySchema",
 	"disabledCredentialsResponseSchema",
 	"credentialBlockRequestSchema",
@@ -174,6 +176,8 @@ const validSamples: Record<SchemaName, unknown> = {
 	credentialRefreshResponseSchema: { entry: CREDENTIAL_ENTRY },
 	credentialDisableRequestSchema: {},
 	credentialDisableResponseSchema: { ok: true },
+	providerLogoutRequestSchema: { provider: "anthropic" },
+	providerLogoutResponseSchema: { ok: true },
 	disabledCredentialSummarySchema: {
 		id: 7,
 		provider: "anthropic",
@@ -210,7 +214,7 @@ function reject(schema: unknown, input: unknown): void {
 }
 
 describe("auth-broker public wire schemas", () => {
-	test("exports all 31 real callable ArkType values with canonical behavior", () => {
+	test("exports callable ArkType wire schemas with canonical behavior", () => {
 		expect(Object.keys(wireSchemas).sort()).toEqual([...schemaNames].sort());
 		for (const name of schemaNames) {
 			const schema = wireSchemas[name];
@@ -241,6 +245,9 @@ describe("auth-broker public wire schemas", () => {
 		accept(wireSchemas.credentialDisableRequestSchema, {});
 		reject(wireSchemas.credentialDisableRequestSchema, { cause: 1 });
 		reject(wireSchemas.credentialDisableRequestSchema, { extra: true });
+		reject(wireSchemas.providerLogoutRequestSchema, {});
+		reject(wireSchemas.providerLogoutRequestSchema, { provider: "" });
+		reject(wireSchemas.providerLogoutRequestSchema, { provider: "anthropic", cause: "invalid_grant" });
 		reject(wireSchemas.healthzResponseSchema, { ok: true, extra: true });
 		reject(wireSchemas.snapshotResponseSchema, { ...SNAPSHOT, generation: 1.5 });
 		reject(wireSchemas.snapshotResponseSchema, { ...SNAPSHOT, extra: true });
