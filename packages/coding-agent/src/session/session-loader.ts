@@ -7,7 +7,7 @@ import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
-import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { defaultSessionStorage, FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -352,7 +352,7 @@ async function loadWithKnownSize(
 /** Load and validate a session while retaining malformed-record diagnostics. */
 export async function loadSessionFile(
 	filePath: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = defaultSessionStorage(),
 	options: LoadSessionOptions = {},
 ): Promise<SessionLoadResult> {
 	try {
@@ -379,7 +379,7 @@ export async function loadSessionFile(
 /** Load the valid entries from a session file, skipping malformed records. */
 export async function loadEntriesFromFile(
 	filePath: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = defaultSessionStorage(),
 	options?: { throwIfMissing?: boolean },
 ): Promise<FileEntry[]> {
 	return (await loadSessionFile(filePath, storage, options)).entries;
@@ -392,7 +392,7 @@ export async function loadEntriesFromFile(
 export async function visitEntriesFromFile(
 	filePath: string,
 	visit: (entry: FileEntry) => void | boolean,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<void> {
 	const size = storage.statSync(filePath).size;
 	if (shouldStreamEntries(storage, size)) {

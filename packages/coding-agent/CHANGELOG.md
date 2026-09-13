@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Sessions can now be stored in PostgreSQL, MySQL, or SQLite instead of JSONL files: set `session.storage: sql` and point `session.sql.dsnFile` at a file holding the connection string (or set `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE`); `--resume`, `--continue`, the session picker, and listing follow the same store.
+
 ## [18.3.2] - 2026-09-25
 
 ### Added

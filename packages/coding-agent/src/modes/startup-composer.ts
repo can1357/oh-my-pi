@@ -199,12 +199,12 @@ async function loadRecentSessionsAfterFirstFrame(
 }
 
 async function loadRecentSessions(cwd: string): Promise<RecentSession[]> {
-	const [{ getRecentSessions }, { computeDefaultSessionDir }, { FileSessionStorage }] = await Promise.all([
+	const [{ getRecentSessions }, { computeDefaultSessionDir }, { defaultSessionStorage }] = await Promise.all([
 		import("../session/session-listing"),
 		import("../session/session-paths"),
 		import("../session/session-storage"),
 	]);
-	const storage = new FileSessionStorage();
+	const storage = defaultSessionStorage();
 	const dir = computeDefaultSessionDir(cwd, storage);
 	const list = await getRecentSessions(dir, 4, storage);
 	return list.map(session => ({ name: session.name, timeAgo: session.timeAgo }));

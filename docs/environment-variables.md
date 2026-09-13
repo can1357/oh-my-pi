@@ -135,6 +135,15 @@ When the broker is enabled, the local SQLite credential store is bypassed and al
 
 The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*`. Its own inbound bearer token lives at `<config-dir>/auth-gateway.token` and is managed via `omp auth-gateway token`.
 
+### Session storage
+
+Sessions persist to JSONL files by default. `session.storage: sql` (or `OMP_SESSION_STORAGE=sql`) stores each session as a row in a PostgreSQL, MySQL, or SQLite table instead; see [`session.md`](./session.md#storage-abstractions).
+
+| Variable                   | Used for                                                              | Required when                                | Notes / precedence                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------- | --------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OMP_SESSION_STORAGE`      | `file` (default) or `sql`; selects where session transcripts persist   | Selecting SQL storage without editing config | Wins over `session.storage` in `config.yml`. Any other value refuses to start naming it. Unset with the setting at its default is file storage exactly as before, with nothing logged.                                                                                                                                                                      |
+| `OMP_SESSION_SQL_DSN_FILE` | Path of a file whose trimmed contents are the database connection URL  | `session.storage` is `sql`                   | Wins over `session.sql.dsnFile`. The file — not the environment — carries the credential; keep it `0600`. A missing, unreadable, or blank file, or a database that refuses the connection, refuses to start with exit 1, naming the variable (or setting) and the path plus the driver's error — never the connection string, never a fallback to files. |
+
 ---
 
 ## 2) Provider-specific runtime configuration

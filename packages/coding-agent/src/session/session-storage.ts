@@ -931,6 +931,26 @@ export class FileSessionStorage implements SessionStorage {
 	}
 }
 
+let defaultStorage: SessionStorage | undefined;
+
+/**
+ * The storage every session factory, listing, resume, and maintenance path
+ * falls back to when the caller passes none. Lazily a {@link FileSessionStorage}
+ * (stateless, so one shared instance is safe); {@link setDefaultSessionStorage}
+ * replaces it with the configured storage before the first session is opened,
+ * so `--resume`, the resume picker, `--continue`, and listing all read the same
+ * store the session is written to.
+ */
+export function defaultSessionStorage(): SessionStorage {
+	defaultStorage ??= new FileSessionStorage();
+	return defaultStorage;
+}
+
+/** Install the process-wide default storage. Call before any session is opened. */
+export function setDefaultSessionStorage(storage: SessionStorage): void {
+	defaultStorage = storage;
+}
+
 function matchesPattern(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
 	if (pattern.startsWith("*.")) {
