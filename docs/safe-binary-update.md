@@ -1,0 +1,25 @@
+# Safe binary update
+
+Official updates are `omp update` and `omp update --check`. Those commands
+detect the active install (standalone binary, bun, npm, Homebrew, mise, Nix).
+Standalone binary, bun, npm, Homebrew, and mise installs can install the
+selected channel. Nix-managed installs are detection-only: `omp update`
+reports that the installation cannot update itself and returns without
+installing anything — update the flake input or profile that provides omp,
+then rebuild. See `omp update --help` and the `update` row in the
+[CLI reference](./cli-reference.md).
+
+This repository also ships an **optional** contrib wrapper that adds
+snapshot/rollback around that same CLI. It does not change core update
+behavior:
+
+- [`contrib/omp-sync/omp-sync.sh`](../contrib/omp-sync/omp-sync.sh) — portable
+  fail-soft wrapper (`--check`, `--apply`, `--rollback`, `--list`)
+- [`contrib/omp-sync/README.md`](../contrib/omp-sync/README.md) — usage, exit
+  codes, snapshot location, rollback coverage, and safety guarantees
+
+Use the wrapper when you want a copy of the previous launcher kept under
+`~/.omp/sync/` (or `$OMP_HOME/sync`) and restored if `omp update` or an
+optional smoke command fails. Restore fully covers standalone-binary and
+shim-takeover installs; bun/npm managed updates that rewrite `node_modules`
+are only partially reverted. User config is never deleted by the wrapper.
