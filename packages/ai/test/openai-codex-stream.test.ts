@@ -3949,6 +3949,170 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it("breaks websocket chaining when replay sanitization removes an output item", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+
+		class SanitizedResponseWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				sentRequests.push(JSON.parse(data) as Record<string, unknown>);
+				if (sentRequests.length !== 1) {
+					this.emitCodexResponse({
+						messageId: "msg_2",
+						responseId: "resp_2",
+						text: "Second answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				this.sendJson({ type: "response.created", response: { id: "resp_1" } });
+				this.sendJson({
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_commentary", summary: [] },
+				});
+				this.sendJson({
+					type: "response.output_item.added",
+					output_index: 1,
+					item: {
+						type: "message",
+						id: "msg_commentary",
+						role: "assistant",
+						status: "in_progress",
+						phase: "commentary",
+						content: [],
+					},
+				});
+				this.sendJson({
+					type: "response.content_part.added",
+					output_index: 1,
+					item_id: "msg_commentary",
+					part: { type: "output_text", text: "" },
+				});
+				this.sendJson({
+					type: "response.output_text.delta",
+					output_index: 1,
+					item_id: "msg_commentary",
+					delta: "Waiting for the background job.",
+				});
+				this.sendJson({
+					type: "response.output_item.done",
+					output_index: 1,
+					item: {
+						type: "message",
+						id: "msg_commentary",
+						role: "assistant",
+						status: "completed",
+						phase: "commentary",
+						content: [{ type: "output_text", text: "Waiting for the background job." }],
+					},
+				});
+				this.sendJson({
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "reasoning",
+						id: "rs_commentary",
+						encrypted_content: "enc_commentary",
+						summary: [],
+					},
+				});
+				this.sendJson({
+					type: "response.output_item.added",
+					output_index: 2,
+					item: {
+						type: "message",
+						id: "msg_empty_final",
+						role: "assistant",
+						status: "in_progress",
+						phase: "final_answer",
+						content: [],
+					},
+				});
+				this.sendJson({
+					type: "response.content_part.added",
+					output_index: 2,
+					item_id: "msg_empty_final",
+					part: { type: "output_text", text: "" },
+				});
+				this.sendJson({
+					type: "response.output_item.done",
+					output_index: 2,
+					item: {
+						type: "message",
+						id: "msg_empty_final",
+						role: "assistant",
+						status: "completed",
+						phase: "final_answer",
+						content: [{ type: "output_text", text: "" }],
+					},
+				});
+				this.sendJson({
+					type: "response.completed",
+					response: { id: "resp_1", status: "completed", usage: DEFAULT_USAGE },
+				});
+			}
+		}
+
+		global.WebSocket = SanitizedResponseWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = {
+			fetch: fetchMock as FetchImpl,
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-sanitized-replay",
+			providerSessionState,
+		};
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: ["You are a helpful assistant."], messages: [firstUser] },
+			options,
+		).result();
+		await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }],
+			},
+			options,
+		).result();
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[1]?.previous_response_id).toBeUndefined();
+		const replay = sentRequests[1]?.input as Array<Record<string, unknown>>;
+		const reasoningIndex = replay.findIndex(item => item.type === "reasoning");
+		const commentaryIndex = replay.findIndex(item => item.type === "message" && item.phase === "commentary");
+		expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+		expect(commentaryIndex).toBe(reasoningIndex + 1);
+		expect(replay).toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Waiting for the background job." }],
+			}),
+		);
+		expect(replay).not.toContainEqual(expect.objectContaining({ role: "assistant", phase: "final_answer" }));
+		const stats = getOpenAICodexWebSocketDebugStats(model, {
+			sessionId: "ws-sanitized-replay",
+			providerSessionState,
+		});
+		expect(stats?.fullContextRequests).toBe(2);
+		expect(stats?.deltaRequests).toBe(0);
+	});
+
 	it("chains websocket tool output after normalizing an oversized call id", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

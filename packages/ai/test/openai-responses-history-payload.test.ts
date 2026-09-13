@@ -875,6 +875,204 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
+	it("does not replay an empty Codex final_answer message or its trailing reasoning item", async () => {
+		// gpt-5.6 shape captured from a live omp session: the answer landed in the
+		// `commentary` phase, so the turn closed with an empty `final_answer`.
+		// Replaying that item seeds the next turn with an empty slot the model
+		// fills with drift ("\n\n", stray words, non-Latin residue).
+		const commentaryThenEmptyFinal = [
+			{ type: "reasoning", encrypted_content: "enc_commentary", summary: [{ type: "summary_text", text: "plan" }] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Awaiting the wake for job 7." }],
+			},
+			{ type: "reasoning", encrypted_content: "enc_empty_final", summary: [] },
+			{ type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "" }] },
+		];
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "start the jobs", timestamp: Date.now() },
+				makeAssistantMessage(commentaryThenEmptyFinal, true, "openai-codex", "gpt-5.5"),
+				{ role: "user", content: "job 7 completed", timestamp: Date.now() },
+			],
+		};
+		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
+		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
+		expect(payload.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "start the jobs" }] },
+			{ type: "reasoning", encrypted_content: "enc_commentary", summary: [{ type: "summary_text", text: "plan" }] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Awaiting the wake for job 7." }],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "job 7 completed" }] },
+		]);
+	});
+
+	it("keeps a whitespace-only Codex final_answer drift out of replay while the commentary survives", async () => {
+		// Second stage of the same drift: the empty slot has already become "\n\n".
+		const items = [
+			{ type: "reasoning", encrypted_content: "enc_c", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Awaiting job 19." }],
+			},
+			{
+				type: "message",
+				role: "assistant",
+				phase: "final_answer",
+				content: [{ type: "output_text", text: "\n\n" }],
+			},
+		];
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "go", timestamp: Date.now() },
+				makeAssistantMessage(items, true, "openai-codex", "gpt-5.5"),
+				{ role: "user", content: "next", timestamp: Date.now() },
+			],
+		};
+		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
+		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
+		expect(payload.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "go" }] },
+			{ type: "reasoning", encrypted_content: "enc_c", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Awaiting job 19." }],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "next" }] },
+		]);
+	});
+
+	it("keeps reasoning for a tool call after removing an earlier empty assistant message", async () => {
+		const emptyMessageThenToolCall = [
+			{ type: "reasoning", encrypted_content: "enc_tool", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "" }],
+			},
+			{ type: "function_call", call_id: "call_read", name: "read", arguments: '{"path":"README.md"}' },
+		];
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "read the file", timestamp: Date.now() },
+				makeAssistantMessage(emptyMessageThenToolCall, true, "openai-codex", "gpt-5.5"),
+				{ role: "user", content: "continue", timestamp: Date.now() },
+			],
+		};
+		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
+		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
+		const input = payload.input ?? [];
+		const reasoningIndex = input.findIndex(
+			item => isIssue5002Record(item) && item.type === "reasoning" && item.encrypted_content === "enc_tool",
+		);
+		const callIndex = input.findIndex(
+			item => isIssue5002Record(item) && item.type === "function_call" && item.call_id === "call_read",
+		);
+		expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+		expect(callIndex).toBe(reasoningIndex + 1);
+		expect(input[callIndex]).toEqual({
+			type: "function_call",
+			call_id: "call_read",
+			name: "read",
+			arguments: '{"path":"README.md"}',
+		});
+		expect(input).not.toContainEqual(expect.objectContaining({ role: "assistant", phase: "commentary" }));
+	});
+
+	it("drops reasoning orphaned by an empty message before a new reasoning group", async () => {
+		const items = [
+			{ type: "reasoning", encrypted_content: "enc_empty_commentary", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "" }],
+			},
+			{ type: "reasoning", encrypted_content: "enc_final", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "final_answer",
+				content: [{ type: "output_text", text: "Recovered answer." }],
+			},
+		];
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "go", timestamp: Date.now() },
+				makeAssistantMessage(items, true, "openai-codex", "gpt-5.5"),
+				{ role: "user", content: "next", timestamp: Date.now() },
+			],
+		};
+		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
+		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
+		expect(payload.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "go" }] },
+			{ type: "reasoning", encrypted_content: "enc_final", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "final_answer",
+				content: [{ type: "output_text", text: "Recovered answer." }],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "next" }] },
+		]);
+	});
+
+	it("isolates full-snapshot reasoning groups and keeps every summary for surviving output", async () => {
+		const snapshot = [
+			{ role: "user", content: [{ type: "input_text", text: "first snapshot user" }] },
+			{ type: "reasoning", encrypted_content: "enc_before_boundary", summary: [] },
+			{ role: "user", content: [{ type: "input_text", text: "second snapshot user" }] },
+			{ type: "reasoning", encrypted_content: "enc_summary_1", summary: [] },
+			{ type: "reasoning", encrypted_content: "enc_summary_2", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Snapshot answer." }],
+			},
+			{ type: "reasoning", encrypted_content: "enc_empty_final", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "final_answer",
+				content: [{ type: "output_text", text: "" }],
+			},
+		];
+		const context: Context = {
+			messages: [
+				makeAssistantMessage(snapshot, false, "openai-codex", "gpt-5.5"),
+				{ role: "user", content: "follow up", timestamp: Date.now() },
+			],
+		};
+		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
+		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
+		expect(payload.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "first snapshot user" }] },
+			{ role: "user", content: [{ type: "input_text", text: "second snapshot user" }] },
+			{ type: "reasoning", encrypted_content: "enc_summary_1", summary: [] },
+			{ type: "reasoning", encrypted_content: "enc_summary_2", summary: [] },
+			{
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Snapshot answer." }],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "follow up" }] },
+		]);
+	});
+
 	it("ignores incompatible native history snapshots across providers", async () => {
 		const model = getBundledModel("github-copilot", "gpt-5.4") as Model<"openai-responses">;
 		const payload = (await captureResponsesPayload(model, codexToCopilotContext)) as { input?: unknown[] };

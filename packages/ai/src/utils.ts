@@ -324,6 +324,15 @@ export function stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(items:
  * Returns `undefined` for hidden-empty turns that only contain reasoning and an
  * empty assistant message, allowing callers to rebuild visible transcript
  * history instead of replaying stale native state.
+ *
+ * When the turn does carry replayable output, whitespace-only assistant
+ * messages are dropped rather than replayed. gpt-5.6 Codex ends a turn whose
+ * text all landed in the `commentary` phase with an empty `final_answer`
+ * message; replaying that item verbatim seeds the next turn with an empty slot
+ * the model then fills - `""` → `"\n\n"` → stray words → non-Latin residue -
+ * and each contaminated item is replayed in turn, so the drift compounds until
+ * the visible answer collapses. Codex CLI replays the empty item too
+ * (openai/codex#32389); this is the layer where omp can refuse to.
  */
 export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
@@ -331,34 +340,68 @@ export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 ): ResponseInput | undefined {
 	const sanitized = sanitizeOpenAIResponsesHistoryItemsForReplay(items, options);
 	let hasReplayableAssistantOutput = false;
+	let hasEmptyAssistantMessage = false;
 
 	for (const item of sanitized) {
 		if (item.type === "reasoning") continue;
-		if (item.type !== "message" || item.role !== "assistant") {
-			hasReplayableAssistantOutput = true;
-			break;
-		}
-		if (typeof item.content === "string") {
-			if (NON_WHITESPACE_RE.test(item.content)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
+		if (isEmptyAssistantMessage(item)) {
+			hasEmptyAssistantMessage = true;
 			continue;
 		}
-		for (const part of item.content) {
-			if (part.type === "output_text" && NON_WHITESPACE_RE.test(part.text)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
-			if (part.type === "refusal" && NON_WHITESPACE_RE.test(part.refusal)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
-		}
-		if (hasReplayableAssistantOutput) break;
+		hasReplayableAssistantOutput = true;
 	}
 
-	return hasReplayableAssistantOutput ? sanitized : undefined;
+	if (!hasReplayableAssistantOutput) return undefined;
+	if (!hasEmptyAssistantMessage) return sanitized;
+	return dropEmptyAssistantMessagesForReplay(sanitized);
+}
+
+function isEmptyAssistantMessage(item: OpenAIResponsesReplayItem): boolean {
+	if (item.type !== "message" || item.role !== "assistant") return false;
+	if (typeof item.content === "string") return !NON_WHITESPACE_RE.test(item.content);
+	for (const part of item.content) {
+		if (part.type === "output_text" && NON_WHITESPACE_RE.test(part.text)) return false;
+		if (part.type === "refusal" && NON_WHITESPACE_RE.test(part.refusal)) return false;
+	}
+	return true;
+}
+
+/**
+ * Remove whitespace-only assistant messages plus any reasoning item left with
+ * no output to introduce: a reasoning item is only meaningful ahead of the
+ * output it produced, and a dangling one is rejected by the Responses API when
+ * it carries an id.
+ */
+function dropEmptyAssistantMessagesForReplay(items: ResponseInput): ResponseInput {
+	const kept: ResponseInput = [];
+	let pendingReasoning: ResponseInput = [];
+	let removedAssistantMessage = false;
+	const flushReasoning = (): void => {
+		kept.push(...pendingReasoning);
+		pendingReasoning = [];
+	};
+	for (const item of items) {
+		if (isOpenAIResponsesClientInputBoundary(item as unknown as Record<string, unknown>)) {
+			pendingReasoning = [];
+			removedAssistantMessage = false;
+			kept.push(item);
+			continue;
+		}
+		if (item.type === "reasoning") {
+			if (removedAssistantMessage) pendingReasoning = [];
+			removedAssistantMessage = false;
+			pendingReasoning.push(item);
+			continue;
+		}
+		if (isEmptyAssistantMessage(item)) {
+			removedAssistantMessage = true;
+			continue;
+		}
+		flushReasoning();
+		removedAssistantMessage = false;
+		kept.push(item);
+	}
+	return kept;
 }
 
 /**

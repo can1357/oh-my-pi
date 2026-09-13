@@ -65,6 +65,72 @@ function createStatefulSse(text: string, responseId: string): Response {
 	});
 }
 
+function createStatefulSseWithEmptyFinal(responseId: string): Response {
+	const commentary = "Waiting for the background job.";
+	const events = [
+		{ type: "response.created", response: { id: responseId } },
+		{
+			type: "response.output_item.added",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_commentary`,
+				role: "assistant",
+				status: "in_progress",
+				phase: "commentary",
+				content: [],
+			},
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", delta: commentary },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_commentary`,
+				role: "assistant",
+				status: "completed",
+				phase: "commentary",
+				content: [{ type: "output_text", text: commentary }],
+			},
+		},
+		{
+			type: "response.output_item.added",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_final`,
+				role: "assistant",
+				status: "in_progress",
+				phase: "final_answer",
+				content: [],
+			},
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_final`,
+				role: "assistant",
+				status: "completed",
+				phase: "final_answer",
+				content: [{ type: "output_text", text: "" }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				id: responseId,
+				status: "completed",
+				usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 function createCapturingFetch(sentRequests: Array<Record<string, unknown>>): FetchImpl {
 	return vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
 		sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -116,6 +182,50 @@ describe("openai-responses stateful chaining", () => {
 		expect(deltaInput[0]?.role).toBe("user");
 		expect(JSON.stringify(deltaInput)).toContain("Second question");
 		expect(JSON.stringify(deltaInput)).not.toContain("Answer 1");
+	});
+
+	it("breaks the response chain when replay sanitization removes an output item", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			if (sentRequests.length === 1) return createStatefulSseWithEmptyFinal("resp_1");
+			return createStatefulSse("Second answer", "resp_2");
+		}) as FetchImpl;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-sanitized-replay",
+			providerSessionState,
+			statefulResponses: true,
+			reasoning: "low" as const,
+			fetch: fetchMock,
+		};
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await streamOpenAIResponses(
+			model,
+			{ systemPrompt, messages: [firstUser] },
+			options,
+		).result();
+		await streamOpenAIResponses(
+			model,
+			{
+				systemPrompt,
+				messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }],
+			},
+			options,
+		).result();
+
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[1]?.previous_response_id).toBeUndefined();
+		const replay = sentRequests[1]?.input as Array<Record<string, unknown>>;
+		expect(replay).toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Waiting for the background job." }],
+			}),
+		);
+		expect(replay).not.toContainEqual(expect.objectContaining({ role: "assistant", phase: "final_answer" }));
 	});
 
 	it("keeps the automatic explicit cache breakpoint stable across chained turns", async () => {
