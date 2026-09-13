@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- MCP OAuth flows now reject authorization callbacks whose RFC 9207 `iss` (issuer) does not match the authorization server the flow started against, aborting the login before any token exchange; legacy authorization servers that omit `iss` continue to work. This complements the MCP protocol 2026-07-28 work in [#8167](https://github.com/can1357/oh-my-pi/pull/8167) by [@art-wiedzmin](https://github.com/art-wiedzmin) ([#11936](https://github.com/can1357/oh-my-pi/pull/11936) by [@bchap1n](https://github.com/bchap1n)).
+
 ## [18.1.19] - 2026-09-12
+
+### Fixed
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
 

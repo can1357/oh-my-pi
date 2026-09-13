@@ -1283,5 +1283,66 @@ describe("mcp oauth flow", () => {
 
 			expect(tokenParams.get("resource")).toBe("https://token.example.com");
 		});
+
+		describe("RFC 9207 issuer validation", () => {
+			function issuerFlow() {
+				return new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://auth.example.com/tenant/oauth/authorize",
+						tokenUrl: "https://auth.example.com/tenant/oauth/token",
+						issuerUrl: "https://auth.example.com/tenant",
+					},
+					{},
+				);
+			}
+
+			function callbackUrl(iss?: string): URL {
+				const url = new URL("http://127.0.0.1:3000/callback?code=code&state=state");
+				if (iss !== undefined) url.searchParams.set("iss", iss);
+				return url;
+			}
+
+			it("accepts a callback whose iss matches the discovered issuer, not the endpoint", () => {
+				// The authorize endpoint appends a path to the issuer; comparing
+				// against the endpoint would falsely reject this legitimate
+				// callback.
+				expect(() =>
+					issuerFlow().onAuthorizeRedirect(callbackUrl("https://auth.example.com/tenant")),
+				).not.toThrow();
+			});
+
+			it("accepts an iss that differs from the issuer only by trailing slash", () => {
+				expect(() =>
+					issuerFlow().onAuthorizeRedirect(callbackUrl("https://auth.example.com/tenant/")),
+				).not.toThrow();
+			});
+
+			it("rejects a callback whose iss names a different authorization server", () => {
+				expect(() => issuerFlow().onAuthorizeRedirect(callbackUrl("https://attacker.example.com"))).toThrow(
+					/OAuth iss mismatch.*RFC 9207.*expected https:\/\/auth\.example\.com\/tenant, got https:\/\/attacker\.example\.com/,
+				);
+			});
+
+			it("accepts a legacy callback that omits iss", () => {
+				expect(() => issuerFlow().onAuthorizeRedirect(callbackUrl())).not.toThrow();
+			});
+
+			it("falls back to the endpoint origin when discovery produced no issuer", () => {
+				const flow = new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://legacy.example.com/oauth/authorize",
+						tokenUrl: "https://legacy.example.com/oauth/token",
+					},
+					{},
+				);
+				expect(() => flow.onAuthorizeRedirect(callbackUrl("https://legacy.example.com"))).not.toThrow();
+				expect(() => flow.onAuthorizeRedirect(callbackUrl("https://legacy.example.com/oauth/authorize"))).toThrow(
+					/OAuth iss mismatch/,
+				);
+				expect(() => flow.onAuthorizeRedirect(callbackUrl("https://attacker.example.com"))).toThrow(
+					/OAuth iss mismatch/,
+				);
+			});
+		});
 	});
 });
