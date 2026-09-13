@@ -10,7 +10,7 @@
  * real Unix-socket IPC is redirected into a temp dir via a spy on
  * `publishCollabHost`, exactly as in host-registry.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,7 +20,20 @@ import type { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 const RELAY_URL = "ws://localhost:8788";
@@ -202,6 +215,143 @@ afterEach(async () => {
 	uninstallInMemoryRelay();
 	publishSpy?.mockRestore();
 	await fs.rm(tmp, { recursive: true, force: true });
+});
+
+describe("interactive collaboration startup", () => {
+	let activeSettings: Settings;
+	let testSession: TestSessionContext;
+	let mode: InteractiveMode | undefined;
+	let originalProject: string;
+
+	beforeEach(async () => {
+		originalProject = getProjectDir();
+		setProjectDir(tmp);
+		resetSettingsForTest();
+		await initTheme();
+		activeSettings = await Settings.init({ inMemory: true, cwd: tmp });
+		activeSettings.override("startup.checkUpdate", false);
+		activeSettings.override("startup.changelogMode", "hidden");
+		activeSettings.override("startup.setupWizard", false);
+		activeSettings.override("startup.showSplash", false);
+		activeSettings.override("marketplace.autoUpdate", "off");
+		testSession = await createTestSession({
+			inMemory: true,
+			settingsOverrides: {
+				"collab.autoStart": "view",
+				"collab.relayUrl": RELAY_URL,
+				"collab.webUrl": WEB_URL,
+			},
+		});
+		mode = undefined;
+	});
+
+	afterEach(async () => {
+		await mode?.collabController.shutdown("test cleanup").catch(() => {});
+		mode?.stop();
+		stopPendingStartupComposer();
+		await testSession.cleanup();
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+		setProjectDir(originalProject);
+	});
+
+	it("skips auto-hosting for an explicit guest initialization without changing the saved policy", async () => {
+		mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: new VirtualTerminal() }),
+		);
+		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+
+		await mode.init({ suppressWelcomeIntro: true, autoStartCollab: false });
+
+		expect(mode.collabHost).toBeUndefined();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		expect(mode.settings.get("collab.autoStart")).toBe("view");
+		// The per-init intent must not permanently disable collaboration.
+		await mode.collabController.start({ access: "view" });
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
+	});
+
+	it.each(["hooks", "replay", "cleanup rejection"] as const)(
+		"withdraws an early host before terminal teardown when startup fails during %s",
+		async failurePoint => {
+			const startupFailure = new Error("injected startup failure");
+			const cleanupFailure = new Error("injected cleanup failure");
+			let earlyHost: CollabHost | undefined;
+			let terminalStopped = false;
+			let hostAtTerminalStop: CollabHost | undefined;
+			let transportOpenAtTerminalStop = false;
+			class StartupTerminal extends VirtualTerminal {
+				override stop(): void {
+					terminalStopped = true;
+					hostAtTerminalStop = mode?.collabHost;
+					transportOpenAtTerminalStop = capturedSockets.some(socket => socket.readyState !== FakeWebSocket.CLOSED);
+					super.stop();
+				}
+			}
+			beginStartupComposer({ terminal: new StartupTerminal(), version: "test", cache: false });
+			spyOn(InteractiveMode.prototype, "initHooksAndCustomTools").mockImplementation(
+				async function (this: InteractiveMode) {
+					mode = this;
+					earlyHost = this.collabHost;
+					// Ordinary init still installs the host before invoking startup hooks.
+					expect(earlyHost).toBeDefined();
+					await this.collabController.idle();
+					expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view" }]);
+					if (failurePoint === "cleanup rejection" && earlyHost) {
+						const stop = earlyHost.stop.bind(earlyHost);
+						spyOn(earlyHost, "stop").mockImplementation(async reason => {
+							await stop(reason);
+							throw cleanupFailure;
+						});
+					}
+					if (failurePoint !== "replay") throw startupFailure;
+				},
+			);
+			if (failurePoint === "replay") {
+				spyOn(InteractiveMode.prototype, "renderInitialMessages").mockRejectedValue(startupFailure);
+			}
+			spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
+			spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
+			const originalIsTTY = process.stdin.isTTY;
+			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+			const authStorage = await AuthStorage.create(path.join(tmp, "startup-auth.db"));
+			try {
+				const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
+				await expect(
+					runRootCommand(parseArgs(rawArgs), rawArgs, {
+						settings: activeSettings,
+						discoverAuthStorage: async () => authStorage,
+						createAgentSession: async options => {
+							if (!options?.preloadedExtensions || !options.eventBus) throw new Error("Missing startup context");
+							await options?.sessionManager?.close();
+							return {
+								session: testSession.session,
+								setToolUIContext: () => {},
+								extensionsResult: options.preloadedExtensions,
+								eventBus: options.eventBus,
+							};
+						},
+					}),
+				).rejects.toBe(startupFailure);
+
+				expect(terminalStopped).toBe(true);
+				expect(hostAtTerminalStop).toBeUndefined();
+				expect(transportOpenAtTerminalStop).toBe(false);
+				expect(earlyHost?.ending).toBe(true);
+				expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+			} finally {
+				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+				authStorage.close();
+			}
+		},
+	);
 });
 
 describe("CollabController", () => {

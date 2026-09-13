@@ -564,67 +564,76 @@ async function runInteractiveMode(
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
+				autoStartCollab: joinLink === undefined,
 				recentSessions: startupLease?.recentSessions,
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
+
+		if (setupWizard && playStartupSplash) {
+			await setupWizard.runStartupSplash(mode);
+		}
+
+		if (setupWizard && setupScenes.length > 0) {
+			await setupWizard.runSetupWizard(mode, setupScenes);
+		}
+
+		// Consume failures immediately, but defer any banner until the transcript is stable.
+		const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
+
+		// `init` already cleared native history before painting the startup frame.
+		// Replaying resumed transcript rows and repainting the viewport is enough;
+		// another clear would only archive the startup frame. In-process session
+		// replacements still request `clearTerminalHistory` at their own callsites.
+		await logger.time("InteractiveMode.renderInitialMessages", () =>
+			mode.renderInitialMessages({ preserveExistingChat: true }),
+		);
+		// A resolved version check must not insert its banner into a partial transcript.
+		checkedVersionPromise.then(newVersion => {
+			if (!settings.get("startup.checkUpdate")) {
+				return;
+			}
+			if (newVersion) {
+				mode.showNewVersionNotification(newVersion);
+			}
+		});
+
+		const advisorConfigWarnings = session.getAdvisorConfigWarnings();
+		if (advisorConfigWarnings.length > 0) {
+			// Pulled here, not pushed from SessionAdvisors: the constructor-time
+			// `emitNotice` fired before the UI subscribed and was silently lost.
+			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
+		}
+
+		for (const notify of notifs) {
+			if (!notify) {
+				continue;
+			}
+			if (notify.kind === "warn") {
+				mode.showWarning(notify.message);
+			} else if (notify.kind === "error") {
+				mode.showError(notify.message);
+			} else if (notify.kind === "info") {
+				mode.showStatus(notify.message);
+			}
+		}
+
+		// `omp join <link>`: dispatch through the same builtin path as a typed
+		// `/join` so collab guards and error rendering stay in one place.
+		if (joinLink !== undefined) {
+			await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
+		}
 	} catch (error) {
-		mode.stop();
+		// Init publishes before startup dialogs, so any later startup failure
+		// must withdraw the room before restoring the terminal.
+		try {
+			await mode.collabController.shutdown("startup failed");
+		} catch (cleanupError) {
+			logger.warn("Failed to stop collaboration after startup failure", { error: String(cleanupError) });
+		} finally {
+			mode.stop();
+		}
 		throw error;
-	}
-
-	if (setupWizard && playStartupSplash) {
-		await setupWizard.runStartupSplash(mode);
-	}
-
-	if (setupWizard && setupScenes.length > 0) {
-		await setupWizard.runSetupWizard(mode, setupScenes);
-	}
-
-	// Consume failures immediately, but defer any banner until the transcript is stable.
-	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
-
-	// `init` already cleared native history before painting the startup frame.
-	// Replaying resumed transcript rows and repainting the viewport is enough;
-	// another clear would only archive the startup frame. In-process session
-	// replacements still request `clearTerminalHistory` at their own callsites.
-	await logger.time("InteractiveMode.renderInitialMessages", () =>
-		mode.renderInitialMessages({ preserveExistingChat: true }),
-	);
-	// A resolved version check must not insert its banner into a partial transcript.
-	checkedVersionPromise.then(newVersion => {
-		if (!settings.get("startup.checkUpdate")) {
-			return;
-		}
-		if (newVersion) {
-			mode.showNewVersionNotification(newVersion);
-		}
-	});
-
-	const advisorConfigWarnings = session.getAdvisorConfigWarnings();
-	if (advisorConfigWarnings.length > 0) {
-		// Pulled here, not pushed from SessionAdvisors: the constructor-time
-		// `emitNotice` fired before the UI subscribed and was silently lost.
-		mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
-	}
-
-	for (const notify of notifs) {
-		if (!notify) {
-			continue;
-		}
-		if (notify.kind === "warn") {
-			mode.showWarning(notify.message);
-		} else if (notify.kind === "error") {
-			mode.showError(notify.message);
-		} else if (notify.kind === "info") {
-			mode.showStatus(notify.message);
-		}
-	}
-
-	// `omp join <link>`: dispatch through the same builtin path as a typed
-	// `/join` so collab guards and error rendering stay in one place.
-	if (joinLink !== undefined) {
-		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
 	if (initialMessage !== undefined) {

@@ -1529,7 +1529,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Guests can join and answer dialogs from now on, but — like the local
 		// composer, whose submit gate is lifted at the end of init — they cannot
 		// prompt, interrupt, or command agents until startup has finished.
-		this.collabController.autoStart();
+		if (options.autoStartCollab !== false) this.collabController.autoStart();
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
