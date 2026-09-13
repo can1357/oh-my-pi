@@ -64,7 +64,8 @@ export async function runCollabListCommand(
 		// Session names and POSIX paths come from other processes and may carry
 		// tabs, newlines, or escape bytes; keep each on one clean line.
 		const name = host.sessionName ? sanitizeDisplayLine(host.sessionName) : "";
-		const session = name ? `${name} (${host.sessionId})` : host.sessionId;
+		const sessionId = sanitizeDisplayLine(host.sessionId);
+		const session = name ? `${name} (${sessionId})` : sessionId;
 		const cwd = sanitizeDisplayLine(shortenPath(host.cwd));
 		const guests = host.participants - 1;
 		const details = [

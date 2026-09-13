@@ -352,10 +352,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					// Registry strings come from other processes: strip controls,
 					// collapse newlines, and bound the width before they hit the TUI.
 					const name = host.sessionName ? sanitizeDisplayLine(host.sessionName) : "";
-					const session = truncateToWidth(
-						name ? `${name} (${host.sessionId})` : host.sessionId,
-						TRUNCATE_LENGTHS.LONG,
-					);
+					const sessionId = sanitizeDisplayLine(host.sessionId);
+					const session = truncateToWidth(name ? `${name} (${sessionId})` : sessionId, TRUNCATE_LENGTHS.LONG);
 					const guests = host.participants - 1;
 					const room = [
 						`gen ${host.generation}`,

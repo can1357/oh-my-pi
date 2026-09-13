@@ -158,11 +158,10 @@ export class CollabController {
 		} catch (err) {
 			if (this.#shutdown) return;
 			logger.warn("Collab auto-start failed", { error: String(err) });
-			const message = truncateToWidth(
-				sanitizeDisplayLine(err instanceof Error ? err.message : String(err)),
-				TRUNCATE_LENGTHS.LINE,
-			);
-			this.#ctx.showStatus(`Collab auto-start failed: ${message}`, { dim: true });
+			const message = sanitizeDisplayLine(err instanceof Error ? err.message : String(err));
+			this.#ctx.showStatus(truncateToWidth(`Collab auto-start failed: ${message}`, TRUNCATE_LENGTHS.LINE), {
+				dim: true,
+			});
 		}
 	}
 
