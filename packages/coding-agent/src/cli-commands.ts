@@ -9,6 +9,7 @@
  * regression that motivated the split.
  */
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
+import Collab from "./commands/collab";
 import * as commandHelp from "./cli/command-help";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
@@ -58,7 +59,7 @@ export const commands: CommandEntry[] = [
 	},
 	{
 		name: "collab",
-		load: () => import("./commands/collab").then(m => m.default),
+		load: () => Promise.resolve(Collab),
 		help: commandHelp.collabHelp,
 	},
 	{
