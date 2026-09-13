@@ -443,28 +443,57 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 		// contributes a directory.
 		const systemPromptParts = ["base prompt"];
 		const appendSessionInitCalls: Array<{ systemPrompt: string }> = [];
-
-		const session = createMockSession(({ emit }) => {
-			emit({
-				type: "tool_execution_end",
-				toolCallId: "tool-1",
-				toolName: "yield",
-				result: { content: [{ type: "text", text: "done" }], details: { status: "success", data: {} } },
-				isError: false,
-			});
-		});
-		session.agent.state.systemPrompt = systemPromptParts;
-		session.sessionManager.appendSessionInit = (init: { systemPrompt: string }) => {
-			appendSessionInitCalls.push(init);
+		const listeners: Array<(event: AgentSessionEvent) => void> = [];
+		const emit = (event: AgentSessionEvent) => {
+			for (const listener of listeners) listener(event);
 		};
-		session.discoverStartupSkillPaths = vi.fn(async () => {
-			systemPromptParts.push("discovered skill notice");
-		});
-		session.extensionRunner = {
-			initialize: vi.fn(),
-			onError: vi.fn(),
-			emit: vi.fn(async () => undefined),
-		} as unknown as AgentSession["extensionRunner"];
+
+		// Built inline (rather than via createMockSession + post-hoc field
+		// assignment) so extensionRunner/appendSessionInit/discoverStartupSkillPaths
+		// are part of the object literal the single `as unknown as AgentSession`
+		// cast below applies to, not assignments against an already-typed
+		// (and therefore readonly-checked) AgentSession reference.
+		const session = {
+			...createSessionDefaults(),
+			state: { messages: [] as unknown[] },
+			skills: [],
+			agent: { state: { systemPrompt: systemPromptParts } },
+			model: undefined,
+			extensionRunner: {
+				initialize: vi.fn(),
+				onError: vi.fn(),
+				emit: vi.fn(async () => undefined),
+			},
+			sessionManager: {
+				appendSessionInit: (init: { systemPrompt: string }) => {
+					appendSessionInitCalls.push(init);
+					return "init-id";
+				},
+			},
+			getActiveToolNames: () => ["read", "yield"],
+			getEnabledToolNames: () => ["read", "yield"],
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				listeners.push(listener);
+				return () => {
+					const index = listeners.indexOf(listener);
+					if (index >= 0) listeners.splice(index, 1);
+				};
+			},
+			prompt: async (_text: string, _options?: PromptOptions) => {
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "tool-1",
+					toolName: "yield",
+					result: { content: [{ type: "text", text: "done" }], details: { status: "success", data: {} } },
+					isError: false,
+				});
+			},
+			sendCustomMessage: vi.fn(async () => {}),
+			getLastAssistantMessage: () => undefined,
+			discoverStartupSkillPaths: vi.fn(async () => {
+				systemPromptParts.push("discovered skill notice");
+			}),
+		} as unknown as AgentSession;
 
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
