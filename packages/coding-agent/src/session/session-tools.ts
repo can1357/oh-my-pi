@@ -8,6 +8,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
+import { realpathIfExists } from "../discovery/contained-path";
 import { compareSkillOrder } from "../discovery/helpers";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
@@ -1372,6 +1373,17 @@ export class SessionTools {
 		// `loadSkills`'s first-configured-source policy) — for replacements of
 		// inherited entries exactly as for newly added names.
 		const claimed = new Set<string>();
+		// Two discovered directories that are symlinks to the same underlying
+		// `SKILL.md`, lacking `name` frontmatter, derive different names from
+		// their own directory basenames — `claimed` (by name) would not catch
+		// that. Dedup by the resolved real file path too, seeded from the
+		// inherited base so a discovered symlink can't re-enter a skill the
+		// snapshot already carries under a different name either.
+		const claimedRealPaths = new Set<string>();
+		for (const skill of base) {
+			const real = await realpathIfExists(skill.filePath);
+			if (real !== null) claimedRealPaths.add(real);
+		}
 		const added: Skill[] = [];
 		for (const dir of extensionDirectories) {
 			const { skills } = await loadSkillsFromDir({ dir: expandTilde(dir), source: "extension:user" });
@@ -1380,6 +1392,11 @@ export class SessionTools {
 				if (matchesIgnorePatterns(skill.name)) continue;
 				if (!matchesIncludePatterns(skill.name)) continue;
 				if (claimed.has(skill.name)) continue;
+				const realFilePath = await realpathIfExists(skill.filePath);
+				if (realFilePath !== null) {
+					if (claimedRealPaths.has(realFilePath)) continue;
+					claimedRealPaths.add(realFilePath);
+				}
 				const existingIndex = indexByName.get(skill.name);
 				if (existingIndex !== undefined) {
 					// Mirror a full child `loadSkills` pass (extensibility/skills.ts):

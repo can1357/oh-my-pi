@@ -1116,6 +1116,89 @@ export default function (pi) {
 		}
 	});
 
+	it("dedups a symlinked skill directory discovered under two different names by its resolved real path (regression: PR #9379 review, mergeDiscoveredSkillDirectories realpath dedup)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-merge-realpath-dedup-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			// A skill with no `name` frontmatter: its derived name is the
+			// containing directory's own basename (discovery/helpers.ts), so two
+			// symlinks to this same file under different link names derive two
+			// different names — dedup by name alone would miss them.
+			const realSkillDir = path.join(tempDir, "real-skill");
+			await fs.mkdir(realSkillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(realSkillDir, "SKILL.md"),
+				"---\ndescription: Reached through two symlinked directory names.\n---\n\nbody\n",
+			);
+			const dirA = path.join(tempDir, "dir-a");
+			const dirB = path.join(tempDir, "dir-b");
+			await fs.mkdir(dirA, { recursive: true });
+			await fs.mkdir(dirB, { recursive: true });
+			await fs.symlink(realSkillDir, path.join(dirA, "link-one"));
+			await fs.symlink(realSkillDir, path.join(dirB, "link-two"));
+
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "realpath-dedup-observer.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(dirA)}, ${JSON.stringify(dirB)}] }));
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+				skills: [],
+				skillsReloadable: false,
+				mergeDiscoveredSkillPaths: true,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+			expect(runtimeErrors).toEqual([]);
+
+			const matches = session.skills.filter(skill => skill.name === "link-one" || skill.name === "link-two");
+			expect(matches).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("first contributing directory wins a same-name replacement across discovered dirs (regression: PR #9379 round-7 review)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-merge-first-wins-"));
 		const authStorage = createInMemoryAuthStorage();
