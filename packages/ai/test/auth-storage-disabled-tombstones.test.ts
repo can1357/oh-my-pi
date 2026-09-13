@@ -190,6 +190,23 @@ describe("disabled credential tombstone retention", () => {
 		]);
 	});
 
+	it("keeps an identity-less automatic tombstone through re-login and clears it on a deliberate logout", async () => {
+		if (!store) throw new Error("test setup failed");
+		const bare = (suffix: string): OAuthCredential => ({
+			type: "oauth",
+			access: `opaque-${suffix}`,
+			refresh: `refresh-${suffix}`,
+			expires: Date.now() + 3_600_000,
+		});
+		const oldId = store.upsertAuthCredentialForProvider("unit-idless", bare("old"))[0].id;
+		store.deleteAuthCredential(oldId, AUTOMATIC_CAUSE);
+		const newId = store.upsertAuthCredentialForProvider("unit-idless", bare("new"))[0].id;
+		expect((await store.listDisabledCredentials("unit-idless")).map(row => row.id)).toEqual([oldId]);
+
+		store.deleteAuthCredentialsForProvider("unit-idless", "logged out by user");
+		expect(readRows(dbPath)).toEqual([{ id: newId, disabled_cause: "logged out by user" }]);
+	});
+
 	it("lets a deliberate removal clear a legacy tombstone the removed org-scoped login had upgraded", () => {
 		if (!store) throw new Error("test setup failed");
 		// Pre-org login (identity `email:<e>`), torn down automatically.

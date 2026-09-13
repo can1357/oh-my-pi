@@ -1444,9 +1444,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * they still been active: exact identity-key equality, or the same
 	 * upgrade-aware rule `matchesReplacementCredential` applies at login (a
 	 * pre-org `<b>` row is claimed by `<b>|org:<o>`; another member's or
-	 * subscription's row never is). `keepAutomatic` preserves rows that record
-	 * an automatic teardown (recovery keeps the forensics); a deliberate removal
-	 * passes `false` so the identities it removes take their history with them.
+	 * subscription's row never is). A tombstone with no identity at all can
+	 * never be matched more precisely, so any OAuth credential of the provider
+	 * supersedes it. `keepAutomatic` preserves rows that record an automatic
+	 * teardown (recovery keeps the forensics); a deliberate removal passes
+	 * `false` so the identities it removes take their history with them.
 	 */
 	#purgeTombstonesSupersededBy(
 		provider: string,
@@ -1461,13 +1463,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			const identityKey = resolveCredentialIdentityKey(provider, credential);
 			if (identityKey) identityKeys.add(identityKey);
 		}
-		if (identityKeys.size === 0) return;
+		if (oauthCredentials.length === 0) return;
 		const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 		for (const row of disabledRows) {
 			if (row.credential_type !== "oauth" || options.excludeIds?.has(row.id)) continue;
 			if (options.keepAutomatic && isAutomaticDisableCause(row.disabled_cause ?? "disabled")) continue;
 			const identityKey = resolveRowCredentialIdentityKey(provider, row);
-			if (identityKey && identityKeys.has(identityKey)) {
+			if (identityKey === null || identityKeys.has(identityKey)) {
 				this.#hardDeleteStmt.run(row.id);
 				continue;
 			}
