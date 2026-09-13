@@ -148,7 +148,7 @@ export class CollabHost {
 	#viewLink = "";
 	#webViewLink = "";
 	#writeToken: Uint8Array | null = null;
-	#sessionId = "";
+	#sessionId: string;
 	#startedAt = 0;
 	readonly #instanceId: string;
 	readonly #generation: number;
@@ -157,6 +157,8 @@ export class CollabHost {
 	#registryPublication: CollabHostPublication | null = null;
 	/** Publication still being created; teardown awaits and withdraws it. */
 	#pendingPublication: Promise<CollabHostPublication | null> | null = null;
+	/** Set by the first teardown (explicit stop or fatal relay close); every later stop() awaits it. */
+	#teardownDone: Promise<void> | null = null;
 	/** Rejects the in-flight first-open wait when `stop()` overtakes `start()`. */
 	#abortStart: ((reason: Error) => void) | null = null;
 	#unsubscribe?: () => void;
@@ -176,6 +178,9 @@ export class CollabHost {
 		this.#instanceId = options.instanceId ?? randomBytes(8).toString("hex");
 		this.#generation = options.generation ?? 1;
 		this.#access = options.access ?? "control";
+		// The room mirrors the session that is active when it is created; the
+		// frame guard and the registry snapshot compare against this from then on.
+		this.#sessionId = ctx.sessionManager.getSessionId();
 	}
 
 	/** Registry identity shared by every room this process hosts. */
@@ -285,9 +290,6 @@ export class CollabHost {
 		this.#webViewLink = formatCollabWebLink(relayUrl, roomId, rawKey, undefined, webUrl);
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
-		// Pin the mirrored session before the first await: the frame guard and
-		// the registry snapshot compare against it while the relay is connecting.
-		this.#sessionId = this.#ctx.sessionManager.getSessionId();
 		const firstOpen = Promise.withResolvers<void>();
 		// stop() may reject this before start() reaches its await (during key
 		// import); mark the rejection handled so it can only surface at the await.
@@ -403,8 +405,14 @@ export class CollabHost {
 		this.#updateStatusSegment();
 	}
 
-	/** Broadcast a goodbye, detach all taps, withdraw the registry entry, and close the socket. */
+	/**
+	 * Broadcast a goodbye, detach all taps, withdraw the registry entry, and
+	 * close the socket. Resolves once the room is fully gone — including a
+	 * teardown the room started on its own after a fatal relay close — so a
+	 * successor can safely reuse this instance's registry endpoint.
+	 */
 	async stop(reason: string): Promise<void> {
+		if (this.#teardownDone) return this.#teardownDone;
 		if (this.#stopped) return;
 		this.#abortStart?.(new Error(`collab host stopped: ${reason}`));
 		const socket = this.#socket;
@@ -417,7 +425,12 @@ export class CollabHost {
 		await this.#teardown();
 	}
 
-	async #teardown(): Promise<void> {
+	#teardown(): Promise<void> {
+		this.#teardownDone ??= this.#runTeardown();
+		return this.#teardownDone;
+	}
+
+	async #runTeardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		const publication = this.#registryPublication;

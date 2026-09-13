@@ -70,7 +70,7 @@ export async function runCollabListCommand(
 		const details = [
 			`pid ${host.pid}`,
 			`gen ${host.generation}`,
-			host.model ? `${host.model.provider}/${host.model.id}` : "no model",
+			host.model ? sanitizeDisplayLine(`${host.model.provider}/${host.model.id}`) : "no model",
 			`started ${formatAge(Math.round((Date.now() - host.startedAt) / 1000)) || "just now"}`,
 			`${guests} ${guests === 1 ? "guest" : "guests"}`,
 			host.access,

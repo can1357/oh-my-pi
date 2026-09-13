@@ -154,10 +154,20 @@ let publishSpy: Mock<typeof registry.publishCollabHost>;
 let controller: CollabController | undefined;
 const guestCleanups: (() => void)[] = [];
 const publishWaiters: (() => void)[] = [];
+let capturedSockets: FakeWebSocket[] = [];
 
 beforeEach(async () => {
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collabctl-"));
 	installInMemoryRelay();
+	// Record every fake socket so a test can drive a terminal close on the host's transport.
+	capturedSockets = [];
+	const Capturing = class extends FakeWebSocket {
+		constructor(url: string) {
+			super(url);
+			capturedSockets.push(this);
+		}
+	};
+	globalThis.WebSocket = Capturing as unknown as typeof WebSocket;
 	const real = registry.publishCollabHost;
 	publishSpy = spyOn(registry, "publishCollabHost").mockImplementation((source, options) => {
 		const publication = real(source, { ...options, dir: tmp });
@@ -311,6 +321,49 @@ describe("CollabController", () => {
 		expect((await registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp })).url).toBe(
 			controlRoom.webLink,
 		);
+	});
+
+	it("waits for a room that ended on its own to finish withdrawing before the next room publishes", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		// Hold the first room's publication open after the real registry work, so
+		// the endpoint is bound while start() still awaits the result.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const firstPublishing = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		let gated = false;
+		publishSpy.mockImplementation(async (source, options) => {
+			const publication = await redirected(source, options);
+			if (!gated) {
+				gated = true;
+				firstPublishing.resolve();
+				await gate.promise;
+			}
+			return publication;
+		});
+		controller.autoStart();
+		const first = ctx.collabHost;
+		if (!first) throw new Error("auto-start did not install a host");
+		await firstPublishing.promise;
+
+		// The relay closes the room for good: the host tears itself down (nobody
+		// awaits that) and its publication is still being withdrawn …
+		const hostSocket = capturedSockets.find(s => s.role === "host");
+		if (!hostSocket) throw new Error("host transport socket was never created");
+		hostSocket.onclose?.({ code: 4001, reason: "room closed" });
+		expect(first.stopped).toBe(true);
+		// … when the session switches. The successor must not bind the same
+		// instance endpoint until that withdrawal completes.
+		switchSession(state, `sess-next-${crypto.randomUUID()}`);
+		gate.resolve();
+		await controller.idle();
+
+		const hosts = await registry.listCollabHosts({ dir: tmp });
+		expect(hosts.map(h => ({ generation: h.generation, sessionId: h.sessionId }))).toEqual([
+			{ generation: 2, sessionId: state.sessionId },
+		]);
+		expect(state.showStatus.some(m => /discovery unavailable/.test(m))).toBe(false);
 	});
 
 	it("shutdown withdraws the room and ignores later session changes", async () => {

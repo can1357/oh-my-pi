@@ -116,7 +116,8 @@ export class CollabController {
 	/**
 	 * Construct the next-generation room synchronously — the body up to the
 	 * first await runs before this returns, so `ctx.collabHost` is installed
-	 * by the time the caller continues — then connect it.
+	 * by the time the caller continues — then connect it once the previous
+	 * room is fully gone.
 	 */
 	async #launch(access: CollabAccess, relay?: string): Promise<CollabHost> {
 		const relayUrl = this.#resolveRelayUrl(relay);
@@ -124,10 +125,15 @@ export class CollabController {
 		this.#unsubscribeSessionChange ??= this.#ctx.session.registerSessionChangeCallback(() =>
 			this.#onSessionChanged(),
 		);
+		const previous = this.#host;
 		const host = new CollabHost(this.#ctx, { instanceId: this.instanceId, generation: ++this.#generation, access });
 		this.#host = host;
 		this.#ctx.collabHost = host;
 		try {
+			// Both rooms publish under this process's instance id. A previous room
+			// that ended on its own (fatal relay close) may still be withdrawing
+			// its publication; wait for that before this room binds the endpoint.
+			await previous?.stop("replaced");
 			await host.start(relayUrl, webUrl);
 		} catch (err) {
 			if (this.#host === host) this.#host = undefined;

@@ -430,6 +430,47 @@ describe("collab registry", () => {
 		});
 	});
 
+	it("does not prune a successor room that republished under the same instance while the query failed", async () => {
+		const dir = await tempDir();
+		// Stale metadata for generation N whose endpoint is already gone.
+		await writeMetadata(dir, "rotating-host.json", {
+			version: COLLAB_REGISTRY_VERSION,
+			instanceId: "rotating-host",
+			pid: process.pid,
+			endpoint: path.join(dir, "rotating-host.sock"),
+			createdAt: Date.now(),
+			token: "stale-token",
+		});
+		// The listing reads N's metadata, then its connect fails with ENOENT —
+		// and in that gap generation N+1 publishes under the same instance name.
+		const successor = makeFixture({ instanceId: "rotating-host", sessionId: "generation-2" });
+		let republished: Promise<CollabHostPublication> | undefined;
+		const connect = spyOn(net, "createConnection").mockImplementation(() => {
+			const socket = new net.Socket();
+			republished ??= publish(dir, successor);
+			void republished.then(() =>
+				socket.emit("error", Object.assign(new Error("no such socket"), { code: "ENOENT" })),
+			);
+			return socket;
+		});
+		let hosts: CollabHostSnapshot[];
+		try {
+			hosts = await listCollabHosts({ dir });
+		} finally {
+			connect.mockRestore();
+		}
+		await republished;
+
+		// The stale query yields nothing, and the successor's files survived the prune.
+		expect(hosts).toEqual([]);
+		expect(await listCollabHosts({ dir })).toMatchObject([
+			{ instanceId: "rotating-host", sessionId: "generation-2" },
+		]);
+		expect(await resolveCollabHostLink("rotating-host", "control", { dir })).toMatchObject({
+			url: successor.controlUrl,
+		});
+	});
+
 	it("removes metadata and socket and disappears from listings after close", async () => {
 		const dir = await tempDir();
 		const f = makeFixture();

@@ -506,12 +506,19 @@ function pidAlive(pid: number): boolean {
 
 async function pruneEntry(dir: string, name: string, meta: DiscoveryMetadata | null): Promise<void> {
 	try {
+		if (meta) {
+			// A host that rotated rooms republishes under the same instance name.
+			// If the entry on disk is no longer the one that failed to answer,
+			// the failure belongs to the previous room: leave the successor alone.
+			const current = parseDiscoveryMetadata(await Bun.file(path.join(dir, name)).text());
+			if (!current || current.token !== meta.token || current.endpoint !== meta.endpoint) return;
+		}
 		await fs.promises.rm(path.join(dir, name), { force: true });
 		if (meta && process.platform !== "win32" && meta.endpoint.startsWith(dir + path.sep)) {
 			await fs.promises.rm(meta.endpoint, { force: true });
 		}
 	} catch {
-		// Best-effort cleanup only.
+		// Best-effort cleanup only (a missing file means someone else already pruned it).
 	}
 }
 

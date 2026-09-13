@@ -57,6 +57,7 @@ function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveMo
 		present,
 		settings: { get: settingsGet },
 		session: { registerSessionChangeCallback: () => () => {} },
+		sessionManager: { getSessionId: () => "sess-qrcode" },
 		collabHost: options?.collabHost,
 	} as unknown as InteractiveModeContext;
 	// `/collab` starts rooms through the controller, which builds a real CollabHost.
