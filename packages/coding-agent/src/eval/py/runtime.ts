@@ -105,6 +105,28 @@ function resolvePathKey(env: Record<string, string | undefined>): string {
 	return match ?? "PATH";
 }
 
+/**
+ * The managed venv (`~/.omp/python-env`), second in {@link enumeratePythonRuntimes}'s
+ * priority order.
+ *
+ * The harness never creates it: the eval kernel needs nothing beyond a working
+ * interpreter, so there is no requirements manifest and no provisioning step to
+ * hook. It exists for the case where a cell needs a library the system Python
+ * lacks (`yaml` being the common one) and you want that available for every
+ * project without a local `.venv`:
+ *
+ * ```
+ * uv venv ~/.omp/python-env
+ * uv pip install --python ~/.omp/python-env/bin/python pyyaml
+ * ```
+ *
+ * Once it exists it wins over the system interpreter (but still loses to an
+ * active `$VIRTUAL_ENV`/`$CONDA_PREFIX` or a project `.venv`/`venv`). The
+ * alternatives are `%pip install pyyaml` inside a cell — which installs into
+ * whichever interpreter resolved, so it does not survive a switch — or pointing
+ * the `python.interpreter` setting at an env you control. `omp setup python
+ * --check` reports which interpreter actually resolved.
+ */
 function resolveManagedPythonEnv(): string {
 	return getPythonEnvDir();
 }

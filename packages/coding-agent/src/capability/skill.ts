@@ -28,6 +28,14 @@ export interface SkillFrontmatter {
 	 * @see https://agentskills.io/specification
 	 */
 	disableModelInvocation?: boolean;
+	/**
+	 * Agent Skills metadata bag — author-defined keys the spec leaves open.
+	 * `requires` lists tool names the skill's instructions depend on (e.g.
+	 * `[bash]`); the subagent preflight refuses to spawn an agent whose tool
+	 * list lacks one.
+	 * @see https://agentskills.io/specification
+	 */
+	metadata?: { requires?: unknown; [key: string]: unknown };
 	[key: string]: unknown;
 }
 

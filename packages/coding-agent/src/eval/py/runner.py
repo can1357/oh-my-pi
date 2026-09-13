@@ -1903,6 +1903,10 @@ _MANAGED_ENV_KEYS = (
     "PI_TOOL_BRIDGE_TOKEN",
     "PI_TOOL_BRIDGE_SESSION",
     "PI_EVAL_LOCAL_ROOTS",
+    # Harness session/agent identity: inherited by subprocess children so an
+    # external CLI can correlate with the agent turn that ran the cell.
+    "OMP_SESSION_ID",
+    "OMP_AGENT_ID",
 )
 
 

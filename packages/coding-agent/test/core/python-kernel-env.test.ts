@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import {
 	enumeratePythonRuntimes,
 	filterEnv,
@@ -157,5 +158,46 @@ describe("enumeratePythonRuntimes", () => {
 
 		expect(enumeratePythonRuntimes(path.join(path.sep, "work"), {})).toEqual([]);
 		expect(() => resolvePythonRuntime(path.join(path.sep, "work"), {})).toThrow("Python executable not found");
+	});
+});
+
+describe("managed kernel session identity", () => {
+	const printIdentity = [
+		"import os, subprocess, sys",
+		"print('kernel', os.environ.get('OMP_SESSION_ID'), os.environ.get('OMP_AGENT_ID'))",
+		"child = subprocess.run([sys.executable, '-c', \"import os; print('child', os.environ.get('OMP_SESSION_ID'), os.environ.get('OMP_AGENT_ID'))\"], capture_output=True, text=True)",
+		"print(child.stdout.strip())",
+	].join("\n");
+
+	// Exercise a real kernel plus a subprocess child, which is what an external
+	// CLI launched from a cell actually sees.
+	it.each(["per-call", "session"] as const)("reaches a %s kernel and its subprocess children", async kernelMode => {
+		const result = await executePython(printIdentity, {
+			cwd: os.tmpdir(),
+			sessionId: `python:identity-${kernelMode}`,
+			kernelMode,
+			ompSessionId: "sess-1",
+			ompAgentId: "Agent-1",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual(["kernel sess-1 Agent-1", "child sess-1 Agent-1"]);
+	});
+
+	// A retained kernel is shared by every owner on its (session, cwd,
+	// interpreter) tuple, so the identity has to be re-applied per request —
+	// that is the runner's `_MANAGED_ENV_KEYS` half of the contract, and the
+	// only way a stale agent id could leak into a sibling's children.
+	it("re-applies the identity on every request to a retained kernel", async () => {
+		const options = {
+			cwd: os.tmpdir(),
+			sessionId: "python:identity-reuse",
+			kernelMode: "session" as const,
+			ompSessionId: "sess-1",
+		};
+		await executePython(printIdentity, { ...options, ompAgentId: "Agent-1" });
+		const second = await executePython(printIdentity, { ...options, ompAgentId: "Agent-2" });
+
+		expect(second.output.trim().split("\n")).toEqual(["kernel sess-1 Agent-2", "child sess-1 Agent-2"]);
 	});
 });

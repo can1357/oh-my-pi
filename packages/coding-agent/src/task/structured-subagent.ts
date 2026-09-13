@@ -21,6 +21,7 @@ import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-h
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
+import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -39,6 +40,7 @@ import {
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
+import { resolveSubagentToolNames } from "./subagent-tools";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -235,6 +237,56 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	}
 }
 
+/**
+ * `skill://<name>` (optionally `skill://<name>/<path>`) references in an
+ * assignment. Skill names are filesystem-derived, so the character class
+ * matches what discovery can produce.
+ */
+const SKILL_URL_PATTERN = /skill:\/\/([A-Za-z0-9][\w.-]*)/g;
+
+/**
+ * Refuse a spawn whose assignment points at a skill the child cannot execute.
+ *
+ * A skill declaring `metadata.requires: [bash]` is unusable to a read-only
+ * profile: the child reads the instructions, discovers it has no way to follow
+ * them, and improvises. Failing here — before any artifact lease or session —
+ * surfaces as an ordinary preflight error the caller can fix by choosing a
+ * different agent.
+ *
+ * Deliberately permissive: an agent with no `tools` key inherits the host's
+ * full set, and an unresolvable skill name is left to `skill://` resolution to
+ * report.
+ */
+function assertSkillToolRequirements(
+	request: StructuredSubagentRequest,
+	agentName: string,
+	agent: AgentDefinition,
+): void {
+	if (!request.assignment.includes("skill://")) return;
+	const skills = request.session.skills;
+	if (!skills?.length) return;
+	// `atMaxDepth`/`restrictToolNames` only ever REMOVE task/hub; assuming the
+	// widest surface keeps this check from failing a spawn that would have
+	// worked.
+	const toolNames = resolveSubagentToolNames(agent, {
+		atMaxDepth: false,
+		evalBackends: resolveEvalBackends({ settings: request.session.settings } as ToolSession),
+	});
+	if (!toolNames) return;
+	const available = new Set(toolNames);
+	for (const [, name] of request.assignment.matchAll(SKILL_URL_PATTERN)) {
+		const required = skills.find(skill => skill.name === name)?.requires;
+		if (!required) continue;
+		for (const tool of required) {
+			if (available.has(tool)) continue;
+			throw new StructuredSubagentError(
+				"preflight",
+				`skill ${name} requires tool ${tool}; agent ${agentName} lacks it`,
+			);
+		}
+	}
+}
+
 function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
 	const taskDepth = request.session.taskDepth ?? 0;
 	const maxDepth = request.session.settings.get("task.maxRecursionDepth") ?? 2;
@@ -293,6 +345,7 @@ export async function resolveEffectiveSubagentPolicy(
 	}
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	assertSkillToolRequirements(request, agentName, effectiveAgent);
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
