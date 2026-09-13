@@ -92,6 +92,7 @@ function createContext(overrides?: {
 	isStreaming?: boolean;
 	model?: Model;
 	agentId?: string;
+	isIsolated?: boolean;
 	parentPromptCacheKey?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
 	activeToolNames?: string[];
@@ -121,6 +122,7 @@ function createContext(overrides?: {
 		model: overrides?.model ?? model,
 		asyncJobManager: { register },
 		sessionId: "parent-session",
+		isIsolated: overrides?.isIsolated ?? false,
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
@@ -415,6 +417,26 @@ describe("TanCommandController", () => {
 		expect(opts?.parentAgentId).toBe("FocusedParent");
 		expect(opts?.parentTaskPrefix).toMatch(/^Tan-/);
 		expect(opts?.parentTaskPrefix).not.toBe("FocusedParent");
+	});
+
+	it("inherits the parent's isolation marker so the clone's own spawns stay gated", async () => {
+		// The clone runs in the parent's cwd — the parent's isolation worktree
+		// when the parent is isolated — and carries the parent's `task` tool.
+		// Without the marker its task tool would re-advertise `isolated` and
+		// accept a nested spawn that the parent's session must reject.
+		const harness = createContext({ isIsolated: true });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub();
+		const createAgentSessionSpy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue({ session: clone } as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+		await controller.start("follow the tangent");
+		const capturedRun = harness.capturedRun;
+		if (!capturedRun) throw new Error("run function was not captured");
+		await capturedRun({ jobId: "job-1", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.isIsolated).toBe(true);
 	});
 
 	it("pins the parent's effective cache key when the parent itself carries a pinned promptCacheKey", async () => {

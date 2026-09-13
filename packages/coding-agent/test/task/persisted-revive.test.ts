@@ -125,7 +125,6 @@ async function createPersistedSession(
 		stopReason: "stop",
 		timestamp: Date.now(),
 	});
-
 	await manager.close();
 	return sessionFile;
 }
