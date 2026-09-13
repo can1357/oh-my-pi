@@ -1323,7 +1323,7 @@ describe("mcp oauth flow", () => {
 			expect(() => issuerFlow().onAuthorizeRedirect(callbackUrl())).not.toThrow();
 		});
 
-		it("falls back to the endpoint origin and path when discovery produced no issuer", () => {
+		it("falls back to the endpoint origin when discovery produced no issuer", () => {
 			const flow = new MCPOAuthFlow(
 				{
 					authorizationUrl: "https://legacy.example.com/oauth/authorize",
@@ -1331,7 +1331,10 @@ describe("mcp oauth flow", () => {
 				},
 				{},
 			);
-			expect(() => flow.onAuthorizeRedirect(callbackUrl("https://legacy.example.com/oauth/authorize"))).not.toThrow();
+			expect(() => flow.onAuthorizeRedirect(callbackUrl("https://legacy.example.com"))).not.toThrow();
+			expect(() => flow.onAuthorizeRedirect(callbackUrl("https://legacy.example.com/oauth/authorize"))).toThrow(
+				/OAuth iss mismatch/,
+			);
 			expect(() => flow.onAuthorizeRedirect(callbackUrl("https://attacker.example.com"))).toThrow(/OAuth iss mismatch/);
 		});
 	});

@@ -295,6 +295,19 @@ function filterResourceIndicator(
 	return resource;
 }
 
+/**
+ * Origin of the authorization endpoint, used as the RFC 9207 expected issuer
+ * only when discovery produced no issuer. `undefined` when the configured
+ * URL does not parse - the caller then fails closed.
+ */
+function authorizationEndpointOrigin(authorizationUrl: string): string | undefined {
+	try {
+		return new URL(authorizationUrl).origin;
+	} catch {
+		return undefined;
+	}
+}
+
 export interface MCPOAuthConfig {
 	/** Authorization endpoint URL */
 	authorizationUrl: string;
@@ -411,7 +424,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * Reject a redirected callback whose `iss` (issuer) does not match the
 	 * authorization server this flow started against (RFC 9207). Compares
 	 * against the discovered RFC 8414 issuer when metadata produced one,
-	 * falling back to the authorization endpoint origin + path. When `iss`
+	 * falling back to the authorization endpoint origin. When `iss`
 	 * is absent (a legacy AS), continue.
 	 */
 	override onAuthorizeRedirect(url: URL): void {
@@ -420,12 +433,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		// RFC 9207 `iss` carries the AS issuer identifier (RFC 8414 `issuer`),
 		// which is generally not the authorize-endpoint URL - compare against
 		// the discovered issuer when metadata produced one, else fall back to
-		// the endpoint origin + path.
-		const rawExpected = this.config.issuerUrl ?? this.config.authorizationUrl;
-		const expected = normalizeIssuerUrl(rawExpected);
+		// the authorization endpoint origin.
+		const rawExpected = this.config.issuerUrl ?? authorizationEndpointOrigin(this.config.authorizationUrl);
+		const expected = rawExpected === undefined ? undefined : normalizeIssuerUrl(rawExpected);
 		if (expected === undefined || normalizeIssuerUrl(iss) !== expected) {
 			throw new AIError.OAuthError(
-			`OAuth iss mismatch (RFC 9207): expected ${rawExpected}, got ${iss}`,
+			`OAuth iss mismatch (RFC 9207): expected ${rawExpected ?? this.config.authorizationUrl}, got ${iss}`,
 			{ kind: "device-auth" },
 			);
 		}
