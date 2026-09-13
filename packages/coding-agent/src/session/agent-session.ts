@@ -3090,6 +3090,12 @@ export class AgentSession {
 			this.#recordToolExecutionStart(event);
 		}
 
+		// Both buffer resets run before the awaited fan-out: event handlers run
+		// concurrently and message_update skips the await, so a reset placed after
+		// it could land behind the new message's first deltas and clear them.
+		if (event.type === "turn_start") this.#ttsr.onTurnStart();
+		if (event.type === "message_start" && event.message.role === "assistant") this.#ttsr.onAssistantMessageStart();
+
 		if (event.type !== "agent_end") {
 			try {
 				await this.#emitSessionEvent(displayEvent);
@@ -3112,8 +3118,6 @@ export class AgentSession {
 				throw error;
 			}
 		}
-
-		if (event.type === "turn_start") this.#ttsr.onTurnStart();
 
 		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
