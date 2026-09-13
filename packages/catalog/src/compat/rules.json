@@ -13,6 +13,7 @@
 		"auth/baseten.kdl",
 		"auth/bedrock-mantle.kdl",
 		"auth/cerebras.kdl",
+		"auth/charm-hyper.kdl",
 		"auth/cline-pass.kdl",
 		"auth/cloudflare-ai-gateway.kdl",
 		"auth/commandcode.kdl",
@@ -114,6 +115,7 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/charm-hyper.kdl",
 		"providers/cline-pass.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
 		"providers/commandcode.kdl",
@@ -3357,7 +3359,63 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:12",
+				"source": "classes/anthropic.kdl:15",
+				"class": "anthropic",
+				"family": "fable",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.0.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:20",
+				"class": "anthropic",
+				"family": "mythos",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.0.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:25",
+				"class": "anthropic",
+				"family": "opus",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "4.6.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:30",
+				"class": "anthropic",
+				"family": "sonnet",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "4.6.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:36",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3378,7 +3436,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:17",
+				"source": "classes/anthropic.kdl:41",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3397,7 +3455,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:22",
+				"source": "classes/anthropic.kdl:46",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3418,7 +3476,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:27",
+				"source": "classes/anthropic.kdl:51",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3437,7 +3495,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:32",
+				"source": "classes/anthropic.kdl:56",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3456,7 +3514,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:37",
+				"source": "classes/anthropic.kdl:61",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3477,7 +3535,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:42",
+				"source": "classes/anthropic.kdl:66",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3496,7 +3554,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:47",
+				"source": "classes/anthropic.kdl:71",
 				"class": "anthropic",
 				"providers": [
 					"aimlapi",
@@ -3516,7 +3574,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:53",
+				"source": "classes/anthropic.kdl:77",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3546,7 +3604,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:60",
+				"source": "classes/anthropic.kdl:84",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3564,7 +3622,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:67",
+				"source": "classes/anthropic.kdl:91",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3593,7 +3651,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:75",
+				"source": "classes/anthropic.kdl:99",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3627,7 +3685,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:82",
+				"source": "classes/anthropic.kdl:106",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3654,7 +3712,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:89",
+				"source": "classes/anthropic.kdl:113",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3680,7 +3738,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:96",
+				"source": "classes/anthropic.kdl:120",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3709,7 +3767,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:100",
+				"source": "classes/anthropic.kdl:124",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3737,7 +3795,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:106",
+				"source": "classes/anthropic.kdl:130",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3759,7 +3817,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:113",
+				"source": "classes/anthropic.kdl:137",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3792,7 +3850,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:120",
+				"source": "classes/anthropic.kdl:144",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3823,7 +3881,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:124",
+				"source": "classes/anthropic.kdl:148",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3849,7 +3907,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:131",
+				"source": "classes/anthropic.kdl:155",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3869,7 +3927,29 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:141",
+				"source": "classes/anthropic.kdl:181",
+				"class": "anthropic",
+				"providers": [
+					"anthropic"
+				],
+				"family": "fable",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "5.1.0"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cacheRead": 0.25,
+						"cacheWrite": 12.5
+					}
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:165",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3889,7 +3969,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:153",
+				"source": "classes/anthropic.kdl:194",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3909,7 +3989,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:171",
+				"source": "classes/anthropic.kdl:212",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3932,7 +4012,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:176",
+				"source": "classes/anthropic.kdl:217",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3952,7 +4032,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:182",
+				"source": "classes/anthropic.kdl:223",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3981,7 +4061,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:196",
+				"source": "classes/anthropic.kdl:237",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4005,7 +4085,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:202",
+				"source": "classes/anthropic.kdl:243",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4025,7 +4105,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:211",
+				"source": "classes/anthropic.kdl:252",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4050,7 +4130,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:217",
+				"source": "classes/anthropic.kdl:258",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4069,7 +4149,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:222",
+				"source": "classes/anthropic.kdl:263",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4092,7 +4172,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:227",
+				"source": "classes/anthropic.kdl:268",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4112,7 +4192,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:233",
+				"source": "classes/anthropic.kdl:274",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4131,7 +4211,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:238",
+				"source": "classes/anthropic.kdl:279",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4151,7 +4231,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:246",
+				"source": "classes/anthropic.kdl:287",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4170,7 +4250,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:251",
+				"source": "classes/anthropic.kdl:292",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4190,7 +4270,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:259",
+				"source": "classes/anthropic.kdl:300",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4210,7 +4290,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:269",
+				"source": "classes/anthropic.kdl:310",
 				"class": "anthropic",
 				"family": "haiku",
 				"revision": [
@@ -4224,7 +4304,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:275",
+				"source": "classes/anthropic.kdl:316",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity",
@@ -4236,7 +4316,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:279",
+				"source": "classes/anthropic.kdl:320",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity"
@@ -5932,9 +6012,10 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:32",
+				"source": "classes/minimax.kdl:34",
 				"class": "minimax",
 				"providers": [
+					"charm-hyper",
 					"minimax",
 					"minimax-cn",
 					"minimax-code",
@@ -5944,6 +6025,10 @@
 					{
 						"kind": "exact",
 						"value": "MiniMax-M3"
+					},
+					{
+						"kind": "exact",
+						"value": "minimax-m3"
 					}
 				],
 				"catalog": {
@@ -5954,7 +6039,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:39",
+				"source": "classes/minimax.kdl:41",
 				"class": "minimax",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5967,7 +6052,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:44",
+				"source": "classes/minimax.kdl:46",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock",
@@ -5984,7 +6069,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:48",
+				"source": "classes/minimax.kdl:50",
 				"class": "minimax",
 				"providers": [
 					"kilo",
@@ -6002,7 +6087,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:54",
+				"source": "classes/minimax.kdl:56",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6019,7 +6104,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:62",
+				"source": "classes/minimax.kdl:64",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6041,7 +6126,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:52",
+				"source": "classes/minimax.kdl:54",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6053,7 +6138,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:72",
+				"source": "classes/minimax.kdl:74",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -6065,7 +6150,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:76",
+				"source": "classes/minimax.kdl:78",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -7140,10 +7225,13 @@
 				],
 				"thinking": {
 					"mode": "effort"
+				},
+				"catalog": {
+					"requiresToolResultImageHoisting": true
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:19",
+				"source": "providers/amazon-bedrock.kdl:21",
 				"class": "deepseek",
 				"providers": [
 					"amazon-bedrock"
@@ -7161,7 +7249,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:24",
+				"source": "providers/amazon-bedrock.kdl:26",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock"
@@ -7172,7 +7260,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:28",
+				"source": "providers/amazon-bedrock.kdl:30",
 				"class": "unknown",
 				"providers": [
 					"amazon-bedrock"
@@ -7185,10 +7273,13 @@
 						"high"
 					],
 					"mode": "budget"
+				},
+				"catalog": {
+					"requiresToolResultImageHoisting": true
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:33",
+				"source": "providers/amazon-bedrock.kdl:40",
 				"providers": [
 					"amazon-bedrock"
 				],
@@ -7203,7 +7294,7 @@
 				}
 			},
 			{
-				"source": "providers/anthropic.kdl:5",
+				"source": "providers/anthropic.kdl:13",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -7229,7 +7320,7 @@
 				}
 			},
 			{
-				"source": "providers/anthropic.kdl:10",
+				"source": "providers/anthropic.kdl:18",
 				"providers": [
 					"anthropic"
 				],
@@ -7256,6 +7347,15 @@
 					"supportsLongCacheRetention": true,
 					"supportsMidConversationSystem": false,
 					"supportsSamplingParams": true
+				}
+			},
+			{
+				"source": "providers/anthropic.kdl:3",
+				"providers": [
+					"anthropic"
+				],
+				"wire": {
+					"firstPartyProvider": true
 				}
 			},
 			{
@@ -7520,6 +7620,55 @@
 				}
 			},
 			{
+				"source": "providers/charm-hyper.kdl:72",
+				"providers": [
+					"charm-hyper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "glm-5.1"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 20275
+					}
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:77",
+				"providers": [
+					"charm-hyper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "minimax-m2.7"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 26214
+					}
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:9",
+				"providers": [
+					"charm-hyper"
+				],
+				"wire": {
+					"supportsDeveloperRole": false,
+					"supportsStore": false,
+					"maxTokensField": "max_tokens",
+					"reasoningContentField": "reasoning_content"
+				},
+				"thinking": {
+					"mode": "effort"
+				}
+			},
+			{
 				"source": "providers/cline-pass.kdl:3",
 				"providers": [
 					"cline-pass"
@@ -7633,7 +7782,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:23",
+				"source": "providers/commandcode.kdl:27",
 				"class": "anthropic",
 				"providers": [
 					"commandcode"
@@ -7647,7 +7796,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:28",
+				"source": "providers/commandcode.kdl:32",
 				"providers": [
 					"commandcode"
 				],
@@ -7695,7 +7844,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:33",
+				"source": "providers/commandcode.kdl:37",
 				"providers": [
 					"commandcode"
 				],
@@ -7728,7 +7877,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:38",
+				"source": "providers/commandcode.kdl:42",
 				"providers": [
 					"commandcode"
 				],
@@ -7762,7 +7911,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:43",
+				"source": "providers/commandcode.kdl:47",
 				"providers": [
 					"commandcode"
 				],
@@ -7812,7 +7961,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:49",
+				"source": "providers/commandcode.kdl:53",
 				"providers": [
 					"commandcode"
 				],
@@ -7847,7 +7996,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:53",
+				"source": "providers/commandcode.kdl:57",
 				"providers": [
 					"commandcode"
 				],
@@ -7879,7 +8028,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:57",
+				"source": "providers/commandcode.kdl:61",
 				"providers": [
 					"commandcode"
 				],
@@ -7919,7 +8068,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:62",
+				"source": "providers/commandcode.kdl:66",
 				"providers": [
 					"commandcode"
 				],
@@ -7953,7 +8102,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:66",
+				"source": "providers/commandcode.kdl:70",
 				"providers": [
 					"commandcode"
 				],
@@ -7974,7 +8123,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:70",
+				"source": "providers/commandcode.kdl:74",
 				"providers": [
 					"commandcode"
 				],
@@ -7996,7 +8145,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:74",
+				"source": "providers/commandcode.kdl:78",
 				"providers": [
 					"commandcode"
 				],
@@ -8013,7 +8162,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:79",
+				"source": "providers/commandcode.kdl:83",
 				"providers": [
 					"commandcode"
 				],
@@ -8030,7 +8179,25 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:99",
+				"source": "providers/commandcode.kdl:91",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.3-codex"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"contextWindow": 272000,
+						"maxTokens": 65536
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:112",
 				"providers": [
 					"commandcode"
 				],
@@ -8050,7 +8217,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:107",
+				"source": "providers/commandcode.kdl:120",
 				"providers": [
 					"commandcode"
 				],
@@ -8070,7 +8237,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:116",
+				"source": "providers/commandcode.kdl:129",
 				"providers": [
 					"commandcode"
 				],
@@ -8090,7 +8257,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:124",
+				"source": "providers/commandcode.kdl:137",
 				"providers": [
 					"commandcode"
 				],
@@ -8110,7 +8277,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:132",
+				"source": "providers/commandcode.kdl:145",
 				"providers": [
 					"commandcode"
 				],
@@ -8138,7 +8305,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:140",
+				"source": "providers/commandcode.kdl:153",
 				"providers": [
 					"commandcode"
 				],
@@ -8158,7 +8325,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:148",
+				"source": "providers/commandcode.kdl:161",
 				"providers": [
 					"commandcode"
 				],
@@ -8178,7 +8345,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:156",
+				"source": "providers/commandcode.kdl:169",
 				"providers": [
 					"commandcode"
 				],
@@ -8198,7 +8365,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:164",
+				"source": "providers/commandcode.kdl:177",
 				"providers": [
 					"commandcode"
 				],
@@ -8218,7 +8385,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:172",
+				"source": "providers/commandcode.kdl:185",
 				"providers": [
 					"commandcode"
 				],
@@ -8238,7 +8405,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:180",
+				"source": "providers/commandcode.kdl:193",
 				"providers": [
 					"commandcode"
 				],
@@ -8258,7 +8425,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:188",
+				"source": "providers/commandcode.kdl:201",
 				"providers": [
 					"commandcode"
 				],
@@ -8278,7 +8445,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:196",
+				"source": "providers/commandcode.kdl:209",
 				"providers": [
 					"commandcode"
 				],
@@ -8298,7 +8465,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:207",
+				"source": "providers/commandcode.kdl:220",
 				"providers": [
 					"commandcode"
 				],
@@ -8318,7 +8485,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:215",
+				"source": "providers/commandcode.kdl:228",
 				"providers": [
 					"commandcode"
 				],
@@ -8342,7 +8509,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:223",
+				"source": "providers/commandcode.kdl:236",
 				"providers": [
 					"commandcode"
 				],
@@ -8362,7 +8529,27 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:231",
+				"source": "providers/commandcode.kdl:246",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4.1-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.15,
+						"output": 0.6,
+						"cacheRead": 0.003,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:254",
 				"providers": [
 					"commandcode"
 				],
@@ -8382,7 +8569,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:239",
+				"source": "providers/commandcode.kdl:262",
 				"providers": [
 					"commandcode"
 				],
@@ -8402,7 +8589,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:247",
+				"source": "providers/commandcode.kdl:270",
 				"providers": [
 					"commandcode"
 				],
@@ -8422,7 +8609,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:255",
+				"source": "providers/commandcode.kdl:278",
 				"providers": [
 					"commandcode"
 				],
@@ -8442,7 +8629,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:263",
+				"source": "providers/commandcode.kdl:286",
 				"providers": [
 					"commandcode"
 				],
@@ -8462,7 +8649,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:273",
+				"source": "providers/commandcode.kdl:296",
 				"providers": [
 					"commandcode"
 				],
@@ -8482,7 +8669,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:281",
+				"source": "providers/commandcode.kdl:304",
 				"providers": [
 					"commandcode"
 				],
@@ -8510,7 +8697,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:289",
+				"source": "providers/commandcode.kdl:312",
 				"providers": [
 					"commandcode"
 				],
@@ -8530,7 +8717,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:297",
+				"source": "providers/commandcode.kdl:320",
 				"providers": [
 					"commandcode"
 				],
@@ -8550,7 +8737,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:306",
+				"source": "providers/commandcode.kdl:329",
 				"providers": [
 					"commandcode"
 				],
@@ -8574,7 +8761,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:314",
+				"source": "providers/commandcode.kdl:337",
 				"providers": [
 					"commandcode"
 				],
@@ -8594,7 +8781,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:324",
+				"source": "providers/commandcode.kdl:347",
 				"providers": [
 					"commandcode"
 				],
@@ -8614,7 +8801,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:332",
+				"source": "providers/commandcode.kdl:355",
 				"providers": [
 					"commandcode"
 				],
@@ -8634,7 +8821,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:340",
+				"source": "providers/commandcode.kdl:363",
 				"providers": [
 					"commandcode"
 				],
@@ -8654,7 +8841,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:348",
+				"source": "providers/commandcode.kdl:371",
 				"providers": [
 					"commandcode"
 				],
@@ -8674,7 +8861,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:356",
+				"source": "providers/commandcode.kdl:379",
 				"providers": [
 					"commandcode"
 				],
@@ -8694,7 +8881,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:364",
+				"source": "providers/commandcode.kdl:387",
 				"providers": [
 					"commandcode"
 				],
@@ -8714,7 +8901,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:372",
+				"source": "providers/commandcode.kdl:395",
 				"providers": [
 					"commandcode"
 				],
@@ -8734,7 +8921,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:380",
+				"source": "providers/commandcode.kdl:403",
 				"providers": [
 					"commandcode"
 				],
@@ -8761,7 +8948,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:399",
+				"source": "providers/commandcode.kdl:422",
 				"providers": [
 					"commandcode"
 				],
@@ -8788,7 +8975,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:414",
+				"source": "providers/commandcode.kdl:437",
 				"providers": [
 					"commandcode"
 				],
@@ -8808,7 +8995,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:422",
+				"source": "providers/commandcode.kdl:445",
 				"providers": [
 					"commandcode"
 				],
@@ -8828,7 +9015,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:430",
+				"source": "providers/commandcode.kdl:453",
 				"providers": [
 					"commandcode"
 				],
@@ -8848,7 +9035,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:438",
+				"source": "providers/commandcode.kdl:461",
 				"providers": [
 					"commandcode"
 				],
@@ -8868,7 +9055,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:446",
+				"source": "providers/commandcode.kdl:469",
 				"providers": [
 					"commandcode"
 				],
@@ -8888,7 +9075,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:454",
+				"source": "providers/commandcode.kdl:477",
 				"providers": [
 					"commandcode"
 				],
@@ -8908,7 +9095,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:462",
+				"source": "providers/commandcode.kdl:485",
 				"providers": [
 					"commandcode"
 				],
@@ -8932,7 +9119,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:471",
+				"source": "providers/commandcode.kdl:494",
 				"providers": [
 					"commandcode"
 				],
@@ -8952,7 +9139,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:479",
+				"source": "providers/commandcode.kdl:502",
 				"providers": [
 					"commandcode"
 				],
@@ -8972,7 +9159,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:487",
+				"source": "providers/commandcode.kdl:510",
 				"providers": [
 					"commandcode"
 				],
@@ -8992,7 +9179,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:495",
+				"source": "providers/commandcode.kdl:518",
 				"providers": [
 					"commandcode"
 				],
@@ -9012,7 +9199,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:503",
+				"source": "providers/commandcode.kdl:526",
 				"providers": [
 					"commandcode"
 				],
@@ -9032,7 +9219,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:511",
+				"source": "providers/commandcode.kdl:534",
 				"providers": [
 					"commandcode"
 				],
@@ -9052,7 +9239,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:519",
+				"source": "providers/commandcode.kdl:542",
 				"providers": [
 					"commandcode"
 				],
@@ -9072,7 +9259,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:527",
+				"source": "providers/commandcode.kdl:550",
 				"providers": [
 					"commandcode"
 				],
@@ -9092,7 +9279,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:535",
+				"source": "providers/commandcode.kdl:558",
 				"providers": [
 					"commandcode"
 				],
@@ -9120,7 +9307,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:543",
+				"source": "providers/commandcode.kdl:566",
 				"providers": [
 					"commandcode"
 				],
@@ -9144,7 +9331,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:551",
+				"source": "providers/commandcode.kdl:574",
 				"providers": [
 					"commandcode"
 				],
@@ -9164,7 +9351,7 @@
 				}
 			},
 			{
-				"source": "providers/commandcode.kdl:563",
+				"source": "providers/commandcode.kdl:586",
 				"providers": [
 					"commandcode"
 				],
@@ -9202,6 +9389,7 @@
 					"maxTokensField": "max_tokens"
 				},
 				"thinking": {
+					"upgradeNeutral": true,
 					"mode": "effort"
 				},
 				"catalog": {
@@ -9561,6 +9749,9 @@
 						"value": "deepseek-v4-flash-vision-exp"
 					}
 				],
+				"wire": {
+					"clampOutputToModelMax": true
+				},
 				"catalog": {
 					"timeBased": {
 						"offPeakMultiplier": 0.5,
@@ -9586,7 +9777,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:44",
+				"source": "providers/deepseek.kdl:45",
 				"providers": [
 					"deepseek"
 				],
@@ -9604,7 +9795,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:51",
+				"source": "providers/deepseek.kdl:52",
 				"providers": [
 					"deepseek"
 				],
@@ -9648,11 +9839,15 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:84",
+				"source": "providers/deepseek.kdl:89",
 				"providers": [
 					"deepseek"
 				],
 				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
 					{
 						"kind": "exact",
 						"value": "deepseek-v4-flash"
@@ -9667,7 +9862,16 @@
 					"reasoningContentField": "reasoning_content",
 					"requiresAssistantContentForToolCalls": true,
 					"requiresReasoningContentForToolCalls": true,
+					"allowsSyntheticReasoningContentForToolCalls": false,
 					"supportsToolChoice": false
+				},
+				"thinking": {
+					"upgradeNeutral": true,
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
@@ -12916,7 +13120,32 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:15",
+				"source": "providers/opencode-go.kdl:10",
+				"providers": [
+					"opencode-go"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4.1-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/opencode-go.kdl:25",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -12927,7 +13156,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:13",
+				"source": "providers/opencode-go.kdl:23",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -12937,7 +13166,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:20",
+				"source": "providers/opencode-go.kdl:30",
 				"providers": [
 					"opencode-go"
 				],
@@ -12952,7 +13181,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:26",
+				"source": "providers/opencode-go.kdl:36",
 				"providers": [
 					"opencode-go"
 				],
@@ -12974,7 +13203,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:32",
+				"source": "providers/opencode-go.kdl:42",
 				"class": "glm",
 				"providers": [
 					"opencode-go"
@@ -12984,7 +13213,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:35",
+				"source": "providers/opencode-go.kdl:45",
 				"class": "kimi",
 				"providers": [
 					"opencode-go"
@@ -12994,7 +13223,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:39",
+				"source": "providers/opencode-go.kdl:49",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -13005,7 +13234,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:38",
+				"source": "providers/opencode-go.kdl:48",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -13015,7 +13244,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:46",
+				"source": "providers/opencode-go.kdl:56",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -13041,7 +13270,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:50",
+				"source": "providers/opencode-go.kdl:60",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -13067,7 +13296,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:56",
+				"source": "providers/opencode-go.kdl:66",
 				"providers": [
 					"opencode-go"
 				],
@@ -13092,7 +13321,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:61",
+				"source": "providers/opencode-go.kdl:71",
 				"providers": [
 					"opencode-go"
 				],
@@ -13112,7 +13341,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:66",
+				"source": "providers/opencode-go.kdl:76",
 				"providers": [
 					"opencode-go"
 				],
@@ -13134,7 +13363,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:71",
+				"source": "providers/opencode-go.kdl:81",
 				"providers": [
 					"opencode-go"
 				],
@@ -13155,7 +13384,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:75",
+				"source": "providers/opencode-go.kdl:85",
 				"providers": [
 					"opencode-go"
 				],
@@ -13182,7 +13411,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:79",
+				"source": "providers/opencode-go.kdl:89",
 				"providers": [
 					"opencode-go"
 				],
@@ -13204,7 +13433,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:84",
+				"source": "providers/opencode-go.kdl:94",
 				"providers": [
 					"opencode-go"
 				],
@@ -13219,7 +13448,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:88",
+				"source": "providers/opencode-go.kdl:98",
 				"providers": [
 					"opencode-go"
 				],
@@ -13636,7 +13865,22 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:10",
+				"source": "providers/openrouter.kdl:5",
+				"providers": [
+					"openrouter"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4.1-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				}
+			},
+			{
+				"source": "providers/openrouter.kdl:14",
 				"class": "anthropic",
 				"providers": [
 					"openrouter"
@@ -13646,7 +13890,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:17",
+				"source": "providers/openrouter.kdl:21",
 				"class": "minimax",
 				"providers": [
 					"openrouter"
@@ -13662,7 +13906,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:22",
+				"source": "providers/openrouter.kdl:26",
 				"class": "openai",
 				"providers": [
 					"openrouter"
@@ -13678,7 +13922,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:27",
+				"source": "providers/openrouter.kdl:31",
 				"class": "stepfun",
 				"providers": [
 					"openrouter"
@@ -13694,7 +13938,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:31",
+				"source": "providers/openrouter.kdl:35",
 				"class": "unknown",
 				"providers": [
 					"openrouter"
@@ -13709,7 +13953,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:35",
+				"source": "providers/openrouter.kdl:39",
 				"providers": [
 					"openrouter"
 				],
@@ -13736,7 +13980,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:40",
+				"source": "providers/openrouter.kdl:44",
 				"providers": [
 					"openrouter"
 				],
@@ -13757,7 +14001,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:44",
+				"source": "providers/openrouter.kdl:48",
 				"providers": [
 					"openrouter"
 				],
@@ -13775,7 +14019,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:48",
+				"source": "providers/openrouter.kdl:52",
 				"providers": [
 					"openrouter"
 				],
@@ -13800,7 +14044,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:53",
+				"source": "providers/openrouter.kdl:57",
 				"providers": [
 					"openrouter"
 				],
@@ -13815,7 +14059,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:57",
+				"source": "providers/openrouter.kdl:61",
 				"providers": [
 					"openrouter"
 				],
@@ -13883,7 +14127,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:63",
+				"source": "providers/openrouter.kdl:67",
 				"providers": [
 					"openrouter"
 				],
@@ -18169,6 +18413,30 @@
 					"instructions": "Create or copy a Provider API key from Command Code Studio",
 					"prompt": "Paste your Command Code API key",
 					"placeholder": "user_..."
+				}
+			},
+			{
+				"id": "charm-hyper",
+				"apiKeyFormat": "bearer",
+				"name": "Charm Hyper",
+				"env": {
+					"vars": [
+						"CHARM_HYPER_API_KEY",
+						"HYPER_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://hyper.charm.land/",
+					"instructions": "Create or copy an API key from the Charm Hyper dashboard",
+					"prompt": "Paste your Charm Hyper API key",
+					"placeholder": "sk-hyper-...",
+					"normalize": "strip-bearer",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Charm Hyper",
+						"url": "https://hyper.charm.land/v1/credits"
+					}
 				}
 			},
 			{

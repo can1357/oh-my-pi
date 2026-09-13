@@ -61,6 +61,31 @@ describe("Muse Code subscription usage", () => {
 		});
 	});
 
+	test("reports quota without a tier when Meta returns null subscription tier fields", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				Response.json({
+					api_key: "LLM|subscription-key",
+					user_email: "Muse@Example.com",
+					is_subs_active: true,
+					subs_tier_id: null,
+					subs_tier_name: null,
+					subs_usage: {
+						window: { used_percent: 42, resets_at: 1_800_000_000, window_duration_mins: 300 },
+					},
+				}),
+			);
+
+		const report = await museCodeUsageProvider.fetchUsage(
+			{ provider: "muse-code", credential },
+			{ fetch: fetchImpl },
+		);
+
+		expect(report?.limits).toHaveLength(1);
+		expect(report?.limits[0]?.scope.tier).toBeUndefined();
+		expect(report?.metadata).not.toHaveProperty("tier");
+	});
+
 	test("does not report Meta PAYG credentials as Muse subscription quota", () => {
 		expect(
 			museCodeUsageProvider.supports?.({

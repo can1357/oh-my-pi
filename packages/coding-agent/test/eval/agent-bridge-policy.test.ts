@@ -1375,7 +1375,7 @@ describe("runEvalAgent isolation", () => {
 			caught = err as Error;
 		}
 		expect(caught).toBeDefined();
-		const match = caught?.message.match(/(\/[^\s,]+?\.nested-0-sub_nested\.patch)/);
+		const match = caught?.message.match(/([^\s,]+?\.nested-0-sub_nested\.patch)/);
 		expect(match).not.toBeNull();
 		const persistedPath = match?.[1];
 		expect(persistedPath).toBeDefined();
@@ -1487,6 +1487,31 @@ describe("runEvalAgent isolation", () => {
 		expect(result.details.nestedPatches).toEqual([{ relativePath: "nested", patch: "diff --git a/file b/file\n" }]);
 		expect(result.text).toContain("nested repository");
 		expect(result.text).toContain("apply=false");
+	});
+
+	it("names each nested patch file and not the empty root patch when apply=false captured nested-only changes", async () => {
+		mockAgents();
+		mockIsolationContext();
+		const nestedPatchPath = "/artifacts/NestedOnly.nested-0-inner.patch";
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			singleResult(opts.baseOptions, {
+				output: "nested-only",
+				patchPath: `/artifacts/${opts.agentId}.patch`,
+				hasRootChanges: false,
+				nestedPatches: [{ relativePath: "inner", patch: "diff --git a/b.txt b/b.txt\n" }],
+				nestedPatchPaths: [nestedPatchPath],
+			}),
+		);
+
+		const session = isolatedSession();
+		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
+
+		// The headline fix: a 0-byte root patch is not reported as "changes
+		// captured at …"; the nested file that holds the work is named instead.
+		expect(result.text).toContain("Isolation: changes captured for 1 nested repository (apply=false). Not applied.");
+		expect(result.text).toContain(`- nested repository patch: \`${nestedPatchPath}\``);
+		expect(result.text).not.toContain("changes captured at");
+		expect(result.details.nestedPatchPaths).toEqual([nestedPatchPath]);
 	});
 
 	it("preserves the temp artifacts dir when apply=false so details.patchPath remains valid", async () => {

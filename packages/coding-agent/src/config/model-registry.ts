@@ -2407,10 +2407,22 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get the base URL associated with a provider, if any model defines one.
+	 * Provider-level base URL: explicit runtime/config overrides first, then any
+	 * discovered model that defines one.
+	 *
+	 * The overrides lead because a model-derived answer is only available once
+	 * discovery has populated the registry. `omp usage` builds a `ModelRegistry`
+	 * and probes credentials immediately, and providers whose roster is
+	 * discovery-only (no bundled rows) have no model to read a URL from at that
+	 * point — so deriving solely from models returned `undefined` cache-cold and
+	 * let a usage probe send a proxy-scoped key to the provider's canonical host.
 	 */
 	getProviderBaseUrl(provider: string): string | undefined {
-		return this.#modelsForProviderLookup(provider).find(m => m.provider === provider && m.baseUrl)?.baseUrl;
+		return (
+			this.#runtimeProviderOverrides.get(provider)?.baseUrl ??
+			this.#providerOverrides.get(provider)?.baseUrl ??
+			this.#modelsForProviderLookup(provider).find(m => m.provider === provider && m.baseUrl)?.baseUrl
+		);
 	}
 	/**
 	 * Get provider-level headers without including per-model overrides.

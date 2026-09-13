@@ -659,7 +659,7 @@ async function runInTabWithSnapshot(
 		}
 	}
 	const abort = (): void => {
-		tab.worker.send({ type: "abort", id });
+		safeSend(tab, { type: "abort", id });
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(opts.signal?.reason);
 	};
 	if (opts.signal?.aborted) abort();
@@ -1194,7 +1194,7 @@ export function armIdleCloseForOwner(ownerId: string, idleMs: number, retryMs: n
 }
 
 /** Test-only accessor for the module-global tabs map. */
-export function getTabsMapForTest(): ReadonlyMap<string, TabSession> {
+export function getTabsMapForTest(): Map<string, TabSession> {
 	return tabs;
 }
 

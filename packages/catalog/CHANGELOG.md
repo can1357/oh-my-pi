@@ -2,12 +2,43 @@
 
 ## [Unreleased]
 
+## [18.1.19] - 2026-09-12
+
 ### Added
 
+- Added Charm Hyper as a built-in provider with API-key login, live model discovery, and per-model pricing, effort ladders, and limits read straight from its catalog ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+
+### Fixed
+
+- `anthropic/claude-fable-5-1` cache reads now cost Anthropic's published $0.25/MTok instead of $1.00, so session cost and usage reports no longer overstate cache-read spend by 4x ([#11862](https://github.com/can1357/oh-my-pi/pull/11862) by [@camjac251](https://github.com/camjac251)).
+
+## [18.1.18] - 2026-09-11
+
+### Added
+
+- `supports-server-compaction` compat axis (`compat.supportsServerCompaction`): whether a model line accepts Anthropic server-side compaction (`compact-2026-01-12`). Class rules enable it for Opus 4.6+, Sonnet 4.6+, and Fable/Mythos 5 on every Anthropic-messages host; the default is `false`.
+
+### Fixed
+
+- OpenCode Go's DeepSeek Flash lanes (`deepseek-flash`, `deepseek-v4.1-flash`) now declare image input. The gateway serves them with vision despite the IDs carrying no vision suffix, so the class-wide `strip-image-input` rule was dropping attachments the endpoint reads; the modality is declared too, since live discovery seeds these lanes text-only ([#11774](https://github.com/can1357/oh-my-pi/pull/11774) by [@STRML](https://github.com/STRML)).
+- Amazon Bedrock OpenAI models, plus unclassified profiles such as opaque application-inference-profile ARNs, now carry the compatibility policy required to preserve image-bearing tool results ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
+- DeepSeek V4.1 Flash requests now honor the documented 384K output maximum instead of being capped at 64K ([#11769](https://github.com/can1357/oh-my-pi/issues/11769)).
+- Fixed the first-party `deepseek-flash` alias missing the V4.1 Flash wire contract: it now sends `max_tokens` with `reasoning_content` and replays reasoning and assistant content on tool calls with no tool choice ([#11799](https://github.com/can1357/oh-my-pi/pull/11799) by [@brit](https://github.com/brit)).
+
+## [18.1.17] - 2026-09-10
+
+### Added
+
+- Added DeepSeek V4.1 Flash on OpenRouter with image input and low/high/max reasoning levels ([#11592](https://github.com/can1357/oh-my-pi/pull/11592) by [@mazzanfar](https://github.com/mazzanfar)).
 - Added DeepSeek cost estimates that follow published peak/off-peak rates.
 - Added dated, announced price changes to the catalog, so rates switch on their effective date (e.g. DeepSeek Pro moving to Flash rates).
-
 - Added Command Code as a built-in provider with API-key login, live model discovery, per-model pricing, native OpenAI/Anthropic-compatible routing, cache-aware token usage, and TTFT metrics ([#11391](https://github.com/can1357/oh-my-pi/pull/11391) by [@CherkaSSH](https://github.com/CherkaSSH)).
+
+### Fixed
+
+- Fixed Command Code models outside the verified effort registry offering unsupported reasoning effort controls, and bundled the live Command Code catalog so fresh installs resolve the default model without waiting for discovery ([#11595](https://github.com/can1357/oh-my-pi/pull/11595) by [@H4vC](https://github.com/H4vC)).
+- Fixed the bundled `deepseek-flash` row shipping without context limits: it now carries its documented 1M context / 384K output so offline context accounting enforces the real window.
+
 ## [18.1.16] - 2026-09-09
 
 - Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).

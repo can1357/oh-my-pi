@@ -51,6 +51,7 @@ import type {
 } from "./usage";
 import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
+import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { clinePassUsageProvider } from "./usage/cline-pass";
 import { cursorUsageProvider } from "./usage/cursor";
@@ -677,6 +678,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
 	devinUsageProvider,
+	charmHyperUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(

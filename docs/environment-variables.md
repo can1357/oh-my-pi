@@ -79,6 +79,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `QWEN_PORTAL_API_KEY`           | Qwen Portal auth                                 | Using `qwen-portal` with API key                               | Fallback after `QWEN_OAUTH_TOKEN`                                                                   |
 | `ZENMUX_API_KEY`                | ZenMux auth                                      | Using `zenmux` provider                                        | Used for ZenMux OpenAI and Anthropic-compatible routes                                              |
 | `COMMAND_CODE_API_KEY`          | Command Code auth                                | Using `commandcode` provider                                   | `COMMANDCODE_API_KEY` is accepted as a legacy alias                                                 |
+| `CHARM_HYPER_API_KEY`           | Charm Hyper auth                                 | Using `charm-hyper` provider                                   | `HYPER_API_KEY` is accepted as a fallback alias                                                     |
 | `VLLM_API_KEY`                  | vLLM auth/discovery opt-in                       | Using `vllm` provider (local OpenAI-compatible servers)        | Any non-empty value works for no-auth local servers                                                 |
 | `CURSOR_ACCESS_TOKEN`           | Cursor provider auth                             | Using Cursor provider                                          | `CURSOR_API_KEY` is accepted as an alias                                                            |
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             | `VERCEL_AI_GATEWAY_API_KEY` is accepted as an alias                                                 |
@@ -108,11 +109,12 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 
 ### GitHub/Copilot tokens
 
-| Variable               | Used for                       | Notes                                     |
-| ---------------------- | ------------------------------ | ----------------------------------------- |
-| `COPILOT_GITHUB_TOKEN` | GitHub Copilot provider auth   | Generic GitHub tokens are not used here   |
-| `GH_TOKEN`             | GitHub API auth in web scraper | Web scraper fallback after `GITHUB_TOKEN` |
-| `GITHUB_TOKEN`         | GitHub API auth in web scraper | Web scraper checks this before `GH_TOKEN` |
+| Variable                  | Used for                                        | Notes                                                                                                                                                                                                                                                   |
+| ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COPILOT_GITHUB_TOKEN`    | GitHub Copilot provider auth                    | Generic GitHub tokens are not used here                                                                                                                                                                                                                 |
+| `COPILOT_INTEGRATION_ID`  | GitHub Copilot client identity override         | Default `copilot-chat` (chat surface). Denied requests retry once as the Copilot CLI; set to pin the client id and skip the retry ([#11372](https://github.com/can1357/oh-my-pi/issues/11372)) |
+| `GH_TOKEN`                | GitHub API auth in web scraper                  | Web scraper fallback after `GITHUB_TOKEN`                                                                                                                                                                                                               |
+| `GITHUB_TOKEN`            | GitHub API auth in web scraper                  | Web scraper checks this before `GH_TOKEN`                                                                                                                                                                                                               |
 
 ### Auth broker / auth gateway (remote credential vault)
 

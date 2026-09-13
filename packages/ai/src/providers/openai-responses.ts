@@ -64,6 +64,7 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
+import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import type {
 	Tool as OpenAITool,
 	ReasoningEffort,
@@ -453,14 +454,15 @@ const streamOpenAIResponsesOnce = (
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { headers, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
-				apiKey,
-				extraHeaders: options?.headers,
-				initiatorOverride: options?.initiatorOverride,
-				messages: context.messages,
-				sessionId: options?.sessionId ?? routingSessionId,
-				promptCacheSessionId,
-			});
+			const { headers, copilotPremiumRequests, baseUrl, copilotCacheKey, copilotCacheSnapshot } =
+				resolveOpenAIRequestSetup(model, {
+					apiKey,
+					extraHeaders: options?.headers,
+					initiatorOverride: options?.initiatorOverride,
+					messages: context.messages,
+					sessionId: options?.sessionId ?? routingSessionId,
+					promptCacheSessionId,
+				});
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
@@ -567,7 +569,13 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: wrapFetchForCopilotFallback(
+							options?.fetch,
+							model.provider === "github-copilot",
+							resolveCopilotRequestIdentity(options?.headers),
+							copilotCacheKey,
+							copilotCacheSnapshot,
+						),
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
