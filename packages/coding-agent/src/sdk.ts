@@ -52,6 +52,7 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
+import { createCodeModelExtension } from "./code-model";
 import { loadCapability } from "./capability";
 import {
 	MAIN_AGENT_RULE_NAME,
@@ -2143,6 +2144,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			if (!options.parentTaskPrefix) inlineExtensions.push(createCodeModelExtension(settings));
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
 			}

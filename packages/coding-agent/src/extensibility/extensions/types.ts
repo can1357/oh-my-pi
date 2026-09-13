@@ -53,6 +53,7 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -1473,7 +1474,7 @@ export interface ExtensionAPI {
 	getThinkingLevel(): ThinkingLevel | undefined;
 
 	/** Set thinking level for the current session. */
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 
 	/** Get a snapshot of the current session's per-family service tiers. */
 	getServiceTiers(): Readonly<ServiceTierByFamily>;
@@ -1684,7 +1685,7 @@ export type SetModelHandler = (model: Model) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel, persist?: boolean) => void;
+export type SetThinkingLevelHandler = (level: ConfiguredThinkingLevel | undefined, persist?: boolean) => void;
 
 export type GetServiceTiersHandler = () => ServiceTierByFamily;
 
