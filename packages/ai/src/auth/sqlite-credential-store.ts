@@ -1565,38 +1565,35 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	deleteAuthCredential(id: number, disabledCause: string): void {
-		try {
-			const cause = normalizeDisabledCause(disabledCause);
-			if (!isDeliberateRemovalCause(cause)) {
-				this.#deleteStmt.run(cause, id);
-				return;
-			}
-			// Read-then-write under WAL: take the write lock up front so a
-			// concurrent writer cannot leave this a deferred snapshot that fails
-			// to upgrade (SQLITE_BUSY_SNAPSHOT) and silently keeps the row active.
-			const remove = this.#db.transaction(() => {
-				const stmt = this.#db.prepare(
-					"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ?",
-				);
-				let row: AuthRow | null;
-				try {
-					row = stmt.get(id) as AuthRow | null;
-				} finally {
-					stmt.finalize();
-				}
-				this.#deleteStmt.run(cause, id);
-				const removed = row ? deserializeCredential(row) : null;
-				if (row && removed) {
-					this.#purgeTombstonesSupersededBy(row.provider, [removed], {
-						keepAutomatic: false,
-						excludeIds: new Set([id]),
-					});
-				}
-			});
-			remove.immediate();
-		} catch {
-			// Ignore delete failures
+		const cause = normalizeDisabledCause(disabledCause);
+		if (!isDeliberateRemovalCause(cause)) {
+			this.#deleteStmt.run(cause, id);
+			return;
 		}
+		// Read-then-write under WAL: take the write lock up front so a
+		// concurrent writer cannot leave this a deferred snapshot that fails
+		// to upgrade (SQLITE_BUSY_SNAPSHOT). Propagate failures so callers only
+		// remove their in-memory credential after the transaction commits.
+		const remove = this.#db.transaction(() => {
+			const stmt = this.#db.prepare(
+				"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ?",
+			);
+			let row: AuthRow | null;
+			try {
+				row = stmt.get(id) as AuthRow | null;
+			} finally {
+				stmt.finalize();
+			}
+			this.#deleteStmt.run(cause, id);
+			const removed = row ? deserializeCredential(row) : null;
+			if (row && removed) {
+				this.#purgeTombstonesSupersededBy(row.provider, [removed], {
+					keepAutomatic: false,
+					excludeIds: new Set([id]),
+				});
+			}
+		});
+		remove.immediate();
 	}
 
 	/**

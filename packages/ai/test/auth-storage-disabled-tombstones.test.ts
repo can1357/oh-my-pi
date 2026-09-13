@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	AuthStorage,
+	type CredentialDisabledEvent,
+	type OAuthCredential,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 function credential(suffix: string, email = "alice@example.com"): OAuthCredential {
@@ -120,20 +125,59 @@ describe("disabled credential tombstone retention", () => {
 		expect(readRows(dbPath)).toEqual([{ id: newId, disabled_cause: null }]);
 	});
 
-	it("lets deliberate removal supersede older automatic tombstones only for the removed identity", () => {
+	it("rejects failed account removal without changing memory or durable state, then clears only owned history", async () => {
 		if (!store) throw new Error("test setup failed");
-		const unrelatedId = store.upsertAuthCredentialForProvider("openai-codex", credential("bob", "bob@example.com"))[0]
-			.id;
+		const peerId = store.upsertAuthCredentialForProvider("anthropic", credential("peer-old"))[0].id;
+		store.deleteAuthCredential(peerId, AUTOMATIC_CAUSE);
+		store.upsertAuthCredentialForProvider("anthropic", credential("peer-live"));
+		const unrelatedId = store.upsertAuthCredentialForProvider(
+			"openai-codex",
+			credential("bob-old", "bob@example.com"),
+		)[0].id;
 		store.deleteAuthCredential(unrelatedId, AUTOMATIC_CAUSE);
 		const oldId = store.upsertAuthCredentialForProvider("openai-codex", credential("old"))[0].id;
 		store.deleteAuthCredential(oldId, AUTOMATIC_CAUSE);
 		const newId = store.upsertAuthCredentialForProvider("openai-codex", credential("new"))[0].id;
-		store.deleteAuthCredential(newId, "deleted by user");
+		store.upsertAuthCredentialForProvider("openai-codex", credential("bob-live", "bob@example.com"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		const before = storage.exportSnapshot().credentials;
+		const events: CredentialDisabledEvent[] = [];
+		storage.onCredentialDisabled(event => {
+			events.push(event);
+		});
+		const db = new Database(dbPath);
+		try {
+			const rows = db.query<{ id: number }, []>("SELECT * FROM auth_credentials ORDER BY id");
+			const durableBefore = rows.all();
+			const causesBefore = readRows(dbPath);
+			// Reject the history purge after the active row has already been disabled.
+			db.run(`CREATE TRIGGER reject_account_removal BEFORE DELETE ON auth_credentials
+				WHEN OLD.id = ${oldId}
+				BEGIN SELECT RAISE(ABORT, 'account history delete rejected'); END`);
 
-		expect(readRows(dbPath)).toEqual([
-			{ id: unrelatedId, disabled_cause: AUTOMATIC_CAUSE },
-			{ id: newId, disabled_cause: "deleted by user" },
-		]);
+			await expect(storage.removeCredential("openai-codex", newId)).rejects.toMatchObject({
+				code: "SQLITE_CONSTRAINT_TRIGGER",
+			});
+			expect(storage.exportSnapshot().credentials).toEqual(before);
+			expect(rows.all()).toEqual(durableBefore);
+			expect(events).toEqual([]);
+
+			db.run("DROP TRIGGER reject_account_removal");
+			expect(await storage.removeCredential("openai-codex", newId)).toBe(true);
+			expect(storage.exportSnapshot().credentials).toEqual(before.filter(row => row.id !== newId));
+			expect(readRows(dbPath)).toEqual(
+				causesBefore
+					.filter(row => row.id !== oldId)
+					.map(row => (row.id === newId ? { id: newId, disabled_cause: "deleted by user" } : row)),
+			);
+			expect(rows.all().filter(row => row.id !== newId)).toEqual(
+				durableBefore.filter(row => row.id !== oldId && row.id !== newId),
+			);
+			expect(events).toEqual([]);
+		} finally {
+			db.close();
+		}
 	});
 
 	it("clears provider history on whole-provider logout without touching another provider", () => {
