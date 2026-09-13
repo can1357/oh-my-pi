@@ -6,7 +6,7 @@
 import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../session/agent-storage";
 import { DEFAULT_MCP_TIMEOUT_MS } from "./timeout";
-import type { MCPServerConfig, MCPToolDefinition } from "./types";
+import type { MCPRequestIdFormat, MCPServerConfig, MCPToolDefinition } from "./types";
 
 const CACHE_VERSION = 1;
 const CACHE_PREFIX = "mcp_tools:";
@@ -30,37 +30,47 @@ function toHex(buffer: ArrayBuffer): string {
 /**
  * Fields excluded from cache-identity hashing because they are connection
  * *policy* (when to connect, whether to connect at all, how long to wait
- * for a response), not part of the server's identity — flipping any of
- * them on an already-cached server must still hit the cache, or an
- * eager-to-lazy transition (or a `timeout` tweak on an already-lazy server)
- * orphans the cache and starts the server tool-less.
+ * for a response, how outgoing request ids are encoded on the wire), not
+ * part of the server's identity — flipping any of them on an
+ * already-cached server must still hit the cache, or an eager-to-lazy
+ * transition (or a `timeout`/`requestIdFormat` tweak on an already-lazy
+ * server) orphans the cache and starts the server tool-less.
  */
-const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled", "timeout"];
+const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = [
+	"lazy",
+	"enabled",
+	"timeout",
+	"requestIdFormat",
+];
 
 /**
  * Policy keys enumerated across every value they could hold at legacy
  * cache-write time (see {@link policyVariants}): each is two-valued, so
- * enumeration is exhaustive. `timeout` is deliberately excluded from this
- * set — it is not boolean, so its legacy candidate in
- * {@link hashLegacyConfigs} reuses the *current* config's actual value
- * instead of enumerating an open value space.
+ * enumeration is exhaustive. `timeout` and `requestIdFormat` are
+ * deliberately excluded from this set — neither is boolean, so their legacy
+ * candidates in {@link hashLegacyConfigs} enumerate the field's own
+ * documented value space (see {@link timeoutCandidates} and
+ * {@link requestIdFormatCandidates}) instead of reusing `policyVariants`.
  */
 const ENUMERATED_LEGACY_POLICY_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled"];
 
 /**
  * Identity-exclusion sets used by every prior cache-identity hashing scheme,
- * recent first: excluding `lazy` and `enabled` (before `timeout` joined the
- * exclusion set), excluding only `lazy` (before `enabled` was added), then
- * excluding neither (the shape that shipped before this cache computed a
- * policy-stripped identity at all). Checked on a miss so a cache written
- * under an older release still hits. This is required, not an optimization:
- * an eager server that misses just reconnects in the background and
- * repopulates its cache, but a *lazy* server with no cache registers no
- * tools at all and stays dormant until a manual `/mcp reconnect` (see
- * `connectServers` in `manager.ts`) — every algorithm change here would
- * otherwise strand every already-lazy server on upgrade.
+ * recent first: excluding `lazy`, `enabled`, and `timeout` (before
+ * `requestIdFormat` joined the exclusion set), excluding `lazy` and
+ * `enabled` (before `timeout` joined), excluding only `lazy` (before
+ * `enabled` was added), then excluding neither (the shape that shipped
+ * before this cache computed a policy-stripped identity at all). Checked on
+ * a miss so a cache written under an older release still hits. This is
+ * required, not an optimization: an eager server that misses just
+ * reconnects in the background and repopulates its cache, but a *lazy*
+ * server with no cache registers no tools at all and stays dormant until a
+ * manual `/mcp reconnect` (see `connectServers` in `manager.ts`) — every
+ * algorithm change here would otherwise strand every already-lazy server on
+ * upgrade.
  */
 const LEGACY_IDENTITY_EXCLUDED_KEYS: ReadonlyArray<readonly (keyof MCPServerConfig)[]> = [
+	["lazy", "enabled", "timeout"],
 	["lazy", "enabled"],
 	["lazy"],
 	[],
@@ -114,6 +124,19 @@ function timeoutCandidates(current: number | undefined): Array<number | undefine
 	return [...new Set([undefined, 0, DEFAULT_MCP_TIMEOUT_MS, current])];
 }
 
+/**
+ * `requestIdFormat` candidates enumerated for legacy migration: the field's
+ * whole documented value space (unset, meaning the runtime default of
+ * numeric ids, plus the two explicit encodings) alongside the *current*
+ * config's own value. Unlike `timeout` this space is already exhaustive —
+ * there is no unbounded historical value to miss — but `current` is kept
+ * for symmetry with {@link timeoutCandidates} and because the `Set` below
+ * dedupes it for free.
+ */
+function requestIdFormatCandidates(current: MCPRequestIdFormat | undefined): Array<MCPRequestIdFormat | undefined> {
+	return [...new Set([undefined, "number", "string", current] as const)];
+}
+
 /** Hashes of `config` under every retired identity-exclusion set, for cache-miss migration. */
 async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
@@ -123,11 +146,17 @@ async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
 		const hashedPolicyKeys = CURRENT_IDENTITY_EXCLUDED_KEYS.filter(key => !excluded.includes(key));
 		const enumeratedKeys = hashedPolicyKeys.filter(key => ENUMERATED_LEGACY_POLICY_KEYS.includes(key));
 		const timeoutValues = hashedPolicyKeys.includes("timeout") ? timeoutCandidates(config.timeout) : [undefined];
+		const requestIdFormatValues = hashedPolicyKeys.includes("requestIdFormat")
+			? requestIdFormatCandidates(config.requestIdFormat)
+			: [undefined];
 		for (const timeoutValue of timeoutValues) {
-			const base: Record<string, unknown> =
-				timeoutValue === undefined ? identity : { ...identity, timeout: timeoutValue };
-			for (const variant of policyVariants(enumeratedKeys)) {
-				hashes.add(await hashIdentity({ ...base, ...variant }));
+			for (const requestIdFormatValue of requestIdFormatValues) {
+				const base: Record<string, unknown> = { ...identity };
+				if (timeoutValue !== undefined) base.timeout = timeoutValue;
+				if (requestIdFormatValue !== undefined) base.requestIdFormat = requestIdFormatValue;
+				for (const variant of policyVariants(enumeratedKeys)) {
+					hashes.add(await hashIdentity({ ...base, ...variant }));
+				}
 			}
 		}
 	}
