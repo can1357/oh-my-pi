@@ -129,19 +129,29 @@ function parseJsonBody(errorMessage: string): Record<string, unknown> | undefine
 	}
 }
 
+const GOOGLE_SYNTHETIC_RESOURCE_EXHAUSTED_MESSAGE = "Resource has been exhausted (e.g. check quota).";
+
+export function isGoogleDailyQuotaExhaustedText(text: string): boolean {
+	const lower = text.toLowerCase();
+	return lower.includes("quota will reset") || lower.includes("exhausted your capacity");
+}
+
 /**
  * Detect synthetic 429 RESOURCE_EXHAUSTED returned by Cloud Code Assist / Google Antigravity
  * when systemInstruction contains blocked fingerprint text. Real quota errors carry structured
- * details (ErrorInfo / RetryInfo), while the synthetic rejection has no details array.
+ * details (ErrorInfo / RetryInfo) or daily-quota wording, while the synthetic rejection has no
+ * details array and emits generic throttle boilerplate.
  */
 export function isAntigravitySynthetic429(status: number | undefined, errorMessage: string): boolean {
 	if (status !== 429) return false;
+	if (isGoogleDailyQuotaExhaustedText(errorMessage)) return false;
 	const body = parseJsonBody(errorMessage);
 	const error = asRecord(body?.error);
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
 		return false;
 	}
-	return !Array.isArray(error.details);
+	if (Array.isArray(error.details)) return false;
+	return typeof error.message === "string" && error.message.includes(GOOGLE_SYNTHETIC_RESOURCE_EXHAUSTED_MESSAGE);
 }
 
 /**
@@ -150,12 +160,25 @@ export function isAntigravitySynthetic429(status: number | undefined, errorMessa
  * embedded top-level object as well as a raw JSON body.
  */
 function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
+	// Antigravity / Cloud Code Assist surface multi-hour daily-quota exhaustion as
+	// "You have exhausted your capacity on this model. Your quota will reset after …"
+	// even in JSON bodies lacking structured details. This must classify as QUOTA_EXHAUSTED
+	// to trigger credential rotation rather than a short transient backoff.
+	if (isGoogleDailyQuotaExhaustedText(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
 	const body = parseJsonBody(errorMessage);
 	const error = asRecord(body?.error);
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
 		return undefined;
 	}
-	if (!Array.isArray(error.details)) return "RATE_LIMIT_EXCEEDED";
+	if (!Array.isArray(error.details)) {
+		if (typeof error.message === "string" && error.message.includes(GOOGLE_SYNTHETIC_RESOURCE_EXHAUSTED_MESSAGE)) {
+			return "RATE_LIMIT_EXCEEDED";
+		}
+		return undefined;
+	}
 
 	for (const value of error.details) {
 		const detail = asRecord(value);
@@ -181,7 +204,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 			}
 		}
 	}
-	return "RATE_LIMIT_EXCEEDED";
+	return undefined;
 }
 
 function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
