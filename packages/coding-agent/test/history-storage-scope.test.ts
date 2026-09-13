@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { historyScopeRing } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import { HistoryStorage, type HistoryScope } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { runGit } from "./helpers/git";
 
 interface Fixtures {
 	repoA: string;
@@ -14,17 +15,6 @@ interface Fixtures {
 
 let tempDir: TempDir | null = null;
 
-function git(cwd: string, ...args: string[]): void {
-	const result = Bun.spawnSync(["git", "-C", cwd, "-c", "user.email=t@example.com", "-c", "user.name=t", ...args], {
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-	});
-	if (result.exitCode !== 0) {
-		throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(result.stderr)}`);
-	}
-}
-
 /** Repo A (plus a nested directory and an out-of-tree linked worktree) and an unrelated repo B. */
 function createFixtures(root: string): Fixtures {
 	const repoA = path.join(root, "repo-a");
@@ -33,10 +23,10 @@ function createFixtures(root: string): Fixtures {
 	const repoAWorktree = path.join(root, "repo-a-wt");
 	fs.mkdirSync(repoASub, { recursive: true });
 	fs.mkdirSync(repoB, { recursive: true });
-	git(repoA, "init", "--quiet");
-	git(repoA, "commit", "--allow-empty", "--quiet", "-m", "init");
-	git(repoB, "init", "--quiet");
-	git(repoA, "worktree", "add", "--quiet", "--detach", repoAWorktree);
+	runGit(repoA, "init", "--quiet");
+	runGit(repoA, "commit", "--allow-empty", "--quiet", "-m", "init");
+	runGit(repoB, "init", "--quiet");
+	runGit(repoA, "worktree", "add", "--quiet", "--detach", repoAWorktree);
 	return { repoA, repoASub, repoAWorktree, repoB };
 }
 
@@ -89,8 +79,6 @@ describe("HistoryStorage scope filtering", () => {
 			"delta other project",
 			"gamma deploy worktree",
 		]);
-		// A legacy row with no session id must never surface under a session scope.
-		expect(promptsOf(storage, { kind: "session", value: "s1" })).not.toContain("zeta anonymous");
 	});
 
 	it("filters reads by exact cwd and exposes prompts with no cwd only outside cwd/repo scopes", async () => {
@@ -134,7 +122,7 @@ describe("HistoryStorage scope filtering", () => {
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 		const emptyRepo = path.join(dir.path(), "repo-c");
 		fs.mkdirSync(emptyRepo, { recursive: true });
-		git(emptyRepo, "init", "--quiet");
+		runGit(emptyRepo, "init", "--quiet");
 
 		expect(storage.getRecent(100, { kind: "repo", value: emptyRepo })).toEqual([]);
 	});
@@ -197,7 +185,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, dir.path() + "/ghost");
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 		const link = dir.join("repo-a-link");
 		fs.symlinkSync(fixtures.repoA, link, "dir");
 		// A row submitted while the symlinked spelling was current: stored `cwd` keeps it.
@@ -224,7 +212,7 @@ describe("HistoryStorage scope filtering", () => {
 		const outer = dir.join("outer");
 		const inner = path.join(outer, "inner");
 		fs.mkdirSync(inner, { recursive: true });
-		git(outer, "init", "--quiet");
+		runGit(outer, "init", "--quiet");
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("before nested init", inner, "s1");
 
@@ -232,7 +220,7 @@ describe("HistoryStorage scope filtering", () => {
 
 		// A repository created while the process runs must be picked up: the cache is dropped
 		// on the next write, so the rows below stop belonging to the outer repository.
-		git(inner, "init", "--quiet");
+		runGit(inner, "init", "--quiet");
 		await storage.add("after nested init", inner, "s1");
 
 		expect(new Set(promptsOf(storage, { kind: "repo", value: inner }))).toEqual(

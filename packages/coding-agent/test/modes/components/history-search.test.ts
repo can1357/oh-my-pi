@@ -147,8 +147,11 @@ describe("HistorySearchComponent", () => {
 		const { plain } = render(component);
 		expect(plain).toContain("History (all projects)");
 		expect(plain).toContain("No history in all projects.");
-		// Advertising a Tab that cannot change anything would promise a no-op.
-		expect(plain).not.toContain("tab");
+		// Advertising a Tab that cannot change anything would promise a no-op. Scope the check to
+		// the footer so a title or prompt containing "tab" cannot mask a stray hint.
+		const footer = plain.split("\n").find(line => line.includes("navigate"));
+		expect(footer).toBeDefined();
+		expect(footer).not.toContain("tab");
 		expect(plain).not.toContain("Press Tab for");
 	});
 

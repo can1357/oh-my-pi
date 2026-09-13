@@ -42,6 +42,7 @@ describe("HistoryStorage.search", () => {
 		expect(storage.getRecent(10)).toEqual([]);
 		expect(storage.search("deploy", 10)).toEqual([]);
 	});
+
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["run git commit --amend now", "unrelated noise"]);

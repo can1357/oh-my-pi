@@ -26,12 +26,20 @@ export interface HistoryEntry {
 }
 
 /**
- * Recall scopes, narrowest first. Single source for the settings enum and the
- * Ctrl+R scope ring, so the three never drift apart.
+ * Recall scopes, narrowest first. Single source for the settings enum, the Ctrl+R scope ring
+ * and the labels both render, so they never drift apart.
  */
 export const HISTORY_SCOPE_KINDS = ["session", "cwd", "repo", "global"] as const;
 
 export type HistoryScopeKind = (typeof HISTORY_SCOPE_KINDS)[number];
+
+/** Human-facing name of each scope, phrased to read mid-sentence (`History (this session)`). */
+export const HISTORY_SCOPE_LABELS: Record<HistoryScopeKind, string> = {
+	session: "this session",
+	cwd: "current folder",
+	repo: "this repository",
+	global: "all projects",
+};
 
 /**
  * Recall filter for {@link HistoryStorage.getRecent} / {@link HistoryStorage.search}.
@@ -62,9 +70,6 @@ const EMPTY_SCOPE_CLAUSE: ScopeClause = { where: "", and: "", params: [] };
 // constant no matter how many directories match.
 const DIRS_WHERE = "WHERE cwd IN (SELECT value FROM json_each(?))";
 const DIRS_AND = "AND cwd IN (SELECT value FROM json_each(?))";
-
-/** Normalized spelling of a stored directory and the normalized root of the repository containing it. */
-type DirFacts = { physical: string; root: string };
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
@@ -115,8 +120,10 @@ export class HistoryStorage {
 	#stmts = new Map<string, Statement>();
 	// Directory scopes resolve stored `cwd` spellings per read. Repository topology and stored
 	// spellings can change while the process runs (a nested `git init`, a moved worktree, a new
-	// prompt), so both memos are dropped on every write and rebuilt by the next read.
-	#dirFacts = new Map<string, DirFacts>();
+	// prompt), so every memo is dropped on every write and rebuilt by the next read. `cwd` needs
+	// only the physical spelling; the repository root is resolved on demand, for `repo` only.
+	#physicalByStored = new Map<string, string>();
+	#rootByPhysical = new Map<string, string>();
 	#dirsByTarget = new Map<string, string[]>();
 
 	private constructor(dbPath: string) {
@@ -195,7 +202,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
-		this.#dirFacts.clear();
+		this.#physicalByStored.clear();
+		this.#rootByPhysical.clear();
 		this.#dirsByTarget.clear();
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
@@ -457,8 +465,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 		const cached = this.#dirsByTarget.get(cacheKey);
 		if (cached) return cached;
 		const dirs = this.#storedDirs().filter(dir => {
-			const facts = this.#factsOf(dir);
-			return kind === "cwd" ? facts.physical === normalized : facts.root === normalized;
+			const physical = this.#physicalOf(dir);
+			return kind === "cwd" ? physical === normalized : this.#rootOf(physical) === normalized;
 		});
 		this.#dirsByTarget.set(cacheKey, dirs);
 		return dirs;
@@ -472,14 +480,26 @@ ON CONFLICT(prompt) DO UPDATE SET
 		).map(row => row.cwd);
 	}
 
-	/** Normalized spelling and primary root of a stored directory, memoized until the next write. */
-	#factsOf(dir: string): DirFacts {
-		const cached = this.#dirFacts.get(dir);
-		if (cached) return cached;
+	/** Normalized physical spelling of a stored directory, memoized until the next write. */
+	#physicalOf(dir: string): string {
+		const cached = this.#physicalByStored.get(dir);
+		if (cached !== undefined) return cached;
 		const physical = normalizePathForComparison(dir);
-		const facts: DirFacts = { physical, root: normalizePathForComparison(primaryRootOrCwd(physical)) };
-		this.#dirFacts.set(dir, facts);
-		return facts;
+		this.#physicalByStored.set(dir, physical);
+		return physical;
+	}
+
+	/**
+	 * Normalized primary root of a physical directory, memoized until the next write. Resolved
+	 * on demand — `cwd` compares physical spellings alone — and keyed by the physical path so
+	 * two spellings of one directory share a single repository lookup.
+	 */
+	#rootOf(physical: string): string {
+		const cached = this.#rootByPhysical.get(physical);
+		if (cached !== undefined) return cached;
+		const root = normalizePathForComparison(primaryRootOrCwd(physical));
+		this.#rootByPhysical.set(physical, root);
+		return root;
 	}
 
 	#prepare(sql: string): Statement {

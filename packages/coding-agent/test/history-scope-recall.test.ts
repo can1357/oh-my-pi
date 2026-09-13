@@ -12,20 +12,10 @@ import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storag
 import type { HistoryScopeKind } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { Editor } from "@oh-my-pi/pi-tui";
 import { setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { runGit } from "./helpers/git";
 
 let tempDir: TempDir | null = null;
 let originalCwd = "";
-
-function git(cwd: string, ...args: string[]): void {
-	const result = Bun.spawnSync(["git", "-C", cwd, "-c", "user.email=t@example.com", "-c", "user.name=t", ...args], {
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-	});
-	if (result.exitCode !== 0) {
-		throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(result.stderr)}`);
-	}
-}
 
 /** Press Up on an emptied editor, exactly the gesture issue #4331 reports. */
 function recall(editor: Editor): string {
@@ -81,8 +71,8 @@ describe("scoped prompt recall", () => {
 		const repoB = path.join(dir.path(), "repo-b");
 		fs.mkdirSync(repoA, { recursive: true });
 		fs.mkdirSync(repoB, { recursive: true });
-		git(repoA, "init", "--quiet");
-		git(repoB, "init", "--quiet");
+		runGit(repoA, "init", "--quiet");
+		runGit(repoB, "init", "--quiet");
 		const dbPath = dir.join("history.db");
 		const storage = HistoryStorage.open(dbPath);
 		let sessionId = "11111111-1111-4111-8111-111111111111";
@@ -108,7 +98,7 @@ describe("scoped prompt recall", () => {
 
 		// Crossing a repository boundary must not leak the other project's prompts either.
 		state.context = { sessionId, cwd: repoB };
-		expect(recall(editor)).not.toBe("ONLY_SESSION_A");
+		expect(recall(editor)).toBe("ONLY_SESSION_B");
 
 		// Project scope keeps the two conversations of one directory together.
 		state.setting = "cwd";
@@ -134,7 +124,7 @@ describe("scoped prompt recall", () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
 		fs.mkdirSync(repo, { recursive: true });
-		git(repo, "init", "--quiet");
+		runGit(repo, "init", "--quiet");
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		storage.setSessionResolver(() => "session-1");
 		const state: { setting: HistoryScopeKind; context: HistoryScopeContext } = {
@@ -151,5 +141,26 @@ describe("scoped prompt recall", () => {
 
 		state.setting = "repo";
 		expect(recall(editor)).toBe("SUBMITTED_FROM_EDITOR");
+	});
+
+	it("stores a prompt under the origin the editor hands it", async () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		fs.mkdirSync(repo, { recursive: true });
+		runGit(repo, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		const state: { setting: HistoryScopeKind; context: HistoryScopeContext } = {
+			setting: "global",
+			context: { sessionId: "current-session", cwd: dir.path() },
+		};
+		const editor = bindEditor(storage, state);
+
+		// A command that switched sessions and moved the working directory passes the context it
+		// was typed in; the adapter must forward both halves, not fall back to the live one.
+		editor.addToHistory("COMMAND_FROM_ORIGIN", { sessionId: "origin-session", cwd: repo });
+
+		const [row] = storage.getRecent(10, { kind: "cwd", value: repo });
+		expect(row?.prompt).toBe("COMMAND_FROM_ORIGIN");
+		expect(row?.sessionId).toBe("origin-session");
 	});
 });

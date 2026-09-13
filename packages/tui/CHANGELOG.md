@@ -5,6 +5,7 @@
 ### Changed
 
 - `Editor.setHistoryStorage()` accepts an optional `sourceKey` callback: when the key changes, the editor re-seeds its list from `storage` at the start of the next navigation. Omitted, the list stays fixed for the editor's lifetime and locally remembered drafts are never reloaded.
+- `Editor.addToHistory()` accepts an optional `origin` (`{ sessionId?, cwd? }`) pinning the conversation and directory a prompt was submitted from, so a command that switches sessions or moves the working directory still files it under the context it was typed in.
 
 ## [18.1.17] - 2026-09-10
 

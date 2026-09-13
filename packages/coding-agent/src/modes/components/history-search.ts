@@ -17,21 +17,18 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
-import type { HistoryEntry, HistoryScope, HistoryScopeKind, HistoryStorage } from "../../session/history-storage";
+import {
+	type HistoryEntry,
+	type HistoryScope,
+	type HistoryStorage,
+	HISTORY_SCOPE_LABELS,
+} from "../../session/history-storage";
 import { rawKeyHint } from "./keybinding-hints";
 import { OverlayPanel } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Visible result rows; also the jump distance for PageUp/PageDown. */
 const MAX_VISIBLE = 10;
-
-/** Scope names as shown in the panel title, footer hint and empty state. */
-const SCOPE_LABELS: Record<HistoryScopeKind, string> = {
-	session: "this session",
-	cwd: "current folder",
-	repo: "this repository",
-	global: "all projects",
-};
 
 /** Split a query the same way `HistoryStorage` tokenizes it, so highlights align with matches. */
 function queryTokens(query: string): string[] {
@@ -219,13 +216,13 @@ export class HistorySearchComponent extends OverlayPanel {
 	}
 
 	#updateChrome(): void {
-		const label = SCOPE_LABELS[this.#scopeAt(this.#scopeIndex).kind];
+		const label = HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex).kind];
 		this.title = `History (${label})`;
 		const dot = theme.fg("dim", theme.sep.dot);
 		const hints = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select")];
 		// A one-scope ring cannot cycle, so advertising Tab would promise a no-op.
 		if (this.#scopes.length > 1)
-			hints.push(rawKeyHint("tab", SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]));
+			hints.push(rawKeyHint("tab", HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]));
 		hints.push(rawKeyHint("esc", "cancel"));
 		this.#hint.setText(hints.join(dot));
 	}
@@ -235,8 +232,9 @@ export class HistorySearchComponent extends OverlayPanel {
 		// the configured scope and wraps, so neither key is strictly "wider" than the other.
 		// Deliberately not `handleTabSwitchKey`: that helper also consumes Left/Right, which
 		// move the cursor inside the query field.
-		if (matchesKey(keyData, "tab") || matchesKey(keyData, "shift+tab")) {
-			const direction = matchesKey(keyData, "tab") ? 1 : -1;
+		const forward = matchesKey(keyData, "tab");
+		if (forward || matchesKey(keyData, "shift+tab")) {
+			const direction = forward ? 1 : -1;
 			this.#scopeIndex =
 				(((this.#scopeIndex + direction) % this.#scopes.length) + this.#scopes.length) % this.#scopes.length;
 			this.#updateChrome();
@@ -310,11 +308,11 @@ export class HistorySearchComponent extends OverlayPanel {
 			? this.#historyStorage.search(query, this.#resultLimit, scope)
 			: this.#historyStorage.getRecent(this.#resultLimit, scope);
 		this.#selectedIndex = 0;
+		const nextScope = HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind];
+		const widen = this.#scopes.length > 1 ? ` Press Tab for ${nextScope}.` : "";
 		const emptyMessage = query
-			? "No matching history"
-			: this.#scopes.length > 1
-				? `No history in ${SCOPE_LABELS[scope.kind]}. Press Tab for ${SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]}.`
-				: `No history in ${SCOPE_LABELS[scope.kind]}.`;
+			? `No matching history in ${HISTORY_SCOPE_LABELS[scope.kind]}.${widen}`
+			: `No history in ${HISTORY_SCOPE_LABELS[scope.kind]}.${widen}`;
 		this.#resultsList.setResults(this.#results, this.#selectedIndex, query ? queryTokens(query) : [], emptyMessage);
 	}
 }

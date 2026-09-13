@@ -9,19 +9,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import type { HistoryScopeKind } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { runGit } from "../helpers/git";
 
 let tempDir: TempDir | null = null;
-
-function git(cwd: string, ...args: string[]): void {
-	const result = Bun.spawnSync(["git", "-C", cwd, "-c", "user.email=t@example.com", "-c", "user.name=t", ...args], {
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-	});
-	if (result.exitCode !== 0) {
-		throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(result.stderr)}`);
-	}
-}
 
 beforeEach(() => {
 	tempDir = TempDir.createSync("@omp-history-scope-cfg-");
@@ -39,7 +29,7 @@ describe("resolveHistoryScope", () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
 		fs.mkdirSync(repo, { recursive: true });
-		git(repo, "init", "--quiet");
+		runGit(repo, "init", "--quiet");
 		const outsideRepo: HistoryScopeContext = { sessionId: "", cwd: dir.path() };
 
 		expect(resolveHistoryScope("session", outsideRepo)).toEqual({ kind: "cwd", value: dir.path() });
@@ -54,7 +44,7 @@ describe("resolveHistoryScope", () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
 		fs.mkdirSync(repo, { recursive: true });
-		git(repo, "init", "--quiet");
+		runGit(repo, "init", "--quiet");
 		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
 
 		expect(resolveHistoryScope("session", context)).toEqual({ kind: "session", value: "session-1" });
@@ -69,7 +59,7 @@ describe("historyScopeRing", () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
 		fs.mkdirSync(repo, { recursive: true });
-		git(repo, "init", "--quiet");
+		runGit(repo, "init", "--quiet");
 		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
 
 		const ring = historyScopeRing("session", context);
@@ -90,9 +80,9 @@ describe("historyScopeRing", () => {
 		const sub = path.join(repo, "src", "deep");
 		const worktree = path.join(dir.path(), "repo-wt");
 		fs.mkdirSync(sub, { recursive: true });
-		git(repo, "init", "--quiet");
-		git(repo, "commit", "--allow-empty", "--quiet", "-m", "init");
-		git(repo, "worktree", "add", "--quiet", "--detach", worktree);
+		runGit(repo, "init", "--quiet");
+		runGit(repo, "commit", "--allow-empty", "--quiet", "-m", "init");
+		runGit(repo, "worktree", "add", "--quiet", "--detach", worktree);
 
 		// Without primary-root resolution the scope would carry the directory itself and
 		// `history.scope: repo` would stop matching the repository's other directories.
@@ -139,8 +129,10 @@ describe("historyScopeKey", () => {
 		// drop recalled drafts even though the rows read back are identical.
 		expect(historyScopeKey({ kind: "cwd", value: link })).toBe(historyScopeKey({ kind: "cwd", value: repo }));
 		expect(historyScopeKey({ kind: "repo", value: link })).toBe(historyScopeKey({ kind: "repo", value: repo }));
-		// An empty value stays itself instead of resolving to the process directory.
-		expect(historyScopeKey({ kind: "cwd", value: "" })).toBe("cwd\u0000");
-		expect(historyScopeKey({ kind: "global" })).toBe("global\u0000");
+		// An empty value stays itself instead of resolving to the process directory, and the
+		// encoding of the key is deliberately not asserted: nothing parses it.
+		const empty = historyScopeKey({ kind: "cwd", value: "" });
+		expect(empty).not.toBe(historyScopeKey({ kind: "cwd", value: process.cwd() }));
+		expect(empty).not.toBe(historyScopeKey({ kind: "global" }));
 	});
 });

@@ -545,8 +545,8 @@ Recent/most-recent scans read only a 4 KiB prefix. Full lists read that prefix p
 - DB: `~/.omp/agent/history.db`
 - Table: `history(id, prompt, created_at, cwd, session_id)`
 - FTS5 index: `history_fts` with trigger-maintained sync
-- Reads take an optional scope: `session` (one conversation), `cwd` (one directory), `repo` (every directory sharing a primary repository root, worktrees included), or `global`. `matchingSessionIds` stays unscoped on purpose, so resume-picker ranking still crosses projects.
-- Writes are synchronous: a submitted prompt is durable when `add()` returns, so an exit racing a deferred flush cannot lose it
-- Consecutive-duplicate suppression lives in the editor's local list, not in storage
+- Reads take an optional scope: `session` (one conversation), `cwd` (one directory), `repo` (every directory sharing a primary repository root, worktrees included), or `global`, and directory scopes compare normalized spellings, so a symlinked checkout reads its history under either path. `matchingSessionIds` stays unscoped on purpose, so resume-picker ranking still crosses projects.
+- Writes are synchronous: a submitted prompt is durable when `add()` returns, so an exit racing a deferred flush cannot lose it.
+- Consecutive-duplicate suppression lives in the editor's local list, not in storage.
 
 Use session files for conversation graph/state replay; use `HistoryStorage` for prompt history UX.
