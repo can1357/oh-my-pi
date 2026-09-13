@@ -110,6 +110,16 @@ describe("scoped prompt recall", () => {
 		editor.handleInput("\x1b[A");
 		expect(editor.getText()).toBe("ONLY_SESSION_A");
 
+		// A prompt filed later, in the project we just left: the project scopes below must recall
+		// their own newest prompt rather than this one, so neither a read that ignored the scope nor
+		// a submission filed without its `cwd` can pass them.
+		setProjectDir(repoA);
+		editor.addToHistory("ONLY_SESSION_A_LATER");
+		state.setting = "cwd";
+		expect(recall(editor)).toBe("ONLY_SESSION_B");
+		state.setting = "repo";
+		expect(recall(editor)).toBe("ONLY_SESSION_B");
+
 		// A restart reprovisions the storage: hydration itself must be scoped.
 		HistoryStorage.close();
 		const reopened = HistoryStorage.open(dbPath);
@@ -128,7 +138,7 @@ describe("scoped prompt recall", () => {
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		storage.setSessionResolver(() => "session-1");
 		const state: { setting: HistoryScopeKind; context: HistoryScopeContext } = {
-			setting: "cwd",
+			setting: "session",
 			context: { sessionId: "session-1", cwd: repo },
 		};
 		const editor = bindEditor(storage, state);
@@ -136,7 +146,12 @@ describe("scoped prompt recall", () => {
 		setProjectDir(repo);
 		editor.addToHistory("SUBMITTED_FROM_EDITOR");
 
-		// A delegation that dropped `cwd` would hide the row from both project scopes.
+		// A newer prompt filed outside the project. A read that ignored the scope would recall this
+		// one, and a delegation that dropped `cwd` would have nothing to recall at all.
+		await storage.add("SUBMITTED_ELSEWHERE", path.join(dir.path(), "elsewhere"));
+
+		// Flipping the scope re-seeds from storage, so the editor's own list cannot mask either.
+		state.setting = "cwd";
 		expect(recall(editor)).toBe("SUBMITTED_FROM_EDITOR");
 
 		state.setting = "repo";
