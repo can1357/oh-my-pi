@@ -243,26 +243,21 @@ describe("agent state file", () => {
 		await agentStateFileSettled();
 		expect(await Bun.file(stateFile()).exists()).toBe(true);
 
-		let release = (): void => {};
-		let entered = (): void => {};
-		const inFlight = new Promise<void>(resolve => {
-			entered = resolve;
-		});
+		const entered = Promise.withResolvers<void>();
+		const held = Promise.withResolvers<number>();
 		spyOn(Bun, "write").mockImplementationOnce(() => {
-			entered();
-			return new Promise<number>(resolve => {
-				release = () => resolve(0);
-			});
+			entered.resolve();
+			return held.promise;
 		});
 		setTerminalTitleState("working");
-		await inFlight;
+		await entered.promise;
 
 		try {
 			setAgentStateFileEnabled(false);
 			expect(await Bun.file(stateFile()).exists()).toBe(true);
 		} finally {
 			// Released whatever the assertion did: a write left held stalls every test after this one.
-			release();
+			held.resolve(0);
 		}
 		await agentStateFileSettled();
 		expect(await Bun.file(stateFile()).exists()).toBe(false);
