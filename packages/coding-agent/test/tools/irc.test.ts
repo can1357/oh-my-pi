@@ -9,6 +9,7 @@ import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1254,6 +1255,57 @@ describe("IRC", () => {
 
 			const event = await ircEvent;
 			expect(event.type).toBe("irc_message");
+		});
+		it("defers an idle wake while a pooled yield contract is installed", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			vi.spyOn(session, "refreshBaseSystemPrompt").mockResolvedValue(undefined);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			let observations = 0;
+			session.setIrcWakeTurnObserver(() => () => {
+				observations++;
+			});
+			await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+			const queueDeferredWake = vi.spyOn(IrcBridge.prototype, "queueDeferredWake");
+			queueDeferredWake.mockClear();
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-pooled",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "status?",
+				ts: Date.now(),
+			});
+			expect(outcome).toBe("woken");
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			// An ordinary wake under pooled items would emit keyed yields against
+			// another turn's items, so no turn starts while the contract is pooled.
+			expect(promptSpy).not.toHaveBeenCalled();
+			// The deferral must not re-arm itself through the idle drain: the
+			// records stay parked until the contract clears instead of chaining
+			// wake observers indefinitely.
+			// Yield the event loop repeatedly: a re-armed chain would schedule more
+			// parking calls per turn of the loop, while fixed code schedules
+			// nothing further, so extra yields cannot flake this assertion.
+			for (let i = 0; i < 20; i++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
+			expect(queueDeferredWake).toHaveBeenCalledTimes(1);
+			// No turn ran, so the wake observer must never have attached: otherwise
+			// it would finalize the next turn's output as this wake's reply.
+			expect(observations).toBe(0);
+			// Clearing publishes the ordinary contract; the resume drain must turn
+			// the parked record into a monitored wake with no later message.
+			promptSpy.mockClear();
+			await session.setWorkPoolYieldItems([]);
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			for (let i = 0; i < 20; i++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
+			expect(promptSpy).toHaveBeenCalled();
 		});
 
 		it("queues peer IRC as an interrupt while a turn is streaming", async () => {

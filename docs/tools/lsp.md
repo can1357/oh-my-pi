@@ -46,7 +46,7 @@
 ## Flow
 1. `packages/coding-agent/src/tools/index.ts` registers `lsp: LspTool.createIf`. The tool is present only when both `session.enableLsp !== false` and `lsp.enabled` (default `true`) allow it. A session with `lspReadOnly` rejects every action outside `LSP_READONLY_ACTIONS`; restricted sessions default both to LSP disabled and read-only if it is explicitly re-enabled.
 2. `LspTool.execute()` in `packages/coding-agent/src/lsp/index.ts` clamps `timeout` with `clampTimeout("lsp", ...)`, including the optional global `tools.maxTimeout` ceiling, builds an `AbortSignal.timeout(...)`, and combines it with the caller signal.
-3. `getConfig()` loads and caches `LspConfig` per cwd, applies idle-timeout config via `setIdleTimeout()`, and reuses the cached config on later calls. Workspace `reload` is the explicit exception: it clears and rebuilds that cwd's config cache before reloading the newly selected servers.
+3. `getConfig()` loads and caches `LspConfig` per cwd and reuses the cached config on later calls. Workspace `reload` is the explicit exception: it clears and rebuilds that cwd's config cache before reloading the newly selected servers.
 4. Config loading in `packages/coding-agent/src/lsp/config.ts` merges `defaults.json` with JSON/YAML overrides from project, project config dirs, user config dirs, plugin roots/marketplace metadata, and home; if there are no overrides it auto-detects servers from root markers plus executable discovery. See [LSP configuration](../lsp-config.md) for filenames, precedence, and server fields.
 5. Server routing uses `getServersForFile()` / `getServerForFile()` from `config.ts`: extension or basename match, then sort primary servers before linters. `index.ts` further filters custom linter clients out of navigation/refactor paths with `getLspServersForFile()` / `getLspServerForFile()`.
 6. `getOrCreateClient()` caches one client per `command:cwd`. With `lsp.shared` (default `true` in SDK sessions), it first asks the broker-managed project mux for a shared transport; failure falls back to a private `ptree.spawn()`. An external `lspmux` wrapper takes precedence over broker sharing. The client then starts its message reader, sends `initialize`, stores capabilities, and sends `initialized`.
@@ -264,7 +264,7 @@ Uses the same location normalization and output shape as `definition`, but sends
   - Caches config per cwd in `configCache`; workspace `reload` invalidates the entry.
   - Caches LSP clients per `command:cwd`, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state. The transport may represent a shared mux link rather than an owned process.
   - Caches custom linter clients by `serverName:cwd`.
-  - Updates client `lastActivity`; optional idle-timeout cleanup is driven by `setIdleTimeout()`.
+  - Updates client `lastActivity`; optional idle-timeout cleanup is driven by workspace `idleTimeoutMs` or `setIdleTimeout()`.
 - Background work / cancellation
   - Every request has an abortable timeout signal.
   - Aborting an in-flight LSP request sends `$/cancelRequest`.

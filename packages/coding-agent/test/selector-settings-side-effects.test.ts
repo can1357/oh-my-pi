@@ -123,6 +123,22 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("re-enables live advisor runtime to rebuild when advisor.maxNotesPerUpdate changes in /settings", () => {
+		const setAdvisorEnabled = vi.fn();
+		const isAdvisorEnabled = vi.fn().mockReturnValue(true);
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			session: { setAdvisorEnabled, isAdvisorEnabled },
+			ui: { requestRender },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("advisor.maxNotesPerUpdate", 3);
+
+		expect(isAdvisorEnabled).toHaveBeenCalledTimes(1);
+		expect(setAdvisorEnabled).toHaveBeenCalledWith(true);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
 	for (const id of ["terminal.showImages", "showImages"]) {
 		for (const visible of [false, true]) {
 			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {
@@ -167,12 +183,12 @@ describe("selector setting side effects", () => {
 			const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 			assistant.setToolResultImagesVisible = setToolResultImagesVisible;
 			const clearInlineImages = vi.fn();
-			const requestRender = vi.fn();
+			const resetDisplay = vi.fn();
 			const ctx = {
 				hideToolActivity: !hidden,
 				toolOutputExpanded: true,
 				chatContainer: { children: [tool, readGroup, assistant], setToolActivityVisible },
-				ui: { clearInlineImages, requestRender },
+				ui: { clearInlineImages, resetDisplay },
 			};
 			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
 
@@ -185,10 +201,10 @@ describe("selector setting side effects", () => {
 			expect(setReadExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
 			expect(ctx.toolOutputExpanded).toBe(hidden);
 			expect(clearInlineImages).toHaveBeenCalledTimes(hidden ? 1 : 0);
-			expect(requestRender).toHaveBeenCalledTimes(1);
+			expect(resetDisplay).toHaveBeenCalledTimes(1);
 			if (hidden) {
 				expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-					requestRender.mock.invocationCallOrder[0],
+					resetDisplay.mock.invocationCallOrder[0],
 				);
 			}
 		});

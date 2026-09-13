@@ -18,8 +18,10 @@ import {
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
+	charmHyperModelManagerOptions,
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
+	commandCodeModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -150,11 +152,44 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "Cerebras" },
 	},
 	{
+		id: "charm-hyper",
+		defaultModel: "glm-5.3",
+		envVars: ["CHARM_HYPER_API_KEY", "HYPER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => charmHyperModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
+		// The gateway row is the whole truth for a Hyper deployment. Same-id rows
+		// on other hosts disagree with it in both directions (it serves
+		// non-thinking Kimi K2.5/K2.7-Code and a text-only Gemma 4 that their
+		// upstream homes list as reasoning/vision), so foreign backfills would
+		// advertise capabilities this deployment does not have.
+		skipCrossProviderReferenceFills: true,
+		// Deliberately NO `catalogDiscovery`: that field is what enrolls a provider
+		// in generate-models.ts. This gateway's catalog is live deployment truth,
+		// so generating would freeze one hyper.charm.land snapshot into
+		// models.json — and since discovery here needs no credentials, it would
+		// happen on every regen, contradicting the runtime-only contract
+		// compat-conformance.test.ts pins for this provider.
+	},
+	{
 		id: "cloudflare-ai-gateway",
 		defaultModel: "anthropic/claude-opus-4-8",
 		envVars: ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cloudflareAiGatewayModelManagerOptions(config),
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
+	},
+	{
+		id: "commandcode",
+		defaultModel: "claude-sonnet-4-6",
+		envVars: ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => commandCodeModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
+		// The Provider API rows carry no reasoning/modality metadata and KDL
+		// owns the deployment policy: same-id references on other hosts must
+		// not backfill reasoning, input, or limits during generation.
+		skipCrossProviderReferenceFills: true,
 	},
 	{
 		id: "cursor",
@@ -196,7 +231,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "firepass",
-		defaultModel: "kimi-k2.6-turbo",
+		defaultModel: "glm-5.2-fast",
 		envVars: ["FIREPASS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => firepassModelManagerOptions(config),
 	},
@@ -611,6 +646,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = CATALOG_ENTRY
 			createModelManagerOptions: provider.createModelManagerOptions,
 			allowUnauthenticated: provider.allowUnauthenticated,
 			dynamicModelsAuthoritative: provider.dynamicModelsAuthoritative,
+			skipCrossProviderReferenceFills: provider.skipCrossProviderReferenceFills,
 			catalogDiscovery: provider.catalogDiscovery
 				? { ...provider.catalogDiscovery, envVars: provider.catalogDiscovery.envVars ?? provider.envVars ?? [] }
 				: undefined,

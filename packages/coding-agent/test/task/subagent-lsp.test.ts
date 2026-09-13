@@ -19,6 +19,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const TEST_TASK: TaskParams = { agent: "task", name: "CheckLsp", task: "Inspect LSP tools." };
 
@@ -51,6 +52,7 @@ function createYieldingSession(): AgentSession {
 	};
 
 	return {
+		...createSessionDefaults(),
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -60,7 +62,6 @@ function createYieldingSession(): AgentSession {
 		},
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -81,12 +82,7 @@ function createYieldingSession(): AgentSession {
 				isError: false,
 			});
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 }
 

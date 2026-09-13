@@ -265,6 +265,26 @@ describe("generated model policies", () => {
 		expect(models[2]?.cost.longContext).toBeUndefined();
 	});
 
+	it("bills Astra API long-context above 272K while the sub route stays exempt", () => {
+		const models = [
+			createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }),
+			createSpec({ id: "gpt-6-astra", api: "openai-codex-responses", provider: "openai-codex" }),
+			// Third-party carriers of the same id must not inherit the tier.
+			createSpec({ id: "gpt-6-astra", api: "openai-completions", provider: "openrouter" }),
+		].map(model => buildGenerated(model));
+
+		expect(models[0]?.cost.longContext).toMatchObject({
+			inputThreshold: 272_000,
+			input: 20,
+			output: 75,
+			cacheRead: 2,
+			cacheWrite: 25,
+		});
+		expect(models[1]?.cost.longContext).toBeUndefined();
+		expect(models[1]?.cost).toMatchObject({ cacheWrite: 0 });
+		expect(models[2]?.cost.longContext).toBeUndefined();
+	});
+
 	it("pins Claude Mythos 5 first-party Anthropic catalog metadata", () => {
 		const model = buildGenerated(
 			createSpec({

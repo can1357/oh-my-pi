@@ -196,6 +196,7 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 	beforeTools: AssistantAgentMessage;
 	afterToolCalls: ReadonlyMap<string, AssistantAgentMessage>;
 	hasToolCalls: boolean;
+	lastToolCallId?: string;
 } {
 	const beforeTools: AssistantAgentMessage["content"] = [];
 	const afterToolCalls = new Map<string, AssistantAgentMessage>();
@@ -236,7 +237,7 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 		return { beforeTools: message, afterToolCalls, hasToolCalls: false };
 	}
 
-	return { beforeTools: displaySegment(beforeTools), afterToolCalls, hasToolCalls: true };
+	return { beforeTools: displaySegment(beforeTools), afterToolCalls, hasToolCalls: true, lastToolCallId };
 }
 
 /**

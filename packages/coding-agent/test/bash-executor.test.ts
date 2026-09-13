@@ -955,26 +955,53 @@ exit 64
 		if (process.platform === "win32") return;
 
 		const sessionKey = "parallel-overlap";
-		const order: string[] = [];
-		const slow = executeBash('sleep 0.15 && echo "A-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(
-			result => {
-				order.push("slow");
-				return result;
-			},
-		);
-		const fast = executeBash('echo "B-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(result => {
-			order.push("fast");
-			return result;
+		const started = path.join(tempDir, "overlap-owner.started");
+		const release = path.join(tempDir, "overlap-owner.release");
+		const controller = new AbortController();
+		const deadline = Date.now() + 4000;
+		let ownerSettled = false;
+		const owner = executeBash(
+			`touch ${shellQuote(started)}; while [ ! -f ${shellQuote(release)} ]; do sleep 0.02; done; echo "A-done"`,
+			{ cwd: tempDir, timeout: 0, sessionKey, signal: controller.signal },
+		).finally(() => {
+			ownerSettled = true;
 		});
+		const calls = [owner];
+		let overlapPassed = false;
+		try {
+			await pollUntil(() => fs.existsSync(started), deadline);
+			expect(fs.existsSync(started)).toBe(true);
 
-		const [slowResult, fastResult] = await Promise.all([slow, fast]);
-		expect(slowResult.exitCode).toBe(0);
-		expect(slowResult.output).toContain("A-done");
-		expect(fastResult.exitCode).toBe(0);
-		expect(fastResult.output).toContain("B-done");
-		// If the second call had queued behind the persistent session it could
-		// not finish before the 150ms sleep of the first.
-		expect(order).toEqual(["fast", "slow"]);
+			let overlappingSettled = false;
+			const overlapping = executeBash('echo "B-done"', {
+				cwd: tempDir,
+				timeout: 0,
+				sessionKey,
+				signal: controller.signal,
+			}).finally(() => {
+				overlappingSettled = true;
+			});
+			calls.push(overlapping);
+			// A serialized call cannot finish until the owner is explicitly released.
+			await pollUntil(() => overlappingSettled, Date.now() + 4000);
+			expect(overlappingSettled).toBe(true);
+			const overlappingResult = await overlapping;
+			expect(overlappingResult.exitCode).toBe(0);
+			expect(overlappingResult.output).toContain("B-done");
+			expect(ownerSettled).toBe(false);
+			overlapPassed = true;
+		} finally {
+			try {
+				await Bun.write(release, "");
+				if (overlapPassed) await pollUntil(() => ownerSettled, Date.now() + 4000);
+			} finally {
+				controller.abort();
+				await Promise.allSettled(calls);
+			}
+		}
+		const ownerResult = await owner;
+		expect(ownerResult.exitCode).toBe(0);
+		expect(ownerResult.output).toContain("A-done");
 	});
 
 	it("keeps the owner session usable when an overlapping call times out", async () => {

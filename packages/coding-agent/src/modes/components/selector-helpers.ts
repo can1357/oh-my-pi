@@ -81,17 +81,13 @@ export function clampSelection(
 /**
  * Classify a key event for search-query text entry. Returns the single
  * printable character to append to the query, or `null` when the key is not a
- * searchable character: non-printable, multi-byte, or a reserved `j`/`k`
- * navigation key.
+ * searchable character: non-printable or multi-byte.
  */
 export function searchableChar(data: string): string | null {
 	const printableText = extractPrintableText(data);
 	if (printableText && printableText.length === 1) {
 		const printableCharCode = printableText.charCodeAt(0);
 		if (printableCharCode > 32 && printableCharCode < 127) {
-			if (printableText === "j" || printableText === "k") {
-				return null;
-			}
 			return printableText;
 		}
 	}

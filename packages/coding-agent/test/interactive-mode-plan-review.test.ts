@@ -14,7 +14,8 @@ import {
 	type PlanReviewAnnotationState,
 	PlanReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/modes/components/plan-review-overlay";
-import { InteractiveMode, planSaveFileName } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -594,11 +595,10 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		// The plan-approved prompt stays reference-only; approval must instead
-		// await the durable file mirror before dispatch so read sees the edit.
+		// The executor must receive the final approved text, including in-overlay edits.
 		const call = promptSpy.mock.calls.find(isPlanApprovedCall);
 		expect(call).toBeDefined();
-		expect(call?.[0] as string).not.toContain("edited body");
+		expect(call?.[0] as string).toContain("edited body");
 		expect(call?.[0] as string).not.toContain("original body");
 		// onPlanEdited mirrored the edit to the plan file.
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");
@@ -1644,6 +1644,61 @@ describe("InteractiveMode plan review rendering", () => {
 			planFilePath,
 			reentry: true,
 		});
+	});
+	it("autosaves the approved plan when plan.autosave is enabled", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
+
+		await mode.handlePlanModeCommand();
+		session.settings.set("plan.autosave", true);
+
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const status = vi.spyOn(mode, "showStatus");
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "AUTOSAVE",
+		});
+
+		const saved = path.join(tempDir.path(), ".omp", "plans", "AUTOSAVE_PLAN.md");
+		expect(await Bun.file(saved).text()).toBe("# Plan\n\nAutosave me.");
+		expect(status).toHaveBeenCalledWith(expect.stringContaining("Saved plan to"));
+	});
+
+	it("continues approval with a warning when autosave fails", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
+
+		await mode.handlePlanModeCommand();
+		session.settings.set("plan.autosave", true);
+		const blocker = path.join(tempDir.path(), "blocker");
+		await Bun.write(blocker, "x");
+		session.settings.set("plan.autosaveDir", path.join(blocker, "sub"));
+
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const warning = vi.spyOn(mode, "showWarning");
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "AUTOSAVE",
+		});
+
+		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(true);
+		expect(warning).toHaveBeenCalledWith(expect.stringContaining("Failed to autosave plan"));
 	});
 
 	it("Approve and compact context: ok outcome dispatches plan-approved after compaction", async () => {

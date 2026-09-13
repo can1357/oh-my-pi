@@ -308,6 +308,20 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Raw background color words of a viewport row, for tests that assert a
+	 * repaint recolored a row rather than reworded it (e.g. a hover band over
+	 * an already-tinted row, where column coverage alone cannot observe the
+	 * change). Compare snapshots opaquely; values are engine cell words.
+	 */
+	getViewportRowBackgroundValues(row: number): number[] {
+		const words = this.#presentedRowCells(row);
+		if (!words) return [];
+		const values: number[] = [];
+		for (let col = 0; col * CELL_U32 < words.length; col++) values.push(words[col * CELL_U32 + CELL_BG] ?? 0);
+		return values;
+	}
+
+	/**
 	 * Columns in a viewport row whose cells carry a non-default foreground color.
 	 * Used with unreset-SGR regressions to ensure per-line resets confine
 	 * foreground attributes to the row that emitted them.

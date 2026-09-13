@@ -9,18 +9,29 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	ContextNotesTool,
+	GrepTool,
+	NewContextTool,
+	ReadTool,
+	type Tool,
+	type ToolSession,
+} from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 type HookMode = "extension-veto" | "park";
 
-describe("AgentSession compaction cancellation source", () => {
+describe.each([false, true])("AgentSession compaction cancellation source (experimental=%s)", experimental => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-compaction-cancellation-");
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(
+			new Error("Network access is forbidden in compaction cancellation tests"),
+		);
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 	});
@@ -29,6 +40,7 @@ describe("AgentSession compaction cancellation source", () => {
 		await session?.dispose();
 		authStorage.close();
 		tempDir.removeSync();
+		vi.restoreAllMocks();
 	});
 
 	async function createSession(mode: HookMode, entered?: () => void, gate?: Promise<void>): Promise<AgentSession> {
@@ -60,8 +72,29 @@ describe("AgentSession compaction cancellation source", () => {
 		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic model");
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.experimentalContextManagement": experimental,
+		});
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings,
+			sessionManager,
+			getSessionId: () => sessionManager.getSessionId(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+		};
+		const tools: Tool[] = experimental
+			? [
+					new ReadTool(toolSession),
+					new GrepTool(toolSession),
+					new ContextNotesTool(toolSession),
+					new NewContextTool(toolSession),
+				]
+			: [];
 		const agent = new Agent({
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
 		});
 
 		sessionManager.appendMessage({ role: "user", content: "first turn", timestamp: Date.now() });
@@ -87,7 +120,9 @@ describe("AgentSession compaction cancellation source", () => {
 		return new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.keepRecentTokens": 1 }),
+			settings,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			builtInToolNames: tools.map(tool => tool.name),
 			modelRegistry,
 			extensionRunner,
 		});
@@ -164,4 +199,37 @@ describe("AgentSession compaction cancellation source", () => {
 		await promptPromise;
 		expect(agentPrompt).toHaveBeenCalledTimes(1);
 	});
+	if (experimental) {
+		for (const mutation of ["branch", "disable"] as const) {
+			it(`rejects a rollover when ${mutation} changes during an awaited hook`, async () => {
+				const started = Promise.withResolvers<void>();
+				const gate = Promise.withResolvers<void>();
+				session = await createSession("park", started.resolve, gate.promise);
+				const cancellation = cancellationFrom(session.compact());
+				await started.promise;
+				if (mutation === "branch") {
+					const first = session.sessionManager.getBranch()[0];
+					if (!first) throw new Error("Expected seeded history");
+					session.sessionManager.branch(first.id);
+				} else {
+					session.settings.override("compaction.experimentalContextManagement", false);
+				}
+				gate.resolve();
+				await cancellation;
+				expect(session.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+			});
+		}
+
+		it("retains saved notes when disabling the experiment before legacy compaction", async () => {
+			session = await createSession("park");
+			session.sessionManager.appendCustomEntry("experimental_context_notes", {
+				version: 1,
+				text: "Preserve the rollback decision.",
+			});
+			session.settings.override("compaction.experimentalContextManagement", false);
+			const result = await session.compact();
+			expect(result.summary).toBe("compacted");
+			expect(JSON.stringify(session.agent.state.messages)).toContain("Preserve the rollback decision.");
+		});
+	}
 });

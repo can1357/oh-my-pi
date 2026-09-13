@@ -3,6 +3,7 @@ import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
 import subagentSystemPrompt from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
 import { HubTool } from "../../src/tools/hub";
 import type { CustomMessage } from "../../src/session/messages";
@@ -141,6 +142,9 @@ afterEach(async () => {
 	managers.clear();
 	vi.restoreAllMocks();
 	AgentRegistry.resetGlobalForTests();
+	// The global lifecycle binds its registry at construction; drop it with the
+	// registry so release() in later tests manages the current instance.
+	AgentLifecycleManager.resetGlobalForTests();
 	WorkPoolRegistry.resetForTests();
 });
 
@@ -215,6 +219,43 @@ describe("WorkPool dispatch", () => {
 		expect(followSpy.mock.calls[0]?.[0].message).not.toContain("todo");
 		follow.resolve();
 		await finishPool(session, workpool);
+	});
+	it("tombstones the worker session when clearing the yield contract fails", async () => {
+		const session = makeSession([], 1);
+		let workerId = "";
+		let disposed = false;
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			workerId = request.identity?.id ?? "missing";
+			// Retained worker whose prompt rebuild throws after the runtime
+			// contract already flipped: pool-local drop alone would leave it
+			// messageable with a stale keyed declaration.
+			AgentRegistry.global().register({
+				id: workerId,
+				displayName: workerId,
+				kind: "sub",
+				status: "idle",
+				session: {
+					setWorkPoolYieldItems: async () => {
+						throw new Error("prompt rebuild boom");
+					},
+					dispose: async () => {
+						disposed = true;
+					},
+				} as unknown as AgentSession,
+			});
+			return execution(workerId);
+		});
+		const workpool = pool(session, "poison");
+		workpool.push(["one"]);
+		await finishPool(session, workpool);
+		// The successful turn result survives the cleanup failure, but the
+		// poisoned worker is gone locally and left terminal in the registry: a
+		// later persisted-agent scan must not resurrect it as parked.
+		expect(workpool.batches[0]?.status).toBe("completed");
+		expect(workpool.agents.length).toBe(0);
+		expect(disposed).toBe(true);
+		expect(AgentRegistry.global().get(workerId)?.status).toBe("aborted");
+		expect(AgentRegistry.global().get(workerId)?.session).toBeNull();
 	});
 
 	it("requeues a dead agent's queued items onto another worker", async () => {

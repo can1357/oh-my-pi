@@ -27,6 +27,7 @@ export function resolveDelegationBias(model: Model): DelegationBias {
 	const { identity } = model;
 	const bias = resolveCascade({
 		provider: model.provider,
+		api: model.api,
 		class: identity.class,
 		model: model.id,
 		reasoning: Boolean(model.reasoning),

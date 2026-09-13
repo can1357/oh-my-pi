@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { defaultConvertToLlm } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
@@ -309,6 +310,105 @@ describe("buildSessionContext", () => {
 				],
 			});
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
+		});
+
+		it("attaches the Anthropic native replay payload and still emits the kept raw messages", () => {
+			const nativeCompaction: CompactionEntry = {
+				...compaction("3", "2", "Native summary", "2"),
+				preserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "Native summary",
+						encryptedContent: "enc_state",
+						model: "claude-fable-5",
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				msg("2", "1", "assistant", "response"),
+				nativeCompaction,
+				msg("4", "3", "user", "after compact"),
+			];
+			const ctx = buildSessionContext(entries);
+			// Summary, the kept assistant turn from firstKeptEntryId, then the new turn:
+			// the Anthropic block replaces nothing in the entry stream.
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant", "user"]);
+			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
+			expect(ctx.messages[0].summary).toBe("Native summary");
+			expect(ctx.messages[0].providerPayload).toEqual({
+				type: "anthropicCompaction",
+				provider: "anthropic",
+				content: "Native summary",
+				encryptedContent: "enc_state",
+			});
+		});
+
+		it("predates native summaries before the retained tail but keeps local commit timestamps", () => {
+			// A rewrite marker newer than the tail strips the tail's bound
+			// thinking on the next request; native replay must not do that.
+			const mayDay = new Date("2025-05-01T00:00:00Z").getTime();
+			const retainedAssistant: SessionMessageEntry = {
+				type: "message",
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-05-01T00:00:00Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "kept reasoning", thinkingSignature: "sig" },
+						{ type: "text", text: "response" },
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-fable-5-1",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: mayDay + 1_000,
+				},
+			};
+			const tailUser = msg("4", "3", "user", "after compact");
+			const nativeCompaction: CompactionEntry = {
+				...compaction("3", "2", "Native summary", "2"),
+				timestamp: "2025-06-01T00:00:00Z",
+				preserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "Native summary",
+						encryptedContent: "enc_state",
+						model: "claude-fable-5",
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				retainedAssistant,
+				nativeCompaction,
+				tailUser,
+			];
+			const ctx = buildSessionContext(entries);
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant", "user"]);
+			const summary = ctx.messages[0];
+			if (summary?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
+			expect(new Date(summary.timestamp).getTime()).toBe(mayDay - 1);
+			const [llmSummary] = defaultConvertToLlm([summary]);
+			if (llmSummary?.role !== "user") throw new Error("Expected user LLM message");
+			expect(llmSummary.historyRewriteAt).toBe(mayDay - 1);
+
+			// A local compaction keeps the entry commit timestamp.
+			const localCtx = buildSessionContext(
+				entries.filter(entry => entry.id !== "3").concat({ ...nativeCompaction, preserveData: undefined }),
+			);
+			const localSummary = localCtx.messages[0];
+			if (localSummary?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
+			expect(localSummary.timestamp).toBe(new Date("2025-06-01T00:00:00Z").getTime());
 		});
 
 		it("caps snapcompact frame payload in LLM context but preserves transcript frames", () => {

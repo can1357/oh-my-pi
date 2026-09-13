@@ -440,3 +440,82 @@ fn ir_to_xml_preserves_operation_boundaries_and_all() {
 		)
 	);
 }
+
+/// `read` emits three truncation-notice families, and a projection copied into
+/// an edit body must lose all of them alike. The `[N more lines in ...]` family
+/// used to survive normalization, so the copied row became part of the matched
+/// pattern -- and of the text written back -- instead of being dropped like the
+/// other two. Each label names a different entity read can truncate.
+#[test]
+fn drops_a_copied_more_lines_notice_like_the_other_read_notices() {
+	for notice in [
+		"[Showing lines 1-2 of 8. Use :3 to continue]",
+		"[6 more lines in file. Use :3 to continue]",
+		"[6 more lines in notebook. Use :3 to continue]",
+		"[6 more lines in archive entry. Use :3 to continue]",
+		"[6 more lines in artifact. Use https://omp.sh/a:3 to continue]",
+		"[More lines in artifact (1.2 MB total; not scanned to EOF). Use https://omp.sh/a:3 to \
+		 continue]",
+		"[\u{2026}6ln elided; re-read needed ranges with a.txt:3-8]",
+	] {
+		let payload = [
+			"<SM:EDIT path=\"a.txt\">",
+			"<SM:FIND>",
+			"keep a",
+			"keep b",
+			notice,
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"keep a",
+			"changed b",
+			notice,
+			"</SM:PUT>",
+		]
+		.join("\n");
+		let operations = parse_operations(&payload, "keep a\nkeep b\n")
+			.unwrap_or_else(|error| panic!("{notice} defeated matching: {error}"));
+		assert_eq!(
+			operations[0].pattern_text, "keep a\nkeep b",
+			"the copied row reached the pattern: {notice}"
+		);
+		assert_eq!(
+			operations[0].rewrite,
+			OperationRewrite::Explicit { text: "keep a\nchanged b".to_owned() },
+			"the copied row reached the rewrite: {notice}"
+		);
+	}
+}
+
+/// Only read's actual notice shape counts: a label, then `. Use ... to
+/// continue`. Ordinary content that merely contains the phrase has to survive,
+/// or the filter would silently delete real lines from the pattern or the
+/// rewrite.
+#[test]
+fn keeps_content_that_only_resembles_a_more_lines_notice() {
+	for line in ["[3 more lines in the appendix]", "[More lines in artifact]"] {
+		let payload = [
+			"<SM:EDIT path=\"a.txt\">",
+			"<SM:FIND>",
+			"keep a",
+			line,
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"keep b",
+			line,
+			"</SM:PUT>",
+		]
+		.join("\n");
+		let operations = parse_operations(&payload, &format!("keep a\n{line}\n"))
+			.unwrap_or_else(|error| panic!("{line} broke matching: {error}"));
+		assert_eq!(
+			operations[0].pattern_text,
+			format!("keep a\n{line}"),
+			"a content line was filtered as a notice: {line}"
+		);
+		assert_eq!(
+			operations[0].rewrite,
+			OperationRewrite::Explicit { text: format!("keep b\n{line}") },
+			"a content line was filtered out of the rewrite: {line}"
+		);
+	}
+}

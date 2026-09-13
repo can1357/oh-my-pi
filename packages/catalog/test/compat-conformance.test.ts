@@ -19,6 +19,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"vllm",
 	"openai-codex-device",
+	// Public gateway discovery via charmHyperModelManagerOptions: every row,
+	// including its tariff and effort ladder, comes from the live /v1/models
+	// snapshot, so no bundled rows are frozen into models.json.
+	"charm-hyper",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {

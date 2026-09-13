@@ -7,20 +7,55 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel, type ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize } from "@oh-my-pi/pi-utils";
+import { getKeybindings, replaceTabs, sliceByColumn, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import type { Theme } from "../modes/theme/theme";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+
+/**
+ * Normalize stray carriage returns in model-authored display text. Some models
+ * (observed with GLM via OpenRouter) degenerate into injecting `\r` runs between
+ * words inside JSON string values; CommonMark treats a lone `\r` as a line
+ * ending, which splatters the text one word per row. CRLF becomes LF, CR runs
+ * collapse to a single space — word separators in prose, one indent unit in
+ * mangled code previews.
+ */
+export function sanitizeCarriageReturns(text: string): string {
+	if (!text.includes("\r")) return text;
+	return text.replaceAll("\r\n", "\n").replace(/\r+/g, " ");
+}
+
+/**
+ * Sanitize raw ask option labels into unique, action-safe display copies.
+ * Degenerate input can sanitize alike (`Retry\rnow`/`Retry now`) or match a
+ * runtime action row (`Other (type your own)`); both would answer the wrong
+ * row, so colliding entries take a numeric suffix. Order and length are
+ * preserved, so indices still align with the original labels for mapping
+ * answers and dialog state back. Every ask race participant (local dialog,
+ * guest selector) must call this with the same `reservedLabels` so a
+ * question renders identically wherever it is answered.
+ */
+export function disambiguateDisplayLabels(rawLabels: string[], reservedLabels: readonly string[]): string[] {
+	const taken = new Set<string>(reservedLabels);
+	return rawLabels.map(raw => {
+		const base = sanitizeCarriageReturns(raw);
+		let candidate = base;
+		for (let suffix = 2; taken.has(candidate); suffix++) candidate = `${base} (${suffix})`;
+		taken.add(candidate);
+		return candidate;
+	});
+}
 
 // =============================================================================
 // Standardized Display Constants
@@ -72,6 +107,54 @@ export const PREVIEW_LIMITS = {
 /** Default number of terminal output rows shown before expansion. */
 export const DEFAULT_TERMINAL_PREVIEW_LINES = 10;
 
+export const FEED_MODEL_BADGE_WIDTH = 30;
+
+export function isFeedModelBadgeEnabled(): boolean {
+	return isSettingsInitialized() && settings.get("task.showResolvedModelBadge");
+}
+
+/** Compact glyph for a configured thinking level; empty for `inherit` (nothing to show). */
+export function thinkingLevelGlyph(level: ConfiguredThinkingLevel, uiTheme: Theme): string {
+	if (level === ThinkingLevel.Inherit) return "";
+	if (level === ThinkingLevel.Off) return uiTheme.status.disabled;
+	const symbol = uiTheme.thinking[level === AUTO_THINKING ? "autoPending" : level];
+	if (typeof symbol !== "string") return "";
+	const space = symbol.indexOf(" ");
+	return space < 0 ? symbol : symbol.slice(0, space);
+}
+
+/**
+ * Compact feed-row prefix: explicit thinking glyph, sanitized model identity,
+ * then advisor eye. Keep fitting icons if no model fits; preserve literal identity suffixes.
+ */
+export function formatFeedModelBadge(
+	modelIdentity: string | undefined,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+	advisor: boolean | undefined,
+	uiTheme: Theme,
+	maxWidth = FEED_MODEL_BADGE_WIDTH,
+): string {
+	if (!modelIdentity) return "";
+	const width = Math.max(0, Math.floor(maxWidth));
+	const clean = sanitizeText(modelIdentity).replace(/\s+/g, " ").trim();
+	if (!clean || !(width > 0)) return "";
+	const glyph = thinkingLevel !== undefined ? thinkingLevelGlyph(thinkingLevel, uiTheme) : "";
+	const advisorIcon = advisor === true ? uiTheme.icon.advisor : "";
+	const prefix = glyph ? `${glyph} ` : "";
+	const suffix = advisorIcon ? ` ${advisorIcon}` : "";
+	const modelWidth = width - visibleWidth(prefix) - visibleWidth(suffix);
+	if (modelWidth < 1) {
+		const advisorWidth = visibleWidth(advisorIcon);
+		if (advisorIcon && advisorWidth <= width) {
+			const thinkingPrefix = glyph && visibleWidth(prefix) + advisorWidth <= width ? prefix : "";
+			return uiTheme.fg("accent", thinkingPrefix) + uiTheme.fg("dim", advisorIcon);
+		}
+		return glyph && visibleWidth(glyph) <= width ? uiTheme.fg("accent", glyph) : "";
+	}
+	const model = truncateMiddleToWidth(clean, modelWidth);
+	return uiTheme.fg("accent", prefix) + uiTheme.fg("dim", `${model}${suffix}`);
+}
+
 /** Truncation lengths for different content types */
 export const TRUNCATE_LENGTHS = {
 	/** Short titles, labels */
@@ -102,6 +185,15 @@ export function expandKeyHint(): string {
 // =============================================================================
 // Text Truncation Utilities
 // =============================================================================
+/** Keep both ends of a single-line label without splitting wide characters. */
+function truncateMiddleToWidth(text: string, maxWidth: number): string {
+	const width = visibleWidth(text);
+	if (width <= maxWidth) return text;
+	if (maxWidth <= 1) return maxWidth === 1 ? "…" : "";
+	const tailWidth = Math.ceil((maxWidth - 1) / 2);
+	const headWidth = maxWidth - 1 - tailWidth;
+	return `${sliceByColumn(text, 0, headWidth, true)}…${sliceByColumn(text, width - tailWidth, tailWidth, true)}`;
+}
 
 /**
  * Get first N lines of text as preview, with each line truncated.
@@ -258,6 +350,21 @@ export function formatMeta(meta: string[], theme: Theme): string {
 function sanitizeErrorText(message: string | undefined): string {
 	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
 	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";
+}
+
+/**
+ * Split multi-line tool text into TUI-safe display lines.
+ * Splits CRLF/LF, collapses stray `\r` progress overwrites to the final
+ * segment (mirroring terminal rendering), and expands tabs — so raw
+ * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
+ * web content) can't corrupt the framed block layout with cursor-moving
+ * control characters or tab-stop width mismatches.
+ */
+export function sanitizeDisplayLines(text: string): string[] {
+	return text.split(/\r?\n/).map(line => {
+		const idx = line.lastIndexOf("\r");
+		return replaceTabs(idx < 0 ? line : line.slice(idx + 1));
+	});
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
@@ -727,6 +834,53 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		}
 	}
 	return filePath;
+}
+
+/** Shorten home-prefixed paths inside free text, preserving surrounding
+ * punctuation so error strings with embedded paths stay readable. */
+export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
+	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
+	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const homePattern = new RegExp(
+		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+		windowsStyle ? "gi" : "g",
+	);
+	const textWithShortenedHome =
+		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
+	return textWithShortenedHome
+		.split(" ")
+		.map(segment => {
+			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
+			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
+			const end = segment.length - trailing.length;
+			if (leading.length >= end) return segment;
+			const shortened = shortenPath(segment.slice(leading.length, end), homeDir);
+			const normalized = shortened.startsWith("~")
+				? shortened.replaceAll(path.win32.sep, path.posix.sep)
+				: shortened;
+			return `${leading}${normalized}${trailing}`;
+		})
+		.join(" ");
+}
+
+/** Sanitize warning text before showing it in TUI, including embedded home paths. */
+export function sanitizeDisplayWarning(text: string): string {
+	return shortenEmbeddedPaths(
+		replaceTabs(sanitizeText(text))
+			.replace(/[\r\n]+/g, " ")
+			.trim(),
+	);
+}
+
+/** Sanitize and bound warning text before showing it in TUI. */
+export function sanitizeDisplayWarnings(warnings: readonly string[]): string[] {
+	const visible = warnings
+		.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
+		.map(warning => truncateToWidth(sanitizeDisplayWarning(warning), TRUNCATE_LENGTHS.LONG));
+	const hidden = warnings.length - visible.length;
+	if (hidden > 0) visible.push(`… ${hidden} more ${pluralize("warning", hidden)}`);
+	return visible;
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

@@ -6,6 +6,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function getHeaderValue(headers: unknown, key: string): string | undefined {
@@ -103,6 +104,38 @@ describe("github copilot model limits mapping", () => {
 		const models = await githubCopilotModelManagerOptions({ apiKey: token, fetch: fetchMock }).fetchDynamicModels?.();
 		expect(models).toEqual([]);
 		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+	it("drops cross-provider wire routing from enterprise-only sibling ids", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "gpt-5.6-sol-fast",
+					name: "GPT-5.6 Sol Fast (Internal only)",
+					capabilities: {
+						type: "chat",
+						limits: { max_context_window_tokens: 1_050_000, max_output_tokens: 128_000 },
+					},
+					billing: {
+						token_prices: {
+							default: { context_max: 200_000, input_price: 234, output_price: 1234, cache_price: 56 },
+						},
+					},
+				},
+			],
+		});
+		const sol = models.find(m => m.id === "gpt-5.6-sol-fast");
+		expect(sol?.api).toBe("openai-responses");
+		// The global fallback reference is the Cursor collapsed family; its
+		// off-tier requestModelId pin and effort routing must not transfer or
+		// every request goes out as gpt-5.6-sol-none-fast regardless of effort.
+		expect(sol).not.toHaveProperty("requestModelId");
+		// The discovered default-tier prices still apply on the reference branch.
+		expect(sol?.cost).toMatchObject({ input: 2.34, output: 12.34, cacheRead: 0.56 });
+		// The strip must not mutate the shared bundled Cursor entry the global
+		// reference points at: it keeps its routing for Cursor consumers.
+		expect(getBundledModels("cursor").find(m => m.id === "gpt-5.6-sol-fast")?.thinking?.effortRouting).toMatchObject({
+			off: "gpt-5.6-sol-none-fast",
+		});
 	});
 	it("does not reuse another token's authoritative cache after COPILOT_GITHUB_TOKEN switches", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-token-switch-"));
@@ -483,6 +516,88 @@ describe("github copilot model limits mapping", () => {
 			// so it stays dropped.
 			expect(models.find(candidate => candidate.id === "grok-4.5")?.api).toBe("openai-responses");
 			expect(models.find(candidate => candidate.id === "grok-4.5-1m")).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refetches a cached enterprise sibling still pinned to -none-fast", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-solfast-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const poisoned: ModelSpec<"openai-responses"> = {
+				id: "gpt-5.6-sol-fast",
+				name: "GPT-5.6 Sol Fast (Internal only)",
+				api: "openai-responses",
+				provider: "github-copilot",
+				baseUrl: "https://api.githubcopilot.com",
+				reasoning: true,
+				requestModelId: "gpt-5.6-sol-none-fast",
+				// Faithful to a real pre-fix mapper row: headers present, so the
+				// header-restore path cannot force the refetch by itself and only
+				// the fingerprint migration distinguishes fixed from broken.
+				headers: { ...COPILOT_API_HEADERS },
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+					effortRouting: {
+						off: "gpt-5.6-sol-none-fast",
+						[Effort.Low]: "gpt-5.6-sol-low-fast",
+						[Effort.Medium]: "gpt-5.6-sol-medium-fast",
+						[Effort.High]: "gpt-5.6-sol-high-fast",
+						[Effort.XHigh]: "gpt-5.6-sol-xhigh-fast",
+						[Effort.Max]: "gpt-5.6-sol-max-fast",
+					},
+				},
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_050_000,
+				maxTokens: 128_000,
+			};
+			const fetchMock = vi.fn(async () => {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "gpt-5.6-sol-fast",
+								name: "GPT-5.6 Sol Fast (Internal only)",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 1_050_000, max_output_tokens: 128_000 },
+								},
+							},
+						],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			});
+			// Seed the poisoned row under the previous cache namespace, mirroring
+			// exactly what a pre-fix binary wrote: same DB, same credential scope,
+			// v1 scheme. The v2 namespace must orphan it and force a refetch.
+			const previousNamespace = `github-copilot:models-v1:${Bun.hash("copilot-test-key\0https://api.githubcopilot.com").toString(36)}`;
+			const oldManager = createModelManager({
+				...githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch: fetchMock }),
+				cacheProviderId: previousNamespace,
+				cacheDbPath,
+				fetchDynamicModels: async () => [poisoned],
+			});
+			await oldManager.refresh("online");
+			const manager = createModelManager({
+				...githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch: fetchMock }),
+				cacheDbPath,
+			});
+			const { models } = await manager.refresh("online-if-uncached");
+			const model = models.find(candidate => candidate.id === "gpt-5.6-sol-fast");
+
+			// The v2 namespace orphans the poisoned v1 row, forcing a refetch;
+			// the remapped row carries no off-tier pin.
+			expect(fetchMock).toHaveBeenCalled();
+			expect(model?.api).toBe("openai-responses");
+			expect(model).not.toHaveProperty("requestModelId");
+			expect(model?.thinking?.effortRouting).toBeUndefined();
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

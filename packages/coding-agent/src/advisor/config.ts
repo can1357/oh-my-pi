@@ -27,6 +27,11 @@ export interface AdvisorConfig {
 	 *  stays in the roster but its runtime is never built — it shows `○` in
 	 *  the status line and `/advisor status` rather than disappearing. */
 	enabled?: boolean;
+	/**
+	 * Per-advisor maximum non-blocker advice notes accepted per advisor prompt
+	 * update (default `4`). Blockers are exempt from the budget.
+	 */
+	maxNotesPerUpdate?: number;
 }
 
 /**
@@ -48,6 +53,13 @@ export type AdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "e
 export interface DiscoveredAdvisors {
 	advisors: AdvisorConfig[];
 	sharedInstructions: string | undefined;
+	sharedMaxNotesPerUpdate?: number;
+	/**
+	 * Human-readable config problems collected during the walk: unparseable
+	 * files and dropped entries. Surfaced as one aggregated session warning so
+	 * a broken roster entry never fails silently.
+	 */
+	warnings: string[];
 }
 
 const advisorEntrySchema = type({
@@ -56,12 +68,55 @@ const advisorEntrySchema = type({
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
+	"maxNotesPerUpdate?": "number",
 });
 
-const watchdogYamlSchema = type({
-	"instructions?": "string",
-	"advisors?": advisorEntrySchema.array(),
-});
+type AdvisorYamlEntry = typeof advisorEntrySchema.infer;
+
+/**
+ * Validate one parsed `WATCHDOG.yml` document per entry instead of as a whole:
+ * a single malformed advisor drops out with a warning naming it, while the
+ * healthy entries still load. Also reports non-string `instructions` and a
+ * non-list `advisors` key — both previously failed the whole file silently.
+ */
+function parseWatchdogDoc(
+	doc: Record<string, unknown>,
+	path: string,
+): {
+	instructions: string | undefined;
+	entries: AdvisorYamlEntry[];
+	sharedMaxNotesPerUpdate: number | undefined;
+	warnings: string[];
+} {
+	const warnings: string[] = [];
+	const rawInstructions = doc.instructions;
+	const instructions = typeof rawInstructions === "string" ? rawInstructions : undefined;
+	if (rawInstructions !== undefined && instructions === undefined) {
+		warnings.push(`${path}: instructions must be a string — ignored`);
+	}
+	const rawMaxNotes = doc.maxNotesPerUpdate;
+	const sharedMaxNotesPerUpdate =
+		typeof rawMaxNotes === "number" && Number.isFinite(rawMaxNotes) && rawMaxNotes >= 1
+			? Math.trunc(rawMaxNotes)
+			: undefined;
+	const rawAdvisors = doc.advisors;
+	if (rawAdvisors !== undefined && !Array.isArray(rawAdvisors)) {
+		warnings.push(`${path}: advisors must be a list — ignored`);
+	}
+	const entries: AdvisorYamlEntry[] = [];
+	for (const [index, rawEntry] of (Array.isArray(rawAdvisors) ? rawAdvisors : []).entries()) {
+		const result = advisorEntrySchema(rawEntry);
+		if (result instanceof type.errors) {
+			const rawName =
+				rawEntry && typeof rawEntry === "object" ? (rawEntry as Record<string, unknown>).name : undefined;
+			const label = typeof rawName === "string" && rawName.trim() ? `"${rawName}"` : `#${index + 1}`;
+			warnings.push(`${path}: advisor ${label} dropped — ${result.summary}`);
+			continue;
+		}
+		entries.push(result);
+	}
+	return { instructions, entries, sharedMaxNotesPerUpdate, warnings };
+}
 
 /**
  * Normalize an advisor name into a filesystem-/id-safe slug used for its
@@ -139,41 +194,57 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 	const items = await collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
 	const advisors = new Map<string, AdvisorConfig>();
 	const sharedParts: string[] = [];
+	let sharedMaxNotesPerUpdate: number | undefined;
+	const warnings: string[] = [];
+	const warn = (message: string, context?: Record<string, unknown>): void => {
+		warnings.push(message);
+		logger.warn("Advisor config", { ...context, error: message });
+	};
 
 	for (const item of items) {
 		let parsed: unknown;
 		try {
 			parsed = YAML.parse(item.content);
 		} catch (err) {
-			logger.warn("Advisor config: failed to parse YAML", { path: item.path, error: String(err) });
+			warn(`${item.path}: failed to parse YAML (${String(err)}) — file skipped`, { path: item.path });
 			continue;
 		}
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			logger.warn("Advisor config: expected a YAML mapping", { path: item.path });
+			warn(`${item.path}: expected a YAML mapping — file skipped`, { path: item.path });
 			continue;
 		}
-		const result = watchdogYamlSchema(parsed);
-		if (result instanceof type.errors) {
-			logger.warn("Advisor config: invalid schema", { path: item.path, error: result.summary });
-			continue;
-		}
+		const {
+			instructions,
+			entries,
+			sharedMaxNotesPerUpdate: docSharedMaxNotes,
+			warnings: docWarnings,
+		} = parseWatchdogDoc(parsed as Record<string, unknown>, item.path);
+		for (const message of docWarnings) warn(message, { path: item.path });
 
-		if (result.instructions?.trim()) {
-			const expanded = (await expandAtImports(result.instructions, item.path)).trim();
+		if (instructions?.trim()) {
+			const expanded = (await expandAtImports(instructions, item.path)).trim();
 			if (expanded) sharedParts.push(expanded);
 		}
 
-		for (const entry of result.advisors ?? []) {
+		if (docSharedMaxNotes !== undefined) sharedMaxNotesPerUpdate = docSharedMaxNotes;
+
+		for (const entry of entries) {
 			const slug = slugifyAdvisorName(entry.name);
-			const instructions = entry.instructions?.trim()
+			const entryInstructions = entry.instructions?.trim()
 				? (await expandAtImports(entry.instructions, item.path)).trim() || undefined
 				: undefined;
 			advisors.set(slug, {
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
 				tools: filterAdvisorTools(entry.tools, item.path),
-				instructions,
+				maxNotesPerUpdate:
+					typeof entry.maxNotesPerUpdate === "number" &&
+					Number.isFinite(entry.maxNotesPerUpdate) &&
+					entry.maxNotesPerUpdate >= 1
+						? Math.trunc(entry.maxNotesPerUpdate)
+						: undefined,
 				enabled: entry.enabled,
+				instructions: entryInstructions,
 			});
 		}
 	}
@@ -181,6 +252,8 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 	return {
 		advisors: [...advisors.values()],
 		sharedInstructions: sharedParts.length > 0 ? sharedParts.join("\n\n") : undefined,
+		sharedMaxNotesPerUpdate,
+		warnings,
 	};
 }
 
@@ -195,7 +268,10 @@ export type AdvisorConfigScope = "project" | "user";
  */
 export interface WatchdogConfigDoc {
 	instructions?: string;
+	maxNotesPerUpdate?: number;
 	advisors: AdvisorConfig[];
+	/** Per-entry problems found while loading (dropped entries). Shown when the file becomes active in the editor. */
+	warnings?: string[];
 }
 
 /**
@@ -228,9 +304,11 @@ export async function resolveAdvisorConfigEditPath(
 }
 
 /**
- * Load one `WATCHDOG.yml` file for editing — raw, un-merged, un-expanded. Missing,
- * unparseable, or schema-invalid files yield an empty doc (never throws) so the
- * editor opens cleanly on a fresh or broken file.
+ * Load one `WATCHDOG.yml` file for editing — raw, un-merged, un-expanded. Missing
+ * or unparseable files yield an empty doc (never throws) so the editor opens
+ * cleanly on a fresh or broken file. Validation is per entry, matching
+ * discovery: malformed entries drop out of `advisors` and land in `warnings`
+ * instead of blanking the whole editor.
  */
 export async function loadWatchdogConfigFile(filePath: string): Promise<WatchdogConfigDoc> {
 	let text: string;
@@ -246,24 +324,34 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		parsed = YAML.parse(text);
 	} catch (err) {
 		logger.warn("Advisor config: failed to parse for edit", { path: filePath, error: String(err) });
-		return { advisors: [] };
+		return { advisors: [], warnings: [`${filePath}: failed to parse YAML (${String(err)})`] };
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { advisors: [] };
-	const result = watchdogYamlSchema(parsed);
-	if (result instanceof type.errors) {
-		logger.warn("Advisor config: invalid schema for edit", { path: filePath, error: result.summary });
-		return { advisors: [] };
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		// Parity with discovery: a non-mapping document is reported, not silently blanked.
+		const message = `${filePath}: expected a YAML mapping — file skipped`;
+		logger.warn("Advisor config", { path: filePath, error: message });
+		return { advisors: [], warnings: [message] };
 	}
-	const advisors = (result.advisors ?? []).map(a => {
+	const { instructions, entries, sharedMaxNotesPerUpdate, warnings } = parseWatchdogDoc(
+		parsed as Record<string, unknown>,
+		filePath,
+	);
+	for (const message of warnings) logger.warn("Advisor config", { path: filePath, error: message });
+	const advisors = entries.map(a => {
 		const advisor: AdvisorConfig = { name: a.name };
 		if (a.model?.trim()) advisor.model = a.model;
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
+		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
+			advisor.maxNotesPerUpdate = Math.trunc(a.maxNotesPerUpdate);
+		}
 		return advisor;
 	});
 	const doc: WatchdogConfigDoc = { advisors };
-	if (result.instructions?.trim()) doc.instructions = result.instructions;
+	if (instructions?.trim()) doc.instructions = instructions;
+	if (sharedMaxNotesPerUpdate !== undefined) doc.maxNotesPerUpdate = sharedMaxNotesPerUpdate;
+	if (warnings.length > 0) doc.warnings = warnings;
 	return doc;
 }
 
@@ -299,6 +387,13 @@ function appendYamlString(lines: string[], indent: string, key: string, value: s
 export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 	const lines: string[] = [];
 	if (doc.instructions?.trim()) appendYamlString(lines, "", "instructions", doc.instructions);
+	if (
+		typeof doc.maxNotesPerUpdate === "number" &&
+		Number.isFinite(doc.maxNotesPerUpdate) &&
+		doc.maxNotesPerUpdate >= 1
+	) {
+		lines.push(`maxNotesPerUpdate: ${Math.trunc(doc.maxNotesPerUpdate)}`);
+	}
 	if (doc.advisors.length > 0) {
 		lines.push("advisors:");
 		for (const advisor of doc.advisors) {
@@ -318,6 +413,13 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 				appendYamlString(lines, "    ", "instructions", advisor.instructions);
 			}
 			if (advisor.enabled !== undefined) lines.push(`    enabled: ${advisor.enabled}`);
+			if (
+				typeof advisor.maxNotesPerUpdate === "number" &&
+				Number.isFinite(advisor.maxNotesPerUpdate) &&
+				advisor.maxNotesPerUpdate >= 1
+			) {
+				lines.push(`    maxNotesPerUpdate: ${Math.trunc(advisor.maxNotesPerUpdate)}`);
+			}
 		}
 	}
 	return lines.length === 0 ? "" : `${lines.join("\n")}\n`;

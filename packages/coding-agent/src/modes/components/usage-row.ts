@@ -45,13 +45,13 @@ export function formatUsageRow(
 	if (timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0) {
 		parts.push(formatUsageTimestamp(timestamp));
 	}
-	// The delta the operator actually waited, clock-suffixed so it reads apart
-	// from the TTFT figure below (which reuses the same clock icon).
+	// The delta the operator actually waited, bare with a space so it scans
+	// apart from the TTFT figure below (which keeps the clock icon).
 	// `message.duration` comes from performance.now(), so the combined value is
 	// fractional; round before formatDuration so the label never prints a raw
 	// float (e.g. `347.28381699998863ms`).
 	if (turnElapsedMs !== undefined && turnElapsedMs > 0) {
-		parts.push(`${theme.icon.time}Δ${formatDuration(Math.round(turnElapsedMs))}`);
+		parts.push(`Δ ${formatDuration(Math.round(turnElapsedMs))}`);
 	}
 	parts.push(`${theme.icon.input} ${formatNumber(totalInput)}`);
 	parts.push(`${theme.icon.output} ${formatNumber(usage.output)}`);

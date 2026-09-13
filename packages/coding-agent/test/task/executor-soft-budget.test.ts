@@ -18,6 +18,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 /**
  * Contracts under test — the soft request budget must degrade gracefully
@@ -68,6 +69,7 @@ function createMockSession(
 	};
 
 	const session: Partial<AgentSession> = {
+		...createSessionDefaults(),
 		state: { messages: [] } as never,
 		agent: { state: { systemPrompt: ["test"] } } as never,
 		model: { api: "anthropic-messages" } as never,
@@ -75,7 +77,6 @@ function createMockSession(
 		sessionManager: { appendSessionInit: () => {} } as never,
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -89,14 +90,12 @@ function createMockSession(
 			await onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
 			return true;
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
 		sendUserMessage: async () => {},
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;
 		},
 		trackIrcReply: () => {},
-		subscribeRunState: () => () => {},
 		deliverIrcMessage: async msg => {
 			const record: CustomMessage = {
 				role: "custom",
@@ -299,31 +298,56 @@ describe("runSubprocess soft request budget", () => {
 		rpcRegistry.setSubscriptionLevel("progress");
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
 			if (promptIndex !== 1) return;
+			// Configuration alone must not show an advisor to remote observers.
+			expect(
+				frames.some(frame => frame.type === "subagent_progress" && frame.payload.progress.advisor === true),
+			).toBe(false);
+			// Model discovery can attach the runtime after the monitor subscribes.
+			advisorActive.mockReturnValue(true);
 			// Never yields: budget 2 → stop at 3, grace exhausted at 3 + 5 = 8.
 			for (let i = 1; i <= 8; i++) {
 				const message = assistantText(`burning request ${i}`);
 				pushMessage(message);
 				emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+				if (i === 1) {
+					const advisedProgress = frames.find(
+						frame => frame.type === "subagent_progress" && frame.payload.progress.advisor === true,
+					);
+					expect(advisedProgress).toMatchObject({ payload: { progress: { requests: 0 } } });
+					// Losing the runtime later must not erase this run's advised history.
+					advisorActive.mockReturnValue(false);
+				}
 			}
 		});
+		const advisorActive = vi.spyOn(handle.session, "isAdvisorActive");
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, eventBus));
+		const result = await runSubprocess({
+			...baseOptions(id, eventBus),
+			agent: { ...baseAgent, advisor: true },
+		});
 
 		expect(result.aborted).toBe(true);
 		expect(result.abortReason).toMatch(/Soft request budget exceeded/);
+		expect(result.advisor).toBe(true);
 		// Resumable stop, not a terminal kill: the ref stays adopted and live.
 		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 		expect(AgentLifecycleManager.global().has(id)).toBe(true);
 		expect(handle.disposeCalls()).toBe(0);
 
-		const expectRpcTurn = (): void => {
+		const expectRpcTurn = (advised: boolean): void => {
 			expect(frames[0]).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "started" },
 			});
-			expect(frames.some(frame => frame.type === "subagent_progress")).toBe(true);
+			const firstProgress = frames.find(frame => frame.type === "subagent_progress");
+			expect(firstProgress).toBeDefined();
+			expect(firstProgress?.payload.progress.advisor === true).toBe(advised);
+			if (advised) {
+				// The badge must appear before the awakened agent emits its first request.
+				expect(firstProgress?.payload.progress.requests).toBe(0);
+			}
 			expect(frames.at(-1)).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "completed" },
@@ -331,20 +355,23 @@ describe("runSubprocess soft request budget", () => {
 		};
 
 		frames.length = 0;
+		advisorActive.mockReturnValue(true);
 		const idleTerminal = waitForFollowUpTerminal();
 		const idleReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume your inventory" });
 		expect(idleReceipt.outcome).toBe("woken");
 		await idleTerminal;
-		expectRpcTurn();
+		expectRpcTurn(true);
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
 		frames.length = 0;
+		// Parking can rebuild an unadvised session; don't retain the prior turn's marker.
+		advisorActive.mockReturnValue(false);
 		const revivedTerminal = waitForFollowUpTerminal();
 		const revivedReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume after parking" });
 		expect(revivedReceipt.outcome).toBe("revived");
 		await revivedTerminal;
-		expectRpcTurn();
+		expectRpcTurn(false);
 		rpcRegistry.dispose();
 	});
 

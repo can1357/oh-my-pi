@@ -614,13 +614,19 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	// none of them ran, the turn is replay-safe the same way a post-call
 	// classifier refusal is, so the configured retry/fallback policy gets its
 	// chance instead of surfacing the socket error as terminal.
-	describe("transport error with emitted tool calls", () => {
-		const socketClose =
-			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
-
+	describe.each([
+		[
+			"socket close",
+			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+		],
+		[
+			"Codex body-read error",
+			"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body",
+		],
+	])("%s with emitted tool calls", (_label, errorMessage) => {
 		function transportError(content: AssistantMessage["content"]): AssistantMessage {
 			const message = makeMessage(content, model);
-			message.errorMessage = socketClose;
+			message.errorMessage = errorMessage;
 			return message;
 		}
 
@@ -662,7 +668,16 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 		it("does not retry when the tool call produced a real result", () => {
 			const message = transportError([toolCall("call-1")]);
-			expect(recoveryForTransport(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+			const recovery = recoveryForTransport(message, [realResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not retry when a synthetic result is followed by a real result for the same call", () => {
+			const message = transportError([toolCall("call-1")]);
+			const recovery = recoveryForTransport(message, [syntheticResult("call-1"), realResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 		});
 
 		it("does not retry when only some tool calls went unexecuted", () => {
@@ -679,6 +694,30 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		it("does not retry when the tool call has no result at all", () => {
 			const message = transportError([toolCall("call-1")]);
 			expect(recoveryForTransport(message, []).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when one call is synthetic-paired and another has no result", () => {
+			const message = transportError([toolCall("call-1"), toolCall("call-2")]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry generated images beside a provably unexecuted call", () => {
+			const message = transportError([
+				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+				toolCall("call-1"),
+			]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry Anthropic server tools beside a provably unexecuted call", () => {
+			const message = transportError([
+				{
+					type: "anthropicServerTool",
+					block: { type: "server_tool_use", id: "srv-1", name: "web_search", input: { query: "status" } },
+				},
+				toolCall("call-1"),
+			]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
 		});
 	});
 
@@ -728,6 +767,48 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		function recoveryForReset(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
+
+		function pythonResetMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			return {
+				...makeMessage(content, model),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorId: 0,
+				errorMessage,
+			};
+		}
+
+		describe.each([
+			[
+				"Python HTTP/2 reset",
+				"Codex error event: <StreamReset stream_id:1283, error_code:2, remote_reset:True> (code=api_error)",
+			],
+			[
+				"Python HTTP/1.1 chunked body",
+				"Codex error event: peer closed connection without sending complete message body (incomplete chunked read) (code=api_error)",
+			],
+		])("%s recovery", (_label, errorMessage) => {
+			it("preserves the replay veto with committed text", () => {
+				const message = pythonResetMessage([{ type: "text", text: "Partial answer." }], errorMessage);
+				const recovery = recoveryForReset(message, []);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			});
+
+			it("continues completed tools through preserved-turn recovery", () => {
+				const message = pythonResetMessage([execToolCall("call-1")], errorMessage);
+				const recovery = recoveryForReset(message, [realResult("call-1")]);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+			});
+
+			it("keeps an unresolved tool outside recovery", () => {
+				const message = pythonResetMessage([execToolCall("call-1")], errorMessage);
+				const recovery = recoveryForReset(message, []);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			});
+		});
 
 		it("continues a Cursor NGHTTP2_INTERNAL_ERROR after a marked exec result", () => {
 			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
@@ -783,6 +864,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	describe("premature stream close after resolved tool calls", () => {
 		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
 		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
+		const codexClose = "Codex stream ended before terminal completion event";
 
 		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
 			const message = makeMessage(content, model);
@@ -798,29 +880,14 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
 
-		it("continues a premature completions close after a resolved tool call", () => {
+		it.each([
+			["completions", completionsClose],
+			["responses", responsesClose],
+			["Codex responses", codexClose],
+		])("continues a premature %s close after a resolved tool call", (_provider, errorMessage) => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
-				completionsClose,
-			);
-			const recovery = recoveryForClose(message, [
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "bash",
-					content: [{ type: "text", text: "Tool call was not executed." }],
-					isError: true,
-					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
-					timestamp: Date.now(),
-				},
-			]);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
-		});
-
-		it("continues a premature responses close after a resolved tool call", () => {
-			const message = gatewayMessage(
-				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
-				responsesClose,
+				errorMessage,
 			);
 			const recovery = recoveryForClose(message, [
 				{

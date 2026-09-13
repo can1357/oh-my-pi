@@ -522,6 +522,37 @@ describe("openai-completions wire-quirk compat detection", () => {
 			).compat.supportsForcedToolChoice,
 		).toBe(true);
 	});
+	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
+		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
+		// cannot round-trip encrypted reasoning: the upstream binds
+		// `encrypted_content` to the gateway's caller, so replaying it on a
+		// later tool-call step 400s with "reasoning `encrypted_content` was not
+		// issued to this caller". The deployment contract must stop requesting
+		// it and drop native reasoning items from replay.
+		for (const [provider, id, baseUrl] of [
+			["opencode-zen", "muse-spark-1.3-contributor-free", "https://opencode.ai/zen/v1"],
+			["opencode-go", "muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1"],
+		] as const) {
+			const compat = resolveModelPolicy(
+				responsesSpec({ id, provider, name: "Muse Spark", baseUrl, reasoning: true }),
+			).compat;
+			expect(compat.includeEncryptedReasoning).toBe(false);
+			expect(compat.filterReasoningHistory).toBe(true);
+		}
+		// A non-Muse reasoning model on the same gateway keeps the Responses
+		// default replay behavior, so the carve-out is scoped to the broken lane.
+		const other = resolveModelPolicy(
+			responsesSpec({
+				id: "big-pickle",
+				provider: "opencode-zen",
+				name: "Big Pickle",
+				baseUrl: "https://opencode.ai/zen/v1",
+				reasoning: true,
+			}),
+		).compat;
+		expect(other.includeEncryptedReasoning).toBe(true);
+		expect(other.filterReasoningHistory).toBe(false);
+	});
 
 	it("requires a synthetic assistant bridge after tool results only for Mistral hosts", () => {
 		// Mistral/Devstral reject a user message directly after a tool result; the chat
@@ -1198,6 +1229,90 @@ describe("model cache spec round trip", () => {
 			const cached = await resolveProviderModels(options, "online-if-uncached");
 			expect(cached.models.map(model => model.id)).toEqual([recoveredModel.id]);
 			expect(cached.stale).toBe(false);
+			expect(fetches).toBe(2);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refreshes an existing empty cache row when discovery fails to preserve retry backoff", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-empty-failure-backoff-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const recoveredModel = completionsSpec({ id: "recovered-model", provider: "empty-failure-backoff-test" });
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] | null = [];
+		let fetches = 0;
+		let currentTime = 1_000_000;
+		const options = {
+			providerId: "empty-failure-backoff-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return discoveredModels;
+			},
+		};
+		try {
+			const empty = await resolveProviderModels(options, "online");
+			expect(empty.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			currentTime += 5 * 60 * 1_000;
+			discoveredModels = null;
+			const failedRefresh = await resolveProviderModels(options, "online-if-uncached");
+			expect(failedRefresh.models).toEqual([]);
+			expect(fetches).toBe(2);
+
+			// The failed refresh advances the existing empty row's timestamp, so
+			// another launch waits for the normal backoff instead of retrying now.
+			discoveredModels = [recoveredModel];
+			const backedOff = await resolveProviderModels(options, "online-if-uncached");
+			expect(backedOff.models).toEqual([]);
+			expect(fetches).toBe(2);
+
+			currentTime += 5 * 60 * 1_000;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
+			expect(fetches).toBe(3);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("does not cache an empty row when discovery fails, so the next launch retries immediately (#10964)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-failed-discovery-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const recoveredModel = completionsSpec({ id: "vendor-7/model-7", provider: "failed-discovery-test" });
+		let fetches = 0;
+		let fail = true;
+		const currentTime = 1_000_000;
+		const options = {
+			providerId: "failed-discovery-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				// A timeout/network failure surfaces to the manager as null (distinct
+				// from a successful but empty [] catalog, which stays cached).
+				return fail ? null : [recoveredModel];
+			},
+		};
+		try {
+			const failed = await resolveProviderModels(options, "online");
+			expect(failed.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			// With no prior catalog and nothing static, the failure writes no cache
+			// row. Had it persisted an empty non-authoritative snapshot, the next
+			// launch inside the 5-min window would serve that empty catalog and skip
+			// discovery, hiding every discovery-only model. The clock does not advance,
+			// so a retry here proves the row is absent rather than aged out.
+			fail = false;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
+			expect(recovered.stale).toBe(false);
 			expect(fetches).toBe(2);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });

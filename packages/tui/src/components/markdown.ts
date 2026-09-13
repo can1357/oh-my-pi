@@ -1256,7 +1256,7 @@ function lexDocument(text: string): Token[] {
 
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
 export interface MarkdownLink {
-	/** Visible link text (equals `href` for autolinks and bare URLs). */
+	/** Flattened visible label with whitespace collapsed to one row; falls back to `href` when empty. */
 	text: string;
 	/** Destination exactly as marked resolved it (references resolved, no normalization). */
 	href: string;
@@ -1276,10 +1276,8 @@ export function extractMarkdownLinks(text: string): MarkdownLink[] {
 			if (token.type === "link") {
 				const link = token as Tokens.Link;
 				if (typeof link.href === "string" && link.href.length > 0) {
-					links.push({
-						text: typeof link.text === "string" && link.text.length > 0 ? link.text : link.href,
-						href: link.href,
-					});
+					const label = plainInlineTokens(link.tokens).replace(/\s+/g, " ").trim();
+					links.push({ text: label || link.href, href: link.href });
 				}
 				continue;
 			}
@@ -1496,6 +1494,9 @@ function plainInlineTokens(tokens: Token[]): string {
 				break;
 			case "codespan":
 				result += token.text;
+				break;
+			case "br":
+				result += "\n";
 				break;
 			default:
 				if ("text" in token && typeof token.text === "string") result += token.text;

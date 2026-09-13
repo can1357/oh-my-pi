@@ -408,7 +408,9 @@ async function loadImageFromUrl(
 	if (!contentType?.startsWith("image/")) {
 		throw new Error(`Unsupported image type from URL: ${imageUrl}`);
 	}
-	const buffer = await response.bytes();
+	// `Response.bytes()` is absent from older undici types; `arrayBuffer`
+	// exists in both and yields identical bytes.
+	const buffer = new Uint8Array(await response.arrayBuffer());
 	return { data: buffer.toBase64(), mimeType: contentType };
 }
 
