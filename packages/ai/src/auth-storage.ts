@@ -7007,9 +7007,13 @@ export class AuthStorage {
 
 		const rawMessage = error instanceof Error ? error.message : typeof error === "string" ? error : "";
 		// The provider's own sentence leads so text classification keeps matching;
-		// the Codex sentence comes from the same template the classifier is built on.
+		// the Codex sentence comes from the same template the classifier is built
+		// on. The echoed model id is provider-controlled text like everything else
+		// here: a clean id re-classifies byte-for-byte, and a hostile one is
+		// neutralized while the structural flags and the preserved classification
+		// message still carry the denial.
 		const head = exactCodexModelPolicy
-			? AIError.codexChatGPTAccountPolicyMessage(deniedModel)
+			? AIError.codexChatGPTAccountPolicyMessage(boundedDiagnostic(deniedModel, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX))
 			: boundedDiagnostic(rawMessage, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX).replace(/[.\s]*$/, ".");
 
 		const nowMs = Date.now();

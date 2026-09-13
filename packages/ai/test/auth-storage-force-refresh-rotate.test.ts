@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { registerCustomApi, unregisterCustomApis, withAuth } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
@@ -1030,6 +1031,40 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
 			),
 		).toBeUndefined();
+	});
+
+	test("the verdict neutralizes a hostile model id echoed by the provider", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref-O", expires: farExpiry(), email: "o@example.com" },
+		]);
+		// A custom model id carrying a tab and an escape sequence, echoed verbatim in the denial.
+		const hostileModel = "gpt-x\t\x1b[31mred";
+		const denial = new ProviderHttpError(
+			`The '${hostileModel}' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)`,
+			400,
+		);
+		const sessionId = "daybreak-hostile-model";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: hostileModel })).toBe("only");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: hostileModel,
+				apiKey: "only",
+			}),
+		).toBe(false);
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, hostileModel, denial);
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
+		expect(verdict.message).toMatch(/^The 'gpt-x red' model is not supported/);
+		expect(AIError.is(AIError.classify(verdict), AIError.Flag.AccountPolicy)).toBe(true);
 	});
 
 	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
