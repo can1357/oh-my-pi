@@ -17,15 +17,17 @@
  */
 export function sanitizeMCPToolNamePart(value: string, fallback: string, keepHyphen = false): string {
 	const folded = keepHyphen ? value : value.toLowerCase().replaceAll("-", "_");
-	const alphabet = keepHyphen ? /^[A-Za-z0-9_-]+$/ : /^[a-z_]+$/;
-	// Already inside the alphabet: return it byte-identical. The filter domain is
-	// an advertised-name domain, and `_` is part of that alphabet, so collapsing
-	// or trimming here would make the domain non-injective — an entry for `read`
-	// would also select a separately advertised `_read`, and `foo_bar` would
-	// also select `foo__bar`. The mint domain still normalizes unconditionally,
-	// because it builds `mcp__<server>_<tool>` where a stray or doubled
-	// underscore would corrupt the server/tool boundary.
-	if (alphabet.test(folded)) return folded;
+	// FILTER domain only: a value already inside the advertised-name alphabet is
+	// returned byte-identical. That domain must stay injective over the names it
+	// has to distinguish — `_` is part of the alphabet, so collapsing or
+	// trimming here would let an entry for `read` also select a separately
+	// advertised `_read`, and `foo_bar` also select `foo__bar`.
+	//
+	// The MINT domain normalizes unconditionally: it builds
+	// `mcp__<server>_<tool>`, where a doubled underscore would corrupt the
+	// server/tool boundary, and `createMCPToolName` must keep round-tripping the
+	// same names it did before this alphabet split.
+	if (keepHyphen && /^[A-Za-z0-9_-]+$/.test(folded)) return folded;
 	const sanitized = folded
 		.replace(keepHyphen ? /[^A-Za-z0-9_-]+/g : /[^a-z_]+/g, "_")
 		.replace(/_+/g, "_")
