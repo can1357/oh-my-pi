@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
-import { loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { findNearestAncestorDir, getAncestorDirs, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("parseFrontmatter", () => {
@@ -201,5 +201,68 @@ describe("loadFilesFromDir recursion", () => {
 			path.join("mineru", "Lib", "site-packages", "gradio", "assets", "svelte", "media-query-D37ajmZt.js"),
 			"my-tool.ts",
 		]);
+	});
+});
+
+describe("getAncestorDirs", () => {
+	test("lists cwd first and stops at the explicit boundary", () => {
+		const cwd = path.join("/repo", "packages", "app");
+		const repoRoot = path.join("/repo");
+		expect(getAncestorDirs(cwd, repoRoot).map(entry => entry.dir)).toEqual([
+			cwd,
+			path.join("/repo", "packages"),
+			repoRoot,
+		]);
+	});
+
+	test("stops at the filesystem root when no boundary is set", () => {
+		const leaf = path.join("/repo", "pkg");
+		const dirs = getAncestorDirs(leaf).map(entry => entry.dir);
+		expect(dirs[0]).toBe(leaf);
+		expect(dirs.at(-1)).toBe(path.parse(leaf).root);
+		expect(dirs).toContain(path.join("/repo"));
+	});
+});
+
+describe("findNearestAncestorDir", () => {
+	let tempDir = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-nearest-ancestor-"));
+		clearCache();
+	});
+
+	afterEach(() => {
+		clearCache();
+		removeSyncWithRetries(tempDir);
+	});
+
+	test("returns cwd when the file is in cwd", async () => {
+		const cwd = path.join(tempDir, "app");
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.writeFile(path.join(cwd, "mcp.json"), "{}");
+		await fs.promises.writeFile(path.join(tempDir, "mcp.json"), "{}");
+		expect(await findNearestAncestorDir(cwd, ["mcp.json"], tempDir)).toBe(cwd);
+	});
+
+	test("returns the nearest ancestor that has the file", async () => {
+		const cwd = path.join(tempDir, "packages", "app");
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.writeFile(path.join(tempDir, "mcp.json"), "{}");
+		expect(await findNearestAncestorDir(cwd, ["mcp.json"], tempDir)).toBe(tempDir);
+	});
+
+	test("returns null when neither cwd nor an ancestor has the file", async () => {
+		const cwd = path.join(tempDir, "app");
+		await fs.promises.mkdir(cwd, { recursive: true });
+		expect(await findNearestAncestorDir(cwd, ["mcp.json"], tempDir)).toBeNull();
+	});
+
+	test("does not escape the stop boundary", async () => {
+		const repoRoot = path.join(tempDir, "repo");
+		const cwd = path.join(repoRoot, "app");
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.writeFile(path.join(tempDir, "mcp.json"), "{}");
+		expect(await findNearestAncestorDir(cwd, ["mcp.json"], repoRoot)).toBeNull();
 	});
 });

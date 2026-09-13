@@ -652,6 +652,46 @@ export async function loadFilesFromDir<T>(
 export function calculateDepth(cwd: string, targetDir: string, separator: string): number {
 	return cwd.split(separator).length - targetDir.split(separator).length;
 }
+
+/**
+ * Walk from `cwd` toward `stopAt` (inclusive) or the filesystem root.
+ * Closest directory is first. Used by native nearest-file discovery
+ * (SYSTEM.md / RULES.md / AGENTS.md) and by both MCP project loaders.
+ */
+export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
+	const ancestors: Array<{ dir: string; depth: number }> = [];
+	let current = cwd;
+	let depth = 0;
+	while (true) {
+		ancestors.push({ dir: current, depth });
+		if (stopAt && current === stopAt) break;
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
+		depth++;
+	}
+	return ancestors;
+}
+
+/**
+ * Return the nearest ancestor directory that contains any of `relativePaths`.
+ * Only that directory wins — stacked ancestor copies are not merged.
+ * The walk stops at `stopAt` when provided, otherwise at the filesystem root.
+ */
+export async function findNearestAncestorDir(
+	cwd: string,
+	relativePaths: readonly string[],
+	stopAt?: string | null,
+): Promise<string | null> {
+	for (const { dir } of getAncestorDirs(cwd, stopAt)) {
+		const contents = await Promise.all(relativePaths.map(rel => readFile(path.join(dir, rel))));
+		if (contents.some(content => content !== null)) {
+			return dir;
+		}
+	}
+	return null;
+}
+
 // =============================================================================
 // Standalone context-file walker (AGENTS.md, CLAUDE.md, …)
 // =============================================================================

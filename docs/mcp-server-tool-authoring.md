@@ -60,7 +60,7 @@ Result: duplicate server names across sources are not merged. One definition win
 
 ### `.mcp.json` and related files
 
-The dedicated fallback provider in `src/discovery/mcp-json.ts` reads project-root `mcp.json` and `.mcp.json` (low priority).
+The dedicated fallback provider in `src/discovery/mcp-json.ts` reads the nearest ancestor `mcp.json` and `.mcp.json` (low priority). The native loader uses the same nearest-ancestor walk for `.omp/mcp.json`. Neither loader merges stacked ancestor copies.
 
 In practice MCP servers also come from higher-priority providers (for example native `.omp/...` and tool-specific config dirs). Authoring guidance:
 
