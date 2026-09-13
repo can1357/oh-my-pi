@@ -52,6 +52,8 @@ impl std::fmt::Debug for GitRepo {
 impl GitRepo {
 	/// Discover the repository containing `dir` by walking toward the root.
 	///
+	/// A `.git` entry only counts when its resolved git dir contains `HEAD`;
+	/// unpopulated `.git` directories are skipped, as `git rev-parse` does.
 	/// Returns `Ok(None)` when `dir` is outside any git repository, or when a
 	/// `.git` pointer file is unreadable due to permissions (matching the
 	/// historical wrapper, which treated that as "not a repo" rather than an
@@ -202,6 +204,16 @@ fn resolve_info(
 			resolved
 		},
 	};
+	// Match git's `is_git_directory()`: a `.git` directory (or gitfile target)
+	// without `HEAD` was never populated by git — typically an empty `.git`
+	// planted as a walk fence or left behind by a wiped store — so it is not a
+	// repository. Returning `None` keeps the walk moving toward the root, as
+	// `git rev-parse` does, instead of adopting the entry and failing later
+	// with a raw ENOENT on the first `HEAD` read. Checking the resolved dir
+	// keeps linked worktrees and submodules valid: their `HEAD` lives there.
+	if !git_dir.join("HEAD").is_file() {
+		return Ok(None);
+	}
 	let common_dir = resolve_common_dir(&git_dir);
 	let is_reftable =
 		read_optional(&common_dir.join("config")).is_some_and(|config| config_has_reftable(&config));
@@ -326,7 +338,18 @@ fn strip_config_comment(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+	use std::{fs, process::Command};
+
 	use super::*;
+
+	fn run_git(root: &Path, args: &[&str]) {
+		let output = Command::new("git")
+			.current_dir(root)
+			.args(args)
+			.output()
+			.unwrap();
+		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+	}
 
 	#[test]
 	fn reftable_detection_honors_quotes_and_comments() {
@@ -346,5 +369,98 @@ mod tests {
 		assert_eq!(parse_gitdir_pointer("gitdir:../relative"), Some("../relative"));
 		assert_eq!(parse_gitdir_pointer("not a pointer"), None);
 		assert_eq!(parse_gitdir_pointer("gitdir:   "), None);
+	}
+
+	#[test]
+	fn discovery_ignores_an_empty_dot_git_directory() {
+		let temp = tempfile::tempdir().unwrap();
+		let fence = temp.path().join("fence");
+		fs::create_dir_all(fence.join(".git")).unwrap();
+		let project = fence.join("project");
+		fs::create_dir_all(&project).unwrap();
+
+		// `git rev-parse` walks past a `.git` directory without `HEAD`; with no
+		// repository above the temp dir, discovery must come up empty instead of
+		// adopting the fence and failing later on the missing `HEAD`.
+		let found = discover_info(&project).unwrap();
+		assert!(found.is_none(), "unpopulated `.git` reported as a repository: {found:?}");
+	}
+
+	#[test]
+	fn discovery_walks_past_an_empty_dot_git_to_the_enclosing_repository() {
+		let temp = tempfile::tempdir().unwrap();
+		run_git(temp.path(), &["init", "-q", "-b", "main"]);
+		let fence = temp.path().join("fence");
+		fs::create_dir_all(fence.join(".git")).unwrap();
+		let project = fence.join("project");
+		fs::create_dir_all(&project).unwrap();
+
+		let info = discover_info(&project)
+			.unwrap()
+			.expect("enclosing repository");
+		assert_eq!(info.repo_root, std::path::absolute(temp.path()).unwrap());
+		assert_eq!(info.git_dir, info.repo_root.join(".git"));
+	}
+
+	#[test]
+	fn discovery_ignores_a_gitfile_whose_target_has_no_head() {
+		let temp = tempfile::tempdir().unwrap();
+		let fence = temp.path().join("fence");
+		let project = fence.join("project");
+		fs::create_dir_all(&project).unwrap();
+		fs::create_dir_all(fence.join("store")).unwrap();
+		fs::write(fence.join(".git"), "gitdir: store\n").unwrap();
+
+		let found = discover_info(&project).unwrap();
+		assert!(
+			found.is_none(),
+			"gitfile to an unpopulated directory reported as a repository: {found:?}"
+		);
+	}
+
+	#[test]
+	fn discovery_accepts_a_fresh_repository_with_an_unborn_head() {
+		let temp = tempfile::tempdir().unwrap();
+		run_git(temp.path(), &["init", "-q", "-b", "main"]);
+		let nested = temp.path().join("src");
+		fs::create_dir_all(&nested).unwrap();
+
+		let info = discover_info(&nested).unwrap().expect("primary checkout");
+		let root = std::path::absolute(temp.path()).unwrap();
+		assert_eq!(info.repo_root, root);
+		assert_eq!(info.git_dir, root.join(".git"));
+		assert_eq!(info.common_dir, info.git_dir);
+		assert!(info.head_path.is_file());
+		assert!(
+			!GitRepo::discover(&nested)
+				.unwrap()
+				.unwrap()
+				.is_linked_worktree()
+		);
+	}
+
+	#[test]
+	fn discovery_accepts_a_linked_worktree_gitfile() {
+		let temp = tempfile::tempdir().unwrap();
+		let main = temp.path().join("main");
+		fs::create_dir_all(&main).unwrap();
+		run_git(&main, &["init", "-q", "-b", "main"]);
+		run_git(&main, &["config", "user.name", "VCS Test"]);
+		run_git(&main, &["config", "user.email", "vcs@example.com"]);
+		run_git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		let linked = temp.path().join("linked");
+		run_git(&main, &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "wt"]);
+		assert!(linked.join(".git").is_file(), "linked worktree `.git` is a gitfile");
+
+		let info = discover_info(&linked).unwrap().expect("linked worktree");
+		assert_eq!(info.repo_root, std::path::absolute(&linked).unwrap());
+		assert!(info.head_path.is_file());
+		assert_ne!(info.git_dir, info.common_dir);
+		assert!(
+			GitRepo::discover(&linked)
+				.unwrap()
+				.unwrap()
+				.is_linked_worktree()
+		);
 	}
 }
