@@ -59,6 +59,7 @@ import {
 } from "./pending-ops";
 import {
 	applyHelloTabChanges,
+	filterHelloTabIds,
 	invalidatesHelloReconciliation,
 	shouldSuppressHelloSnapshot,
 } from "./hello-refresh";
@@ -844,7 +845,32 @@ function refreshHello(onSent?: () => void): void {
 		};
 		entry.done = buildHello()
 			.then(async (hello) => {
-				hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+				const applyTabChanges = (): void => {
+					hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+					hello.attachedTabIds = filterHelloTabIds(
+						hello.attachedTabIds,
+						hello.tabs,
+					);
+					hello.recoverableTabIds = filterHelloTabIds(
+						hello.recoverableTabIds ?? [],
+						hello.tabs,
+					);
+					hello.relayDetachedTabIds = filterHelloTabIds(
+						hello.relayDetachedTabIds ?? [],
+						hello.tabs,
+					);
+					hello.freshRootRequiredTabIds = filterHelloTabIds(
+						hello.freshRootRequiredTabIds ?? [],
+						hello.tabs,
+					);
+					const tabIds = new Set(hello.tabs.map(tab => tab.tabId));
+					hello.recoveryLoaderIds = Object.fromEntries(
+						Object.entries(hello.recoveryLoaderIds ?? {}).filter(([tabId]) =>
+							tabIds.has(Number(tabId)),
+						),
+					);
+				};
+				applyTabChanges();
 				// Suppress a hello whose attachment snapshot was invalidated before it
 				// could be sent. A guard detach that marks this refresh structurally
 				// dirty in flight means `getTargets()` may predate the detach, so this
@@ -887,7 +913,7 @@ function refreshHello(onSent?: () => void): void {
 				// their latest state again immediately before the synchronous send so an
 				// allowed bounded retry never retracts a newer tabCreated/tabUpdated or
 				// resurrects a tabRemoved event with an authoritative stale tab list.
-				hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+				applyTabChanges();
 				if (
 					shouldSuppressHelloSnapshot(
 						entry.structuralDirty,

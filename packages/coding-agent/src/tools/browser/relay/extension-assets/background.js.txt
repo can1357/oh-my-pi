@@ -336,6 +336,10 @@ function applyHelloTabChanges(tabs, changes) {
   }
   return [...current.values()];
 }
+function filterHelloTabIds(tabIds, tabs) {
+  const current = new Set(tabs.map((tab) => tab.tabId));
+  return tabIds.filter((tabId) => current.has(tabId));
+}
 function invalidatesHelloReconciliation(changeInfo) {
   return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
@@ -777,11 +781,20 @@ function refreshHello(onSent) {
       afterSend
     };
     entry.done = buildHello().then(async (hello) => {
-      hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+      const applyTabChanges = () => {
+        hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+        hello.attachedTabIds = filterHelloTabIds(hello.attachedTabIds, hello.tabs);
+        hello.recoverableTabIds = filterHelloTabIds(hello.recoverableTabIds ?? [], hello.tabs);
+        hello.relayDetachedTabIds = filterHelloTabIds(hello.relayDetachedTabIds ?? [], hello.tabs);
+        hello.freshRootRequiredTabIds = filterHelloTabIds(hello.freshRootRequiredTabIds ?? [], hello.tabs);
+        const tabIds = new Set(hello.tabs.map((tab) => tab.tabId));
+        hello.recoveryLoaderIds = Object.fromEntries(Object.entries(hello.recoveryLoaderIds ?? {}).filter(([tabId]) => tabIds.has(Number(tabId))));
+      };
+      applyTabChanges();
       if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
         return;
       await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation) && ws === socket && socket.readyState === WebSocket.OPEN);
-      hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+      applyTabChanges();
       if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN) {

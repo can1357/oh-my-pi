@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	applyHelloTabChanges,
+	filterHelloTabIds,
 	invalidatesHelloReconciliation,
 	shouldSuppressHelloSnapshot,
 } from "./hello-refresh";
@@ -43,5 +44,9 @@ describe("hello refresh invalidation", () => {
 			{ tabId: 2, title: "newer" },
 			{ tabId: 3, title: "created" },
 		]);
+	});
+
+	it("drops attachment state for tabs removed after the snapshot", () => {
+		expect(filterHelloTabIds([1, 2], [{ tabId: 2 }, { tabId: 3 }])).toEqual([2]);
 	});
 });

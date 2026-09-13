@@ -15,6 +15,14 @@ export function applyHelloTabChanges<T extends { tabId: number }>(
 	return [...current.values()];
 }
 
+export function filterHelloTabIds(
+	tabIds: readonly number[],
+	tabs: readonly { tabId: number }[],
+): number[] {
+	const current = new Set(tabs.map(tab => tab.tabId));
+	return tabIds.filter(tabId => current.has(tabId));
+}
+
 /**
  * URL and group changes affect relay reconciliation, so an in-flight hello
  * carrying their previous values must be suppressed rather than merely
