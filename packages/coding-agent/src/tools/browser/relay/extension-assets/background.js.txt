@@ -329,8 +329,8 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
 function invalidatesHelloReconciliation(changeInfo) {
   return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
-function shouldSuppressHelloSnapshot(structuralDirty, reconciliationDirty, allowStaleReconciliation) {
-  return structuralDirty || reconciliationDirty && !allowStaleReconciliation;
+function shouldSuppressHelloSnapshot(structuralDirty, reconciliationDirty, allowStaleStructural, allowStaleReconciliation) {
+  return structuralDirty && !allowStaleStructural || reconciliationDirty && !allowStaleReconciliation;
 }
 
 // extension/background.ts
@@ -528,6 +528,13 @@ async function setOrphanSweepDeadline(deadlineMs) {
   });
   orphanSweepDeadlineUpdates = update.catch(() => {});
   await update;
+}
+function clearOrphanSweepDeadlineAfterHello(socket) {
+  setOrphanSweepDeadline(null).catch(() => {
+    if (ws === socket && helloDeliveredSocket === socket && socket.readyState === WebSocket.OPEN) {
+      setTimeout(() => clearOrphanSweepDeadlineAfterHello(socket), 1000);
+    }
+  });
 }
 async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   requireRecoveryStateLoaded(await loadRecoverableState());
@@ -748,10 +755,11 @@ function refreshHello(onSent) {
       helloRefresh.afterSend = onSent;
     return;
   }
-  const startRefresh = (afterSend, allowStaleReconciliation) => {
+  const startRefresh = (afterSend, allowStaleStructural, allowStaleReconciliation) => {
     const entry = {
       socket,
       structuralDirty: false,
+      allowStaleStructural,
       reconciliationDirty: false,
       allowStaleReconciliation,
       metaDirty: false,
@@ -759,10 +767,10 @@ function refreshHello(onSent) {
       afterSend
     };
     entry.done = buildHello().then(async (hello) => {
-      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleStructural, entry.allowStaleReconciliation))
         return;
-      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation) && ws === socket && socket.readyState === WebSocket.OPEN);
-      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleStructural, entry.allowStaleReconciliation) && ws === socket && socket.readyState === WebSocket.OPEN);
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleStructural, entry.allowStaleReconciliation))
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(hello));
@@ -778,14 +786,14 @@ function refreshHello(onSent) {
       if (helloRefresh !== entry)
         return;
       if ((entry.structuralDirty || entry.reconciliationDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
-        startRefresh(entry.afterSend, entry.allowStaleReconciliation || entry.reconciliationDirty);
+        startRefresh(entry.afterSend, entry.allowStaleStructural || entry.structuralDirty, entry.allowStaleReconciliation || entry.reconciliationDirty);
       } else {
         helloRefresh = null;
       }
     });
     helloRefresh = entry;
   };
-  startRefresh(onSent ?? null, false);
+  startRefresh(onSent ?? null, false, false);
 }
 function invalidateHelloRefresh() {
   if (helloRefresh)
@@ -1019,7 +1027,7 @@ async function connect() {
       helloDeliveredSocket = socket;
       attachmentGuard.onConnected();
       initializedRelayClearedOrphanSweep = true;
-      setOrphanSweepDeadline(null);
+      clearOrphanSweepDeadlineAfterHello(socket);
     });
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);

@@ -393,6 +393,23 @@ async function setOrphanSweepDeadline(
 	await update;
 }
 
+/**
+ * Clearing the persisted deadline is authoritative once a hello has reached the
+ * relay. A transient storage.session failure must not leave the previous value
+ * behind for a future worker restart to interpret as an already-expired sweep.
+ */
+function clearOrphanSweepDeadlineAfterHello(socket: WebSocket): void {
+	void setOrphanSweepDeadline(null).catch(() => {
+		if (
+			ws === socket &&
+			helloDeliveredSocket === socket &&
+			socket.readyState === WebSocket.OPEN
+		) {
+			setTimeout(() => clearOrphanSweepDeadlineAfterHello(socket), 1_000);
+		}
+	});
+}
+
 async function maybeScheduleOrphanSweep(
 	forceDisconnected = false,
 ): Promise<void> {
@@ -742,6 +759,13 @@ let helloRefresh: {
 	 */
 	structuralDirty: boolean;
 	/**
+	 * The previous refresh in this chain was already suppressed for a structural
+	 * change. Permit this snapshot through if tab churn continues so a stream of
+	 * creates/removes cannot indefinitely block relay initialization; the queued
+	 * rebuild still publishes the final tab set once churn settles.
+	 */
+	allowStaleStructural: boolean;
+	/**
 	 * Reconciliation metadata (URL or group membership) changed after this hello
 	 * snapshotted the tab. Suppress the first stale snapshot in a refresh chain to
 	 * preserve event ordering, but allow a later retry through if the state keeps
@@ -800,12 +824,14 @@ function refreshHello(onSent?: () => void): void {
 	}
 	const startRefresh = (
 		afterSend: (() => void) | null,
+		allowStaleStructural: boolean,
 		allowStaleReconciliation: boolean,
 	): void => {
 		const entry: {
 			socket: WebSocket;
 			done: Promise<void>;
 			structuralDirty: boolean;
+			allowStaleStructural: boolean;
 			reconciliationDirty: boolean;
 			allowStaleReconciliation: boolean;
 			metaDirty: boolean;
@@ -813,6 +839,7 @@ function refreshHello(onSent?: () => void): void {
 		} = {
 			socket,
 			structuralDirty: false,
+			allowStaleStructural,
 			reconciliationDirty: false,
 			allowStaleReconciliation,
 			metaDirty: false,
@@ -838,6 +865,7 @@ function refreshHello(onSent?: () => void): void {
 					shouldSuppressHelloSnapshot(
 						entry.structuralDirty,
 						entry.reconciliationDirty,
+						entry.allowStaleStructural,
 						entry.allowStaleReconciliation,
 					)
 				)
@@ -854,6 +882,7 @@ function refreshHello(onSent?: () => void): void {
 						!shouldSuppressHelloSnapshot(
 							entry.structuralDirty,
 							entry.reconciliationDirty,
+							entry.allowStaleStructural,
 							entry.allowStaleReconciliation,
 						) &&
 						ws === socket &&
@@ -863,6 +892,7 @@ function refreshHello(onSent?: () => void): void {
 					shouldSuppressHelloSnapshot(
 						entry.structuralDirty,
 						entry.reconciliationDirty,
+						entry.allowStaleStructural,
 						entry.allowStaleReconciliation,
 					)
 				)
@@ -911,6 +941,7 @@ function refreshHello(onSent?: () => void): void {
 					// post-send callback onto the rebuild.
 					startRefresh(
 						entry.afterSend,
+						entry.allowStaleStructural || entry.structuralDirty,
 						entry.allowStaleReconciliation || entry.reconciliationDirty,
 					);
 				} else {
@@ -919,7 +950,7 @@ function refreshHello(onSent?: () => void): void {
 			});
 		helloRefresh = entry;
 	};
-	startRefresh(onSent ?? null, false);
+	startRefresh(onSent ?? null, false, false);
 }
 
 function invalidateHelloRefresh(): void {
@@ -1321,7 +1352,7 @@ async function connect(): Promise<void> {
 			helloDeliveredSocket = socket;
 			attachmentGuard.onConnected();
 			initializedRelayClearedOrphanSweep = true;
-			void setOrphanSweepDeadline(null);
+			clearOrphanSweepDeadlineAfterHello(socket);
 		});
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);

@@ -15,7 +15,11 @@ export function invalidatesHelloReconciliation(changeInfo: HelloRefreshTabChange
 export function shouldSuppressHelloSnapshot(
 	structuralDirty: boolean,
 	reconciliationDirty: boolean,
+	allowStaleStructural: boolean,
 	allowStaleReconciliation: boolean,
 ): boolean {
-	return structuralDirty || (reconciliationDirty && !allowStaleReconciliation);
+	return (
+		(structuralDirty && !allowStaleStructural) ||
+		(reconciliationDirty && !allowStaleReconciliation)
+	);
 }

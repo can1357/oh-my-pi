@@ -15,8 +15,13 @@ describe("hello refresh invalidation", () => {
 	});
 
 	it("suppresses the first stale reconciliation snapshot but bounds continuous churn", () => {
-		expect(shouldSuppressHelloSnapshot(false, true, false)).toBe(true);
-		expect(shouldSuppressHelloSnapshot(false, true, true)).toBe(false);
-		expect(shouldSuppressHelloSnapshot(true, true, true)).toBe(true);
+		expect(shouldSuppressHelloSnapshot(false, true, false, false)).toBe(true);
+		expect(shouldSuppressHelloSnapshot(false, true, false, true)).toBe(false);
+	});
+
+	it("suppresses the first stale structural snapshot but bounds continuous tab churn", () => {
+		expect(shouldSuppressHelloSnapshot(true, false, false, false)).toBe(true);
+		expect(shouldSuppressHelloSnapshot(true, false, true, false)).toBe(false);
+		expect(shouldSuppressHelloSnapshot(true, true, true, false)).toBe(true);
 	});
 });
