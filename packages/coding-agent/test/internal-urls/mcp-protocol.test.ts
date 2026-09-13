@@ -525,6 +525,36 @@ describe("McpProtocolHandler", () => {
 		expect(allowed.isError ?? false).toBe(false);
 	});
 
+	it("refuses a scoped-out server's NATIVE-scheme resource, which also routes to MCP", async () => {
+		// A server can advertise a native URI (`ags://secret`) whose scheme no OMP
+		// handler claims; the router falls back to the MCP handler for it. Gating
+		// only `mcp://` would leave this whole class readable by a scoped child.
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("native-server", {
+			resources: [{ uri: "ags://secret", name: "secret" }],
+			templates: [],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["native-server"],
+				resources,
+				readResult: { contents: [{ uri: "ags://secret", text: "classified", mimeType: "text/plain" }] },
+			}),
+		);
+		InternalUrlRouter.instance();
+
+		const scoped = new ReadTool(createToolSession(server => server !== "native-server"));
+		await expect(scoped.execute("read-native-scoped-out", { path: "ags://secret" })).rejects.toThrow(
+			/No MCP server has resource/,
+		);
+
+		// Unscoped still reads it: the gate is the scope's, not a blanket refusal.
+		const allowed = await new ReadTool(createToolSession()).execute("read-native-unscoped", {
+			path: "ags://secret",
+		});
+		expect(allowed.isError ?? false).toBe(false);
+	});
+
 	it("reads an MCP resource when the session has no scope gate", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("open-server", {

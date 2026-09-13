@@ -2695,7 +2695,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// frames). Gate here, against the session the read tool is bound to,
 		// using the same URI→server resolution the router performs so the two
 		// cannot disagree about which server a URI belongs to.
-		if (scheme === "mcp") {
+		// The MCP handler answers TWO URL forms: the `mcp://<uri>` wrapper and a
+		// server-advertised native URI whose scheme no OMP handler claims
+		// (`ags://secret`). Gate on the router's own fallback predicate rather than
+		// `scheme === "mcp"`, or the native form stays readable while the scope
+		// excludes its server everywhere else.
+		if (internalRouter.routesToMcpResources(url)) {
 			const mcpManager = MCPManager.instance();
 			const serverName = mcpManager ? resolveTargetServer(mcpManager, extractResourceUri(urlMeta)) : undefined;
 			if (serverName !== undefined && this.session.isMCPServerResourceAllowed?.(serverName) === false) {
