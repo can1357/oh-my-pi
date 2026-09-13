@@ -1301,6 +1301,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.inlineModelPicker": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Inline Model Picker",
+			description:
+				"Search models in the existing chat input area, with results in a bordered popup and the statusline kept visible",
+		},
+	},
+
 	"display.shimmer": {
 		type: "enum",
 		values: ["classic", "kitt", "disabled"] as const,

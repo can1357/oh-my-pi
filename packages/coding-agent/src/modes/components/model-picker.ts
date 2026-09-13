@@ -1,11 +1,17 @@
 /**
- * Compact session-model picker (alt+p / `/switch`): a bottom-anchored
- * floating overlay hosting just a {@link ModelBrowser} — no provider sidebar.
- * Model entries switch the current session only; a search beginning with `@`
- * exposes the configured ctrl+p quick roles.
+ * Session-only model picker. Hosts may opt into a passive editor-area popup;
+ * the default remains the compact bottom-anchored overlay.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
-import { addKeyAliases, type Component, canonicalKeyId, type KeyId, parseKey, type TUI } from "@oh-my-pi/pi-tui";
+import {
+	addKeyAliases,
+	type Component,
+	canonicalKeyId,
+	type KeyId,
+	parseKey,
+	truncateToWidth,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
@@ -40,6 +46,10 @@ export interface ModelPickerCallbacks {
 }
 
 export interface ModelPickerOptions {
+	/** Replace only the existing editor rows; paint the list through the slash-popup path. */
+	editorRows?: number;
+	/** Preserve the editor's existing status chrome while replacing its input row. */
+	renderEditorRows?: (width: number) => readonly string[];
 	/** Session token count; models with smaller context windows are grayed and compact-first on pick. */
 	currentContextTokens?: number;
 	/** `provider/id` of the session's active model; highlighted and preselected. */
@@ -58,7 +68,7 @@ export interface ModelPickerOptions {
 	taskSelector?: string;
 }
 
-/** Fixed chrome rows: top border, status row, footer, bottom border. */
+/** Fixed chrome rows in the default picker. */
 const CHROME_ROWS = 4;
 /** Rows the browser renders around its list window (search + blank, blank + two detail rows). */
 const BROWSER_FRAME_ROWS = 5;
@@ -74,11 +84,7 @@ const FOOTER_HINT = "↑/↓ models · Enter use for this session · type to sea
 const QUICK_ROLE_FOOTER_HINT = "↑/↓ roles · Enter apply role model · type to search · Esc close";
 const TASK_FOOTER_HINT = "↑/↓ models · Enter use for Task subagents · type to search · Esc close";
 
-/**
- * The alt+p picker component. Hosted as a non-fullscreen bottom-anchored
- * overlay (`ui.showOverlay(..., { anchor: "bottom-center" })`); keyboard-only,
- * since mouse tracking is reserved for fullscreen overlays.
- */
+/** Search occupies the editor slot; results use the passive slash-popup renderer. */
 export class ModelPickerComponent implements Component {
 	#tui: TUI;
 	#settings: Settings;
@@ -96,6 +102,8 @@ export class ModelPickerComponent implements Component {
 	#taskMatchKeys = new Set<string>();
 	#taskModeKeyLabel: string;
 	#taskSelector: string | undefined;
+	#editorRows: number | undefined;
+	#renderEditorRows: ((width: number) => readonly string[]) | undefined;
 
 	constructor(
 		tui: TUI,
@@ -106,6 +114,8 @@ export class ModelPickerComponent implements Component {
 		options: ModelPickerOptions = {},
 	) {
 		this.#tui = tui;
+		this.#editorRows = options.editorRows;
+		this.#renderEditorRows = options.renderEditorRows;
 		this.#settings = settings;
 		this.#registry = registry;
 		this.#scopedModels = scopedModels;
@@ -122,6 +132,9 @@ export class ModelPickerComponent implements Component {
 		);
 
 		this.#browser = new ModelBrowser(settings, {
+			searchPrompt: options.editorRows === undefined ? undefined : "",
+			searchFocused: options.editorRows !== undefined,
+			searchIcon: options.editorRows === undefined ? undefined : "⌕",
 			currentContextTokens: options.currentContextTokens,
 			markOverContext: true,
 			emptyText: () => (this.#roleMode ? "  No quick roles in the Ctrl+P cycle" : undefined),
@@ -261,16 +274,43 @@ export class ModelPickerComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const termRows = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
-		const listBudget = Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS - BROWSER_FRAME_ROWS;
-		this.#browser.setMaxVisible(Math.max(MIN_VISIBLE, listBudget));
+		if (this.#editorRows !== undefined) {
+			const editorRows = this.#renderEditorRows?.(width);
+			const count = Math.max(1, editorRows?.length ?? this.#editorRows);
+			const rendered = this.#renderPicker(width, this.#tui.terminal.rows);
+			const search = rendered.pop() ?? "";
+			this.#tui.setCursorOverlay(
+				(popupWidth, available) => {
+					const rows = this.#renderPicker(popupWidth, available + 1);
+					rows.pop();
+					return rows.slice(-available);
+				},
+				count - 1,
+				count,
+			);
+			return [...(editorRows?.slice(0, -1) ?? Array.from({ length: count - 1 }, () => "")), search];
+		}
+		return this.#renderPicker(width, this.#tui.terminal.rows);
+	}
+
+	#renderPicker(width: number, availableRows: number): string[] {
+		const inline = this.#editorRows !== undefined;
+		const termRows = inline
+			? Math.max(1, availableRows)
+			: Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
+		const listBudget = inline
+			? Math.min(Math.max(MIN_VISIBLE, Math.floor(this.#tui.terminal.rows * HEIGHT_FRACTION) - 7), termRows - 7)
+			: Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS - BROWSER_FRAME_ROWS;
+		this.#browser.setMaxVisible(Math.max(inline ? 1 : MIN_VISIBLE, listBudget));
 
 		const inner = Math.max(1, width - 4);
 		const status = this.#configError
-			? theme.fg("error", ` ${this.#configError}`)
+			? this.#configError
 			: this.#taskMode
-				? theme.fg("error", ` ${TASK_STATUS_HINT}`)
-				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+				? TASK_STATUS_HINT
+				: this.#roleMode
+					? QUICK_ROLE_STATUS_HINT
+					: STATUS_HINT;
 
 		const borderColor: ThemeColor | undefined = this.#taskMode ? "error" : undefined;
 		let footer = this.#taskMode ? TASK_FOOTER_HINT : this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT;
@@ -279,13 +319,29 @@ export class ModelPickerComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
-		out.push(row(status, width, borderColor));
-		for (const line of this.#browser.render(inner)) {
-			out.push(row(line, width, borderColor));
+		if (!inline) {
+			out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
+			out.push(
+				row(theme.fg(this.#configError || this.#taskMode ? "error" : "muted", ` ${status}`), width, borderColor),
+			);
+			for (const line of this.#browser.render(inner)) out.push(row(line, width, borderColor));
+			out.push(row(theme.fg("dim", footer), width, borderColor));
+			out.push(bottomBorder(width, borderColor));
+			return out;
 		}
-		out.push(row(theme.fg("dim", footer), width, borderColor));
-		out.push(bottomBorder(width, borderColor));
+		const title = this.#taskMode ? "Switch Task Model" : "Switch Model";
+		const scope =
+			this.#roleMode || this.#taskMode || this.#configError ? status : "Session-only — role models stay unchanged";
+		out.push(topBorder(width, `${title} · ${scope}`, borderColor));
+		const [searchRow = "", ...browserRows] = this.#browser.render(inner);
+		for (const line of browserRows) out.push(row(line, width, borderColor));
+		out.push(
+			topBorder(width, footer, borderColor)
+				.replace(theme.boxRound.topLeft, theme.boxRound.bottomLeft)
+				.replace(theme.boxRound.topRight, theme.boxRound.bottomRight),
+		);
+		const placeholder = this.#browser.query ? "" : theme.fg("dim", "Search model…");
+		out.push(truncateToWidth(`${theme.fg(borderColor ?? "border", "╰─")}${searchRow.trim()}${placeholder}`, width));
 		return out;
 	}
 }

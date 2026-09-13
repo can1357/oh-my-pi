@@ -120,6 +120,9 @@ export interface RenderScheduler {
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 }
+/** Passive layer painted beside the editor, without allocating transcript rows. */
+export type CursorOverlayRenderer = (width: number, maxRows: number) => readonly string[];
+
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
 	readonly columns: number;
@@ -668,6 +671,12 @@ export class TUI extends Container {
 	// Screen row where the provider's mutable viewport begins (0-based); rows
 	// above it hold history still visible on the physical screen.
 	#providerViewportTop = 0;
+	#cursorOverlayRender: CursorOverlayRenderer | undefined;
+	#cursorOverlayOffset = 0;
+	#cursorOverlayEditorRows = 0;
+	#cursorOverlayBacking: { top: number; rows: string[]; painted: readonly string[] } | undefined;
+	/** Only the current physical screen, never native scrollback. */
+	#providerScreen: readonly string[] = [];
 	// Net composer-space offset of the published hit-test origin behind the
 	// painted top, from the last paint: replay-replaced rows minus viewport
 	// rows the paint prepended for a short viewport. Negative while prepended
@@ -882,10 +891,20 @@ export class TUI extends Container {
 		return mode === "append" || mode === "rebuild" || mode === "preserve" ? mode : "preserve";
 	}
 
+	/** Set a passive, non-focus-stealing layer for the current composed frame. */
+	setCursorOverlay(render: CursorOverlayRenderer | undefined, cursorOffset: number, editorRows: number): void {
+		this.#cursorOverlayRender = render;
+		this.#cursorOverlayOffset = cursorOffset;
+		this.#cursorOverlayEditorRows = editorRows;
+	}
+
 	/** Install the product-owned bounded frame provider. */
 	setFrameProvider(provider: TerminalFrameProvider | undefined): void {
 		this.#frameProvider = provider;
 		this.#providerWindow = [];
+		this.#providerScreen = [];
+		this.#cursorOverlayRender = undefined;
+		this.#cursorOverlayBacking = undefined;
 		this.#resizeReplaySize = undefined;
 		this.requestRender(true);
 	}
@@ -1115,6 +1134,7 @@ export class TUI extends Container {
 			this.#resizeAltActive ||
 			this.#resizeProbe !== undefined ||
 			this.#resizeInPlaceActive ||
+			this.#cursorOverlayBacking !== undefined ||
 			this.#ghosttyInitialImageDelayTimer !== undefined
 		) {
 			return { top: 0, length: 0 };
@@ -1834,11 +1854,23 @@ export class TUI extends Container {
 				this.#imageBudget.beginPass();
 				plan = provider.renderFrame({ columns: width, rows: height });
 			} while (this.#imageBudget.endPass());
-			if (plan.history === undefined) return;
+			if (plan.history === undefined) {
+				if (this.#cursorOverlayBacking) {
+					this.#emitPlanFrame(
+						width,
+						height,
+						Array.from(plan.viewport).slice(0, height),
+						undefined,
+						provider,
+						true,
+					);
+				}
+				return;
+			}
 			let viewport = Array.from(plan.viewport);
 			if (viewport.length > height) viewport = viewport.slice(0, height);
 			const acceptedBefore = this.#acceptedHistoryBatchId;
-			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+			this.#emitPlanFrame(width, height, viewport, plan.history, provider, true);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
 				throw new Error("History flush did not accept the offered batch");
 			}
@@ -2630,6 +2662,7 @@ export class TUI extends Container {
 		viewportRows: string[],
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
+		flushing = false,
 	): void {
 		let viewport = viewportRows;
 		if (this.#getTopmostVisibleOverlay() !== undefined) {
@@ -2707,8 +2740,30 @@ export class TUI extends Container {
 			!this.#forceViewportRepaintOnNextRender &&
 			!destructiveReset &&
 			this.#providerWindow.length > 0;
+		const marker = markers[0];
+		const editorTop = Math.max(0, newTop + (marker?.row ?? 0) - this.#cursorOverlayOffset);
+		const editorBottom = Math.min(height, editorTop + this.#cursorOverlayEditorRows);
+		const above = editorTop >= height - editorBottom;
+		const available = above ? editorTop : height - editorBottom;
+		const overlayRows =
+			marker && !flushing && !this.hasOverlay() && available > 0
+				? (this.#cursorOverlayRender?.(width, available) ?? [])
+				: [];
+		const overlayCount = Math.min(overlayRows.length, available);
+		const overlayTop = above ? editorTop - overlayCount : editorBottom;
+		const previousOverlay = this.#cursorOverlayBacking;
+		// Restore physical cells before an append can scroll them into history.
+		if (previousOverlay && geometryStable && !destructiveReset && !pendingAltExit) {
+			for (let index = 0; index < previousOverlay.rows.length; index++) {
+				const row = previousOverlay.top + index;
+				if (diffable && row >= overlayTop && row < overlayTop + overlayCount) continue;
+				buffer += `\x1b[${row + 1};1H${this.#lineRewriteSequence(previousOverlay.rows[index]!, width, row)}`;
+			}
+		}
+		this.#cursorOverlayBacking = undefined;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
+				if (newTop + index >= overlayTop && newTop + index < overlayTop + overlayCount) continue;
 				if (this.#providerWindow[index] === prepared[index]) continue;
 				buffer += `\x1b[${newTop + index + 1};1H${this.#lineRewriteSequence(
 					prepared[index] ?? "",
@@ -2762,11 +2817,28 @@ export class TUI extends Container {
 		}
 		const mutableTop = newTop + replayViewportRows;
 		const mutablePrepared = replayViewportRows > 0 ? prepared.slice(replayViewportRows) : prepared;
-		const marker = markers[0];
 		const target =
 			marker !== undefined && rows > 0
 				? this.#targetHardwareCursorState({ row: newTop + Math.min(marker.row, rows - 1), col: marker.col }, height)
 				: null;
+		const screenPrefix = destructiveReset ? [] : this.#providerScreen.slice(0, startTop);
+		while (screenPrefix.length < startTop) screenPrefix.push("");
+		this.#providerScreen = [...screenPrefix, ...preparedHistory.slice(-height), ...prepared].slice(-height);
+		if (overlayCount > 0) {
+			const covered: string[] = [];
+			for (let index = 0; index < overlayCount; index++) {
+				const row = overlayTop + index;
+				covered.push(this.#providerScreen[row] ?? "");
+				if (
+					diffable &&
+					this.#providerWindow.length === rows &&
+					previousOverlay?.painted[row - previousOverlay.top] === overlayRows[index]
+				)
+					continue;
+				buffer += `\x1b[${row + 1};1H${this.#lineRewriteSequence(overlayRows[index]!, width, row)}`;
+			}
+			this.#cursorOverlayBacking = { top: overlayTop, rows: covered, painted: overlayRows.slice(0, overlayCount) };
+		}
 		if (target) {
 			buffer += `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
 			this.#parkedViewportOffset = Math.max(0, target.row - mutableTop);
