@@ -1244,6 +1244,57 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		);
 	});
 
+	test("a reordered snapshot keeps each model denial on its own account", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		let reordered = false;
+		// A refreshed broker snapshot that lists the same rows in another order.
+		const brokerLike = new Proxy(sqlite, {
+			get(target, property) {
+				if (property === "refreshSnapshot") {
+					return async () => {
+						reordered = true;
+					};
+				}
+				if (property === "listAuthCredentials") {
+					return (provider?: string) => {
+						const rows = target.listAuthCredentials(provider);
+						return reordered ? rows.toReversed() : rows;
+					};
+				}
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const codexStorage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "denied-a", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "untried-b", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-reordered";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("denied-a");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "denied-a",
+			}),
+		).toBe(true);
+
+		// After the refresh B sits where A was; A's denial must not be charged to B.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "denied-a" }),
+		).toBeUndefined();
+		expect(reordered).toBe(true);
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("untried-b");
+	});
+
 	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
 		if (!store) throw new Error("test setup failed");
 		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });

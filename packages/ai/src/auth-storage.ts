@@ -1823,6 +1823,7 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
+		this.#remapIndexedBackoff(provider, current, credentials);
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -1839,6 +1840,46 @@ export class AuthStorage {
 			this.#data.set(provider, credentials);
 		}
 		this.#bumpGeneration("credentials");
+	}
+
+	/**
+	 * In-memory backoff is keyed by a credential's position in the provider
+	 * array. A reload that removes or reorders rows — a refreshed broker
+	 * snapshot, a sibling process's login — would otherwise leave every block
+	 * attached to whichever credential now occupies its old index, and an
+	 * exhaustion scan could charge one account's model denial to an untried
+	 * sibling. Carry each entry over by credential id and drop the ones whose
+	 * row is gone; persisted blocks are keyed by id already.
+	 */
+	#remapIndexedBackoff(
+		provider: string,
+		previous: readonly StoredCredential[],
+		next: readonly StoredCredential[],
+	): void {
+		if (previous.every((entry, index) => next[index]?.id === entry.id)) return;
+		const nextIndexById = new Map(next.map((entry, index) => [entry.id, index] as const));
+		// Keys are `provider:type` or `provider:type\0scope`; match per type so a
+		// provider id that is a prefix of another (managed MCP ids embed URLs)
+		// cannot claim the other's maps.
+		const providerKeys = (["oauth", "api_key"] as const).map(type => this.#getProviderTypeKey(provider, type));
+		const belongs = (backoffKey: string): boolean =>
+			providerKeys.some(key => backoffKey === key || backoffKey.startsWith(`${key}\0`));
+		const remap = <T>(maps: Map<string, Map<number, T>>): void => {
+			for (const [backoffKey, byIndex] of maps) {
+				if (!belongs(backoffKey)) continue;
+				const remapped = new Map<number, T>();
+				for (const [index, value] of byIndex) {
+					const id = previous[index]?.id;
+					const nextIndex = id === undefined ? undefined : nextIndexById.get(id);
+					if (nextIndex !== undefined) remapped.set(nextIndex, value);
+				}
+				if (remapped.size === 0) maps.delete(backoffKey);
+				else maps.set(backoffKey, remapped);
+			}
+		};
+		remap(this.#credentialBackoff);
+		remap(this.#credentialBackoffProviderTimed);
+		remap(this.#credentialBackoffProbeAfter);
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
