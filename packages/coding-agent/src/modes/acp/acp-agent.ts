@@ -63,6 +63,7 @@ import { loadAllExtensions } from "../../modes/components/extensions/state-manag
 import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
+import { AgentRegistry } from "../../registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -85,6 +86,7 @@ import {
 } from "../../tts/models";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
+import { mirrorAgentRegistry } from "./agent-registry-notification";
 import {
 	extractAssistantMessageText,
 	mapAgentSessionEventToAcpSessionUpdates,
@@ -617,11 +619,19 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	#stopRegistryMirror: (() => void) | undefined;
+	#registry: AgentRegistry;
 
-	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
+	constructor(
+		connection: AgentSideConnection,
+		createSession: CreateAcpSession,
+		initialSession?: AgentSession,
+		registry?: AgentRegistry,
+	) {
 		this.#connection = connection;
 		this.#initialSession = initialSession;
 		this.#createSession = createSession;
+		this.#registry = registry ?? AgentRegistry.global();
 	}
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
@@ -630,6 +640,17 @@ export class AcpAgent implements Agent {
 
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
+		// From initialize rather than the constructor: a subscription taken
+		// before the client has spoken would send on a connection that may
+		// never complete the handshake.
+		//
+		// An adopted `initialSession` never went through the ACP factory, so
+		// nothing has corrected the `running` status `createAgentSession`
+		// registered it with or subscribed to its transitions. Do that before the
+		// first frame, or the client's first roster is wrong about the one
+		// session it definitely has.
+		if (this.#initialSession) this.#registry.syncOwnedSession(this.#initialSession);
+		this.#stopRegistryMirror ??= mirrorAgentRegistry(this.#connection, this.#registry);
 		this.#clientCapabilities = params.clientCapabilities;
 		const authMethods: AuthMethod[] = [
 			{
@@ -1326,6 +1347,12 @@ export class AcpAgent implements Agent {
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
+		// Every session this agent adopts, whoever built it. The bundled ACP
+		// factory already syncs the one it hands back, and this is idempotent, but
+		// an embedder's own `AcpSessionFactory` is a supported entry point and its
+		// sessions arrive registered `running` by `createAgentSession`, as do the
+		// ones from load, resume, and fork.
+		this.#registry.syncOwnedSession(session);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
@@ -2795,6 +2822,8 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#disposePromise = (async () => {
+			this.#stopRegistryMirror?.();
+			this.#stopRegistryMirror = undefined;
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
 			await Promise.all(

@@ -153,6 +153,8 @@ async function createAgent(): Promise<AcpAgent> {
 	const abortController = new AbortController();
 	const connection = {
 		sessionUpdate: async () => {},
+		// `initialize` starts the agent-registry mirror, which sends here.
+		extNotification: async () => {},
 		signal: abortController.signal,
 		closed: Promise.withResolvers<void>().promise,
 	} as unknown as AgentSideConnection;

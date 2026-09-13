@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- ACP clients now receive the live subagent roster as a `notifications/agent_registry` extension notification ([#11302](https://github.com/can1357/oh-my-pi/pull/11302) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

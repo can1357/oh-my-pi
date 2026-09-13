@@ -133,6 +133,8 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	/** Keyed by session so a re-adopted session replaces its subscriptions instead of stacking them. */
+	readonly #ownedSessionUnsubscribes = new WeakMap<AgentSession, () => void>();
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -295,6 +297,49 @@ export class AgentRegistry {
 			this.setStatus(id, status, session);
 		});
 		return unsubscribe;
+	}
+
+	/**
+	 * Mirror run state onto whichever ref owns this session, and correct the
+	 * status it was registered with. Every ref is registered `running` before
+	 * its session exists, so a caller that owns a session rather than an id —
+	 * an ACP host adopting one, a factory handing one back — has no way to say
+	 * "this is idle now" without first finding its ref. Returns false when no
+	 * ref owns the session, which is the normal answer for a session the
+	 * registry never took.
+	 *
+	 * Also publishes the changes a session makes to itself that no registry
+	 * mutation describes: adopting a different `sessionId` (`newSession`,
+	 * `fork`, `switchSession`, `/fresh`) and switching model. A listener that
+	 * reports either — the ACP roster notification, the hub, collab guests —
+	 * would otherwise keep serving a dead value until something unrelated
+	 * changed. The event filter runs on the session's whole stream, so it stays
+	 * a single type comparison and never emits at streaming rate.
+	 *
+	 * Idempotent: several owners legitimately adopt the same session — the ACP
+	 * factory hands one back and the ACP agent then registers it — and a second
+	 * call replaces the first's subscriptions rather than stacking on them.
+	 */
+	syncOwnedSession(session: AgentSession): boolean {
+		for (const ref of this.#refs.values()) {
+			if (ref.session !== session) continue;
+			this.#ownedSessionUnsubscribes.get(session)?.();
+			const publish = (): void => {
+				if (this.#refs.get(ref.id) === ref) this.#emit({ type: "metadata_changed", ref });
+			};
+			const stopRunState = this.syncSessionStatus(ref.id, session);
+			const stopIdentity = session.registerSessionIdentityChangeCallback(publish);
+			const stopModel = session.subscribe(event => {
+				if (event.type === "model_changed") publish();
+			});
+			this.#ownedSessionUnsubscribes.set(session, () => {
+				stopRunState();
+				stopIdentity();
+				stopModel();
+			});
+			return this.setStatus(ref.id, session.isStreaming ? "running" : "idle", session);
+		}
+		return false;
 	}
 
 	onChange(listener: RegistryListener): () => void {

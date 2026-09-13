@@ -109,4 +109,36 @@ describe("AgentSession fresh provider state", () => {
 		expect(session.sessionId).toBe(sessionManager.getSessionId());
 		expect(session.sessionId).not.toBe(freshResult.sessionId);
 	});
+
+	it("notifies session-change observers when only the provider id rotates", async () => {
+		const { session, sessionManager } = await createFreshHarness();
+		const seen: string[] = [];
+		const unregister = session.registerSessionIdentityChangeCallback(() => {
+			seen.push(session.sessionId);
+		});
+		const transcriptChanges: string[] = [];
+		const unregisterTranscript = session.registerSessionChangeCallback(() => {
+			transcriptChanges.push(sessionManager.getSessionId());
+		});
+		try {
+			// `/fresh` leaves the transcript and its manager id alone, so an
+			// observer watching the manager sees nothing while the id it actually
+			// reads, `session.sessionId`, has already moved.
+			const fresh = session.freshSession();
+			expect(fresh).toBeDefined();
+			if (!fresh) return;
+			expect(sessionManager.getSessionId()).toBe(fresh.previousSessionId);
+			expect(seen).toEqual([fresh.sessionId]);
+			expect(transcriptChanges).toEqual([]);
+
+			// And the reverse transition, back onto the manager's own id.
+			await session.newSession();
+			expect(seen).toHaveLength(2);
+			expect(seen[1]).toBe(session.sessionId);
+			expect(transcriptChanges).toHaveLength(1);
+		} finally {
+			unregister();
+			unregisterTranscript();
+		}
+	});
 });

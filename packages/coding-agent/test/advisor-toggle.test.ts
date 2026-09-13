@@ -747,6 +747,46 @@ describe("AgentSession advisor toggle", () => {
 			load.mockRestore();
 		}
 	});
+	it("preserves an initial cost restore during a provider-only reset", async () => {
+		const restore = Promise.withResolvers<Map<string, number>>();
+		const load = vi.spyOn(advisorModule, "loadAdvisorTranscriptCosts").mockImplementation((_file, options) => {
+			options?.onSnapshot?.();
+			return restore.promise;
+		});
+		try {
+			session.beginInitialAdvisorCostRestore();
+			const fresh = session.freshSession();
+			expect(fresh).toBeDefined();
+			restore.resolve(new Map([["", 0.5]]));
+			await session.advisorCostRestore;
+
+			expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
+		} finally {
+			load.mockRestore();
+		}
+	});
+	it("ignores an initial cost restore after switching sessions", async () => {
+		const targetSessionFile = SessionManager.createEmptySessionFile(tempDir.path());
+		const restore = Promise.withResolvers<Map<string, number>>();
+		const initialFile = session.sessionFile;
+		const load = vi.spyOn(advisorModule, "loadAdvisorTranscriptCosts").mockImplementation(async (file, options) => {
+			if (file === initialFile) {
+				options?.onSnapshot?.();
+				return restore.promise;
+			}
+			return new Map();
+		});
+		try {
+			session.beginInitialAdvisorCostRestore();
+			expect(await session.switchSession(targetSessionFile)).toBe(true);
+			restore.resolve(new Map([["", 0.5]]));
+			await session.advisorCostRestore;
+
+			expect(session.getAdvisorCost()).toBe(0);
+		} finally {
+			load.mockRestore();
+		}
+	});
 	it("starts a new session with only post-transition advisor cost", async () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);

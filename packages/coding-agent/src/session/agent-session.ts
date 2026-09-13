@@ -604,7 +604,10 @@ export class AgentSession {
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
+	#sessionIdentityChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
+	/** Manager id and provider id together; either moving is an identity change. */
+	#observedSessionIdentity: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
@@ -4344,10 +4347,16 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
-	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
+	/** Register cleanup that runs when this AgentSession adopts a different transcript / session manager ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
 		return () => this.#sessionChangeCallbacks.delete(callback);
+	}
+
+	/** Register notification that runs when this AgentSession's provider-facing session identity rotates. */
+	registerSessionIdentityChangeCallback(callback: () => void): () => void {
+		this.#sessionIdentityChangeCallbacks.add(callback);
+		return () => this.#sessionIdentityChangeCallbacks.delete(callback);
 	}
 
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
@@ -4432,7 +4441,19 @@ export class AgentSession {
 			this.#observedSessionId = currentSessionId;
 			if (notifyChange) this.#notifySessionChangeCallbacks();
 		}
+
 		const sid = this.#activeProviderSessionId(sessionId);
+		// Both halves, because observers read `AgentSession.sessionId`, which is
+		// the provider-facing one: a transcript switch moves the manager's id,
+		// while `/fresh` and `/clear` move only the provider id. Watching the
+		// manager alone left every observer serving a dead id after `/fresh`.
+		const identity = `${currentSessionId}\u0000${sid}`;
+		if (this.#observedSessionIdentity === undefined) {
+			this.#observedSessionIdentity = identity;
+		} else if (this.#observedSessionIdentity !== identity) {
+			this.#observedSessionIdentity = identity;
+			if (notifyChange) this.#notifySessionIdentityChangeCallbacks();
+		}
 		this.agent.sessionId = sid;
 		this.agent.setMetadataResolver((provider: string) =>
 			buildSessionMetadata(sid, provider, this.#modelRegistry.authStorage),
@@ -4459,6 +4480,15 @@ export class AgentSession {
 				callback();
 			} catch (error) {
 				logger.warn("Session change callback failed", { error: String(error) });
+			}
+		}
+	}
+	#notifySessionIdentityChangeCallbacks(): void {
+		for (const callback of Array.from(this.#sessionIdentityChangeCallbacks)) {
+			try {
+				callback();
+			} catch (error) {
+				logger.warn("Session identity change callback failed", { error: String(error) });
 			}
 		}
 	}
@@ -4778,6 +4808,7 @@ export class AgentSession {
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
+		this.#sessionIdentityChangeCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -9280,6 +9311,7 @@ export class AgentSession {
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
+				this.#notifySessionIdentityChangeCallbacks();
 			}
 			transitionSettled.resolve();
 			this.#sessionTransitionSettled = previousSessionTransitionSettled;
