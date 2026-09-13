@@ -57,6 +57,23 @@ const NO_TOOL_PLANE_MODEL: Model<"anthropic-messages"> = buildModel({
 	maxTokens: 8_192,
 });
 
+// Deployments that escape builtin tool names (Umans-hosted models, and every
+// OAuth request) put tool names on the wire behind the `_` transport prefix,
+// so the byte-stability plane sees `_bash` where the user configured `bash`.
+const ESCAPED_TOOL_NAMES_MODEL: Model<"anthropic-messages"> = buildModel({
+	id: "claude-opus-4-8",
+	name: "Claude Opus 4.8",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+	contextWindow: 200_000,
+	maxTokens: 8_192,
+	compat: { escapeBuiltinToolNames: true },
+});
+
 const SESSION_ID = "cache-break-attribution-session";
 
 function tool(name: string, properties: Record<string, unknown>): Tool {
@@ -174,7 +191,7 @@ async function turn(
 	cacheRetention?: CacheRetention,
 	model: Model<"anthropic-messages"> = MODEL,
 	fetch: FetchImpl = successFetch,
-	options: Pick<AnthropicOptions, "onPayload" | "sessionId"> = {},
+	options: Pick<AnthropicOptions, "onPayload" | "sessionId" | "promptCacheKey"> = {},
 ): Promise<AssistantMessage> {
 	return await streamAnthropic(model, context, {
 		apiKey: "sk-ant-api-test",
@@ -620,5 +637,109 @@ describe("anthropic cache-break attribution", () => {
 
 		expect(turnScopedSent).toBe(1);
 		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("reports a rewritten history for a prompt-cache-key caller with no session id", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		// A direct caller (the Anthropic-compatible server, the auth gateway)
+		// declares its cache identity as a prompt cache key. Request setup already
+		// routes on it, so diagnostics must key on it too: falling back to the
+		// conversation root gives the compacted turn its own snapshot key, finds
+		// nothing to compare against, and leaves the cold turn unexplained.
+		const identity: Pick<AnthropicOptions, "sessionId" | "promptCacheKey"> = {
+			sessionId: undefined,
+			promptCacheKey: "prompt-cache-key-without-session",
+		};
+		await turn(
+			states,
+			{
+				...base,
+				messages: [
+					{ role: "user", content: "Use the tools", timestamp: 1 },
+					assistantTurn([{ type: "text", text: "on it" }], 2),
+					{ role: "user", content: "keep going", timestamp: 3 },
+				],
+			},
+			undefined,
+			MODEL,
+			successFetch,
+			identity,
+		);
+		const second = await turn(
+			states,
+			{
+				...base,
+				messages: [{ role: "user", content: "Summary: the user wanted the tools exercised.", timestamp: 4 }],
+			},
+			undefined,
+			MODEL,
+			successFetch,
+			identity,
+		);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("scopes diagnostics to the declared prompt cache key rather than the conversation root", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const conversation = (opening: string): Context => ({
+			...base,
+			messages: [{ role: "user", content: opening, timestamp: 1 }],
+		});
+		const first = conversation("first conversation");
+		const second = conversation("second conversation");
+		const under = (
+			promptCacheKey: string,
+		): Pick<AnthropicOptions, "sessionId" | "promptCacheKey"> & { sessionId: undefined } => ({
+			sessionId: undefined,
+			promptCacheKey,
+		});
+		// One key is one cache identity, exactly as one session id is: the two
+		// conversations share a snapshot and each reads as a rewrite of the other.
+		// That is the same self-healing imprecision a shared session id has always
+		// carried — the consumer only surfaces a reason on a turn that went cold —
+		// and the alternative, mixing the root back into the key, is what loses
+		// attribution across a compaction.
+		await turn(states, first, undefined, MODEL, successFetch, under("shared"));
+		const interleaved = await turn(states, second, undefined, MODEL, successFetch, under("shared"));
+		const returned = await turn(states, first, undefined, MODEL, successFetch, under("shared"));
+		// Distinct keys partition the snapshots, so the same interleaving is
+		// silent: the rewrite above is caused by the shared identity, not by
+		// anything about the two histories.
+		await turn(states, first, undefined, MODEL, successFetch, under("own-key-a"));
+		await turn(states, second, undefined, MODEL, successFetch, under("own-key-b"));
+		const isolated = await turn(states, first, undefined, MODEL, successFetch, under("own-key-a"));
+
+		expect(interleaved.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+		expect(returned.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+		expect(isolated.cacheBreakReason).toBeUndefined();
+	});
+
+	it("names the internal tool rather than its wire name when an escaped tool is redefined", async () => {
+		const states = createProviderSessionState();
+		let sentToolNames: string[] = [];
+		await turn(states, contextWithTools([tool("bash", {})]), undefined, ESCAPED_TOOL_NAMES_MODEL);
+		// The reason is persisted on the AssistantMessage and printed in the
+		// cache-miss marker, so it has to name the tool the user configured. The
+		// wire name is asserted alongside it: without the transport prefix really
+		// being applied, the decode this defends would be a no-op.
+		const second = await turn(
+			states,
+			contextWithTools([tool("bash", { command: { type: "string" } })]),
+			undefined,
+			ESCAPED_TOOL_NAMES_MODEL,
+			successFetch,
+			{
+				onPayload: payload => {
+					const sent = payload as { tools?: Array<{ name: string }> };
+					sentToolNames = (sent.tools ?? []).map(entry => entry.name);
+				},
+			},
+		);
+
+		expect(sentToolNames).toEqual(["_bash"]);
+		expect(second.cacheBreakReason).toEqual({ kind: "tools", tool: "bash" });
 	});
 });

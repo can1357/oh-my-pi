@@ -2369,6 +2369,19 @@ const streamAnthropicOnce = (
 				});
 			}
 
+			// The cache identity this request routes on, resolved once: an explicit
+			// `sessionId`, else the session embedded in a Claude-Code-shaped
+			// `metadata.user_id`, else the declared `promptCacheKey`. `createClient`
+			// takes it for transport affinity and the Claude Code session header and
+			// `buildParams` keys cache-break diagnostics on the same value, so
+			// routing and attribution always describe one conversation. Letting the
+			// diagnostics key resolve its own identity is what made a caller with a
+			// `promptCacheKey` but no `sessionId` fall back to the conversation root,
+			// which a compaction or branch rewrite replaces — the very event the
+			// report exists to name.
+			const cacheIdentity =
+				options?.sessionId ?? extractClaudeMetadataSessionId(options?.metadata?.user_id) ?? options?.promptCacheKey;
+
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
@@ -2493,10 +2506,7 @@ const streamAnthropicOnce = (
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
-					sessionId:
-						options?.sessionId ??
-						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
-						options?.promptCacheKey,
+					sessionId: cacheIdentity,
 					disableStrictTools,
 				});
 				client = created.client;
@@ -2509,6 +2519,7 @@ const streamAnthropicOnce = (
 			let commitCacheBreakSnapshot: () => void = () => {};
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				const built = buildParams(model, preparedContext, isOAuthToken, options, {
+					cacheIdentity,
 					compactionSupported,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
@@ -4226,18 +4237,28 @@ function anthropicHistoryChain(messages: readonly MessageParam[], markAt: number
 /**
  * Conversation identity for one request. The two keys differ on purpose.
  *
- * `controlKey` is the control-state key: session + system texts + conversation
- * root, so editing the system prompt or replacing the root yields a fresh
- * baseline rather than mutating the existing one.
+ * `controlKey` is the control-state key: cache identity + system texts +
+ * conversation root, so editing the system prompt or replacing the root yields
+ * a fresh baseline rather than mutating the existing one.
  *
  * `conversationKey` is the diagnostics key and must survive exactly the events
  * diagnostics exist to name: it drops the system texts so a system-prompt edit
  * is observable, and it drops the conversation root so a compaction or branch
  * summary — which replaces the first wire message — still finds the snapshot
- * it rewrote. The session id is stable across both, so it is the whole key
- * whenever the caller supplies one; only a session-less request falls back to
- * the root message, and then a root replacement simply reads as a new
- * conversation.
+ * it rewrote.
+ *
+ * `identity` is the cache identity the request itself routes on, resolved by
+ * `streamAnthropic` from `sessionId`, a Claude-Code-shaped `metadata.user_id`,
+ * or `promptCacheKey` and handed to `createClient` unchanged. It is stable
+ * across both keys, so it is the whole diagnostics key whenever the caller
+ * declares one — including through `promptCacheKey` alone, which is a declared
+ * cache identity and therefore scopes diagnostics exactly like a session id.
+ * Two conversations sharing one identity share one snapshot and read as
+ * rewrites of each other; that is the same accepted, self-healing imprecision
+ * a shared session id has always carried, and the only alternative — mixing
+ * the root back in — is what breaks attribution across a compaction. Only a
+ * request with no identity at all falls back to the root message, and then a
+ * root replacement simply reads as a new conversation.
  */
 type AnthropicConversationIdentity = {
 	conversationKey: string;
@@ -4245,14 +4266,14 @@ type AnthropicConversationIdentity = {
 };
 
 function anthropicConversationIdentity(
-	sessionId: string | undefined,
+	identity: string | undefined,
 	system: readonly AnthropicSystemBlock[] | undefined,
 	messages: readonly MessageParam[],
 ): AnthropicConversationIdentity {
 	const root = messages[0];
 	const rootProjection = root ? anthropicControlMessageProjection(root) : null;
-	const session = sessionId ?? "";
-	const conversationScope = sessionId !== undefined ? [sessionId] : [null, rootProjection];
+	const session = identity ?? "";
+	const conversationScope = identity !== undefined ? [identity] : [null, rootProjection];
 	return {
 		conversationKey: String(Bun.hash(JSON.stringify(conversationScope))),
 		controlKey: String(Bun.hash(JSON.stringify([session, system?.map(block => block.text) ?? null, rootProjection]))),
@@ -4372,12 +4393,19 @@ function recordAnthropicControlTransition(
  * appended with `defer_loading: true` (not part of the checked prefix until
  * referenced) and offered with `tool_addition`. A changed definition for an
  * already-declared name cannot be expressed as a control and re-baselines.
+ *
+ * `current` holds wire names, so the tool blamed for a re-baseline is decoded
+ * back to its internal name before it is recorded: the reason is persisted on
+ * the `AssistantMessage` and shown to the user, who configured `bash`, not the
+ * `_bash` the OAuth/`escapeBuiltinToolNames` transport prefix produces.
  */
 function planStableAnthropicTools(
 	current: AnthropicWireTool[] | undefined,
 	messages: readonly MessageParam[],
 	state: AnthropicControlState | undefined,
 	enabled: boolean,
+	isOAuthToken: boolean,
+	escapeBuiltinToolNames: boolean,
 ): AnthropicWireTool[] | undefined {
 	if (!state || !enabled || !current) return current;
 	if (!state.declaredTools) {
@@ -4392,7 +4420,10 @@ function planStableAnthropicTools(
 		if (declared && anthropicToolDefinitionKey(declared) !== anthropicToolDefinitionKey(tool)) {
 			// A redefined tool cannot be expressed as a control, so the declared
 			// `tools` array — part of the cached prefix — is rewritten.
-			resetAnthropicControlState(state, { kind: "tools", tool: tool.name });
+			resetAnthropicControlState(state, {
+				kind: "tools",
+				tool: decodeAnthropicToolName(tool.name, isOAuthToken, escapeBuiltinToolNames),
+			});
 			state.declaredTools = cloneAnthropicTools(current);
 			state.activeToolNames = new Set(current.map(candidate => candidate.name));
 			return cloneAnthropicTools(state.declaredTools);
@@ -4577,7 +4608,8 @@ const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefin
  * fingerprint this used to store alongside it: a replaced root changes the
  * chain at index 0 and therefore at every later index too. The root
  * fingerprint survives only inside {@link anthropicConversationIdentity},
- * where it keys a session-less conversation rather than describing its shape.
+ * where it keys a conversation whose caller declared no cache identity rather
+ * than describing its shape.
  *
  * The tools array is read two different ways depending on where it came from.
  * Where `supportsMidConversationToolChanges` holds, {@link
@@ -4605,13 +4637,13 @@ const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefin
  * {@link planStableAnthropicSystem}, whose re-baseline branch also fires for
  * every freshly created control state.
  *
- * Side requests normally use distinct `:side:` session ids and are isolated by
- * `conversationKey`. A request sharing the main session id with a different
- * prefix (for example an in-session summarizer without that suffix) can cause
- * one misattributed reason on the next main turn. That turn overwrites the
- * snapshot, so attribution self-heals. This is acceptable because the consumer
- * only surfaces a reason on a turn that actually went cold, and such a turn
- * is usually not cold.
+ * Side requests normally use distinct `:side:` cache identities and are
+ * isolated by `conversationKey`. A request sharing the main identity with a
+ * different prefix (for example an in-session summarizer without that suffix)
+ * can cause one misattributed reason on the next main turn. That turn
+ * overwrites the snapshot, so attribution self-heals. This is acceptable
+ * because the consumer only surfaces a reason on a turn that actually went
+ * cold, and such a turn is usually not cold.
  */
 function detectAnthropicCacheBreak(
 	state: AnthropicProviderSessionState | undefined,
@@ -4683,6 +4715,13 @@ function detectAnthropicCacheBreak(
 }
 
 type AnthropicParamBuildOptions = {
+	/**
+	 * The cache identity `streamAnthropic` resolved for this request and handed
+	 * to {@link createClient}. Required rather than re-derived here so cache
+	 * routing and cache-break attribution cannot drift apart; `undefined` means
+	 * the caller declared none at all.
+	 */
+	cacheIdentity: string | undefined;
 	disableStrictTools: boolean;
 	useUmansGatewayWebSearch: boolean;
 	forceDemoteUnsignedThinking: boolean;
@@ -4723,6 +4762,7 @@ function buildParams(
 	buildOptions: AnthropicParamBuildOptions,
 ): AnthropicBuiltParams {
 	const {
+		cacheIdentity,
 		disableStrictTools,
 		useUmansGatewayWebSearch,
 		forceDemoteUnsignedThinking,
@@ -4879,11 +4919,18 @@ function buildParams(
 		dropAllThinking,
 		droppedThinkingBlocks,
 	});
-	const conversation = anthropicConversationIdentity(options?.sessionId, systemBlocks, wireMessages);
+	const conversation = anthropicConversationIdentity(cacheIdentity, systemBlocks, wireMessages);
 	const controlState = getAnthropicControlState(providerSessionState, conversation.controlKey);
 	if (controlState) syncAnthropicControlState(controlState, wireMessages);
 	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
-	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
+	tools = planStableAnthropicTools(
+		tools,
+		wireMessages,
+		controlState,
+		model.compat.supportsMidConversationToolChanges,
+		isOAuthToken,
+		model.compat.escapeBuiltinToolNames,
+	);
 	// Consume baseline reset diagnostics now; the caller compares the final
 	// payload after its hook and commits the snapshot only on success.
 	const controlReason = controlState?.pendingCacheBreakReason;
