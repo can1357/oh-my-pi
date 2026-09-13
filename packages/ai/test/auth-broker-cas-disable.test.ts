@@ -357,7 +357,7 @@ describe("credential disable bearer CAS", () => {
 			}
 		});
 
-		test("remote disable diagnostics redact managed provider URLs and echoed credentials", async () => {
+		test("remote replacement diagnostics redact managed provider URLs and echoed credentials", async () => {
 			const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
 			storage.upsertCredential(provider, credential);
 			const remoteStore = await openRemote();
@@ -368,7 +368,7 @@ describe("credential disable bearer CAS", () => {
 					new AuthBrokerError('HTTP 503 {"refresh_token":"RTSECRET","error":"temporarily unavailable"}'),
 				);
 			try {
-				await remoteStore.deleteAuthCredentialsRemote(provider, "deleted by user");
+				await remoteStore.replaceAuthCredentialsRemote(provider, [rotated]);
 				const diagnostics = warnSpy.mock.calls.map(([, meta]) => meta);
 				expect(diagnostics).toEqual([
 					expect.objectContaining({
