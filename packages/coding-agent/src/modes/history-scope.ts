@@ -84,7 +84,7 @@ export function bindHistoryScope(
 	scope: () => HistoryScope,
 ): Pick<HistoryStorage, "add" | "getRecent"> {
 	return {
-		add: (prompt, cwd, sessionId) => storage.add(prompt, cwd, sessionId),
+		add: (prompt, cwd) => storage.add(prompt, cwd),
 		getRecent: limit => storage.getRecent(limit, scope()),
 	};
 }

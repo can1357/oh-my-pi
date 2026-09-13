@@ -446,7 +446,7 @@ interface HistoryEntry {
 }
 
 interface HistoryStorage {
-	add(prompt: string, cwd?: string, sessionId?: string): Promise<void>;
+	add(prompt: string, cwd?: string): Promise<void>;
 	getRecent(limit: number): HistoryEntry[];
 }
 
@@ -880,18 +880,30 @@ export class Editor implements Component, Focusable {
 	#rehydrateHistory(): void {
 		const key = this.#historySourceKey?.() ?? "";
 		if (key === this.#historySourceKeyValue) return;
-		this.#historySourceKeyValue = key;
 		const storage = this.#historyStorage;
 		// Without persistent storage the list is the editor's own: never drop it.
-		if (!storage) return;
+		if (!storage) {
+			this.#historySourceKeyValue = key;
+			return;
+		}
+		// Publish the key before the read so a storage that re-enters the editor cannot start a
+		// second seed for the same change, and put the previous one back if the read fails: the
+		// next browse must retry this data set rather than serve the list it was replacing.
+		const previousKey = this.#historySourceKeyValue;
+		this.#historySourceKeyValue = key;
+		let recent: HistoryEntry[];
+		try {
+			recent = storage.getRecent(HISTORY_LIMIT);
+		} catch (error) {
+			this.#historySourceKeyValue = previousKey;
+			throw error;
+		}
+		// Nothing below can fail, so the list and the key it belongs to change together.
 		const drafts = this.#history.filter(entry => entry.draft !== undefined);
 		// Recalled draft payloads live in the editor, not in the list; with no draft carried
 		// over there is nothing left to restore, so the flag must not survive the re-seed.
 		if (drafts.length === 0) this.#historyDraftActive = false;
-		this.#history = [...drafts, ...storage.getRecent(HISTORY_LIMIT).map(entry => ({ text: entry.prompt }))].slice(
-			0,
-			HISTORY_LIMIT,
-		);
+		this.#history = [...drafts, ...recent.map(entry => ({ text: entry.prompt }))].slice(0, HISTORY_LIMIT);
 		this.#historyIndex = -1;
 	}
 

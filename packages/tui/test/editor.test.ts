@@ -206,6 +206,41 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("persisted in A");
 		});
 
+		it("retries the seed after a failed read instead of serving the previous context", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "prompt from the first context" }],
+				second: [{ prompt: "prompt from the second context" }],
+			};
+			let key = "first";
+			let failNextRead = false;
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage(
+				{
+					add: async () => {},
+					getRecent: () => {
+						if (failNextRead) {
+							failNextRead = false;
+							throw new Error("storage read failed");
+						}
+						return byKey[key] ?? [];
+					},
+				},
+				() => key,
+			);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the first context");
+
+			// The read fails while the context is moving: the failure must not pin the old data set.
+			key = "second";
+			failNextRead = true;
+			editor.setText("");
+			expect(() => editor.handleInput("\x1b[A")).toThrow("storage read failed");
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the second context");
+		});
+
 		it("carries a canceled draft across a context change, keeping its payload expandable", () => {
 			const byKey: Record<string, { prompt: string }[]> = {
 				first: [{ prompt: "persisted from the first context" }],
