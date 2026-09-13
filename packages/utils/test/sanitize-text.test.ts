@@ -89,17 +89,84 @@ describe("redactUrlSecrets", () => {
 		);
 	});
 
-	it("touches only the URL inside prose and keeps trailing punctuation outside it", () => {
+	it("keeps safe prose around URLs without treating ambiguous punctuation as safe", () => {
 		expect(redactUrlSecrets("request to https://host/token?flow=refresh returned invalid_grant")).toBe(
 			"request to https://host/token?flow=refresh returned invalid_grant",
 		);
-		expect(redactUrlSecrets("see https://host/x?apiKey=1, then retry.")).toBe(
-			"see https://host/x?apiKey=[redacted], then retry.",
+		const output = redactUrlSecrets("see https://host/x?apiKey=abc! then retry.");
+		expect(output.startsWith("see https://host/x?apiKey=")).toBe(true);
+		expect(output.endsWith(" then retry.")).toBe(true);
+		expect(output).not.toContain("abc");
+		expect(output).not.toContain("!");
+	});
+
+	it("removes complete punctuation-only and punctuation-suffixed secret values", () => {
+		const url = "https://host/mcp?token=!!!&apiKey=abc!#password=.,;:!?)";
+		const redacted = new URL(redactUrlSecrets(url));
+		expect(redacted.searchParams.get("token")).toBe("[redacted]");
+		expect(redacted.searchParams.get("apiKey")).toBe("[redacted]");
+		expect(new URLSearchParams(redacted.hash.slice(1)).get("password")).toBe("[redacted]");
+		expect(redactSecrets("request https://host/mcp?token=!!! failed")).toBe(
+			"request https://host/mcp?token=[redacted] failed",
 		);
+	});
+
+	it.each([
+		["space", "https://host/mcp?ref=hello world&apiKey=native-secret"],
+		["tab", "https://host/mcp?ref=hello\tworld&api\tKey=native-secret"],
+		["quote", 'https://host/mcp?ref=hello"world&apiKey=native-secret'],
+	])("uses the receiving URL parser for a literal %s before a credential", (_boundary, input) => {
+		const received = new URL(input);
+		expect(received.searchParams.get("apiKey")).toBe("native-secret");
+		for (const prefix of ["", "mcp_oauth:profile:default:"]) {
+			const output = redactUrlSecrets(prefix + input);
+			expect(output.startsWith(prefix)).toBe(true);
+			const redacted = new URL(output.slice(prefix.length));
+			expect(redacted.searchParams.get("apiKey")).toBe("[redacted]");
+			expect(redacted.searchParams.get("ref")).toBe(received.searchParams.get("ref"));
+			expect(output).not.toContain("native-secret");
+		}
 	});
 });
 
 describe("redactSecrets", () => {
+	it("redacts entire authorization fields regardless of scheme", () => {
+		for (const scheme of ["Token", "Digest", "ApiKey", "Custom-Scheme", "Bearer", "Basic"]) {
+			const output = redactSecrets(`Authorization: ${scheme} abc123; status=keep`);
+			expect(output).not.toContain("abc123");
+			expect(output).not.toContain(scheme);
+		}
+	});
+
+	it("redacts complete native authorization values and preserves structured neighbors", () => {
+		for (const value of ['Token prefix;TAIL_SECRET, "quoted tail"', "ApiKey prefix}TAIL_SECRET unquoted tail"]) {
+			const headers = new Headers({ Authorization: value });
+			expect(headers.get("Authorization")).toBe(value);
+			const diagnostic = redactSecrets(`Authorization: ${headers.get("Authorization")}\nstatus=keep`);
+			expect(diagnostic).not.toContain("prefix");
+			expect(diagnostic).not.toContain("TAIL_SECRET");
+			expect(diagnostic).not.toContain("tail");
+			expect(diagnostic).toContain("\nstatus=keep");
+			expect(JSON.parse(redactSecrets(JSON.stringify({ Authorization: value, status: "keep" })))).toEqual({
+				Authorization: "[redacted]",
+				status: "keep",
+			});
+		}
+	});
+
+	it("redacts parsed authorization values with escaped names and quotes as whole fields", () => {
+		const input = String.raw`{"Authoriz\u0061tion":"Custom-Scheme first \"second, third\"","status":"keep"}`;
+		expect(JSON.parse(redactSecrets(input))).toEqual({ Authorization: "[redacted]", status: "keep" });
+		const encoded = JSON.stringify(input);
+		expect(JSON.parse(JSON.parse(redactSecrets(encoded)))).toEqual({ Authorization: "[redacted]", status: "keep" });
+	});
+
+	it("withholds unterminated authorization quotes and their escaped tails", () => {
+		for (const prefix of ['Token "', "Basic '", String.raw`Digest \"`]) {
+			expect(redactSecrets("Authorization: " + prefix + "truncated-secret\\")).toBe("Authorization: [redacted]");
+		}
+	});
+
 	it("redacts compound key labels separated by whitespace", () => {
 		for (const label of ["Invalid API key", "private key", "access\tkey", "auth code"]) {
 			const output = redactSecrets(`${label}: opaque-secret`);
@@ -144,7 +211,7 @@ describe("redactSecrets", () => {
 			nested: JSON.stringify({ oauth_code: "nested-encoded-secret", status: "keep" }),
 		});
 		expect(JSON.parse(redactSecrets(input))).toEqual({
-			error_description: "client_secret=\"[redacted]\" rejected; Authorization: Basic '[redacted]'",
+			error_description: 'client_secret="[redacted]" rejected; Authorization: [redacted]',
 			detail: 'server said "} still inside the string"',
 			nested: JSON.stringify({ oauth_code: "[redacted]", status: "keep" }),
 		});
@@ -160,10 +227,7 @@ describe("redactSecrets", () => {
 		expect(JSON.parse(output)).toEqual({ detail: "safe" });
 	});
 
-	it("consumes quoted authorization and mixed quoted assignment values", () => {
-		expect(
-			redactSecrets("Authorization: Bearer \"alpha beta\"; Authorization: Basic 'gamma delta'; status=keep"),
-		).toBe("Authorization: Bearer \"[redacted]\"; Authorization: Basic '[redacted]'; status=keep");
+	it("consumes mixed quoted assignment values", () => {
 		expect(redactSecrets("client_secret=abc'def")).toBe("client_secret=[redacted]");
 		expect(redactSecrets('client_secret=abc"def ghi"; status=keep')).toBe("client_secret=[redacted]; status=keep");
 		expect(redactSecrets('client_secret={"value": "nested prose secret"}; status=keep')).toBe(
@@ -174,12 +238,7 @@ describe("redactSecrets", () => {
 	it("consumes escaped quote delimiters and unterminated values with dangling escapes", () => {
 		const escaped = 'client_secret=\\"alpha beta\\"; status=keep';
 		expect(redactSecrets(escaped)).toBe('client_secret=\\"[redacted]\\"; status=keep');
-		for (const prefix of [
-			'client_secret="',
-			"client_secret='",
-			'Authorization: Bearer "',
-			"Authorization: Basic '",
-		]) {
+		for (const prefix of ['client_secret="', "client_secret='"]) {
 			expect(redactSecrets(prefix + "truncated-secret\\")).toBe(prefix + "[redacted]" + prefix.at(-1));
 		}
 	});
@@ -223,9 +282,9 @@ describe("redactSecrets", () => {
 		expect(redacted).toContain('"error_description":"grant revoked"');
 	});
 
-	it("redacts authorization values, name=value pairs, and JWTs in free text", () => {
-		expect(redactSecrets("Authorization: Bearer abc.def; client_secret=s3cr3t; password: hunter2; authCode=q")).toBe(
-			"Authorization: Bearer [redacted]; client_secret=[redacted]; password: [redacted]; authCode=[redacted]",
+	it("redacts name=value pairs and JWTs in free text", () => {
+		expect(redactSecrets("client_secret=s3cr3t; password: hunter2; authCode=q")).toBe(
+			"client_secret=[redacted]; password: [redacted]; authCode=[redacted]",
 		);
 		const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
 		expect(redactSecrets(`token ${jwt} expired`)).toBe("token [redacted] expired");

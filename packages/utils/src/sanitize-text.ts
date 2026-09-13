@@ -115,10 +115,10 @@ const SECRET_NAME_IN_PROSE =
 
 /** A JWT: three base64url segments. */
 const JWT_VALUE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
-/** A URL wherever it sits in text; ends at whitespace or a quote/bracket. */
+/** A conservative URL span in prose; whitespace and quotes belong to the surrounding text. */
 const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
-/** Sentence punctuation that follows a URL in prose is not part of it. */
-const URL_TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+/** A complete URL, optionally prefixed by a colon-delimited credential identifier. */
+const COMPLETE_URL_START = /^(\s*(?:[\w.-]+:)*)[a-z][a-z0-9+.-]*:\/\//i;
 const URL_USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
 /** Visit whole URLs/JSON before prose inside them; a labelled value takes precedence over its contents. */
 const SECRET_IN_TEXT = new RegExp(
@@ -158,18 +158,28 @@ function redactUrl(url: string): string {
 }
 
 /**
- * Redact the credential-bearing parts of every URL in `text` — userinfo,
- * query and fragment parameters whose name is a {@link SECRET_NAME} — so the
- * text can be logged or shown. Works on a bare URL, on an identifier that
- * embeds one (a managed MCP credential id keeps its server URL's complete
- * query string), and on prose around a URL: nothing outside a URL is touched,
- * and inside one only the redacted values change — no re-encoding.
+ * Redact URL userinfo and secret-named query/fragment values. A bare URL or
+ * colon-delimited credential identifier consumes the entire URL suffix and
+ * uses native URL normalization first, matching the receiving fetch parser
+ * even for literal spaces, tabs, and quotes. Safe parameter semantics survive;
+ * their spelling may be normalized. Invalid URLs are redacted without parsing.
+ * Other text uses conservative URL spans; use {@link redactSecrets} for prose
+ * that starts with a URL. Ambiguous trailing punctuation is never detached
+ * from a secret value, even when it might have been sentence punctuation.
  */
 export function redactUrlSecrets(text: string): string {
-	return text.replace(URL_IN_TEXT, match => {
-		const trailing = URL_TRAILING_PUNCTUATION.exec(match)?.[0] ?? "";
-		return `${redactUrl(trailing ? match.slice(0, -trailing.length) : match)}${trailing}`;
-	});
+	const complete = COMPLETE_URL_START.exec(text);
+	if (complete) {
+		const prefix = complete[1];
+		let url = text.slice(prefix.length);
+		try {
+			url = new URL(url).href;
+		} catch {
+			// Keep the whole suffix even when malformed; truncating can expose a credential.
+		}
+		return prefix + redactUrl(url);
+	}
+	return text.replace(URL_IN_TEXT, redactUrl);
 }
 
 /** The end of a quoted diagnostic value, including escaped quotes and incomplete final escapes. */
@@ -218,7 +228,9 @@ function redactJson(text: string): string {
 /**
  * Redact credential-shaped values in free text before it is logged or shown:
  * URL credentials, parsed JSON fields, authorization values, named assignments,
- * and JWTs. Malformed JSON candidates are withheld rather than leaking a tail.
+ * and JWTs. Unstructured authorization fields own the rest of their line;
+ * only parsed JSON provides safe boundaries for neighboring fields. Malformed
+ * JSON candidates are withheld rather than leaking a tail.
  * Arbitrary unlabelled secrets cannot be identified here.
  */
 export function redactSecrets(text: string): string {
@@ -233,6 +245,7 @@ export function redactSecrets(text: string): string {
 		output += text.slice(cursor, match.index);
 		let end = tokens.lastIndex;
 		let prefix = match[3] || match[4];
+		let authorization = !!prefix && /authorization["']?\s*[:=]\s*$/i.test(prefix);
 		if (match[6]) {
 			end = quotedValueEnd(text, match.index);
 			const quoted = text.slice(match.index, end);
@@ -240,8 +253,11 @@ export function redactSecrets(text: string): string {
 			if (separator) {
 				end += separator[0].length;
 				try {
-					if (SECRET_NAME.test(JSON.parse(quoted))) prefix = text.slice(match.index, end);
-					else output += text.slice(match.index, end);
+					const name: string = JSON.parse(quoted);
+					if (SECRET_NAME.test(name)) {
+						prefix = text.slice(match.index, end);
+						authorization = /authorization$/i.test(name);
+					} else output += text.slice(match.index, end);
 				} catch {
 					prefix = '"[redacted]"' + separator[0];
 				}
@@ -250,13 +266,17 @@ export function redactSecrets(text: string): string {
 			}
 		}
 		if (match[1]) {
-			output += redactUrlSecrets(match[1]).replace(JWT_VALUE, "[redacted]");
+			output += redactUrl(match[1]).replace(JWT_VALUE, "[redacted]");
 		} else if (match[2]) {
 			end = jsonValueEnd(text, match.index);
 			output += redactJson(text.slice(match.index, end));
 		} else if (prefix) {
 			output += prefix;
-			if (match[4] || !/^(?:Bearer|Basic)\s/i.test(text.slice(end))) {
+			if (authorization) {
+				const start = end;
+				while (end < text.length && text[end] !== "\r" && text[end] !== "\n") end++;
+				if (end > start) output += "[redacted]";
+			} else if (match[4] || !/^(?:Bearer|Basic)\s/i.test(text.slice(end))) {
 				const escaped = text[end] === "\\" && (text[end + 1] === '"' || text[end + 1] === "'");
 				const quote = escaped ? text.slice(end, end + 2) : text[end];
 				if (escaped || quote === '"' || quote === "'") {
