@@ -17,6 +17,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
+	AsyncJobRunError,
 	type AsyncJobProgressDelivery,
 	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
 	formatJobLabel,
@@ -907,10 +908,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					// the job's terminal state.
 					settleCompletion({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
-						// A non-zero exit is a completed command that failed. Re-enter
-						// the failure path so the job manager records it as failed and
-						// delivers the error text, matching prior throw-based behavior.
-						throw new ToolError(finalText);
+						// Re-enter the failure path so the job manager records a
+						// completed Bash error result as failed while retaining the
+						// raw stream provenance for progress deduplication.
+						const failureDetails = { ...latestProgressDetails };
+						throw new AsyncJobRunError(finalText, failureDetails, undefined, result.output);
 					}
 					await reportProgress(finalText, {
 						...latestProgressDetails,
