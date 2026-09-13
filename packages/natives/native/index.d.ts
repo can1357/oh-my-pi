@@ -2778,6 +2778,12 @@ export interface VcsDiffOptions {
 /** Discover the repository owning a directory. */
 export declare function vcsDiscover(dir: string): VcsRepo | null
 
+/**
+ * Discover the repository presenting a directory: equal-root jj+git ties
+ * prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+ */
+export declare function vcsDiscoverForDisplay(dir: string): VcsRepo | null
+
 /** Clone a Git repository. */
 export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
 

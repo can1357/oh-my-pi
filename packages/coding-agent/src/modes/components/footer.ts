@@ -57,7 +57,7 @@ export class FooterComponent implements Component {
 		this.#gitUnwatch = null;
 
 		if (!settings.get("git.enabled")) return;
-		const repository = vcs.repo(getProjectDir());
+		const repository = vcs.repoForDisplay(getProjectDir());
 		if (!repository) return;
 
 		try {
@@ -103,7 +103,7 @@ export class FooterComponent implements Component {
 
 		const repository = (() => {
 			try {
-				return vcs.repo(getProjectDir());
+				return vcs.repoForDisplay(getProjectDir());
 			} catch {
 				return null;
 			}
@@ -123,8 +123,9 @@ export class FooterComponent implements Component {
 					.label(request.signal)
 					.then(label => {
 						if (this.#disposed || this.#branchGeneration !== generation) return;
-						const changed = this.#cachedBranch !== label;
-						this.#cachedBranch = label;
+						const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
+						const changed = this.#cachedBranch !== clean;
+						this.#cachedBranch = clean;
 						if (changed) this.#onBranchChange?.();
 					})
 					.catch(() => {

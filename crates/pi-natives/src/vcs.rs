@@ -495,6 +495,15 @@ pub fn vcs_discover(env: Env, dir: String) -> Result<Option<VcsRepo>> {
 		.map_err(|err| rich_error(env, err))
 }
 
+/// Discover the repository presenting a directory: equal-root jj+git ties
+/// prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+#[napi]
+pub fn vcs_discover_for_display(env: Env, dir: String) -> Result<Option<VcsRepo>> {
+	pi_vcs::detect_for_display(Path::new(&dir))
+		.map(|repo| repo.map(|inner| VcsRepo { inner }))
+		.map_err(|err| rich_error(env, err))
+}
+
 #[napi]
 impl VcsRepo {
 	/// Backend kind (`"git"` or `"jj"`).

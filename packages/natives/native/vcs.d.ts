@@ -47,6 +47,8 @@ export declare function isEmptyCherryPick(error: unknown): error is VcsError & {
 export declare function git(dir: string): VcsGitRepo | null;
 /** Discover the repository owning `dir`; `null` outside any repository. */
 export declare function repo(dir: string): VcsRepo | null;
+/** Like {@link repo}, but equal-root jj+git ties prefer Jujutsu for display. Git-safe automation must keep using {@link repo}. */
+export declare function repoForDisplay(dir: string): VcsRepo | null;
 
 /** Like {@link repo}, asserting any requested backend capabilities. */
 export declare function require(dir: string, ...features: VcsFeature[]): VcsRepo;

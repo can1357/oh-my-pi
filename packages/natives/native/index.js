@@ -113,6 +113,7 @@ export const supportsLanguage = nativeBindings.supportsLanguage;
 export const truncateToWidth = nativeBindings.truncateToWidth;
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir;
 export const vcsDiscover = nativeBindings.vcsDiscover;
+export const vcsDiscoverForDisplay = nativeBindings.vcsDiscoverForDisplay;
 export const vcsGitClone = nativeBindings.vcsGitClone;
 export const vcsGitDiscover = nativeBindings.vcsGitDiscover;
 export const vcsGitRepoInfo = nativeBindings.vcsGitRepoInfo;

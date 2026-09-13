@@ -282,6 +282,29 @@ pub fn detect(dir: &Path) -> Result<Option<Repo>> {
 	}
 }
 
+/// Detect which VCS should present `dir` in the status line and footer.
+///
+/// Same as [`detect`], except equal-root jj+git ties prefer Jujutsu:
+/// colocated workspaces resolve to [`Repo::Jj`]. A strictly deeper nested
+/// git checkout still wins (it is the tree the user works in), and
+/// [`is_pure_jj`] keeps using [`detect`], so git-mutating automation policy
+/// is unchanged. Existing [`Repo`] dispatch serves both detectors without a
+/// colocated variant: presentation reads the label through the returned
+/// backend (status counts stay on the operational handle), while automation
+/// keeps the [`detect`] result.
+pub fn detect_for_display(dir: &Path) -> Result<Option<Repo>> {
+	let jj = jj::JjWorkspace::discover(dir)?;
+	let Some(jj) = jj else {
+		return Ok(git::GitRepo::discover(dir)?.map(|repo| Repo::Git(Arc::new(repo))));
+	};
+	match git::GitRepo::discover(dir)? {
+		Some(repo) if is_strict_descendant(repo.root(), jj.root()) => {
+			Ok(Some(Repo::Git(Arc::new(repo))))
+		},
+		_ => Ok(Some(Repo::Jj(Arc::new(jj)))),
+	}
+}
+
 /// Detect a "pure" Jujutsu workspace — one where git-mutating automation has
 /// no safe target because jj is the nearest (or only) VCS ancestor.
 ///
@@ -376,7 +399,51 @@ mod tests {
 			.unwrap()
 			.uncommitted_diff(&[])
 			.unwrap();
+
 		assert_eq!(actual, expected);
+	}
+
+	#[test]
+	fn display_prefers_jj_on_equal_root_ties() {
+		let temp = tempfile::tempdir().unwrap();
+		init_git(temp.path());
+		fs::create_dir_all(temp.path().join(".jj/repo")).unwrap();
+		assert!(matches!(detect(temp.path()).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(temp.path()).unwrap(), Some(Repo::Jj(_))));
+	}
+
+	#[test]
+	fn display_matches_detect_for_pure_and_nested_roots() {
+		// Pure git.
+		let git_dir = tempfile::tempdir().unwrap();
+		init_git(git_dir.path());
+		assert!(matches!(detect(git_dir.path()).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(git_dir.path()).unwrap(), Some(Repo::Git(_))));
+
+		// Pure jj.
+		let jj_dir = tempfile::tempdir().unwrap();
+		fs::create_dir_all(jj_dir.path().join(".jj/repo")).unwrap();
+		assert!(matches!(detect(jj_dir.path()).unwrap(), Some(Repo::Jj(_))));
+		assert!(matches!(detect_for_display(jj_dir.path()).unwrap(), Some(Repo::Jj(_))));
+
+		// Nested git checkout under an outer jj workspace: the strictly
+		// deeper git root still wins in both detectors.
+		let outer = tempfile::tempdir().unwrap();
+		fs::create_dir_all(outer.path().join(".jj/repo")).unwrap();
+		let inner = outer.path().join("sub");
+		fs::create_dir_all(&inner).unwrap();
+		init_git(&inner);
+		assert!(matches!(detect(&inner).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(&inner).unwrap(), Some(Repo::Git(_))));
+
+		// Jj nested inside an unrelated git checkout: the deeper root wins
+		// in both detectors.
+		let git_outer = tempfile::tempdir().unwrap();
+		init_git(git_outer.path());
+		let jj_inner = git_outer.path().join("sub");
+		fs::create_dir_all(jj_inner.join(".jj/repo")).unwrap();
+		assert!(matches!(detect(&jj_inner).unwrap(), Some(Repo::Jj(_))));
+		assert!(matches!(detect_for_display(&jj_inner).unwrap(), Some(Repo::Jj(_))));
 	}
 
 	#[test]

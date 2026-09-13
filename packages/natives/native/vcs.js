@@ -41,6 +41,11 @@ export function repo(dir) {
 	return api().vcsDiscover(dir);
 }
 
+/** Like {@link repo}, but equal-root jj+git ties prefer Jujutsu for display. Git-safe automation must keep using {@link repo}. */
+export function repoForDisplay(dir) {
+	return api().vcsDiscoverForDisplay(dir);
+}
+
 /** Like {@link repo}, asserting any requested backend capabilities. */
 export function require(dir, ...features) {
 	const discovered = repo(dir);
