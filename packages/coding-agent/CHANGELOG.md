@@ -19,6 +19,7 @@
 ### Fixed
 
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
+- Retry-fallback model swaps now re-sync the system prompt when the incoming model changes the active edit variant, so sessions falling back to a model pinned by `edit.modelVariants` stop receiving the chain head's edit instructions ([#11983](https://github.com/can1357/oh-my-pi/issues/11983)).
 - Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
 
 ## [18.1.19] - 2026-09-12
