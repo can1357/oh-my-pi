@@ -1127,6 +1127,34 @@ mod tests {
 		assert_eq!(subject, "");
 	}
 
+	// Regression: `require_jj_diff_options` used to reject `max_bytes` on every
+	// jj operation that shared it, even though only `diff_text` renders text
+	// and needs the cap honored. A caller reusing one `DiffOptions` across
+	// `diffText`/`changedFiles`/`numstat` calls got `Unsupported` on the two
+	// operations that never look at `max_bytes` at all.
+	#[test]
+	fn max_bytes_is_inert_for_non_rendering_jj_queries() {
+		let temp = tempfile::tempdir().unwrap();
+		init_internal_jj(temp.path());
+		fs::write(temp.path().join("alpha.txt"), "one\ntwo\n").unwrap();
+		let repo = crate::detect(temp.path()).unwrap().unwrap();
+
+		let capped = crate::DiffOptions { max_bytes: Some(1), ..crate::DiffOptions::default() };
+		assert_eq!(repo.changed_files(&capped).unwrap(), vec!["alpha.txt"]);
+		assert_eq!(repo.numstat(&capped).unwrap(), vec![NumstatEntry {
+			path:    "alpha.txt".to_owned(),
+			added:   Some(2),
+			removed: Some(0),
+		}]);
+
+		let err = repo.diff_text(&capped).unwrap_err();
+		assert_eq!(err.kind(), "Unsupported");
+		assert!(matches!(err, crate::Error::Unsupported {
+			operation: "diffMaxBytes",
+			backend:   crate::VcsKind::Jj,
+		}));
+	}
+
 	#[test]
 	fn jj_operations_match_cli() {
 		if !jj_available() {

@@ -142,6 +142,16 @@ impl Repo {
 			Self::Git(repo) => repo.diff_text(options),
 			Self::Jj(workspace) => {
 				require_jj_diff_options(options)?;
+				// Jujutsu rendering has no cap to enforce (`JjWorkspace::diff_text`
+				// takes no byte budget), so a caller-supplied `max_bytes` would
+				// silently go unhonored here; refuse it instead of pretending to
+				// bound memory we cannot bound. `changed_files`/`numstat` below
+				// share `require_jj_diff_options` for the cached/base/head checks
+				// but never render text, so a `max_bytes` inert for them must not
+				// be rejected (see the P2 finding on this validator).
+				if options.max_bytes.is_some() {
+					return Err(Error::Unsupported { operation: "diffMaxBytes", backend: VcsKind::Jj });
+				}
 				workspace.diff_text(&options.files, true)
 			},
 		}
@@ -251,15 +261,18 @@ impl Repo {
 	}
 }
 
+/// Options rejected on every Jujutsu operation: staged diffs and revision
+/// ranges have no jj-lib equivalent this backend implements. `max_bytes` is
+/// deliberately excluded — it only constrains rendering, so `diff_text`
+/// checks it itself and `changed_files`/`numstat` (non-rendering, sharing
+/// this validator) must not reject a `DiffOptions` that merely happens to
+/// carry a cap meant for a sibling `diff_text` call.
 const fn require_jj_diff_options(options: &DiffOptions) -> Result<()> {
 	if options.cached {
 		return Err(Error::Unsupported { operation: "stagedDiff", backend: VcsKind::Jj });
 	}
 	if options.base.is_some() || options.head.is_some() {
 		return Err(Error::Unsupported { operation: "revDiff", backend: VcsKind::Jj });
-	}
-	if options.max_bytes.is_some() {
-		return Err(Error::Unsupported { operation: "diffMaxBytes", backend: VcsKind::Jj });
 	}
 	Ok(())
 }
