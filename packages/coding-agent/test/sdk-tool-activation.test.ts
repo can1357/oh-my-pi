@@ -3791,6 +3791,71 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
+	it("routes a Claude Code MCP spelling when no xdev state exists", async () => {
+		// `createTools` allocates `session.xdev` only when `tools.xdev` is on and
+		// the session is unrestricted, so alias recovery cannot live in the device
+		// resolver alone: with the setting off, an advertised MCP tool called
+		// under the doubled separator this harness primes would still dead-end.
+		// Driven through the real SDK session rather than a fabricated XdevState,
+		// because the absence of that state is precisely what is under test.
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated();
+		settings.set("tools.xdev", false);
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({ ...baseOptions(tempDir), settings });
+			try {
+				let executed = 0;
+				await session.refreshMCPTools([
+					{
+						// Exactly what `createMCPToolName("seedpatch-client", "bank")` mints.
+						name: "mcp__seedpatch_client_bank",
+						label: "seedpatch-client/bank",
+						description: "Read the bank",
+						parameters: type({}),
+						mcpServerName: "seedpatch-client",
+						mcpToolName: "bank",
+						async execute() {
+							executed += 1;
+							return { content: [{ type: "text", text: "bank contents" }] };
+						},
+					} satisfies CustomTool,
+				]);
+
+				// The configuration under test: advertised top-level, nothing mounted.
+				expect(session.getActiveToolNames()).toContain("mcp__seedpatch_client_bank");
+				expect(session.getMountedXdevToolNames()).toHaveLength(0);
+
+				const toolCallId = "claude-code-spelling-1";
+				const mock = createMockModel({
+					responses: [
+						{
+							content: [
+								// Raw server name plus the doubled separator: the Claude
+								// Code convention the identity prompt primes.
+								{ type: "toolCall", id: toolCallId, name: "mcp__seedpatch-client__bank", arguments: {} },
+							],
+						},
+						{ content: [{ type: "text", text: "done" }] },
+					],
+				});
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+
+				await session.prompt("hi");
+
+				const result = session.messages.find(
+					(message): message is ToolResultMessage =>
+						message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				expect(result?.isError).toBeFalsy();
+				expect(JSON.stringify(result?.content)).toContain("bank contents");
+				expect(executed).toBe(1);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("runs advisor tools through the approval gate", async () => {
 		// The advisor's tools are built straight from `BUILTIN_TOOLS`, outside
 		// the registry loop that wraps everything else. Its own loop and its

@@ -25,7 +25,12 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	resolveAgentServiceTierOverride,
+	resolveSubagentServiceTier,
+	type ServiceTierInheritSettingValue,
+} from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -518,6 +523,12 @@ export interface ExecutorOptions {
 	 * inherit falls back to the subagent's configured `tier.*` settings.
 	 */
 	parentServiceTier?: ServiceTierByFamily | null;
+	/**
+	 * Exact-name `task.agentServiceTierOverrides` entry that task/eval dispatch
+	 * resolved for this agent, applied after model resolution. Spawns that keep
+	 * `tier.subagent` (Vibe workers) omit it.
+	 */
+	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -938,6 +949,19 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
+function inheritedSubagentServiceTiers(
+	baseSettings: Settings,
+	inheritedServiceTier?: ServiceTierByFamily | null,
+): ServiceTierByFamily {
+	return inheritedServiceTier === undefined
+		? buildServiceTierByFamily(
+				baseSettings.get("tier.openai"),
+				baseSettings.get("tier.anthropic"),
+				baseSettings.get("tier.google"),
+			)
+		: (inheritedServiceTier ?? {});
+}
+
 export function createSubagentSettings(
 	baseSettings: Settings,
 	overrides?: Partial<Record<SettingPath, unknown>>,
@@ -951,14 +975,7 @@ export function createSubagentSettings(
 	// match the parent's live tiers when a live session supplied them, else the
 	// subagent's own configured tier.* settings). The result is stamped back onto
 	// the snapshot so createAgentSession's tier.* reads pick it up.
-	const inheritedTiers =
-		inheritedServiceTier === undefined
-			? buildServiceTierByFamily(
-					baseSettings.get("tier.openai"),
-					baseSettings.get("tier.anthropic"),
-					baseSettings.get("tier.google"),
-				)
-			: (inheritedServiceTier ?? {});
+	const inheritedTiers = inheritedSubagentServiceTiers(baseSettings, inheritedServiceTier);
 	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
 	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
@@ -3287,6 +3304,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedModel: model.id,
 				});
 			}
+			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
+			// for this agent. The session evaluates it against its final model —
+			// including patterns only it can resolve — so a concrete tier lands on
+			// exactly that model's family, and persists the result (even empty) so
+			// hot and cold revival restore it instead of re-deriving `tier.subagent`.
+			const serviceTierOverride = options.serviceTierOverride;
+			const resolveServiceTierByFamily =
+				serviceTierOverride === undefined
+					? undefined
+					: (resolvedModel: Model | undefined) =>
+							resolveAgentServiceTierOverride(
+								serviceTierOverride,
+								resolvedModel,
+								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
+							);
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
@@ -3449,6 +3481,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
+				// A revived session restores the tier history it persisted (including
+				// tiers a provider rejected or an extension changed since spawn); only
+				// the fresh spawn resolves the per-agent override.
+				resolveServiceTierByFamily: forRevive ? undefined : resolveServiceTierByFamily,
 				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
