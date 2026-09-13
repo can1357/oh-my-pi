@@ -1,5 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
-import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings, TERMINAL } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	isFocusable,
+	type OverlayOptions,
+	setKeybindings,
+	TERMINAL,
+} from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "../../../src/config/keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";

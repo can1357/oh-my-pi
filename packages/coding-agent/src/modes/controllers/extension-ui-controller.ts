@@ -951,9 +951,9 @@ export class ExtensionUiController {
 	 * this dialog. The large-paste menu, slash-command pickers, user-run extension
 	 * commands and fire-and-forget `message_end` handlers all open dialogs mid-turn
 	 * without blocking it, so only the sites that genuinely wait ask for this —
-	 * tool approvals, the coding-plan reserve question, and collab guest requests
-	 * relayed from a blocked host. `ask.notify` still governs it, the same way it
-	 * governs the `ask` tool.
+	 * tool approvals and the coding-plan reserve question. Collab guest requests
+	 * stay silent because the wire carries no announce intent. `ask.notify` still
+	 * governs announcements, the same way it governs the `ask` tool.
 	 */
 	#announceAwaitedPrompt(prompt: string): void {
 		if (this.ctx.settings.get("ask.notify") === "off") return;
