@@ -22,6 +22,7 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	type Model,
+	PromptCacheCutoff,
 	resolveCacheRetention,
 	type SimpleStreamOptions,
 	type Usage,
@@ -577,7 +578,9 @@ export class CacheWarmer {
 				}
 				partial = event.partial;
 				if (isGenerationEvent(event) && !needsTerminalUsage) {
-					cutoff.abort();
+					// The reason tells the provider's prompt-cache diagnostics this abort
+					// is the planned cutoff, so the observed cache usage is kept.
+					cutoff.abort(new PromptCacheCutoff());
 					break;
 				}
 			}
