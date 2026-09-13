@@ -579,6 +579,7 @@ function formatReloginDeadline(
 }
 
 /**
+
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
  * each provider section as "no usage data" rows.

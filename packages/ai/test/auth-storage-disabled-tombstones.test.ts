@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { removeWithRetries } from "../../utils/src/temp";
 
-function credential(suffix: string, email = "alice@example.com"): AuthCredential {
+function credential(suffix: string, email = "alice@example.com"): OAuthCredential {
 	return {
 		type: "oauth",
 		access: `access-${suffix}`,
@@ -172,5 +172,58 @@ describe("disabled credential tombstone retention", () => {
 			{ id: oldId, disabled_cause: AUTOMATIC_CAUSE },
 			{ id: newId, disabled_cause: "oauth refresh failed: x" },
 		]);
+	});
+
+	it("lets a deliberate removal clear a legacy tombstone the removed org-scoped login had upgraded", () => {
+		if (!store) throw new Error("test setup failed");
+		// Pre-org login (identity `email:<e>`), torn down automatically.
+		const legacyId = store.upsertAuthCredentialForProvider("openai-codex", {
+			...credential("legacy"),
+			accountId: "personal",
+			orgId: undefined,
+		})[0].id;
+		store.deleteAuthCredential(legacyId, AUTOMATIC_CAUSE);
+		// Same person signs in again workspace-scoped (identity `email:<e>|org:<o>`)
+		// and then logs that account out through the account selector.
+		const orgId = store.upsertAuthCredentialForProvider("openai-codex", credential("team"))[0].id;
+		expect(readRows(dbPath).map(row => row.id)).toEqual([legacyId, orgId]);
+		store.deleteAuthCredential(orgId, "deleted by user");
+
+		expect(readRows(dbPath)).toEqual([{ id: orgId, disabled_cause: "deleted by user" }]);
+	});
+
+	it("lets `omp auth-broker logout` clear upgraded legacy tombstones for every logged-out identity", () => {
+		if (!store) throw new Error("test setup failed");
+		const legacyId = store.upsertAuthCredentialForProvider("openai-codex", {
+			...credential("legacy"),
+			accountId: "personal",
+			orgId: undefined,
+		})[0].id;
+		store.deleteAuthCredential(legacyId, AUTOMATIC_CAUSE);
+		const bobId = store.upsertAuthCredentialForProvider("openai-codex", credential("bob", "bob@example.com"))[0].id;
+		store.deleteAuthCredential(bobId, AUTOMATIC_CAUSE);
+		const teamId = store.upsertAuthCredentialForProvider("openai-codex", credential("team"))[0].id;
+
+		// The exact cause the CLI's runLogout() writes.
+		store.deleteAuthCredentialsForProvider("openai-codex", "logged out by user");
+
+		expect(readRows(dbPath)).toEqual([
+			{ id: bobId, disabled_cause: AUTOMATIC_CAUSE },
+			{ id: teamId, disabled_cause: "logged out by user" },
+		]);
+	});
+
+	it("expires an aged tombstone on the read path of a store that never writes again", async () => {
+		if (!store) throw new Error("test setup failed");
+		const oldId = store.upsertAuthCredentialForProvider("openai-codex", credential("old"))[0].id;
+		store.deleteAuthCredential(oldId, AUTOMATIC_CAUSE);
+		const freshId = store.upsertAuthCredentialForProvider("openai-codex", credential("fresh", "fresh@example.com"))[0]
+			.id;
+		store.deleteAuthCredential(freshId, AUTOMATIC_CAUSE);
+		expect((await store.listDisabledCredentials("openai-codex")).map(row => row.id)).toEqual([oldId, freshId]);
+
+		ageRow(dbPath, oldId);
+		expect((await store.listDisabledCredentials("openai-codex")).map(row => row.id)).toEqual([freshId]);
+		expect(readRows(dbPath).map(row => row.id)).toEqual([freshId]);
 	});
 });
