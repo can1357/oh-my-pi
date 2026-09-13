@@ -5140,6 +5140,73 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("retires the application marker after an interrupted cleanup registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script", "loader-before");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const privateMarker = (marked?.params as { source?: string } | undefined)?.source?.match(
+			/throw ("__ompRelayPreload[^"]+")/,
+		)?.[1];
+		expect(privateMarker).toBeDefined();
+		ack(bridge, ext2, "send", { identifier: "root-script-with-marker" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+
+		// Chrome may have accepted the companion cleanup registration, but its
+		// reply never reaches the relay. The forced fresh root discards both
+		// registrations, so their marker must leave exception suppression too.
+		bridge.extClosed(ext2);
+		await flush();
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		const messagesBeforeException = cdp.messages.length;
+		bridge.extMessage(
+			ext3,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: JSON.parse(privateMarker!) } } },
+			}),
+		);
+		expect(cdp.messages).toHaveLength(messagesBeforeException + 1);
+		expect(cdp.messages.at(-1)).toMatchObject({
+			sessionId: pageSession,
+			method: "Runtime.exceptionThrown",
+		});
+	});
+
 	it("retires a replaced application marker after a second recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

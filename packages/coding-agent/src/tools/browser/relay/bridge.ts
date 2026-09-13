@@ -3461,6 +3461,11 @@ export class RelayBridge {
 					// The immediate companion clears the marker in every existing context,
 					// including child frames. Future navigations run it after the producer.
 				} catch (err) {
+					// The marker only belongs to this replay pair. If the cleanup
+					// registration loses its result, the fresh root below discards the
+					// accepted producer as well, so retaining the marker would suppress an
+					// unrelated page exception after recovery.
+					tab.preloadApplicationMarkers.delete(applicationMarker);
 					if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
 					throw err;
 				}
