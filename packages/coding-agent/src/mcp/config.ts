@@ -241,6 +241,26 @@ export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 const NATIVE_EXA_MCP_TOOLS = new Set(["web_search_exa"]);
 
 /**
+ * Decode a raw `tools=` value before splitting it.
+ *
+ * The endpoint decodes its own query string, so a stdio wrapper passing the
+ * URL-encoded list (`?tools=web_search_exa%2Cweb_fetch_exa`) advertises two
+ * tools. Splitting the still-encoded value yields one synthetic name matching
+ * no `enabledTools` entry, which would drop a server whose selected tool the
+ * endpoint really does serve. A malformed escape is left verbatim rather than
+ * throwing: the config is user-authored, and the raw spelling is the best
+ * available answer.
+ */
+function decodeExaToolList(raw: string | undefined): string | undefined {
+	if (raw === undefined) return undefined;
+	try {
+		return decodeURIComponent(raw);
+	} catch {
+		return raw;
+	}
+}
+
+/**
  * Parse the comma-separated `tools` restriction from an Exa MCP config.
  * Returns `null` when the config does not restrict its tool set.
  */
@@ -259,9 +279,9 @@ function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 			const stdioConfig = config as { args?: string[] };
 			const args = stdioConfig.args ?? [];
 			for (let i = 0; i < args.length; i++) {
-				if (/^--?tools$/i.test(args[i])) return args[i + 1];
+				if (/^--?tools$/i.test(args[i])) return decodeExaToolList(args[i + 1]);
 				const match = args[i].match(/(?:^|[\s?&])tools=([^&\s]+)/i) ?? args[i].match(/--?tools[=\s]([^\s]+)/i);
-				if (match) return match[1];
+				if (match) return decodeExaToolList(match[1]);
 			}
 		}
 		return undefined;

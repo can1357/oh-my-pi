@@ -296,6 +296,24 @@ describe("Exa MCP filtering", () => {
 		}
 	});
 
+	test("reads a URL-encoded stdio tools list as the tools the endpoint serves", () => {
+		// The endpoint decodes its own query string, so this wrapper advertises
+		// `web_search_exa` AND `web_fetch_exa`. Treating `%2C` as literal text reads
+		// one synthetic name, which matches no allowlist entry — dropping a server
+		// whose selected non-native tool the endpoint really serves.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: {
+				type: "stdio",
+				command: "npx",
+				args: ["-y", "mcp-remote", "https://mcp.exa.ai/mcp?tools=web_search_exa%2Cweb_fetch_exa"],
+				enabledTools: ["web_fetch_exa"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
 	test("keeps an exa server restricted only by a denylist", () => {
 		// A denylist selects the complement of what it names, so it always leaves
 		// the server's non-native tools reachable; dropping the server would take
