@@ -341,6 +341,28 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("group")).toHaveLength(1);
 	});
 
+	it("does not treat a stale hello group snapshot as a user opt-out", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await claimTab(bridge, ext, cdp, connId, 1);
+		ack(bridge, ext, "group", { grouped: { "1": 42 } });
+		await flush();
+
+		// The live event reports the group RPC's result before a bounded hello
+		// retry publishes its older snapshot. Only the event is evidence of a
+		// user-driven group change; a hello is a reconciliation baseline.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		connect(bridge, ext, [tab({ tabId: 1, groupId: -1 })], { attachedTabIds: [1] });
+
+		bridge.cdpClosed(connId);
+		const ungroups = ext.rpcs("ungroup");
+		expect(ungroups).toHaveLength(1);
+		expect(ungroups[0]?.tabIds).toEqual([1]);
+	});
+
 	it("ungroups when the claiming client disconnects, even while another connection still holds sessions", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();

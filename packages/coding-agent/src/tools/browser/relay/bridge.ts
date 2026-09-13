@@ -2945,7 +2945,7 @@ export class RelayBridge {
 			if (tab.url !== snap.url) tab.banned = false;
 			// The user dragging a tab out of the omp group is an opt-out; the
 			// relay never fights the user over grouping.
-			if (tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
+			if (!opts.silent && tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
 				tab.grouped = false;
 				tab.groupOptOut = true;
 			}
