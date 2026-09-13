@@ -1190,6 +1190,60 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(verdict.message).not.toContain("API key");
 	});
 
+	test("the verdict is judged against a refreshed broker snapshot, not the cached pool", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		let refreshes = 0;
+		// A broker-backed store: `refreshSnapshot` is where an account another
+		// client signed in becomes visible to this process.
+		const brokerLike = new Proxy(sqlite, {
+			get(target, property) {
+				if (property === "refreshSnapshot") {
+					return async () => {
+						refreshes += 1;
+						target.upsertAuthCredentialForProvider(CODEX_PROVIDER, {
+							type: "oauth",
+							access: "fresh-sibling",
+							refresh: "ref-F",
+							expires: farExpiry(),
+							email: "f@example.com",
+						});
+					};
+				}
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const codexStorage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref-O", expires: farExpiry(), email: "o@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-stale-snapshot";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("only");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "only",
+			}),
+		).toBe(false);
+
+		// The cached pool is exhausted; the refreshed one has an untried sibling.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+		).toBeUndefined();
+		expect(refreshes).toBeGreaterThan(0);
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(
+			"fresh-sibling",
+		);
+	});
+
 	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
 		if (!store) throw new Error("test setup failed");
 		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });

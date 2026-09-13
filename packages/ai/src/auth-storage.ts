@@ -7052,6 +7052,24 @@ export class AuthStorage {
 		const modelPolicyScope = modelAccountPolicyBlockScope(provider, modelId);
 		if (modelPolicyScope === undefined) return undefined;
 
+		// The verdict is terminal, so it is judged against the pool as it is now,
+		// not a broker client's cached snapshot: another client may have signed in
+		// or unblocked a sibling since. One bounded budget covers this and the
+		// tombstone lookup below; a refresh that fails scans what is loaded.
+		const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
+		const lookupSignal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
+		try {
+			await this.revalidateCredentials(lookupSignal);
+		} catch (revalidateError) {
+			logger.debug(
+				"Credential snapshot revalidation failed before the entitlement verdict; scanning the loaded pool",
+				{
+					provider,
+					error: String(revalidateError),
+				},
+			);
+		}
+
 		// Evidence that this request ran on the stored pool and was refused
 		// there: the failed bearer resolves to a stored credential blocked for
 		// exactly this model. The folding lookup would also accept an unrelated
@@ -7116,8 +7134,6 @@ export class AuthStorage {
 
 		let recentlySignedOut: string[] = [];
 		try {
-			const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
-			const lookupSignal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
 			recentlySignedOut = (await this.listActionableDisabledCredentials(provider, lookupSignal))
 				.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
 				.slice(0, 3)
