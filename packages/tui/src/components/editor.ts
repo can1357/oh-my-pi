@@ -617,6 +617,9 @@ export class Editor implements Component, Focusable {
 	#history: LocalHistoryEntry[] = [];
 	#historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	#historyStorage?: HistoryStorage;
+	// Names the data set behind #historyStorage; a change re-seeds #history on the next browse.
+	#historySourceKey?: () => string;
+	#historySourceKeyValue?: string;
 	// Recalled payloads outlive browsing when an edit resets #historyIndex.
 	#historyDraftActive = false;
 
@@ -849,11 +852,35 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	/** Loads persistent prompts for navigation and enables future persistence. */
-	setHistoryStorage(storage: HistoryStorage): void {
+	/**
+	 * Loads persistent prompts for navigation and enables future persistence.
+	 *
+	 * `sourceKey` names the data set behind `storage` (for a host, the resolved recall
+	 * scope). When it changes — a new conversation, another project, a settings change —
+	 * the editor re-seeds its list from `storage` at the start of the next navigation.
+	 * Omit it and the list stays fixed for the editor's lifetime.
+	 */
+	setHistoryStorage(storage: HistoryStorage, sourceKey?: () => string): void {
 		this.#historyStorage = storage;
-		const recent = storage.getRecent(100);
-		this.#history = recent.map(entry => ({ text: entry.prompt }));
+		this.#historySourceKey = sourceKey;
+		this.#historySourceKeyValue = undefined;
+		this.#rehydrateHistory();
+	}
+
+	/**
+	 * Re-seed the persistent list when the host's data set changed. A no-op while the key
+	 * holds, so the common case costs nothing and locally remembered drafts survive; a real
+	 * change replaces the list and restarts browsing, since the old entries belong to a
+	 * context the user has left.
+	 */
+	#rehydrateHistory(): void {
+		const key = this.#historySourceKey?.() ?? "";
+		if (key === this.#historySourceKeyValue) return;
+		this.#historySourceKeyValue = key;
+		const storage = this.#historyStorage;
+		// Without persistent storage the list is the editor's own: never drop it.
+		if (!storage) return;
+		this.#history = storage.getRecent(100).map(entry => ({ text: entry.prompt }));
 		this.#historyIndex = -1;
 	}
 
@@ -934,6 +961,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	#navigateHistory(direction: 1 | -1): void {
+		this.#rehydrateHistory();
 		this.#resetKillSequence();
 		if (this.#history.length === 0) return;
 		const newIndex = this.#historyIndex - direction; // Up(-1) increases index, Down(1) decreases

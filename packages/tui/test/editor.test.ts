@@ -165,6 +165,53 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("");
 		});
 
+		it("re-seeds from storage when the host's source key changes", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "prompt from the first context" }],
+				second: [{ prompt: "prompt from the second context" }],
+			};
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the first context");
+
+			key = "second";
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the second context");
+
+			// A context whose history is empty must win over the previous context's entries.
+			key = "third";
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("keeps locally remembered drafts while the source key holds", () => {
+			let loads = 0;
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage(
+				{
+					add: async () => {},
+					getRecent: () => {
+						loads++;
+						return [{ prompt: "persisted" }];
+					},
+				},
+				() => "stable",
+			);
+
+			editor.setText("cleared draft");
+			editor.rememberDraft();
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+
+			expect(editor.getText()).toBe("cleared draft");
+			// Re-seeding here would both drop the draft and re-hit storage on every keypress.
+			expect(loads).toBe(1);
+		});
+
 		it("shows most recent history entry on Up arrow when editor is empty", () => {
 			const editor = new Editor(defaultEditorTheme);
 

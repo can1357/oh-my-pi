@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `Editor.setHistoryStorage()` accepts an optional `sourceKey` callback: when the key changes, the editor re-seeds its list from `storage` at the start of the next navigation. Omitted, the list stays fixed for the editor's lifetime and locally remembered drafts are never reloaded.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
