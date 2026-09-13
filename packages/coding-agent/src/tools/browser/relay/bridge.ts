@@ -1042,6 +1042,7 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
 			return;
 		}
+		const rootGeneration = tab.runtimeGeneration;
 		// Keep the pre-registration read to distinguish a navigation that overlaps
 		// the command from one that happened earlier, but never persist it as the
 		// successful invocation's baseline.
@@ -1072,6 +1073,14 @@ export class RelayBridge {
 		const rootIdentifier = result?.identifier;
 		if (typeof rootIdentifier !== "string") {
 			this.#replyError(conn, msg, "Page.addScriptToEvaluateOnNewDocument did not return an identifier");
+			return;
+		}
+		// Preload identifiers are local to one Chrome debugger root. A final-owner
+		// detach can complete while this additive RPC is still in flight; its late
+		// result then belongs to the destroyed root and must neither be journaled nor
+		// queued for removal against a replacement root where Chrome may reuse it.
+		if (tab.runtimeGeneration !== rootGeneration) {
+			this.#replyError(conn, msg, "Page.addScriptToEvaluateOnNewDocument completed after the debugger detached");
 			return;
 		}
 		const loaderId =

@@ -5243,6 +5243,67 @@ describe("RelayBridge tab grouping", () => {
 		);
 	});
 
+	it("drops a late preload cleanup identifier after the originating root detaches", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__oldOwner = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "old-root preload install");
+		const oldRootAdd = ext.pending("send")[0]!;
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1, "last-holder detach");
+		ack(bridge, ext, "detach");
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		const adopterSession = await attachPage(bridge, ext, adopter, adopterConn, 1);
+		bridge.cdpMessage(
+			adopterConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: adopterSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__newOwner = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 2, "new-root preload install");
+		const newRootAdd = ext
+			.pending("send")
+			.find(rpc => (rpc.params as { source?: string } | undefined)?.source === "window.__newOwner = true;")!;
+		ext.markAcked(newRootAdd.id);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "rpcResult", id: newRootAdd.id, ok: true, result: { identifier: "reused-id" } }),
+		);
+		await flush();
+
+		// The destroyed root returns its result after the replacement root has
+		// installed a script with the same Chrome-local identifier. The late result
+		// must not schedule a removal against the replacement root.
+		ext.markAcked(oldRootAdd.id);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "rpcResult", id: oldRootAdd.id, ok: true, result: { identifier: "reused-id" } }),
+		);
+		await flush();
+
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(0);
+	});
+
 	it("discards deferred root-state cleanup after the final detach succeeds", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
