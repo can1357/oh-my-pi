@@ -146,12 +146,7 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 		const codingStateMatches =
 			(sameModel(active, previous.coding) || retryFallbackIsActive(ctx)) &&
 			configuredThinkingLevel() === previous.coding.effort;
-		if (
-			!options.force &&
-			!interrupted &&
-			!codingStateMatches &&
-			!currentMatches(ctx, previous.original)
-		) {
+		if (!options.force && !interrupted && !codingStateMatches && !currentMatches(ctx, previous.original)) {
 			save(undefined);
 			return {
 				changed: false,

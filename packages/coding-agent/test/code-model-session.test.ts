@@ -48,6 +48,8 @@ function harness(
 	const manual = model("manual", "choice");
 	const openRouterRouted = {
 		...model("openrouter", "glm-4.7"),
+		api: "openai-completions",
+		baseUrl: "https://openrouter.ai/api/v1",
 		compat: { openRouterRouting: { only: ["cerebras"] } },
 	} as unknown as Model;
 	const models = [main, coding, fallback, manual, openRouterRouted];

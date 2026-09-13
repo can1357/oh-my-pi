@@ -1285,10 +1285,7 @@ export class ExtensionRunner {
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
-		const execute = async (
-			handlerSignal: AbortSignal,
-			budget?: HandlerTimeoutBudget,
-		): Promise<R | undefined> => {
+		const execute = async (handlerSignal: AbortSignal, budget?: HandlerTimeoutBudget): Promise<R | undefined> => {
 			registrationScope.signal = handlerSignal;
 			let result: R | undefined;
 			try {
