@@ -16,8 +16,9 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "b
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
-import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { type CollabGuestUiResult, CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
@@ -30,6 +31,7 @@ const WEB_URL = "https://collab.example";
 /** Mutable, observable surface of a host context fixture. */
 interface HostContextState {
 	sessionId: string;
+	transition?: Promise<void>;
 	showStatus: string[];
 	/** Guest prompts the host forwarded into the session. */
 	prompts: string[];
@@ -74,6 +76,12 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 			onEntryAppended: undefined,
 		},
 		session: {
+			get isSessionTransitioning() {
+				return state.transition !== undefined;
+			},
+			waitForSessionTransition: async () => {
+				await state.transition;
+			},
 			isStreaming: false,
 			queuedMessageCount: 0,
 			sessionName: "registry-test",
@@ -144,6 +152,91 @@ afterEach(async () => {
 });
 
 describe("collab host registry lifecycle (#6099)", () => {
+	for (const completion of ["rollback", "commit", "stop", "writer-left"] as const) {
+		it("handles an old-room answer during provisional suspension followed by " + completion, async () => {
+			const { ctx, state } = makeHostContext();
+			const originalConnect = CollabSocket.prototype.connect;
+			let transport: CollabSocket | undefined;
+			const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+				transport = this;
+				return originalConnect.call(this);
+			});
+			host = new CollabHost(ctx);
+			try {
+				await host.start(RELAY_URL, WEB_URL);
+			} finally {
+				capture.mockRestore();
+			}
+			if (!transport) throw new Error("host transport missing");
+			const parsed = parseCollabLink(host.link);
+			if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+			transport.onFrame!(
+				{
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: "writer",
+					writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+				},
+				1,
+			);
+			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "reader" }, 2);
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] });
+			if (!answer) throw new Error("host did not retain the dialog");
+			let outcome: CollabGuestUiResult | undefined;
+			void answer.then(result => {
+				outcome = result;
+			});
+			const original = state.sessionId;
+			const transition = Promise.withResolvers<void>();
+			state.transition = transition.promise;
+			state.sessionId = "provisional";
+			try {
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
+				await setImmediate();
+				expect(outcome).toBeUndefined();
+				if (completion === "stop") {
+					await host.stop("stopped during transition");
+				} else {
+					if (completion === "rollback" || completion === "writer-left") state.sessionId = original;
+					if (completion === "writer-left") transport.onControl?.({ t: "peer-left", peer: 1 });
+					state.transition = undefined;
+					transition.resolve();
+					await setImmediate();
+					if (completion === "writer-left") {
+						expect(outcome).toBeUndefined();
+						transport.onFrame!(
+							{
+								t: "hello",
+								proto: COLLAB_PROTO,
+								name: "replacement writer",
+								writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+							},
+							2,
+						);
+						transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
+					}
+					if (completion === "commit") {
+						expect(outcome).toBeUndefined();
+						await host.stop("session switched");
+					}
+				}
+				await setImmediate();
+				expect(outcome).toEqual(
+					completion === "rollback"
+						? { kind: "answered", value: "Yes" }
+						: completion === "writer-left"
+							? { kind: "answered", value: "No" }
+							: { kind: "unavailable" },
+				);
+			} finally {
+				state.transition = undefined;
+				transition.resolve();
+			}
+		});
+	}
+
 	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
 		const { ctx, state } = makeHostContext();
 		const originalConnect = CollabSocket.prototype.connect;

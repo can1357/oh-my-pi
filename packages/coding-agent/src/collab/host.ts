@@ -128,6 +128,13 @@ const MAX_PENDING_UI_REQUESTS = 64;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+interface PendingCollabUiRequest {
+	request: CollabUiRequest;
+	promise: Promise<CollabGuestUiResult>;
+	settle(result: CollabGuestUiResult): void;
+	responsePending?: boolean;
+}
+
 /**
  * Identity a host publishes to the local registry. The controller that owns
  * hosting supplies a process-lifetime `instanceId` and bumps `generation` for
@@ -185,7 +192,7 @@ export class CollabHost {
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
 	#uiReqSeq = 0;
-	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
+	#pendingUi = new Map<number, PendingCollabUiRequest>();
 	#lastStateJson = "";
 	#stateDebounce: Timer | null = null;
 	#streamingInterval: Timer | null = null;
@@ -309,7 +316,7 @@ export class CollabHost {
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
-		this.#pendingUi.set(reqId, { request: fullRequest, settle });
+		this.#pendingUi.set(reqId, { request: fullRequest, promise, settle });
 		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
 		return promise;
 	}
@@ -601,6 +608,12 @@ export class CollabHost {
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		// An old-room answer may wait for rollback, but cannot settle against
+		// another session. The response handler owns that bounded deferral.
+		if (frame.t === "ui-response") {
+			this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
+			return;
+		}
 		// Inbound frames act on the mirrored session (join snapshots, prompts,
 		// aborts, agent control); none may reach a session this room never
 		// shared, or one whose room is already ending.
@@ -620,9 +633,6 @@ export class CollabHost {
 			case "agent-cmd":
 				if (this.#rejectWhileStarting("agent control", fromPeer)) break;
 				this.#handleAgentCmd(frame.cmd, frame.agentId, frame.text, fromPeer);
-				break;
-			case "ui-response":
-				this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
 				break;
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
@@ -753,6 +763,8 @@ export class CollabHost {
 	}
 
 	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
+		const suspended = !this.#guestTrafficAllowed();
+		if (suspended && (this.ending || !this.#ctx.session.isSessionTransitioning)) return;
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("responding to ask", fromPeer);
@@ -760,6 +772,11 @@ export class CollabHost {
 		}
 		const pending = this.#pendingUi.get(reqId);
 		if (pending) {
+			if (pending.responsePending) return;
+			if (suspended) {
+				void this.#settleUiAfterTransition(pending, value, fromPeer);
+				return;
+			}
 			pending.settle({ kind: "answered", value });
 			return;
 		}
@@ -767,6 +784,35 @@ export class CollabHost {
 		// reconnected after the broadcast `ui-request-end` resends its answer and would
 		// otherwise wait forever, so acknowledge it directly.
 		this.#send({ t: "ui-request-end", reqId }, fromPeer);
+	}
+
+	async #settleUiAfterTransition(
+		pending: PendingCollabUiRequest,
+		value: CollabUiResponseValue,
+		fromPeer: number,
+	): Promise<void> {
+		// At most one answer per existing request; stop/local cancellation wakes
+		// the wait even if a session hook never finishes.
+		pending.responsePending = true;
+		const { reqId } = pending.request;
+		try {
+			do {
+				await Promise.race([this.#ctx.session.waitForSessionTransition(), pending.promise]);
+			} while (
+				this.#pendingUi.get(reqId) === pending &&
+				!this.ending &&
+				!this.#sessionStillCurrent() &&
+				this.#ctx.session.isSessionTransitioning
+			);
+			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
+			if (this.#peers.get(fromPeer)?.canWrite) pending.settle({ kind: "answered", value });
+			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
+		} catch (error) {
+			logger.warn("Collab UI response could not await session transition", { error: String(error) });
+			pending.settle({ kind: "unavailable" });
+		} finally {
+			pending.responsePending = false;
+		}
 	}
 
 	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
