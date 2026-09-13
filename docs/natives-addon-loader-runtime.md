@@ -6,6 +6,7 @@ This page documents `packages/natives/native/loader-state.js`, the runtime betwe
 
 - `native/index.js` calls `loadNative()` at module evaluation and exposes the generated root API.
 - `native/desktop.js` and `native/clipboard.js` import the loader but call it only inside their public wrappers.
+- `enableNativeAddonStaging()` — opts the current process into Windows package-addon staging. Must be called before the native API is loaded; throws if called after a direct (non-staged) load has already occurred. The state is process-local and not inherited by child processes.
 - Pure loader helpers are exported for focused tests and do not perform detection or filesystem probing until `loadNative()` or `initLoaderContext()` is called.
 
 A successful call is not memoized by JS. Repeated calls rely on the runtime's `require(...)` module cache, while post-load setup is idempotent or best-effort.
@@ -20,7 +21,7 @@ A successful call is not memoized by JS. Repeated calls rely on the runtime's `r
 - `nativesDir`, normally `~/.omp/natives`; it uses `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` exists;
 - `versionedDir`: `<nativesDir>/<packageVersion>`;
 - legacy compiled-binary directory: `%LOCALAPPDATA%/omp` (or `~/AppData/Local/omp`) on Windows, `~/.local/bin` elsewhere;
-- workspace/install/compiled mode, optional leaf directory, Windows staging policy, CPU variant, filenames, and ordered candidates.
+- `stagingEnabled` (Windows only): whether the current process opted into `node_modules` staging via `enableNativeAddonStaging()`. Default `false`; only the `update` command flips this so the updater doesn't lock the installed addon that the package manager must replace.
 
 Compiled mode is true when a populated embedded manifest exists, `PI_COMPILED` is set, or `import.meta.url` contains a Bun embedded marker (`$bunfs`, `~BUN`, or `%7EBUN`). A non-compiled `nativeDir` outside a `node_modules` path is a workspace load. Windows path classification is case-insensitive; other platforms use case-sensitive path matching.
 
@@ -64,22 +65,9 @@ Detection uses `Bun.spawnSync` when available, then falls back to `node:child_pr
 
 The platform leaf wins over a stale core artifact. Workspace loads deliberately skip leaf resolution.
 
-### Windows `node_modules` staging
+### Windows `node_modules` staging (updater only)
 
-When the platform is Windows, the runtime is non-compiled, and `nativeDir` contains a `node_modules` segment:
-
-1. Every selected filename in `versionedDir`.
-2. Leaf-package candidates.
-3. Package-local and executable candidates.
-
-Before probing, `maybeStageNodeModulesAddon()` copies each available filename from `leafPackageDir ?? nativeDir` to a missing cache target. Existing cache files are retained. This keeps the loaded DLL handle away from the package-manager copy that an update must replace. Directory/copy failures are recorded and normal probing continues.
-
-### Compiled runtime
-
-1. For each filename, `versionedDir`, then the legacy user-data directory.
-2. For each filename, package-local `nativeDir`, then the executable directory.
-
-A successfully selected embedded candidate is prepended. Windows staging is disabled in compiled mode.
+Staging is opt-in via `enableNativeAddonStaging()`, called before the `update` command loads its module graph. When enabled on a non-compiled Windows `node_modules` install, `resolveLoaderCandidates()` returns **only** `versionedDir` candidates — no fallback to leaf or `nativeDir` paths. Before probing, `maybeStageNodeModulesAddon()` copies each available filename from `leafPackageDir ?? nativeDir` to a missing cache target. A staging failure (corrupt cache, unwritable dir) is fatal to the load; the updater must never silently fall back to locking the installed addon. Normal (non-updater) launches ignore staging entirely and load directly from the leaf package.
 
 ## Embedded manifest and extraction
 
@@ -131,7 +119,7 @@ Compiled help lists expected cache paths, suggests deleting the versioned direct
 entrypoint evaluates or lazy wrapper is invoked
   -> initialize loader context
   -> extract matching embedded archive, if any
-  -> otherwise stage Windows node_modules addon, if applicable
+  -> otherwise stage Windows node_modules addon, if staging was opted in
   -> require candidates in deterministic order
        -> validate sentinel outside workspace development
        -> install optional post-load runtime

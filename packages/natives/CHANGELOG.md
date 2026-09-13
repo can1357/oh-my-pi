@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Windows npm/bun installs now load the native addon directly from `node_modules` instead of staging it into `~/.omp/natives/<version>/`. Only `omp update` opts into staging via `enableNativeAddonStaging()` so the updater doesn't lock the file the package manager needs to replace. Other running OMP sessions can still hold the installed addon; this trades per-version cache disk for simpler direct loading on normal startup ([#4385](https://github.com/can1357/oh-my-pi/issues/4385)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

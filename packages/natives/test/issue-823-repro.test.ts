@@ -157,28 +157,6 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		expect(candidates.indexOf(leafBaseline)).toBeLessThan(candidates.indexOf(coreBaseline));
 	});
 
-	it("keeps Windows staging ahead of leaf package and core nativeDir candidates", () => {
-		const versionedDir = "/home/u/.omp/natives/15.5.15";
-		const leafPackageDir = "/app/node_modules/@oh-my-pi/pi-natives-win32-x64";
-		const nativeDir = "/app/node_modules/@oh-my-pi/pi-natives/native";
-		const candidates = resolveLoaderCandidates({
-			addonFilenames: getAddonFilenames({ tag: "win32-x64", arch: "x64", variant: "baseline" }),
-			isCompiledBinary: false,
-			stageFromNodeModules: true,
-			leafPackageDir,
-			nativeDir,
-			execDir: "/app/node_modules/.bin",
-			versionedDir,
-			userDataDir: "/home/u/AppData/Local/omp",
-		});
-
-		const stagedBaseline = path.join(versionedDir, "pi_natives.win32-x64-baseline.node");
-		const leafBaseline = path.join(leafPackageDir, "pi_natives.win32-x64-baseline.node");
-		const coreBaseline = path.join(nativeDir, "pi_natives.win32-x64-baseline.node");
-		expect(candidates.indexOf(stagedBaseline)).toBeLessThan(candidates.indexOf(leafBaseline));
-		expect(candidates.indexOf(leafBaseline)).toBeLessThan(candidates.indexOf(coreBaseline));
-	});
-
 	it("keeps the development candidate list unchanged when no leaf package is installed", () => {
 		const nativeDir = "/repo/packages/natives/native";
 		const execDir = "/usr/bin";

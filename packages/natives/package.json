@@ -72,6 +72,10 @@
       "types": "./native/index.d.ts",
       "import": "./native/index.js"
     },
+    "./loader": {
+      "types": "./native/loader-state.d.ts",
+      "import": "./native/loader-state.js"
+    },
     "./desktop": {
       "types": "./native/desktop.d.ts",
       "import": "./native/desktop.js"
