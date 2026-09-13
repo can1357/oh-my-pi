@@ -108,6 +108,8 @@ export const LABEL_MAX = 80;
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const modelSelectorSchema = type("string.trim |> string > 0");
+const modelInputSchema = modelSelectorSchema.or(modelSelectorSchema.array().atLeastLength(1));
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -118,6 +120,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -127,6 +130,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -147,6 +151,8 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to this child. */
 	tools?: string[];
+	/** Caller-owned model selector or ordered candidate selectors for this spawn. */
+	model?: string | string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
@@ -158,6 +164,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -168,16 +175,19 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"+": "delete",
 });
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	"model?": "never",
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
+	"model?": "never",
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -218,12 +228,14 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
+				"model?": modelInputSchema,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				"model?": "never",
 				"+": "delete",
 			});
 		}
@@ -235,11 +247,13 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"model?": modelInputSchema,
 			"+": "delete",
 		});
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
+			"model?": "never",
 			"+": "delete",
 		});
 	}
@@ -252,6 +266,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"model?": modelInputSchema,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -264,6 +279,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		"model?": modelInputSchema,
 		"+": "delete",
 	});
 }
@@ -313,6 +329,8 @@ export interface TaskParams {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to the flat-form child. */
 	tools?: string[];
+	/** Caller-owned model selector or ordered candidate selectors for the flat-form child. */
+	model?: string | string[];
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */

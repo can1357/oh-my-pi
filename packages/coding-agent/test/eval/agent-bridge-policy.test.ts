@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async";
+import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { runEvalAgent, type EvalAgentBridgeOptions, type EvalAgentResult } from "../../src/eval/agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
@@ -16,6 +17,7 @@ import { resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/reg
 import type { PlanModeState } from "../../src/plan-mode/state";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
+import { AuthStorage } from "../../src/session/auth-storage";
 import * as taskDiscovery from "../../src/task/discovery";
 import type { ExecutorOptions } from "../../src/task/executor";
 import * as taskExecutor from "../../src/task/executor";
@@ -42,6 +44,26 @@ const reviewerAgent = {
 } satisfies AgentDefinition;
 
 const jobManagers = new Set<AsyncJobManager>();
+
+interface ModelFixture {
+	authStorage: AuthStorage;
+	modelRegistry: ModelRegistry;
+	tempDir: TempDir;
+}
+
+const modelFixtures = new Set<ModelFixture>();
+
+async function makeModelFixture(): Promise<ModelFixture> {
+	const tempDir = TempDir.createSync("@omp-eval-agent-models-");
+	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	modelRegistry.refreshInBackground("offline");
+	await modelRegistry.awaitInitialBackgroundRefresh();
+	const fixture = { authStorage, modelRegistry, tempDir };
+	modelFixtures.add(fixture);
+	return fixture;
+}
 
 function isEvalAgentResult(value: unknown): value is EvalAgentResult {
 	return (
@@ -76,6 +98,8 @@ interface SessionOptions {
 	depth?: number;
 	activeModel?: string;
 	modelString?: string;
+	modelRegistry?: ModelRegistry;
+	authStorage?: AuthStorage;
 	enableLsp?: boolean;
 	settings?: Settings;
 	outputManager?: AgentOutputManager;
@@ -106,6 +130,8 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		getSessionSpawns: () => options.spawns ?? "*",
 		getActiveModelString: () => options.activeModel ?? "p/active",
 		getModelString: () => options.modelString ?? "p/fallback",
+		modelRegistry: options.modelRegistry,
+		authStorage: options.authStorage,
 		getArtifactsDir: () => artifactsDir,
 		getSessionId: () => "test-session",
 		getEvalSessionId: () => "test-eval-session",
@@ -186,6 +212,11 @@ describe("runEvalAgent", () => {
 		resetRegisteredArtifactDirsForTests();
 		await Promise.all([...jobManagers].map(manager => manager.dispose()));
 		jobManagers.clear();
+		for (const fixture of modelFixtures) {
+			fixture.authStorage.close();
+			fixture.tempDir.removeSync();
+		}
+		modelFixtures.clear();
 	});
 
 	it("resolves the default task agent and agent overrides", async () => {
@@ -340,19 +371,65 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("fails a per-call model before dispatch when the registry is unavailable", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
+		await expect(runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() })).rejects.toThrow(
+			/Requested model candidates default.*model registry unavailable/,
+		);
+		expect(runSpy).not.toHaveBeenCalled();
+	});
 
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+	it("gives caller model candidates precedence and keeps their order", async () => {
+		const fixture = await makeModelFixture();
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession({
+			modelRegistry: fixture.modelRegistry,
+			authStorage: fixture.authStorage,
+			activeModel: "p/parent-active",
+			modelString: "p/parent-fallback",
+			settings: Settings.isolated({
+				"async.enabled": false,
+				"task.isolation.enabled": false,
+				"task.enableLsp": true,
+				"task.agentModelOverrides": { task: "anthropic/claude-haiku-4-5" },
+			}),
+		});
+
+		const result = await runEvalAgentAndWait(
+			{ prompt: "work", model: ["anthropic/missing-model", "anthropic/claude-sonnet-4-5"] },
+			{ session },
+		);
+
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(result.details.model).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	it("rejects unavailable caller models before registering a job or reserving its id", async () => {
+		const fixture = await makeModelFixture();
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const outputManager = new AgentOutputManager(() => null);
+		const session = makeSession({
+			modelRegistry: fixture.modelRegistry,
+			authStorage: fixture.authStorage,
+			outputManager,
+		});
+
+		await expect(
+			runEvalAgent({ prompt: "unavailable", model: "anthropic/missing-model", label: "Stable" }, { session }),
+		).rejects.toThrow(/Requested model candidates anthropic\/missing-model are unavailable/);
+		expect(session.asyncJobManager?.getAllJobs()).toEqual([]);
+		expect(runSpy).not.toHaveBeenCalled();
+
+		const handle = await runEvalAgentAndWait(
+			{ prompt: "available", model: "anthropic/claude-sonnet-4-5", label: "Stable" },
+			{ session },
+		);
+		expect(handle.details.id).toBe("Stable");
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };

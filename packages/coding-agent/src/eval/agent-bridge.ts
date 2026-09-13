@@ -27,6 +27,7 @@ export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
 
 const agentArgsSchema = type({
 	prompt: "string>0",
+	"model?": type("string.trim |> string > 0").or(type("string.trim |> string > 0").array().atLeastLength(1)),
 	"agent?": "string>0",
 	"label?": "string",
 	"schema?": "unknown",
@@ -40,6 +41,7 @@ const agentArgsSchema = type({
 
 interface EvalAgentArgs {
 	prompt: string;
+	model?: string | string[];
 	agent?: string;
 	label?: string;
 	schema?: unknown;
@@ -198,6 +200,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			session: options.session,
 			invocationKind: "eval",
 			assignment: parsed.prompt,
+			...(parsed.model !== undefined ? { model: parsed.model } : {}),
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
@@ -221,6 +224,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						session: options.session,
 						invocationKind: "eval",
 						assignment: parsed.prompt,
+						...(parsed.model !== undefined ? { model: parsed.model } : {}),
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),

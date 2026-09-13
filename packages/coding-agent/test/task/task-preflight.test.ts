@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { kNoAuth, type ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -20,6 +22,7 @@ function createSession(options: {
 	manager: AsyncJobManager;
 	settings?: Record<string, unknown>;
 	spawns?: string | boolean;
+	modelRegistry?: ModelRegistry;
 }): ToolSession {
 	return {
 		cwd: "/tmp",
@@ -28,7 +31,18 @@ function createSession(options: {
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		asyncJobManager: options.manager,
+		modelRegistry: options.modelRegistry,
 	} as unknown as ToolSession;
+}
+
+function modelRegistry(): ModelRegistry {
+	const model = getBundledModel("openai", "gpt-4.1-mini");
+	if (!model) throw new Error("Expected bundled model openai/gpt-4.1-mini");
+	return {
+		getAvailable: () => [model],
+		getAll: () => [model],
+		getApiKey: async () => kNoAuth,
+	} as unknown as ModelRegistry;
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -106,6 +120,7 @@ describe("task async preflight", () => {
 
 			const result = await tool.execute("preflight", params as TaskParams);
 
+			expect(result.isError).toBe(true);
 			expect(textOf(result)).toContain(expectation);
 			expect(jobs.getJob(name)).toBeUndefined();
 		},
@@ -116,19 +131,22 @@ describe("task async preflight", () => {
 		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
 		const jobs = manager();
 		const register = vi.spyOn(jobs, "register");
-		const tool = await TaskTool.create(createSession({ manager: jobs, settings: { "task.batch": true } }));
+		const tool = await TaskTool.create(
+			createSession({ manager: jobs, modelRegistry: modelRegistry(), settings: { "task.batch": true } }),
+		);
 
 		const result = await tool.execute("mixed-preflight", {
 			context: "Shared context.",
 			tasks: [
-				{ name: "Invalid", agent: "missing", task: "Do invalid work." },
+				{ name: "Invalid", agent: "task", task: "Do invalid work.", model: "missing/model" },
 				{ name: "AlsoInvalid", agent: "also-missing", task: "Do more invalid work." },
 				{ name: "Valid", agent: "task", task: "Do valid work." },
 			],
 		} as TaskParams);
 
 		const text = textOf(result);
-		expect(text).toContain('Task Invalid failed preflight: Unknown agent "missing"');
+		expect(result.isError).toBe(true);
+		expect(text).toContain("Task Invalid failed preflight: Requested model candidates missing/model");
 		expect(text).toContain('Task AlsoInvalid failed preflight: Unknown agent "also-missing"');
 		expect(register).not.toHaveBeenCalled();
 		expect(runSubprocess).not.toHaveBeenCalled();
@@ -143,18 +161,23 @@ describe("task async preflight", () => {
 		const jobs = manager();
 		const register = vi.spyOn(jobs, "register");
 		const tool = await TaskTool.create(
-			createSession({ manager: jobs, settings: { "async.enabled": false, "task.batch": true } }),
+			createSession({
+				manager: jobs,
+				modelRegistry: modelRegistry(),
+				settings: { "async.enabled": false, "task.batch": true },
+			}),
 		);
 
 		const result = await tool.execute("sync-preflight", {
 			context: "Shared context.",
 			tasks: [
-				{ name: "Invalid", agent: "missing", task: "Do invalid work." },
-				{ name: "Valid", agent: "task", task: "Do valid work." },
+				{ name: "Invalid", agent: "task", task: "Do invalid work.", model: "missing/model" },
+				{ name: "Valid", agent: "task", task: "Do valid work.", model: "openai/gpt-4.1-mini" },
 			],
 		} as TaskParams);
 
-		expect(textOf(result)).toContain('Task Invalid failed preflight: Unknown agent "missing"');
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Task Invalid failed preflight: Requested model candidates missing/model");
 		expect(register).not.toHaveBeenCalled();
 		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
