@@ -192,13 +192,11 @@ interface XdevMountNoticeDetails {
 
 interface PendingNoticePreview<T> {
 	notice: CustomMessage<T> | undefined;
-	revision: number;
 	/**
-	 * Fingerprint of the previewed notice's rendered content. Guards against
-	 * changes the {@link SessionTools.#xdevMountDeltaRevision} counter misses —
-	 * chiefly a same-named MCP tool reconnecting with a new schema during the
-	 * maintenance await, which rewrites the inline docs without moving the mount
-	 * set or the schema-excluding applied-tool signature.
+	 * Exact rendered content included in the context estimate. Re-projecting and
+	 * comparing this key after maintenance catches every semantically relevant
+	 * change — mount membership, base-catalog suppression, summaries, and schemas
+	 * — without false-invalidating a byte-identical notice after a hidden rebuild.
 	 */
 	contentKey: string;
 }
@@ -223,7 +221,6 @@ export class SessionTools {
 	#xdev: XdevState | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
-	#xdevMountDeltaRevision = 0;
 	/**
 	 * Whether the current {@link #baseSystemPrompt} already renders the roster the
 	 * pending delta describes — true after a full rebuild, false after a frozen
@@ -1146,11 +1143,6 @@ export class SessionTools {
 
 	#setBasePromptXdevNames(names: readonly string[] | undefined): void {
 		this.#basePromptXdevNames = new Set(names);
-		// A rebuild can change which pending additions the final base catalog
-		// already announces. Invalidate the projection; the post-maintenance take
-		// records additions carried by a delivered base and defers only the
-		// remaining notice payload.
-		if (this.#pendingXdevMountDelta) this.#xdevMountDeltaRevision++;
 	}
 
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {
@@ -1200,7 +1192,6 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
-		this.#xdevMountDeltaRevision++;
 		if (this.#host.settings.get("startup.quiet")) return;
 		const parts: string[] = [];
 		if (addedNames.length > 0) parts.push(`mounted ${addedNames.join(", ")}`);
@@ -1321,7 +1312,7 @@ export class SessionTools {
 		};
 	}
 
-	/** Previews the hidden `xd://` mount notice, its pending revision, and a content fingerprint. */
+	/** Previews the hidden `xd://` mount notice and its rendered-content fingerprint. */
 	peekPendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
 	}): PendingNoticePreview<XdevMountNoticeDetails> | undefined {
@@ -1329,38 +1320,34 @@ export class SessionTools {
 		if (!projection) return undefined;
 		return {
 			notice: projection.notice,
-			revision: this.#xdevMountDeltaRevision,
 			contentKey: this.#xdevNoticeContentKey(projection.notice),
 		};
 	}
 
-	/** Consumes the mount notice only when no delta, catalog, or schema change followed its preview. */
+	/**
+	 * Consumes the mount notice only when its rendered content still matches the
+	 * preview included in the context estimate.
+	 */
 	takePendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
-		expectedRevision: number;
 		expectedContentKey: string;
 	}): CustomMessage<XdevMountNoticeDetails> | undefined {
-		if (options.expectedRevision !== this.#xdevMountDeltaRevision) {
-			// Maintenance may have rebuilt and delivered the base catalog after the
-			// preview. Commit additions carried by that prompt before deferring the
-			// remaining delta; a later unmount must not cancel an addition the model
-			// has already seen.
+		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
+		if (!projection) return undefined;
+		const contentMatches = this.#xdevNoticeContentKey(projection.notice) === options.expectedContentKey;
+		if (!contentMatches) {
+			// Changed rendered content can follow mount/catalog changes or a
+			// same-named MCP tool reconnect whose schema replacement does not change
+			// mount membership or the applied-tool signature.
+			// If maintenance delivered a rebuilt base, commit additions carried by
+			// that prompt before deferring the remaining notice content.
 			if (options.baseCatalogDelivered) this.#recordBasePromptXdevAdditions();
 			return undefined;
 		}
-		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
-		if (!projection) return undefined;
-		if (this.#xdevNoticeContentKey(projection.notice) !== options.expectedContentKey) {
-			// The rendered notice changed after the only context estimate without
-			// moving the revision — a same-named MCP tool reconnecting with a new
-			// schema during the await rewrites the inline docs (up to
-			// XDEV_DOCS_TOTAL_BUDGET). Defer the whole notice to the next user turn,
-			// which re-previews it against a fresh estimate, rather than delivering
-			// unbudgeted docs now.
-			return undefined;
-		}
+		// A hidden base rebuild can leave the projected notice byte-identical. The
+		// exact content was already budgeted, so consume it rather than withholding
+		// both the catalog and its availability notice from this request.
 		this.#pendingXdevMountDelta = undefined;
-		this.#xdevMountDeltaRevision++;
 		this.#announcedMounts = projection.announcedMounts;
 		return projection.notice;
 	}
@@ -1386,7 +1373,6 @@ export class SessionTools {
 		}
 		if (!changed) return;
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
-		this.#xdevMountDeltaRevision++;
 	}
 
 	#projectPendingXdevMountNotice(baseCatalogDelivered: boolean): XdevMountNoticeProjection | undefined {

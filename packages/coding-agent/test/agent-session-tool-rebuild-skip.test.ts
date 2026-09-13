@@ -1237,11 +1237,20 @@ These tools became available:
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 
 		// The base prompt rebuild exposes the device, but the per-turn extension
-		// replaces that prompt before the provider call. The mount notice is now
-		// the only channel making the newly mounted device visible on this turn.
+		// replaces that prompt before the provider call. A second rebuild during
+		// maintenance advances the internal catalog revision, yet remains hidden by
+		// the same override and leaves the budgeted notice byte-identical. That
+		// notice is the only channel making the newly mounted device visible on this
+		// turn, so the revision change alone must not defer it.
 		await session.refreshMCPTools([search]);
+		const hiddenRebuild = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshBaseSystemPrompt();
+			});
 		await session.prompt("hi");
 
+		expect(hiddenRebuild).toHaveBeenCalledTimes(1);
 		expect(systemPrompts[0]).toEqual(replacementPrompt);
 		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);

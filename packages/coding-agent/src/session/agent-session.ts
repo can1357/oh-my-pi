@@ -6607,7 +6607,6 @@ export class AgentSession {
 			const xdevMountNotice = previewXdevMountNotice
 				? this.#tools.takePendingXdevMountNotice({
 						baseCatalogDelivered: baseXdevCatalogDelivered,
-						expectedRevision: previewXdevMountNotice.revision,
 						expectedContentKey: previewXdevMountNotice.contentKey,
 					})
 				: undefined;
