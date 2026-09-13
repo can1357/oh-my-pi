@@ -46,6 +46,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Raw query. The orchestrator parses Google-style directives (`site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `filetype:`, quoted phrases, exclusions, and `OR`) so providers can map them to native filters or supported syntax; the original string remains available to adapters. |
+| `provider` | `"auto" \| SearchProviderId` | No | Target search provider (`auto` or a specific provider ID). Defaults to `auto` (walks the configured provider priority chain). Explicitly selecting an excluded provider returns an error. |
 | `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
 | `limit` | `number` | No | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`. |
 | `max_tokens` | `number` | No | Passed through as provider token caps (`maxOutputTokens`, `max_tokens`, or xAI `max_output_tokens`) only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
@@ -84,9 +85,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 ## Flow
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
 2. `executeSearch()` parses `query` once with `parseSearchQuery()`, then computes ordered provider candidates without eagerly loading their modules:
-   - if internal `params.provider` is set and not `"auto"`, that provider is the only candidate and is treated as explicit;
+   - if `params.provider` names a specific provider, that provider is the only candidate and is treated as explicit; if it is excluded via `providers.webSearchExclude`, search immediately returns an error;
    - otherwise it uses the configured candidate order. Entries explicitly listed in `providers.webSearchOrder` use `isExplicitlyAvailable()`; ordinary fallback entries use `isAvailable()`.
-3. `resolveProviderCandidates()` prioritizes valid first-occurrence IDs from `providers.webSearchOrder`, then appends unlisted providers in `SEARCH_PROVIDER_ORDER`. An empty list preserves built-in order. `providers.webSearchExclude` removes providers from the automatic/configured chain and from Public Web fan-out. Internal per-request forced providers bypass that configured chain.
+3. `resolveProviderCandidates()` prioritizes valid first-occurrence IDs from `providers.webSearchOrder`, then appends unlisted providers in `SEARCH_PROVIDER_ORDER`. An empty list preserves built-in order. `providers.webSearchExclude` removes providers from the automatic/configured chain and from Public Web fan-out.
 4. If no candidate is available (for example, settings exclude every credential-free engine and no keyed/OAuth provider is configured), `executeSearch()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
 5. For each provider in order, `executeSearch()` calls `provider.search()` with:
    - `query`,
@@ -105,7 +106,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 
 ## Modes / Variants
 - **Provider selection**
-  - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
+  - **Explicit provider**: callers and tool invocations may pass `provider`; a specific provider ID is the only attempted provider and uses `isExplicitlyAvailable()`. If the provider is excluded via `providers.webSearchExclude`, search immediately returns an error. `auto` (or omitting the field) walks the configured chain.
   - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
   - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
   - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
@@ -279,7 +280,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - SearXNG `findAuth()` can throw configuration errors before any HTTP call if Basic auth fields are incomplete or invalid.
 
 ## Notes
-- The model-facing schema does not expose `provider`, but internal callers can force one through `SearchQueryParams`.
+- The model-facing schema exposes optional `provider` (defaulting to `auto`), allowing direct routing to specialized backends or quota control while respecting `providers.webSearchExclude`.
 - `executeSearch()` walks `resolveProviderCandidates()` lazily; `resolveProviderChain()` remains a compatibility helper that loads every candidate. Provider instances are cached, and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
 - `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.

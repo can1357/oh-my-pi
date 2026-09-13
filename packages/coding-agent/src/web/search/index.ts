@@ -24,6 +24,7 @@ import {
 	formatSearchProviderFailures,
 	getSearchProvider,
 	getSearchProviderLabel,
+	isSearchProviderExcluded,
 	resolveProviderCandidates,
 	type SearchProvider,
 	type SearchProviderCandidate,
@@ -33,14 +34,15 @@ import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
+	SEARCH_PROVIDER_PREFERENCES,
 	SearchProviderError,
-	type SearchProviderId,
 	type SearchResponse,
 } from "./types";
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
 	query: "string",
+	"provider?": type.enumerated(...SEARCH_PROVIDER_PREFERENCES).describe("Search provider (default: auto)"),
 	recency: "'day' | 'week' | 'month' | 'year'?",
 	limit: "number?",
 	max_tokens: "number?",
@@ -50,9 +52,7 @@ export const webSearchSchema = type({
 
 export type SearchToolParams = typeof webSearchSchema.infer;
 
-export interface SearchQueryParams extends SearchToolParams {
-	provider?: SearchProviderId | "auto";
-}
+export type SearchQueryParams = SearchToolParams;
 
 /** Truncate text for tool output */
 function truncateText(text: string, maxLen: number): string {
@@ -144,6 +144,14 @@ async function executeSearch(
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
+		if (isSearchProviderExcluded(explicitProvider)) {
+			const label = getSearchProviderLabel(explicitProvider);
+			const message = `${label} web search is excluded by configuration.`;
+			return {
+				content: [{ type: "text" as const, text: `Error: ${message}` }],
+				details: { response: { provider: explicitProvider, sources: [] }, error: message },
+			};
+		}
 		candidates = [{ id: explicitProvider, explicit: true }];
 	} else {
 		// `--provider auto` and the default both walk the configured chain;
