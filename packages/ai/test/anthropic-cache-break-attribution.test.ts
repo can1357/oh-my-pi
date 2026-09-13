@@ -114,6 +114,23 @@ const rewriteWireRoot: NonNullable<AnthropicOptions["onPayload"]> = payload => {
 	};
 };
 
+/**
+ * Payload hook that returns a replacement body whose `tools` array is the
+ * assembled one with a rewritten description on its first entry. The array
+ * stays present and keeps its length, so the declared tool bytes are the only
+ * difference between the array the stable-tools plane produced and the one the
+ * request actually sends.
+ */
+const rewriteWireTools: NonNullable<AnthropicOptions["onPayload"]> = payload => {
+	const assembled = payload as Record<string, unknown> & { tools: ReadonlyArray<Record<string, unknown>> };
+	return {
+		...assembled,
+		tools: assembled.tools.map((entry, index) =>
+			index === 0 ? { ...entry, description: "rewritten after assembly" } : entry,
+		),
+	};
+};
+
 const successFetch: FetchImpl = async () => {
 	const events = [
 		{
@@ -442,6 +459,36 @@ describe("anthropic cache-break attribution", () => {
 
 		expect(second.cacheBreakReason).toEqual({ kind: "tools" });
 		expect(third.cacheBreakReason).toEqual({ kind: "tools" });
+	});
+
+	it("blames a still-present tool array a payload hook rewrote under the tool plane", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([tool("lookup", {})]);
+		await turn(states, context);
+		// The plane earns its exemption by keeping the array it produces stable.
+		// The hook runs after it and rewrites that array, so this request really
+		// does declare different tools than the cached prefix holds.
+		const second = await turn(states, context, undefined, MODEL, successFetch, { onPayload: rewriteWireTools });
+		// The hook stops firing and the array changes straight back, which is the
+		// same prefix rewrite in the other direction.
+		const third = await turn(states, context);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "tools" });
+		expect(third.cacheBreakReason).toEqual({ kind: "tools" });
+	});
+
+	it("blames nothing when a payload hook rewrites the tool array the same way on every turn", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([tool("lookup", {})]);
+		const hooked = async (): Promise<AssistantMessage> =>
+			await turn(states, context, undefined, MODEL, successFetch, { onPayload: rewriteWireTools });
+		await hooked();
+		// Every turn sends the same rewritten array, so the declared prefix stands
+		// still. Treating "the hook touched it" as the cause rather than comparing
+		// what was sent blames a steady state on every hooked turn forever.
+		const second = await hooked();
+
+		expect(second.cacheBreakReason).toBeUndefined();
 	});
 
 	it("blames nothing across a long run of turns that only append", async () => {

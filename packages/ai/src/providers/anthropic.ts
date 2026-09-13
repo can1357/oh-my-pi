@@ -472,6 +472,13 @@ type AnthropicCachePrefixSnapshot = {
 	systemTextLength: number;
 	toolsFingerprint: string;
 	toolsPresent: boolean;
+	/**
+	 * Whether {@link toolsFingerprint} describes the array the stable-tools
+	 * plane produced, rather than one a payload hook rewrote afterwards. The
+	 * plane's exemption from the fingerprint comparison only holds while both
+	 * sides of it came from the plane.
+	 */
+	toolsPlanned: boolean;
 	/** Resolved retention; absent when the request carried no `cache_control` at all. */
 	cacheTtl?: "5m" | "1h";
 };
@@ -2521,6 +2528,12 @@ const streamAnthropicOnce = (
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
 				}
+				// Fingerprint the array the stable-tools plane produced before the
+				// hook can touch it, and eagerly, because a hook that mutates in
+				// place edits the very objects this would otherwise read later.
+				const plannedToolsFingerprint = built.toolPlaneEnabled
+					? anthropicToolsPrefixFingerprint(nextParams.tools)
+					: undefined;
 				const replacementPayload = await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
@@ -2531,7 +2544,7 @@ const streamAnthropicOnce = (
 					built.conversation,
 					nextParams,
 					built.controlReason,
-					built.toolPlaneEnabled,
+					plannedToolsFingerprint,
 				);
 				commitCacheBreakSnapshot = cacheBreak.commit;
 				// Degradation retries compare against the same uncommitted snapshot,
@@ -4476,17 +4489,26 @@ function materializeAnthropicControlTransitions(
 }
 
 /**
- * Full cache-relevant wire definition of a tool, for the deployments without a
- * stable-tools plane: there every byte of the declared array is prefix,
- * including `description`, which {@link anthropicToolDefinitionKey} deliberately
- * ignores because the plane cannot express a description change as a control.
- * `cache_control` is excluded so a breakpoint move alone never reads as a
- * definition change.
+ * Full cache-relevant wire definition of a tool. Every byte of the declared
+ * array is prefix, including `description`, which {@link
+ * anthropicToolDefinitionKey} deliberately ignores because the stable-tools
+ * plane cannot express a description change as a control. `cache_control` is
+ * excluded so a breakpoint move alone never reads as a definition change.
  */
 function anthropicToolPrefixKey(tool: AnthropicWireTool): string {
 	const stable = { ...tool };
 	delete stable.cache_control;
 	return JSON.stringify(stable);
+}
+
+/**
+ * Fingerprint of a whole `tools` array as the cached prefix sees it. Taken once
+ * over the array the provider assembled and once over the array it sent, so a
+ * payload hook that rewrote the array in between is visible as a difference
+ * between the two.
+ */
+function anthropicToolsPrefixFingerprint(tools: readonly AnthropicWireTool[] | undefined): string {
+	return String(Bun.hash(JSON.stringify(tools?.map(anthropicToolPrefixKey) ?? [])));
 }
 
 /** Read retention from the sent prefix, falling back to a message breakpoint for headless requests. */
@@ -4557,14 +4579,25 @@ const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefin
  * fingerprint survives only inside {@link anthropicConversationIdentity},
  * where it keys a session-less conversation rather than describing its shape.
  *
- * The tools array is read two different ways depending on the deployment. Where
- * `supportsMidConversationToolChanges` holds, {@link planStableAnthropicTools}
- * carries ordinary add/remove as control blocks. A re-baseline names the tool
- * itself; an array changing between present and absent is also a prefix change. Where
- * the axis is off (Bedrock, Vertex, gateways, models without the capability)
- * there is no stable-tools plane, so any difference in the array — an add, a
- * remove, a description edit — rewrites the prefix, and the fingerprint
- * comparison below catches it without being able to blame a single tool.
+ * The tools array is read two different ways depending on where it came from.
+ * Where `supportsMidConversationToolChanges` holds, {@link
+ * planStableAnthropicTools} carries ordinary add/remove as control blocks and
+ * hands back an array it deliberately keeps stable, so blaming a difference in
+ * its own output would be a false positive: a re-baseline names the tool
+ * itself, and an array changing between present and absent is a prefix change
+ * on its own. Where the axis is off (Bedrock, Vertex, gateways, models without
+ * the capability) there is no stable-tools plane, so any difference in the
+ * array — an add, a remove, a description edit — rewrites the prefix, and the
+ * fingerprint comparison below catches it without being able to blame a single
+ * tool.
+ *
+ * `plannedToolsFingerprint` is that plane's own output, taken just before the
+ * payload hook runs and absent where the plane is off, so the exemption follows
+ * the array rather than the deployment. A hook that reorders or rewrites a
+ * still-present array sends a prefix the plane never planned, and the
+ * fingerprint speaks for it — then speaks again on the turn that stops hooking,
+ * because the array changes back. Both sides of the comparison must have come
+ * from the plane for it to stay silent, which is what `toolsPlanned` records.
  *
  * Returns no reason when this conversation has no snapshot yet: the first
  * request of a conversation writes the prefix cold by definition and must never
@@ -4585,7 +4618,7 @@ function detectAnthropicCacheBreak(
 	conversation: AnthropicConversationIdentity,
 	params: MessageCreateParamsStreaming,
 	controlReason: CacheBreakReason | undefined,
-	toolPlaneEnabled: boolean,
+	plannedToolsFingerprint: string | undefined,
 ): AnthropicCacheBreakDetection {
 	if (!state) return NO_CACHE_BREAK_DETECTION;
 	const { system, tools } = params;
@@ -4593,9 +4626,10 @@ function detectAnthropicCacheBreak(
 	const systemFingerprint = String(Bun.hash(JSON.stringify(texts)));
 	let systemTextLength = 0;
 	for (const text of texts) systemTextLength += text.length;
-	// Only consulted where the plane is off, so it reads the full wire
-	// definition rather than the plane's comparison key.
-	const toolsFingerprint = String(Bun.hash(JSON.stringify(tools?.map(anthropicToolPrefixKey) ?? [])));
+	const toolsFingerprint = anthropicToolsPrefixFingerprint(tools);
+	// Equal means the plane produced what was sent; unequal means a payload hook
+	// rewrote the array afterwards, and absent means there is no plane at all.
+	const toolsPlanned = plannedToolsFingerprint === toolsFingerprint;
 	// An absent `ttl` is the API's 5-minute default; `cacheControl` itself is
 	// absent when caching is off, and then there is no retention to record —
 	// switching caching on later is not a retention change.
@@ -4611,6 +4645,7 @@ function detectAnthropicCacheBreak(
 		systemTextLength,
 		toolsFingerprint,
 		toolsPresent: tools !== undefined,
+		toolsPlanned,
 		...(cacheTtl ? { cacheTtl } : {}),
 	};
 	const commit = (): void => {
@@ -4637,7 +4672,7 @@ function detectAnthropicCacheBreak(
 	if (controlReason) return { reason: controlReason, commit };
 	if (
 		previous.toolsPresent !== snapshot.toolsPresent ||
-		(!toolPlaneEnabled && previous.toolsFingerprint !== toolsFingerprint)
+		((!toolsPlanned || !previous.toolsPlanned) && previous.toolsFingerprint !== toolsFingerprint)
 	) {
 		return { reason: { kind: "tools" }, commit };
 	}
