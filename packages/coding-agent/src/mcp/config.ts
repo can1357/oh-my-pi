@@ -241,6 +241,17 @@ export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 const NATIVE_EXA_MCP_TOOLS = new Set(["web_search_exa"]);
 
 /**
+ * Whether a name is one the native Exa integration provides.
+ *
+ * Compared WITHOUT case folding: MCP tool names are case-sensitive, so
+ * `WEB_SEARCH_EXA` is a different tool from the native `web_search_exa`, and
+ * reading them as equal drops a server the allowlist explicitly selected.
+ */
+function isNativeExaMcpTool(toolName: string): boolean {
+	return NATIVE_EXA_MCP_TOOLS.has(toolName);
+}
+
+/**
  * Decode a raw `tools=` value before splitting it.
  *
  * The endpoint decodes its own query string, so a stdio wrapper passing the
@@ -340,7 +351,7 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 			enabledTools: allowlist,
 			disabledTools: config.disabledTools,
 		}).allowed;
-		return effective.some(tool => !NATIVE_EXA_MCP_TOOLS.has(tool.toLowerCase()));
+		return effective.some(tool => !isNativeExaMcpTool(tool));
 	}
 	if (allowlist.length === 0) {
 		// Unrestricted: a denylist leaves the complement of what it denies,
@@ -372,7 +383,7 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	// still names a fetch tool. Only when every entry resolved to the native
 	// tool alone is the drop provable, as with `web_search_ex[a]`.
 	if (unmatched.length > 0) return true;
-	return effective.some(tool => !NATIVE_EXA_MCP_TOOLS.has(tool.toLowerCase()));
+	return effective.some(tool => !isNativeExaMcpTool(tool));
 }
 
 /** Result of filtering Exa MCP servers */

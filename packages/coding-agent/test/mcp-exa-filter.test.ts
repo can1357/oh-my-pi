@@ -314,6 +314,18 @@ describe("Exa MCP filtering", () => {
 		expect(Object.keys(result.configs)).toEqual(["exa"]);
 	});
 
+	test("keeps a differently-cased native name, which the native integration does not provide", () => {
+		// MCP tool names are case-sensitive, so `WEB_SEARCH_EXA` is not the native
+		// `web_search_exa`. Folding case when classifying read them as equal and
+		// dropped a server the allowlist had explicitly selected.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["WEB_SEARCH_EXA"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
 	test("keeps an exa server restricted only by a denylist", () => {
 		// A denylist selects the complement of what it names, so it always leaves
 		// the server's non-native tools reachable; dropping the server would take

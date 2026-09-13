@@ -86,12 +86,14 @@ type ToolMatcher = (name: string) => boolean;
 const compiledPatterns = new Map<string, ToolMatcher>();
 
 /**
- * Quote a bare `"` in a pattern before compiling: picomatch's parser reads a
- * bare quote and derails (a lone one compiles to an empty match). Applied to
- * every compiled pattern.
+ * Quote a BARE `"` in a pattern before compiling: picomatch's parser reads a
+ * bare quote and derails (a lone one compiles to an empty match). A quote the
+ * author already escaped (`\"`, the glob spelling for a literal quote) is left
+ * alone — escaping it again yields `\\"`, which matches a backslash followed by
+ * a quote and so silently stops matching the intended name.
  */
 function quoteDoubles(pattern: string): string {
-	return pattern.replaceAll('"', '\\"');
+	return pattern.replaceAll(/(?<!\\)"/g, '\\"');
 }
 
 /** Does the pattern hold four or more consecutive backslashes? */

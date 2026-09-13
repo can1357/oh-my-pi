@@ -227,6 +227,11 @@ test("double quotes are ordinary characters", () => {
 	expect(run(['a"b', "ab"], ['a"b']).allowed).toEqual(['a"b']);
 	// A quote works as a class member too.
 	expect(run(['x"y'], ['x["]y']).allowed).toEqual(['x"y']);
+	// An author-escaped quote is the glob spelling for a literal quote: escaping
+	// it a second time produces `\\"`, which matches a backslash followed by a
+	// quote, so the entry silently stopped matching the tool it named.
+	expect(run(['"'], ['\\"']).allowed).toEqual(['"']);
+	expect(run(['"', "x"], ['\\"']).allowed).toEqual(['"']);
 });
 
 test("POSIX bracket classes expand the way picomatch expands them", () => {
