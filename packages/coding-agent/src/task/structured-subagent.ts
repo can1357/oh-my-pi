@@ -415,15 +415,11 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	// Freeze the resolver and its account affinity together so the child cannot
-	// drift onto a different OAuth account if the parent rotates its session id
-	// mid-run. Falls back to the raw resolver for callers that predate the bundle.
-	const inheritedCredential = session.getInheritedCredential?.();
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
-		getApiKey: inheritedCredential?.getApiKey ?? session.getApiKey,
-		credentialSessionId: inheritedCredential?.credentialSessionId,
+		getApiKey: session.getApiKey,
+		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),

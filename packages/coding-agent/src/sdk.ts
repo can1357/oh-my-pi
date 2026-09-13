@@ -399,10 +399,11 @@ export interface CreateAgentSessionOptions {
 	 */
 	getApiKey?: AgentOptions["getApiKey"];
 	/**
-	 * Session affinity used by {@link getApiKey} for credential metadata lookups.
+	 * Session whose stored credential affinities are copied into this session
+	 * before any child credential operation.
 	 * @internal
 	 */
-	credentialSessionId?: string;
+	credentialSourceSessionId?: string;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -1464,6 +1465,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		await sessionManager.setAdditionalDirectories(merged);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+	if (options.credentialSourceSessionId) {
+		modelRegistry.authStorage.inheritSessionCredentials(options.credentialSourceSessionId, providerSessionId);
+	}
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
@@ -1812,21 +1816,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
-			getApiKey: effectiveGetApiKey,
-			// Snapshot the resolver AND its account affinity together at spawn time.
-			// A detached child outlives the parent turn, so a later parent `/fresh`
-			// (which rotates agent.sessionId) must not leave the child resolving a
-			// bearer token under the new affinity while its metadata still attributes
-			// the old account. Freezing both here keeps credential and metadata
-			// resolution on the same account for the child and every nested child.
-			getInheritedCredential: () => {
-				const credentialSessionId = options.credentialSessionId ?? agent.sessionId;
-				return {
-					getApiKey:
-						options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, credentialSessionId)),
-					credentialSessionId,
-				};
-			},
+			// Explicit resolvers retain their existing pass-through contract. Ordinary
+			// sessions inherit stored affinity into the child's own provider session.
+			getApiKey: options.getApiKey,
+			getCredentialSourceSessionId: options.getApiKey ? undefined : () => agent.sessionId,
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
@@ -3901,7 +3894,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
-			credentialSessionId: options.credentialSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,

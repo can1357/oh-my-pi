@@ -152,16 +152,6 @@ export interface DeferredDiagnosticsEntry {
 	isStale(): boolean;
 }
 
-/**
- * A credential resolver paired with the provider session id it resolves under.
- * Captured when a child session is spawned so the child's bearer token and its
- * Anthropic account metadata stay on one account across parent session rotations.
- */
-export interface InheritedCredential {
-	getApiKey: AgentOptions["getApiKey"];
-	credentialSessionId: string | undefined;
-}
-
 /** Session context for tool factories */
 export interface ToolSession {
 	/** Current working directory */
@@ -185,12 +175,8 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
-	/**
-	 * Snapshot the inherited credential resolver together with the account
-	 * affinity it resolves under, captured when a child session is spawned so the
-	 * child's bearer token and request metadata attribute the same account.
-	 */
-	getInheritedCredential?: () => InheritedCredential;
+	/** Current session whose stored credential affinities should seed a child session. */
+	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */

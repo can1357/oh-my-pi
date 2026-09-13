@@ -397,8 +397,8 @@ export interface ExecutorOptions {
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
-	/** Session affinity used by {@link getApiKey} for credential metadata lookups. */
-	credentialSessionId?: string;
+	/** Parent session whose stored credential affinities seed the child session. */
+	credentialSourceSessionId?: string;
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -3472,7 +3472,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				authStorage,
 				modelRegistry,
 				getApiKey: options.getApiKey,
-				credentialSessionId: options.credentialSessionId,
+				credentialSourceSessionId: options.credentialSourceSessionId,
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,

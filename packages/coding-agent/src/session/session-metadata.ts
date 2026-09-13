@@ -21,10 +21,6 @@ import type { AuthStorage } from "./auth-storage";
  * `provider` is the target provider string (e.g. `"anthropic"`) and gates the
  * `account_uuid` and `device_id` lookups — only `"anthropic"` requests carry them.
  *
- * `credentialSessionId` is forwarded to the auth-storage session-sticky lookup
- * so multi-credential setups attribute to the same OAuth account used for the
- * actual API request. It defaults to `sessionId` for ordinary sessions.
- *
  * `authStorage` is treated as optional so test fixtures that stub `modelRegistry`
  * without a real storage layer still work; the resolver simply skips the lookup
  * and emits `{ session_id }` alone, matching the no-OAuth-credential path.
@@ -33,7 +29,6 @@ export function buildSessionMetadata(
 	sessionId: string,
 	provider: string,
 	authStorage: AuthStorage | undefined,
-	credentialSessionId = sessionId,
 ): Record<string, unknown> {
 	const userId: Record<string, string> = { session_id: sessionId };
 	// Only look up account_uuid when the request is going to Anthropic. Injecting
@@ -41,7 +36,7 @@ export function buildSessionMetadata(
 	// Anthropic-format-compatible proxies like cloudflare-ai-gateway or gitlab-duo)
 	// would leak the user's Anthropic identity to unrelated third-party APIs.
 	if (provider === "anthropic") {
-		const accountUuid = authStorage?.getOAuthAccountId("anthropic", credentialSessionId);
+		const accountUuid = authStorage?.getOAuthAccountId("anthropic", sessionId);
 		if (typeof accountUuid === "string" && accountUuid.length > 0) {
 			userId.account_uuid = accountUuid;
 			// Claude Code's `device_id` is a stable 64-hex account-scoped install
