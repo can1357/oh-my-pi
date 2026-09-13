@@ -4054,8 +4054,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// bridge both run these instances directly, so a raw one would execute a
 		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 		// first, matching the registry's wrap order.
-		const advisorTools: Tool[] = built
-			.filter((tool): tool is Tool => tool != null)
+		// The advisor is a full agent, but it is still this agent's delegate: a
+		// session scoped read-only (`tools: []` or `disallowedTools: ["*"]`) must
+		// not reach `bash`/`write`/`edit` through its advisor. Apply the owning
+		// session's scope to the roster — through the same shared predicate and
+		// pair-aware filter as the primary's active set — so the advisor can only
+		// select what the primary itself may run. An unscoped session admits
+		// everything, leaving top-level behaviour unchanged.
+		const builtAdvisorTools = built.filter((tool): tool is Tool => tool != null);
+		const scopedAdvisorToolNames = new Set(
+			withoutSiblingTools(
+				builtAdvisorTools.map(tool => tool.name),
+				name =>
+					!isToolScopedIn(name, disallowedPatterns, {
+						enforceToolAllowlist,
+						allowedToolNames: explicitlyRequestedToolNameSet,
+					}),
+			),
+		);
+		const advisorTools: Tool[] = builtAdvisorTools
+			.filter(tool => scopedAdvisorToolNames.has(tool.name))
 			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];

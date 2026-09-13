@@ -2386,6 +2386,50 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("confines the advisor roster to the session's tool scope", async () => {
+		// The advisor is a full agent that selects from the built roster via its
+		// own WATCHDOG config, so an unscoped roster let a child declared
+		// `tools: []` acquire bash/write/edit through its advisor while still
+		// being classified and advertised as read-only.
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated({ "advisor.enabled": true, "compaction.enabled": false });
+		settings.setModelRole("advisor", "openai/gpt-4o-mini");
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			toolNames: ["read"],
+			// What the executor sets for an agent-declared `tools:` list.
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			const advisorToolNames = session.getAdvisorAvailableToolNames();
+			expect(advisorToolNames).toContain("read");
+			for (const mutating of ["bash", "write", "edit", "task"]) {
+				expect(advisorToolNames).not.toContain(mutating);
+			}
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps a deny-all scope off the advisor roster", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated({ "advisor.enabled": true, "compaction.enabled": false });
+		settings.setModelRole("advisor", "openai/gpt-4o-mini");
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			disallowedTools: ["*"],
+		});
+
+		try {
+			expect(session.getAdvisorAvailableToolNames()).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	// Late registrations flow through scheduleToolRegistration after startup, so every
 	// arm of the scopedOut clause must hold there too, not just during initial activation:
 	//   scopedOut = (enforceToolAllowlist && !explicitlyRequested) || isToolDisallowed(...)
