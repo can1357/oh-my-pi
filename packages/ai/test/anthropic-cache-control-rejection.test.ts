@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { isCacheControlUnsupported } from "@oh-my-pi/pi-ai/error";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { buildAnthropicClientOptions, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
@@ -21,6 +21,12 @@ import { withOfficialAnthropicEndpoint } from "./helpers";
 
 const EXTENDED_CACHE_TTL_BETA = "extended-cache-ttl-2025-04-11";
 const PROMPT_CACHING_SCOPE_BETA = "prompt-caching-scope-2026-01-05";
+/** Added by `compat.supportsPerMessageEffort`; forces a per-request override. */
+const PER_MESSAGE_EFFORT_BETA = "mid-conversation-output-config-2026-07-01";
+/** Caller-owned betas that have nothing to do with prompt caching. */
+const CUSTOM_BETA = "custom-proxy-beta-2026-01-01";
+const OTHER_CUSTOM_BETA = "custom-proxy-extra-2026-02-02";
+const CLIENT_DEFAULT_BETA = "custom-client-default-2026-03-03";
 
 const MODEL: Model<"anthropic-messages"> = buildModel({
 	id: "claude-sonnet-4-6",
@@ -138,6 +144,35 @@ function transportAt(baseURL: string, fetchImpl: FetchImpl): AnthropicMessagesCl
  */
 function createOpaqueClient(baseURL: string, fetchImpl: FetchImpl): AnthropicMessagesClientLike {
 	return { messages: transportAt(baseURL, fetchImpl).messages };
+}
+
+/**
+ * OAuth against a non-official endpoint whose compat opts into fingerprint
+ * header overrides — the one shape where a caller's own `anthropic-beta` value
+ * reaches the wire verbatim instead of being dropped as an enforced key.
+ */
+function overrideModel(headers: Record<string, string> = {}): Model<"anthropic-messages"> {
+	return buildModel({
+		...MODEL,
+		provider: "custom-anthropic",
+		baseUrl: "https://override-proxy.example/anthropic",
+		headers,
+		compat: { allowAnthropicHeaderOverrides: true },
+	});
+}
+
+function runOverrideTurn(
+	model: Model<"anthropic-messages">,
+	capture: Capture,
+	headers?: Record<string, string>,
+): Promise<AssistantMessage> {
+	return streamAnthropic(model, CONTEXT, {
+		apiKey: "sk-ant-oat-test",
+		isOAuth: true,
+		headers,
+		providerSessionState: new Map<string, ProviderSessionState>(),
+		fetch: createFetch(capture, ["reject", "ok"]),
+	}).result();
 }
 
 /** Every `cache_control` breakpoint on the wire, across tools, system and messages. */
@@ -366,6 +401,123 @@ describe("Anthropic cache_control rejection fallback", () => {
 		// endpoint just refused.
 		expect(capture.betaHeaders[0]).toContain(PROMPT_CACHING_SCOPE_BETA);
 		expect(capture.betaHeaders[1]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
+	});
+
+	it("drops a cache beta supplied through model.headers from the replay", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+
+		const message = await runOverrideTurn(
+			overrideModel({ "anthropic-beta": `${EXTENDED_CACHE_TTL_BETA},${CUSTOM_BETA}` }),
+			capture,
+		);
+
+		expect(message.stopReason).toBe("stop");
+		expect(capture.betaHeaders[0]).toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
+	});
+
+	it("drops a cache beta supplied through options.headers from the replay", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+
+		const message = await runOverrideTurn(overrideModel(), capture, {
+			// Mixed casing on purpose: HTTP header names are case-insensitive, so
+			// a filter keyed on the exact lowercase spelling would miss this.
+			"Anthropic-Beta": `${PROMPT_CACHING_SCOPE_BETA},${CUSTOM_BETA}`,
+		});
+
+		expect(message.stopReason).toBe("stop");
+		expect(capture.betaHeaders[0]).toContain(PROMPT_CACHING_SCOPE_BETA);
+		expect(capture.betaHeaders[1]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
+	});
+
+	it("keeps the caller's other betas in the same header value on the replay", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+
+		await runOverrideTurn(
+			overrideModel({
+				"anthropic-beta": `${CUSTOM_BETA},${EXTENDED_CACHE_TTL_BETA},${OTHER_CUSTOM_BETA},${PROMPT_CACHING_SCOPE_BETA}`,
+			}),
+			capture,
+		);
+
+		// Exact value: only the two cache tokens leave, the rest keep their order,
+		// and the list carries no empty entry or dangling separator.
+		expect(capture.betaHeaders[1]).toBe(`${CUSTOM_BETA},${OTHER_CUSTOM_BETA}`);
+	});
+
+	it("keeps a caller-header cache beta out of an injected client's per-request override", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const fetchImpl = createFetch(capture, ["reject", "ok"]);
+		// A control beta is what forces the provider to send a per-request
+		// `anthropic-beta` at all for an injected client, and that override seeds
+		// itself from the caller's own header value.
+		const model = buildModel({ ...MODEL, compat: { supportsPerMessageEffort: true } });
+		// Client-level betas the caller fixed at construction. The per-request
+		// override replaces them wholesale, which is exactly why the provider may
+		// never emit a blanket `anthropic-beta` it did not derive from the caller.
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-ant-api-test",
+			baseURL: "https://injected.example/v1",
+			fetch: fetchImpl,
+			defaultHeaders: { "anthropic-beta": CLIENT_DEFAULT_BETA },
+		});
+
+		const message = await streamAnthropic(model, CONTEXT, {
+			client,
+			headers: { "anthropic-beta": `${EXTENDED_CACHE_TTL_BETA},${CUSTOM_BETA}` },
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		}).result();
+
+		expect(message.stopReason).toBe("stop");
+		expect(capture.betaHeaders[0]).toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[1]).toBe(`${CUSTOM_BETA},${PER_MESSAGE_EFFORT_BETA}`);
+	});
+
+	it("cannot remove a cache beta baked into an injected client's own default headers", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const fetchImpl = createFetch(capture, ["reject", "ok"]);
+		// No caller headers and no control beta, so the provider sends no
+		// per-request override and the client's constructor-time headers are the
+		// only beta source. Their value is unreadable from here, so the cache beta
+		// survives the replay: dropping it is the owning caller's job.
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-ant-api-test",
+			baseURL: "https://injected-defaults.example/v1",
+			fetch: fetchImpl,
+			defaultHeaders: { "anthropic-beta": `${CUSTOM_BETA},${EXTENDED_CACHE_TTL_BETA}` },
+		});
+
+		const message = await streamAnthropic(MODEL, CONTEXT, {
+			client,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		}).result();
+
+		expect(message.stopReason).toBe("stop");
+		// The body still drops its breakpoints, so the replay can succeed.
+		expect(countBreakpoints(capture.bodies[1])).toBe(0);
+		// The client's header is passed through byte-for-byte: not rewritten, and
+		// not wiped either — a blanket override would have cost the caller
+		// `CUSTOM_BETA` as well.
+		expect(capture.betaHeaders[1]).toBe(`${CUSTOM_BETA},${EXTENDED_CACHE_TTL_BETA}`);
+	});
+
+	it("strips a caller cache beta from the GitHub Copilot default headers", () => {
+		// The Copilot branch builds its headers by merge alone — it has no
+		// enforced-key filter, so a caller's `anthropic-beta` reaches the wire
+		// verbatim on an ordinary API-key request.
+		const options = buildAnthropicClientOptions({
+			model: buildModel({
+				...MODEL,
+				provider: "github-copilot",
+				baseUrl: "https://api.githubcopilot.com",
+				headers: { "anthropic-beta": `${CUSTOM_BETA},${EXTENDED_CACHE_TTL_BETA}` },
+			}),
+			apiKey: "ghu_test_token_12345",
+			stream: true,
+			dropCacheControl: true,
+		});
+
+		expect(options.defaultHeaders["anthropic-beta"]).toBe(CUSTOM_BETA);
 	});
 });
 
