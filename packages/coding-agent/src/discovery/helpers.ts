@@ -547,12 +547,26 @@ export async function scanSkillsFromDir(
 		return loadSkill(skillPath);
 	};
 
+	// A manifest-declared directory that is itself a collection — its own
+	// SKILL.md alongside one-level-deep child skill directories, not a single
+	// leaf — must still surface those children (PR #9379 review): only a
+	// direct child with its own `SKILL.md` disqualifies `selfIsBoundary` from
+	// stopping the scan; a two-level-deep fixture (`examples/demo/SKILL.md`)
+	// does not, matching the one-level nesting the loop below itself scans.
+	const hasChildSkillDir =
+		options.selfIsBoundary &&
+		entries.some(
+			entry =>
+				entry.name.startsWith(".") === false &&
+				(entry.isDirectory() || entry.isSymbolicLink()) &&
+				fs.existsSync(path.join(dir, entry.name, "SKILL.md")),
+		);
 	const work: Promise<void>[] = [];
 	if (options.includeSelf) {
 		const selfSkillPath = path.join(dir, "SKILL.md");
 		if (fs.existsSync(selfSkillPath)) {
 			await loadContained(selfSkillPath);
-			if (options.selfIsBoundary) {
+			if (options.selfIsBoundary && !hasChildSkillDir) {
 				// A directly declared skill directory is a leaf, not a collection:
 				// its own SKILL.md defines the single skill, and nested fixtures
 				// (`examples/demo/SKILL.md`) must not surface as separate skills.
