@@ -26,8 +26,8 @@
 ### Fixed
 
 - Fixed completed tool cards reverting to pending after refocusing live sessions, and tool output collapsing behind finished reasoning segments ([#11868](https://github.com/can1357/oh-my-pi/pull/11868) by [@serverinspector](https://github.com/serverinspector)).
-- `memory://root` now names the active memory backend and points at `recall`/`reflect` instead of telling Hindsight and Mnemopi users to enable memories they already enabled, and prompt autocomplete stops offering the namespace on backends that never create it ([#11909](https://github.com/can1357/oh-my-pi/issues/11909)).
-- Rejected `memory://` glob patterns now name the accepted form (`memory://root/**`) instead of echoing the rejected pattern back as the requirement ([#11909](https://github.com/can1357/oh-my-pi/issues/11909)).
+- `memory://root` now names the active memory backend and points at `recall`/`reflect` instead of telling Hindsight and Mnemopi users to enable memories they already enabled, and prompt autocomplete stops offering the namespace on backends that never create it ([#11917](https://github.com/can1357/oh-my-pi/pull/11917) by [@oldschoola](https://github.com/oldschoola)).
+- Rejected `memory://` glob patterns now name the accepted form (`memory://root/**`) instead of echoing the rejected pattern back as the requirement ([#11917](https://github.com/can1357/oh-my-pi/pull/11917) by [@oldschoola](https://github.com/oldschoola)).
 - Invalid `WATCHDOG.yml` entries now produce startup/editor warnings while healthy advisors remain available ([#11882](https://github.com/can1357/oh-my-pi/pull/11882) by [@olegpulatov](https://github.com/olegpulatov)).
 - Claude Code session imports now preserve typed user text stored alongside tool results ([#11854](https://github.com/can1357/oh-my-pi/issues/11854)).
 - Extension commands now settle BTW writes before creating, switching, or branching sessions, preventing side requests from outliving their source session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).
