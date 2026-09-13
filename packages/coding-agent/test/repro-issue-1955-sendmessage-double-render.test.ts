@@ -85,6 +85,7 @@ function createHarness(): Harness {
 		getMessageRenderer: () => undefined,
 		getAssistantThinkingRenderers: () => undefined,
 		getComposerShapes: () => [],
+		trackPendingSend: () => {},
 	};
 
 	const sessionMock = {
