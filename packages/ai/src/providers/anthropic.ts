@@ -2541,9 +2541,18 @@ const streamAnthropicOnce = (
 				}
 				// Fingerprint the array the stable-tools plane produced before the
 				// hook can touch it, and eagerly, because a hook that mutates in
-				// place edits the very objects this would otherwise read later.
+				// place edits the very objects this would otherwise read later —
+				// the capture is the hash, never the array.
+				//
+				// Normalized the same way the wire is: `toWellFormedDeep` below runs
+				// after the hook, so a lone surrogate anywhere in a description or
+				// schema (an extension, an MCP server) would make the plane's own
+				// output disagree with what was sent on every single turn, and the
+				// exemption that keeps an ordinary add/remove silent would be dead.
+				// Only the `tools` subtree is walked here, so the post-hook pass
+				// stays the only full-payload walk per request.
 				const plannedToolsFingerprint = built.toolPlaneEnabled
-					? anthropicToolsPrefixFingerprint(nextParams.tools)
+					? anthropicToolsPrefixFingerprint(toWellFormedDeep(nextParams.tools) as typeof nextParams.tools)
 					: undefined;
 				const replacementPayload = await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
@@ -4536,7 +4545,9 @@ function anthropicToolPrefixKey(tool: AnthropicWireTool): string {
  * Fingerprint of a whole `tools` array as the cached prefix sees it. Taken once
  * over the array the provider assembled and once over the array it sent, so a
  * payload hook that rewrote the array in between is visible as a difference
- * between the two.
+ * between the two. Both sides must be lone-surrogate-normalized first, because
+ * only the sent array passes through {@link toWellFormedDeep}; comparing a raw
+ * array against a normalized one differs on every turn.
  */
 function anthropicToolsPrefixFingerprint(tools: readonly AnthropicWireTool[] | undefined): string {
 	return String(Bun.hash(JSON.stringify(tools?.map(anthropicToolPrefixKey) ?? [])));

@@ -92,6 +92,14 @@ function contextWithTools(tools: Tool[], systemPrompt = "You are a precise assis
 	};
 }
 
+/**
+ * Tool whose description carries a lone UTF-16 high surrogate, the way one
+ * arrives from an extension or an MCP server. The provider rewrites it to
+ * U+FFFD before the request leaves, so the bytes the cached prefix holds are
+ * not the bytes `buildParams` assembled.
+ */
+const loneSurrogateTool: Tool = { ...tool("lookup", {}), description: "lookup tool \ud800" };
+
 function assistantTurn(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
 	return {
 		role: "assistant",
@@ -169,6 +177,14 @@ const successFetch: FetchImpl = async () => {
 		headers: { "Content-Type": "text/event-stream", "request-id": "req_cache_break" },
 	});
 };
+
+/** {@link successFetch} that also records the request body the SDK serialized. */
+function capturingFetch(sink: { body: string }): FetchImpl {
+	return async (input, init) => {
+		sink.body = typeof init?.body === "string" ? init.body : "";
+		return await successFetch(input, init);
+	};
+}
 
 /** Rejects before any response body exists, the way a malformed request does. */
 const rejectedFetch: FetchImpl = async () =>
@@ -506,6 +522,39 @@ describe("anthropic cache-break attribution", () => {
 		const second = await hooked();
 
 		expect(second.cacheBreakReason).toBeUndefined();
+	});
+
+	it("does not blame an added tool when a declared description carries a lone surrogate", async () => {
+		const states = createProviderSessionState();
+		const sent = { body: "" };
+		await turn(states, contextWithTools([loneSurrogateTool]));
+		// The add appends a `defer_loading` entry, so the plane's array really
+		// does change bytes between the two turns and only the exemption keeps
+		// this silent. The exemption holds only when the fingerprint taken over
+		// the plane's output describes the normalized array that was sent.
+		const second = await turn(
+			states,
+			contextWithTools([loneSurrogateTool, tool("search", {})]),
+			undefined,
+			MODEL,
+			capturingFetch(sent),
+		);
+
+		// Without the surrogate really being rewritten on the wire, the two
+		// fingerprints would have nothing to disagree about.
+		expect(sent.body).toContain("lookup tool \ufffd");
+		expect(second.cacheBreakReason).toBeUndefined();
+	});
+
+	it("blames a hook-rewritten tool array even when a declared description carries a lone surrogate", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([loneSurrogateTool]);
+		await turn(states, context);
+		// Normalizing the planned array must not turn the comparison into a
+		// rubber stamp: the hook still sends an array the plane never produced.
+		const second = await turn(states, context, undefined, MODEL, successFetch, { onPayload: rewriteWireTools });
+
+		expect(second.cacheBreakReason).toEqual({ kind: "tools" });
 	});
 
 	it("blames nothing across a long run of turns that only append", async () => {
