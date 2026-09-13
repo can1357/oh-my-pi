@@ -41,7 +41,7 @@ import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
-import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
+import { type BuiltinToolName, type HiddenToolName, normalizeToolNames, withSiblingTools } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
@@ -504,7 +504,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
-	const requestedTools = restrictToolNames
+	let requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
 		: toolNames
 			? normalizeToolNames(toolNames)
@@ -556,13 +556,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// the agent (it can checkpoint but not rewind, or vice versa). Auto-include
 	// the sister tool so a one-sided frontmatter `tools:` entry still works.
 	// Unlike the AST/auto-learn convenience auto-includes below, this is a
-	// safety pairing — it applies to restricted sessions too.
+	// safety pairing — it applies to restricted sessions too. Shared with the
+	// SDK's activation pass and the cold-revive clamp so all three agree.
 	if (requestedTools && session.settings.get("checkpoint.enabled")) {
-		if (requestedTools.includes("checkpoint") && !requestedTools.includes("rewind")) {
-			requestedTools.push("rewind");
-		} else if (requestedTools.includes("rewind") && !requestedTools.includes("checkpoint")) {
-			requestedTools.push("checkpoint");
-		}
+		requestedTools = withSiblingTools(requestedTools);
 	}
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.

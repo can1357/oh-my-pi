@@ -20,7 +20,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { isMCPToolName, isToolScopedIn, normalizeToolNames } from "../tools/builtin-names";
+import { isMCPToolName, isToolScopedIn, normalizeToolNames, withoutSiblingTools } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -900,7 +900,11 @@ export class SessionTools {
 
 	#scopeActiveToolSelection(toolNames: string[]): string[] {
 		if (!this.#enforceToolAllowlist && this.#disallowedToolPatterns.length === 0) return toolNames;
-		return toolNames.filter(name => this.#isToolScopedIn(name));
+		// Pair-aware, like the startup scope: a runtime mutation (extension
+		// hook, internal toggle, cold-revive clamp) must not readmit one half of
+		// a sibling pair whose other half the scope removed — the survivor's
+		// companion call could never succeed.
+		return withoutSiblingTools(toolNames, name => !this.#isToolScopedIn(name));
 	}
 
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {

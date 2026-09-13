@@ -2361,10 +2361,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	it("drops both checkpoint tools when either one of the pair is disallowed", async () => {
 		// The pair is unusable apart, so an allowlist naming one is widened to the
 		// sister — which means a disallow on the sister alone would leave a tool
-		// whose companion call must fail. The deny has to remove both.
+		// whose companion call must fail. The deny has to remove both, at
+		// construction and through later runtime mutations.
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
+			settings: Settings.isolated({ "checkpoint.enabled": true }),
 			toolNames: ["read", "checkpoint"],
 			disallowedTools: ["rewind"],
 		});
@@ -2374,6 +2376,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(active).not.toContain("rewind");
 			expect(active).not.toContain("checkpoint");
 			expect(active).toContain("read");
+
+			// The scope invariant filters per name, so a runtime mutation needs
+			// the same pairing or it readmits the surviving half.
+			await session.setActiveToolsByName([...active, "checkpoint"]);
+			expect(session.getActiveToolNames()).not.toContain("checkpoint");
 		} finally {
 			await session.dispose();
 		}
