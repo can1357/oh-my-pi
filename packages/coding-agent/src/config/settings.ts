@@ -45,12 +45,15 @@ import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
+import { expandRoleAlias } from "./model-resolver";
 import { validateAgentServiceTierOverrides } from "./service-tier";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
+	type ProfileDefinition,
+	type ProfilesSnapshot,
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingValue,
@@ -600,9 +603,10 @@ export class Settings {
 	/**
 	 * Load a persisted settings instance without touching the global singleton.
 	 */
-	static loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
+	static async loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
 		const instance = new Settings(options);
-		return instance.#load();
+		await instance.#load();
+		return instance;
 	}
 
 	/**
@@ -664,6 +668,9 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		// Local before-snapshot: profile signals compare effective state
+		// around THIS mutation, never a long-lived cache that can drift.
+		const profileBefore = path === "profiles" ? this.#effectiveProfileSnapshot() : undefined;
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -678,6 +685,9 @@ export class Settings {
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
 			hook(next, prev);
+		}
+		if (profileBefore) {
+			this.#fireProfileSignalsIfNeeded(profileBefore);
 		}
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
@@ -741,6 +751,10 @@ export class Settings {
 		}
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
+		}
+		if (path === "activeProfile") {
+			modelRolesSignal.fire();
+			activeProfileSignal.fire();
 		}
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
@@ -849,6 +863,9 @@ export class Settings {
 			const previousSignaledValues = {
 				modelRoles: this.get("modelRoles"),
 				sessionAccent: this.get("statusLine.sessionAccent"),
+				activeProfile: this.getActiveProfile(),
+				profiles: this.getProfiles(),
+				profileState: this.#effectiveProfileSnapshot(),
 			};
 			const previousCodeModeValues = this.#codeModeSignalSnapshot();
 			const previousHookValues = new Map<SettingPath, unknown>();
@@ -887,6 +904,11 @@ export class Settings {
 					previousSignaledValues.sessionAccent,
 				);
 			}
+			// Local before/after comparison of EFFECTIVE profile state (name +
+			// overlay roles): an external edit to the ACTIVE profile's roles
+			// notifies live consumers even when the name is unchanged; inactive
+			// profile edits change neither and stay silent.
+			this.#fireProfileSignalsIfNeeded(previousSignaledValues.profileState);
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
@@ -916,6 +938,11 @@ export class Settings {
 		await this.flush();
 		this.#restoreRuntimeModelRoleOverrides();
 		const prevModelRoles = this.get("modelRoles");
+		// Local before-snapshot of EFFECTIVE profile state: two projects can
+		// select the same profile name with different roles (including under a
+		// runtime --model-profile override), so a name-only comparison would
+		// silently skip the notification the default-model reconciler needs.
+		const prevProfileState = this.#effectiveProfileSnapshot();
 		const prevCodeModeValues = this.#codeModeSignalSnapshot();
 		this.#cwd = normalized;
 		if (this.#persist) {
@@ -923,6 +950,7 @@ export class Settings {
 		}
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
+		this.#fireProfileSignalsIfNeeded(prevProfileState);
 		this.#fireCodeModeChangeIfNeeded(prevCodeModeValues);
 		this.#fireAllHooks();
 	}
@@ -1284,18 +1312,21 @@ export class Settings {
 
 	/**
 	 * Report which layer actually supplies the effective model role across
-	 * full merge precedence (runtime override → config overlay → project →
-	 * global → default). Unlike {@link getModelRoleSource}, this accounts
-	 * for runtime and config-overlay layers and detects ownership by key
-	 * presence rather than normalized value, so a `null` tombstone in the
+	 * full merge precedence (runtime override → config overlay → profile →
+	 * project → global → default). Unlike {@link getModelRoleSource}, this
+	 * accounts for runtime and config-overlay layers and detects ownership by
+	 * key presence rather than normalized value, so a `null` tombstone in the
 	 * overlay or runtime layer correctly blocks lower layers. The project
 	 * layer is checked through {@link #projectSettingsForMerge} because a
 	 * project null is a cleared value (falls back to global), not a
 	 * tombstone.
 	 */
-	getModelRoleProvenance(role: ModelRole | string): "runtime" | "overlay" | "project" | "global" | "default" {
+	getModelRoleProvenance(
+		role: ModelRole | string,
+	): "runtime" | "overlay" | "profile" | "project" | "global" | "default" {
 		if (this.#modelRoleLayerOwns(this.#overrides, role)) return "runtime";
 		if (this.#modelRoleLayerOwns(this.#configOverlay, role)) return "overlay";
+		if (this.#activeProfileOwnsRole(role)) return "profile";
 		if (this.#modelRoleLayerOwns(this.#projectSettingsForMerge(), role)) return "project";
 		if (this.#modelRoleLayerOwns(this.#global, role)) return "global";
 		return "default";
@@ -2985,11 +3016,453 @@ export class Settings {
 	}
 
 	#rebuildMerged(): void {
-		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
-		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
-		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		const base = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
+		// Profiles are a configuration layer, not a rewrite: the active
+		// profile's modelRoles are overlaid onto the base roles and sit
+		// BELOW --config overlays and runtime overrides, so explicit one-shot
+		// layers always win. Profile selection (and definitions) come from the
+		// persistent + overlay layers, with a runtime --model-profile override
+		// taking precedence.
+		const profileRoles = this.#activeProfileModelRoles(base, this.#configOverlay);
+		let merged = profileRoles ? this.#overlayProfileRoles(base, profileRoles) : base;
+		merged = this.#deepMerge(merged, this.#configOverlay);
+		merged = this.#deepMerge(merged, this.#overrides);
+		this.#merged = merged;
 		this.#resolvedCache.clear();
 		this.#editVariantCache = undefined;
+	}
+
+	/**
+	 * Effective name of the active profile, honoring a runtime `--model-profile`
+	 * override over the configured `activeProfile`. Presence of the runtime key
+	 * is what matters — an explicitly empty value deactivates the persisted
+	 * profile (the runtime layer is highest), matching how "" and "off" mean
+	 * "no profile" everywhere else.
+	 */
+	#activeProfileName(layers: RawSettings): string {
+		if (Object.hasOwn(this.#overrides, "activeProfile")) {
+			const runtimeProfile = this.#overrides.activeProfile;
+			if (typeof runtimeProfile === "string") return runtimeProfile;
+		}
+		const configured = getByPath(layers, ["activeProfile"]);
+		return typeof configured === "string" ? configured : "";
+	}
+
+	/**
+	 * Resolve the active profile's `modelRoles` overlay from the merged
+	 * persistent + overlay layers. Returns undefined when no profile is active
+	 * (`""`/`off`), the profile does not exist, or it defines no roles — all
+	 * lenient fall-throughs that match how missing role configuration behaves.
+	 */
+	#activeProfileModelRoles(base: RawSettings, overlay: RawSettings): Record<string, string> | undefined {
+		const selection = this.#deepMerge(base, overlay);
+		const name = this.#activeProfileName(selection);
+		if (name === "" || name === "off") return undefined;
+		const profiles = getByPath(selection, ["profiles"]);
+		if (!isRecord(profiles)) return undefined;
+		const profile = profiles[name];
+		if (!isRecord(profile)) return undefined;
+		const roles = getByPath(profile, ["modelRoles"]);
+		if (!isRecord(roles)) return undefined;
+		const result: Record<string, string> = {};
+		for (const [role, value] of Object.entries(roles)) {
+			if (typeof value === "string" && value !== "") result[role] = value;
+		}
+		return Object.keys(result).length > 0 ? result : undefined;
+	}
+
+	/** Whether the active profile's overlay owns `role` (effective value comes from the profile). */
+	#activeProfileOwnsRole(role: ModelRole | string): boolean {
+		const roles = this.#activeProfileModelRoles(
+			this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge()),
+			this.#configOverlay,
+		);
+		return roles !== undefined && Object.hasOwn(roles, role);
+	}
+
+	/**
+	 * True when a profile is active and its overlay defines at least one role.
+	 */
+	isProfileActive(): boolean {
+		return (
+			this.#activeProfileModelRoles(
+				this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge()),
+				this.#configOverlay,
+			) !== undefined
+		);
+	}
+
+	/** Effective name of the active profile ("" when none). Honors `--model-profile`. */
+	getActiveProfile(): string {
+		const base = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
+		const name = this.#activeProfileName(this.#deepMerge(base, this.#configOverlay));
+		if (name === "" || name === "off") return "";
+		// A configured name with no definition is effectively inactive: the
+		// overlay resolver already falls through, so the public accessor must
+		// not advertise a profile that applies nothing.
+		return this.getProfile(name) !== undefined ? name : "";
+	}
+
+	/**
+	 * Merged profile definitions (global + project + overlay layers). Built
+	 * with a null-prototype record so inherited keys (`toString`,
+	 * `constructor`, `__proto__`, …) can never masquerade as profiles.
+	 */
+	getProfiles(): Record<string, ProfileDefinition> {
+		const profiles = getByPath(this.#merged, ["profiles"]);
+		if (!isRecord(profiles)) return {};
+		const result: Record<string, ProfileDefinition> = Object.create(null);
+		for (const [name, value] of Object.entries(profiles)) {
+			// Prototype-collision keys (hand-written YAML can carry `__proto__`
+			// as an own property) are never profiles — writes reject them too.
+			if (name === "__proto__" || name === "constructor" || name === "hasOwnProperty") continue;
+			if (isRecord(value)) result[name] = value as unknown as ProfileDefinition;
+		}
+		return result;
+	}
+
+	/** Effective definition of one profile, or undefined when it does not exist. */
+	getProfile(name: string): ProfileDefinition | undefined {
+		if (name === "") return undefined;
+		const profiles = this.getProfiles();
+		return Object.hasOwn(profiles, name) ? profiles[name] : undefined;
+	}
+
+	/**
+	 * The profile definition exactly as stored at one scope, without merged
+	 * inherited fields. Editors use this to persist only scope-local
+	 * overrides so inherited roles from other layers are never materialized.
+	 */
+	getScopeLocalProfile(scope: "global" | "project", name: string): ProfileDefinition | undefined {
+		if (name === "") return undefined;
+		const layer = scope === "global" ? this.#global : this.#projectSettingsForMerge();
+		const raw = getByPath(layer, ["profiles", name]);
+		return isRecord(raw) ? (structuredClone(raw) as unknown as ProfileDefinition) : undefined;
+	}
+
+	/**
+	 * The active profile's model-role overlay (profile name → role selectors),
+	 * or undefined when no profile is active. Exposed for tests and diagnostics.
+	 */
+	resolveProfileModelRoles(): Record<string, string> | undefined {
+		const base = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
+		return this.#activeProfileModelRoles(base, this.#configOverlay);
+	}
+
+	// ── Agent-managed profile configuration ─────────────────────────────
+
+	/**
+	 * Snapshot of the effective profile state that live consumers observe:
+	 * the selected name plus the overlay roles actually applied. Used to
+	 * decide whether a `profiles` mutation must fire change signals — raw
+	 * edits to INACTIVE profiles produce no notification, so editing an
+	 * unused profile can never reset the live session model.
+	 */
+	#effectiveProfileSnapshot(): {
+		active: string;
+		roles: Record<string, string> | undefined;
+		defaultRole: string | undefined;
+	} {
+		const roles = this.resolveProfileModelRoles();
+		return {
+			active: this.getActiveProfile(),
+			roles,
+			// Resolved model, not the raw selector: `default: "@smol"` must
+			// register as a default change when the smol role changes.
+			defaultRole: expandRoleAlias(this.getModelRole("default") ?? "", this),
+		};
+	}
+
+	/**
+	 * Compare a before-snapshot with current state and fire signals exactly
+	 * when consumed state changed: role changes fire the modelRoles signal;
+	 * a selection change also fires the active-profile signal. No-op when
+	 * only inactive profiles were touched.
+	 */
+	#fireProfileSignalsIfNeeded(
+		before:
+			| { active: string; roles: Record<string, string> | undefined; defaultRole: string | undefined }
+			| undefined,
+	): void {
+		const after = this.#effectiveProfileSnapshot();
+		// No prior snapshot means this is the first profiles write we've seen:
+		// fire conservatively so consumers can't miss a real change.
+		const rolesChanged = !before || !Bun.deepEquals(before.roles ?? null, after.roles ?? null);
+		const activeChanged = !before || before.active !== after.active;
+		// The default-model reconciler subscribes to the active-profile signal,
+		// so it fires only when the SELECTION or the effective DEFAULT role
+		// changed — a smol/slow-only edit must not reset the session model.
+		const defaultChanged = !before || before.defaultRole !== after.defaultRole;
+		if (rolesChanged) modelRolesSignal.fire();
+		if (activeChanged || defaultChanged) activeProfileSignal.fire();
+	}
+
+	/**
+	 * Persist a profile definition at a specific scope. Creates the profile
+	 * when missing, updates it in place when present: only the fields provided
+	 * are written, so an update that names just `modelRoles.smol` leaves every
+	 * other role, sibling profiles, and unrelated settings untouched. The
+	 * write goes through the normal settings save machinery (file lock,
+	 * re-read-before-write), so concurrent external edits are preserved.
+	 *
+	 * Scope semantics match OMP's config layering: "global" writes to
+	 * `~/.omp/agent/config.yml`, "project" writes to `<cwd>/.omp/config.yml`.
+	 * Returns the persisted definition.
+	 */
+	async setProfile(
+		scope: "global" | "project",
+		name: string,
+		definition: ProfileDefinition,
+	): Promise<ProfileDefinition> {
+		validateProfileName(name);
+		validateProfileDefinition(definition);
+		// Flush debounced saves first: the direct write below re-reads the file
+		// and then REPLACES the in-memory layer from disk, which would discard
+		// any ordinary setting still sitting in the 100 ms debounce window
+		// (its later save would read the reloaded, pre-change value).
+		await this.flush();
+		// Effective state before the write: signals fire only when this
+		// snapshot actually changes (see #fireProfileSignalsIfNeeded).
+		const before = this.#effectiveProfileSnapshot();
+		if (scope === "global") {
+			const configPath = this.#configPath;
+			if (!configPath) {
+				// In-memory instance: no file to lock; mutate the layer directly.
+				const current = getByPath(this.#global, ["profiles"]);
+				const merged: Record<string, unknown> = isRecord(current) ? { ...current } : {};
+				merged[name] = deepMergeProfileDefinition(merged[name], definition);
+				this.set("profiles", merged as SettingValue<"profiles">);
+				await this.flush();
+				return structuredClone(this.getProfile(name) ?? definition);
+			}
+			// Merge against FRESH file content under the write lock: a stale
+			// in-memory `profiles` record must never overwrite profiles another
+			// process wrote after this instance loaded.
+			await this.#withYamlWriteLock(configPath, async writePath => {
+				const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
+				const loaded = loadedSettings ?? {};
+				const currentProfiles = getByPath(loaded, ["profiles"]);
+				const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
+					? structuredClone(currentProfiles)
+					: {};
+				mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
+				setByPath(loaded, ["profiles"], mergedProfiles);
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(configPath);
+			this.#persistedMutationGeneration++;
+			this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
+			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
+		} else {
+			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
+			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+				const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(
+					projectConfigPath,
+					writePath,
+				);
+				const projectSettings =
+					loadedSettings ??
+					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
+				const currentProfiles = getByPath(projectSettings, ["profiles"]);
+				const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
+					? structuredClone(currentProfiles)
+					: {};
+				mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
+				setByPath(projectSettings, ["profiles"], mergedProfiles);
+				await this.#writeYamlAtomically(writePath, projectSettings);
+			});
+			invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
+			// Reload the project layer through the real path so the merged view
+			// and caches observe the new definition; signals fire only if the
+			// effective profile state changed (project mutations bypass `set`).
+			this.#project = await this.#loadProjectSettings();
+			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
+		}
+		return structuredClone(this.getProfile(name) ?? definition);
+	}
+
+	/**
+	 * Remove a profile at a specific scope. When the removed profile is the
+	 * one selected by `activeProfile` **at that same scope**, the selection is
+	 * cleared too, so no stale active name survives; a selection from another
+	 * scope is left alone (the surviving scope still supplies it). Deleting a
+	 * non-existent profile throws — callers should read before deleting.
+	 */
+	async removeProfile(scope: "global" | "project", name: string): Promise<void> {
+		validateProfileName(name);
+		// Flush debounced saves first: the direct write below re-reads the file
+		// and then REPLACES the in-memory layer from disk, which would discard
+		// any ordinary setting still sitting in the 100 ms debounce window.
+		await this.flush();
+		const before = this.#effectiveProfileSnapshot();
+		if (scope === "global") {
+			const configPath = this.#configPath;
+			if (!configPath) {
+				const current = getByPath(this.#global, ["profiles"]);
+				if (!isRecord(current) || !isRecord(current[name])) {
+					throw new Error(`Profile "${name}" does not exist in global config.`);
+				}
+				const merged: Record<string, unknown> = { ...current };
+				delete merged[name];
+				// Deactivate only if the global selection points at the deleted profile.
+				const globalActive = getByPath(this.#global, ["activeProfile"]);
+				if (globalActive === name) this.set("activeProfile", "");
+				this.set("profiles", merged as SettingValue<"profiles">);
+				// Persist synchronously: callers (slash commands, agents) read back
+				// from disk and must not observe the deleted profile after return.
+				await this.flush();
+				return;
+			}
+			// Delete against FRESH file content under the write lock so a
+			// sibling profile another process added after this instance loaded
+			// survives; only the requested profile (and a same-scope selection
+			// pointing at it) is touched.
+			await this.#withYamlWriteLock(configPath, async writePath => {
+				const { settings: loaded } = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
+				if (!loaded) {
+					throw new Error(`Profile "${name}" does not exist in global config.`);
+				}
+				const currentProfiles = getByPath(loaded, ["profiles"]);
+				if (!isRecord(currentProfiles) || !isRecord(currentProfiles[name])) {
+					throw new Error(`Profile "${name}" does not exist in global config.`);
+				}
+				const mergedProfiles = structuredClone(currentProfiles);
+				delete mergedProfiles[name];
+				setByPath(loaded, ["profiles"], mergedProfiles);
+				if (getByPath(loaded, ["activeProfile"]) === name) {
+					setByPath(loaded, ["activeProfile"], "");
+				}
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(configPath);
+			this.#persistedMutationGeneration++;
+			this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
+			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
+		} else {
+			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+				const { settings: loaded } = await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath);
+				if (!loaded || !isRecord(getByPath(loaded, ["profiles"]))) {
+					throw new Error(`Profile "${name}" does not exist in project config.`);
+				}
+				const projectProfiles = structuredClone(getByPath(loaded, ["profiles"]) as Record<string, unknown>);
+				if (!isRecord(projectProfiles[name])) {
+					throw new Error(`Profile "${name}" does not exist in project config.`);
+				}
+				delete projectProfiles[name];
+				setByPath(loaded, ["profiles"], projectProfiles);
+				// Drop a same-scope active selection pointing at the deleted profile
+				// by REMOVING the key: persisting an explicit empty value would
+				// mask a surviving same-name selection from a lower scope, so the
+				// profile would stay disabled instead of falling back to it.
+				if (getByPath(loaded, ["activeProfile"]) === name) {
+					delete loaded.activeProfile;
+				}
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
+			this.#project = await this.#loadProjectSettings();
+			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
+		}
+	}
+
+	/**
+	 * Activate a profile persistently at a specific scope ("runtime" keeps
+	 * the existing ephemeral override semantics — see {@link override}).
+	 * Persistent activation validates that the profile exists in the merged
+	 * view first, then writes ONLY the selected scope's config file:
+	 * "global" → `~/.omp/agent/config.yml`, "project" → `<cwd>/.omp/config.yml`.
+	 */
+	async setActiveProfile(scope: "global" | "project" | "runtime", name: string): Promise<void> {
+		if (scope === "runtime") {
+			if (name !== "" && name !== "off" && this.getProfile(name) === undefined) {
+				throw new Error(`Unknown profile: ${name}`);
+			}
+			this.override("activeProfile", name);
+			return;
+		}
+		if (name !== "" && name !== "off" && this.getProfile(name) === undefined) {
+			throw new Error(`Unknown profile: ${name}`);
+		}
+		const prevActive = this.getActiveProfile();
+		if (scope === "project") {
+			// Flush debounced saves first: the direct write below re-reads the
+			// file and then reloads the project layer from disk, which would
+			// discard any project setting still in the 100 ms debounce window.
+			await this.flush();
+			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
+			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+				const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(
+					projectConfigPath,
+					writePath,
+				);
+				const loaded =
+					loadedSettings ??
+					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
+				setByPath(loaded, ["activeProfile"], name);
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(projectConfigPath);
+			this.#persistedMutationGeneration++;
+			this.#project = await this.#loadProjectSettings();
+			this.#rebuildMerged();
+			this.#fireEffectiveSettingChanged("activeProfile", this.getActiveProfile(), prevActive);
+			return;
+		}
+		this.set("activeProfile", name);
+		await this.flush();
+	}
+
+	/** Structured snapshot of profile state for agent visibility. */
+	describeProfiles(): ProfilesSnapshot {
+		const baseModelRoles: Record<string, string> = {};
+		const baseRaw = getByPath(this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge()), [
+			"modelRoles",
+		]);
+		if (isRecord(baseRaw)) {
+			for (const [role, value] of Object.entries(baseRaw)) {
+				if (typeof value === "string") baseModelRoles[role] = value;
+			}
+		}
+		const effectiveModelRoles: Record<string, string> = {};
+		// Union of base roles and the active profile's roles: a profile can
+		// introduce roles the base config never mentions (e.g. profile-only
+		// `slow`), and consumers of this snapshot must see them resolved.
+		const roleKeys = new Set([...Object.keys(baseModelRoles), ...Object.keys(this.resolveProfileModelRoles() ?? {})]);
+		for (const role of roleKeys) {
+			const effective = this.getModelRole(role);
+			if (effective) effectiveModelRoles[role] = effective;
+		}
+		const profiles: ProfilesSnapshot["profiles"] = {};
+		for (const [name, definition] of Object.entries(this.getProfiles())) {
+			const definedIn: Array<"global" | "project" | "overlay"> = [];
+			if (isRecord(getByPath(this.#global, ["profiles", name]))) definedIn.push("global");
+			if (isRecord(getByPath(this.#projectSettingsForMerge(), ["profiles", name]))) definedIn.push("project");
+			if (isRecord(getByPath(this.#configOverlay, ["profiles", name]))) definedIn.push("overlay");
+			const roles: Record<string, string> = {};
+			for (const [role, value] of Object.entries(definition.modelRoles ?? {})) {
+				if (typeof value === "string") roles[role] = value;
+			}
+			profiles[name] = {
+				description: typeof definition.description === "string" ? definition.description : undefined,
+				modelRoles: Object.keys(roles).length > 0 ? roles : undefined,
+				definedIn,
+			};
+		}
+		return { active: this.getActiveProfile(), baseModelRoles, effectiveModelRoles, profiles };
+	}
+
+	/** Inline the profile overlay into a layer's `modelRoles` (profile beats base roles). */
+	#overlayProfileRoles(base: RawSettings, roles: Record<string, string>): RawSettings {
+		const baseRoles = getByPath(base, ["modelRoles"]);
+		const mergedRoles = isRecord(baseRoles) ? { ...baseRoles, ...roles } : { ...roles };
+		return { ...base, modelRoles: mergedRoles };
 	}
 
 	#fireAllHooks(): void {
@@ -3148,6 +3621,12 @@ const modelRolesSignal = new SettingSignal("modelRoles");
 /** Subscribe to model role changes. Returns an unsubscribe function. */
 export const onModelRolesChanged: (cb: () => void) => () => void = modelRolesSignal.on.bind(modelRolesSignal);
 
+/** Fires when the active profile (or profile definitions) changes at runtime. */
+const activeProfileSignal = new SettingSignal("activeProfile");
+
+/** Subscribe to active-profile changes. Returns an unsubscribe function. */
+export const onActiveProfileChanged: (cb: () => void) => () => void = activeProfileSignal.on.bind(activeProfileSignal);
+
 /** Fires when Code Mode activation or its direct keep-set changes at runtime. */
 const codeModeSignal = new SettingSignal("providers.openai-codex.codeMode");
 
@@ -3230,13 +3709,17 @@ export function withActiveSettings<T>(instance: Settings | undefined, fn: () => 
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
 let boundSettingsInstance: Settings | null = null;
-let boundSettingsMethods = new Map<PropertyKey, unknown>();
+const boundSettingsMethods = new Map<PropertyKey, unknown>();
 
 function clearBoundSettingsMethods(): void {
 	boundSettingsInstance = null;
-	boundSettingsMethods = new Map<PropertyKey, unknown>();
+	boundSettingsMethods.clear();
 }
 
+/**
+ * Whether the global settings singleton has been initialized. Exported
+ * domain concept used as a guard across many modules.
+ */
 export function isSettingsInitialized(): boolean {
 	return globalInstance !== null;
 }
@@ -3328,3 +3811,97 @@ export const settings = new Proxy({} as Settings, {
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Validate a profile name for agent-driven configuration writes. Profile
+ * names are user-facing keys, not filesystem paths, but they must be
+ * non-empty strings restricted to a safe character set that cannot collide
+ * with the `off` / `+create` manager sentinels, object prototype keys, or
+ * confuse YAML tooling.
+ */
+function validateProfileName(name: string): void {
+	const trimmed = typeof name === "string" ? name.trim() : "";
+	if (!trimmed || trimmed !== name) {
+		throw new Error(
+			`Invalid profile name: ${JSON.stringify(name)}. Names must be non-empty without surrounding whitespace.`,
+		);
+	}
+	if (trimmed === "off" || trimmed === "+create") {
+		throw new Error(`"${trimmed}" is reserved for profile-manager actions and cannot be a profile name.`);
+	}
+	if (trimmed === "__proto__" || trimmed === "constructor" || trimmed === "hasOwnProperty") {
+		throw new Error(`Profile name "${trimmed}" collides with an object prototype key and is not allowed.`);
+	}
+	if (!/^[\w.:@/-]+$/.test(trimmed)) {
+		throw new Error(
+			`Invalid profile name: ${JSON.stringify(name)}. Use letters, digits, and . _ - : @ / characters only.`,
+		);
+	}
+	if (trimmed.length > 128) {
+		throw new Error("Profile name exceeds 128 characters.");
+	}
+}
+
+/**
+ * Validate a profile definition shape before persisting it: description must
+ * be a string when present; modelRoles (when present) must map role names to
+ * string selectors in the same format as the top-level modelRoles setting.
+ * Unknown extra fields are preserved as-is — the schema is open for future
+ * expansion. Selector *resolution* (unknown provider/model) is deliberately
+ * NOT validated here: profile values follow normal OMP lenient fall-through
+ * semantics at resolution time, matching how base modelRoles behave.
+ */
+function validateProfileDefinition(definition: ProfileDefinition): void {
+	if (!isRecord(definition)) {
+		throw new Error("Profile definition must be an object.");
+	}
+	if (definition.description !== undefined && typeof definition.description !== "string") {
+		throw new Error("Profile description must be a string when present.");
+	}
+	if (definition.modelRoles !== undefined) {
+		if (!isRecord(definition.modelRoles)) {
+			throw new Error("Profile modelRoles must be an object mapping roles to model selectors.");
+		}
+		for (const [role, value] of Object.entries(definition.modelRoles)) {
+			if (value === null) continue; // tombstone: removes the role on merge
+			if (typeof value !== "string" || value.trim() === "") {
+				throw new Error(`Invalid model selector for role "${role}": ${JSON.stringify(value)}.`);
+			}
+			if (role.trim() === "") {
+				throw new Error("Model role names must be non-empty.");
+			}
+		}
+	}
+}
+
+/**
+ * Merge an incoming profile definition over an existing one field-by-field:
+ * provided fields replace, omitted fields keep their previous values, and a
+ * missing existing definition simply adopts the new one. Used by
+ * {@link Settings.setProfile} so an update naming only `modelRoles.smol`
+ * never disturbs sibling roles or unrelated fields. Within `modelRoles`, a
+ * `null` selector removes that role from the profile (mirroring the project
+ * layer's null-tombstone semantics); other unknown fields replace wholesale.
+ */
+function deepMergeProfileDefinition(existing: unknown, incoming: ProfileDefinition): ProfileDefinition {
+	const base = isRecord(existing) ? structuredClone(existing) : {};
+	const result: Record<string, unknown> = { ...base };
+	for (const [key, value] of Object.entries(incoming)) {
+		if (value === undefined) continue;
+		if (key === "modelRoles" && isRecord(value)) {
+			const currentRoles = isRecord(result.modelRoles) ? { ...result.modelRoles } : {};
+			for (const [role, selector] of Object.entries(value)) {
+				if (selector === undefined) continue;
+				if (selector === null) {
+					delete currentRoles[role];
+				} else if (typeof selector === "string" && selector.trim() !== "") {
+					currentRoles[role] = selector;
+				}
+			}
+			result.modelRoles = currentRoles;
+		} else {
+			result[key] = value;
+		}
+	}
+	return result as unknown as ProfileDefinition;
+}

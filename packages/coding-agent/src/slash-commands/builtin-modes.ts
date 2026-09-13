@@ -11,6 +11,12 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import {
+	activateProfile,
+	type ProfileMutation,
+	parseProfileMutation,
+	runProfileMutation,
+} from "./helpers/profile-command";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
@@ -176,6 +182,90 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "profile",
+		icon: "settings",
+		description: "Show, switch, create, edit, or delete model-role profiles",
+		acpDescription: "Show, switch, create, edit, or delete model-role profiles",
+		allowArgs: true,
+		inlineHint: "[name|off|list|show <n>|create <n> --role r=m [...]|set-role <n> <role>=<m>|delete <n>]",
+		subcommands: [
+			{ name: "off", description: "Disable the active profile" },
+			{ name: "list", description: "List configured profiles" },
+			{ name: "show", description: "Show one profile's configuration", usage: "<name>" },
+			{
+				name: "create",
+				description: "Create or update a profile",
+				usage: "<name> --role <role>=<selector> [--project] [--description <text>]",
+			},
+			{
+				name: "set-role",
+				description: "Set or remove (null) one role",
+				usage: "<name> <role>=<selector|null> [--project]",
+			},
+			{ name: "delete", description: "Delete a profile", usage: "<name> [--project]" },
+		],
+		getTuiAutocompleteDescription: runtime => {
+			const active = runtime.ctx.settings.getActiveProfile();
+			return active ? `Profile: ${active}` : "No active profile";
+		},
+		handle: async (command, runtime) => {
+			const settings = runtime.settings;
+			if (command.args) {
+				const parsed = parseProfileMutation(command.args);
+				let message: string | undefined;
+				if (typeof parsed === "string") {
+					// Direct activation: existing behavior.
+					message = activateProfile(settings, parsed);
+				} else if ("error" in parsed) {
+					message = parsed.error;
+				} else {
+					message = await runProfileMutation(settings, parsed as ProfileMutation);
+				}
+				if (
+					message?.startsWith("Unknown profile") ||
+					message?.startsWith("Usage:") ||
+					message?.startsWith("Invalid")
+				) {
+					return usage(message, runtime);
+				}
+				await runtime.output(message ?? "No active profile.");
+				await runtime.notifyConfigChanged?.();
+				await runtime.notifyTitleChanged?.();
+				return commandConsumed();
+			}
+			const active = settings.getActiveProfile();
+			await runtime.output(active ? `Active profile: ${active}` : "No active profile.");
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const settings = runtime.ctx.settings;
+			if (command.args) {
+				const parsed = parseProfileMutation(command.args);
+				let message: string | undefined;
+				if (typeof parsed === "string") {
+					message = activateProfile(settings, parsed);
+				} else if ("error" in parsed) {
+					message = parsed.error;
+				} else {
+					message = await runProfileMutation(settings, parsed as ProfileMutation);
+				}
+				if (
+					message?.startsWith("Unknown profile") ||
+					message?.startsWith("Usage:") ||
+					message?.startsWith("Invalid")
+				) {
+					runtime.ctx.showError(message);
+					return;
+				}
+				runtime.ctx.showStatus(message ?? "No active profile.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showProfileSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},

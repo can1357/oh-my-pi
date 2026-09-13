@@ -205,6 +205,7 @@ For task dispatch, model precedence is:
 1. `task.agentModelOverrides[agentName]`
 2. the agent frontmatter's prioritized `model` list
 3. the parent's active model, then its configured/default model fallback
+Subagent role resolution consumes the effective model roles as resolved for the parent session, so the active profile (selected by `activeProfile` or `--model-profile`) is inherited too.
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 

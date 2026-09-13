@@ -127,6 +127,48 @@ Environment variables are **not** a single settings layer. Each is read by the f
 
 Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, environment, and `.env` files); see [Providers](./providers.md) and the full [Environment variables](./environment-variables.md) reference.
 
+### Profiles
+
+A profile is a named model-role overlay. The `profiles` setting maps a profile name to a block with a human-readable `description` and a `modelRoles` override that layers on top of your base `modelRoles`. The `activeProfile` setting selects which profile (if any) is applied. A profile switches a whole set of role assignments at once without editing the base `modelRoles`.
+
+```yaml
+# ~/.omp/agent/config.yml
+modelRoles:
+  default: anthropic/claude-sonnet-4-5
+  smol: openai/gpt-4.1-mini
+  slow: anthropic/claude-opus-4-5:high
+
+profiles:
+  cheap:
+    description: Route the heavy roles to small fast models.
+    modelRoles:
+      slow: openai/gpt-4.1-mini
+      plan: openai/gpt-4.1-mini
+  audit:
+    description: Use the strongest model for review and planning.
+    modelRoles:
+      review: anthropic/claude-opus-4-5:high
+      plan: anthropic/claude-opus-4-5:high
+
+activeProfile: cheap
+```
+
+Roles not listed in a profile fall through to the base `modelRoles`. The base `modelRoles` are never rewritten by a profile — a profile is an extra layer applied on top of them, so turning a profile off restores the base assignments exactly.
+
+Switch profiles interactively or with the slash command:
+
+- `/profile` (bare) opens the profile selector.
+- `/profile <name>` activates the named profile for the session.
+- `/profile off` deactivates any active profile and falls back to the base `modelRoles`.
+
+Profile precedence, lowest to highest:
+
+```text
+defaults  <  global modelRoles  <  project modelRoles  <  active profile modelRoles  <  --config overlays  <  runtime overrides (--model / --smol / --slow / --plan / --model-profile)
+```
+
+The explicit one-run model flags (`--model`, `--smol`, `--slow`, `--plan`, `--model-profile`) beat the active profile, so a profile sets the default role set and a per-run flag still overrides any single role for that run.
+
 ## Merge rules
 
 Layers are combined with a deep merge:
