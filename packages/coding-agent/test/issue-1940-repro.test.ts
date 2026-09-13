@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { SttClient } from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import type { SttWorkerInbound, SttWorkerOutbound } from "@oh-my-pi/pi-coding-agent/stt/asr-protocol";
+import { TinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/model-client";
 import { TinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import type { TinyWorkerRequest, TinyWorkerResponse } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
 
@@ -97,8 +98,90 @@ class FakeSttWorker {
 	}
 }
 
+describe("tiny model client completion", () => {
+	it("allows small local models to complete without title truncation", async () => {
+		const output =
+			"The parser preserves exact passage annotations while a separate source summary provides context. ".repeat(4);
+		const worker = new FakeTinyWorker((message, worker) => {
+			if (message.type === "chat") worker.emit({ type: "text", id: message.id, text: output });
+		});
+		const client = new TinyModelClient(async () => worker);
+		try {
+			expect(await client.complete("lfm2.5-230m", "Summarize source")).toBe(output.trim());
+			expect(await client.complete("online", "Never send online")).toBeNull();
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("forwards completion prefill and stop controls to worker generation", async () => {
+		const worker = new FakeTinyWorker((message, worker) => {
+			if (message.type !== "chat") return;
+			const output =
+				message.prefill === "<answer>" && message.stop === "</answer>" ? "Useful answer" : "wrong answer";
+			worker.emit({ type: "text", id: message.id, text: output });
+		});
+		const client = new TinyModelClient(async () => worker);
+
+		try {
+			expect(
+				await client.complete("lfm2.5-230m", "Answer the question", {
+					prefill: "<answer>",
+					stop: "</answer>",
+				}),
+			).toBe("Useful answer");
+			expect(await worker.firstRequest.promise).toMatchObject({
+				type: "chat",
+				prefill: "<answer>",
+				stop: "</answer>",
+			});
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("settles a canceled completion without corrupting another request", async () => {
+		const secondRequest = Promise.withResolvers<Extract<TinyWorkerRequest, { type: "chat" }>>();
+		let chatRequestCount = 0;
+		const worker = new FakeTinyWorker(message => {
+			if (message.type !== "chat") return;
+			chatRequestCount += 1;
+			if (chatRequestCount === 2) secondRequest.resolve(message);
+		});
+		const client = new TinyModelClient(async () => worker);
+		try {
+			const controller = new AbortController();
+			const canceled = client.complete("qwen3-1.7b", "cancel this", { signal: controller.signal });
+			const survivor = client.complete("qwen3-1.7b", "keep this");
+			const firstRequest = await worker.firstRequest.promise;
+			const remainingRequest = await secondRequest.promise;
+
+			controller.abort();
+			expect(await canceled).toBeNull();
+			worker.emit({ type: "text", id: firstRequest.id, text: "late canceled output" });
+			worker.emit({ type: "text", id: remainingRequest.id, text: "surviving output" });
+			expect(await survivor).toBe("surviving output");
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("caps completion length and returns null for empty output", async () => {
+		const worker = new FakeTinyWorker((message, worker) => {
+			if (message.type === "chat") worker.emit({ type: "text", id: message.id, text: "   " });
+		});
+		const client = new TinyModelClient(async () => worker);
+		try {
+			expect(await client.complete("qwen3-1.7b", "prompt", { maxTokens: 999_999 })).toBeNull();
+			expect(await worker.firstRequest.promise).toMatchObject({ type: "chat", maxNewTokens: 1024 });
+		} finally {
+			await client.terminate();
+		}
+	});
+});
+
 describe("tiny title client prompt construction", () => {
-	it("renders the title chat with a custom system prompt, the <title> prefill, and extracts the reply", async () => {
+	it("renders the title chat with a custom system prompt, title controls, and extracts the reply", async () => {
 		let sent: TinyWorkerRequest | undefined;
 		const worker = new FakeTinyWorker((message, worker) => {
 			sent = message;
@@ -106,7 +189,8 @@ describe("tiny title client prompt construction", () => {
 				worker.emit({ type: "text", id: message.id, text: " Custom Title</title> trailing" });
 			}
 		});
-		const client = new TinyTitleClient(async () => worker);
+		const modelClient = new TinyModelClient(async () => worker);
+		const client = new TinyTitleClient(modelClient);
 
 		try {
 			const title = await client.generate("lfm2.5-230m", "Investigate routing", {
@@ -118,26 +202,15 @@ describe("tiny title client prompt construction", () => {
 				type: "chat",
 				prefill: "<title>",
 				stop: "</title>",
+				maxNewTokens: 20,
 				messages: [
 					{ role: "system", content: "Custom title prompt" },
 					{ role: "user", content: expect.stringContaining("Investigate routing") },
 				],
 			});
+			expect(await modelClient.complete("lfm2.5-230m", "Investigate routing")).toBe("Custom Title</title> trailing");
 		} finally {
-			await client.terminate();
-		}
-	});
-
-	it("caps completion length and returns null for empty output", async () => {
-		const worker = new FakeTinyWorker((message, worker) => {
-			if (message.type === "chat") worker.emit({ type: "text", id: message.id, text: "   " });
-		});
-		const client = new TinyTitleClient(async () => worker);
-		try {
-			expect(await client.complete("qwen3-1.7b", "prompt", { maxTokens: 999_999 })).toBeNull();
-			expect(await worker.firstRequest.promise).toMatchObject({ type: "chat", maxNewTokens: 1024 });
-		} finally {
-			await client.terminate();
+			await modelClient.terminate();
 		}
 	});
 });
@@ -150,7 +223,7 @@ describe("issue #1940 — local model failures release the worker process", () =
 			}
 		});
 		let spawnCount = 0;
-		const client = new TinyTitleClient(async () => {
+		const client = new TinyModelClient(async () => {
 			spawnCount += 1;
 			return first;
 		});
@@ -167,7 +240,7 @@ describe("issue #1940 — local model failures release the worker process", () =
 
 	it("faults queued local completions when the failed worker is recycled", async () => {
 		const worker = new FakeTinyWorker(() => {});
-		const client = new TinyTitleClient(async () => worker);
+		const client = new TinyModelClient(async () => worker);
 
 		try {
 			const first = client.complete("qwen3-1.7b", "first prompt");
@@ -189,14 +262,15 @@ describe("issue #1940 — local model failures release the worker process", () =
 			if (message.type === "chat") worker.emit({ type: "text", id: message.id, text: "recovered title" });
 		});
 		const spawned: string[] = [];
-		const client = new TinyTitleClient(async modelKey => {
+		const modelClient = new TinyModelClient(async modelKey => {
 			spawned.push(modelKey);
 			return modelKey === "qwen3-1.7b" ? memoryWorker : titleWorker;
 		});
+		const titleClient = new TinyTitleClient(modelClient);
 
 		try {
-			const crashedMemory = client.complete("qwen3-1.7b", "first prompt");
-			const title = client.generate("lfm2.5-230m", "title prompt");
+			const crashedMemory = modelClient.complete("qwen3-1.7b", "first prompt");
+			const title = titleClient.generate("lfm2.5-230m", "title prompt");
 			await memoryWorker.firstRequest.promise;
 			memoryWorker.emitError(new Error("tiny worker connection closed"));
 
@@ -207,7 +281,7 @@ describe("issue #1940 — local model failures release the worker process", () =
 			expect(titleWorker.terminated).toBe(false);
 			expect(spawned).toEqual(["qwen3-1.7b", "lfm2.5-230m"]);
 		} finally {
-			await client.terminate();
+			await modelClient.terminate();
 		}
 	});
 });
@@ -215,7 +289,7 @@ describe("issue #1940 — local model failures release the worker process", () =
 describe("issue #3291 — tiny-model downloads keep the worker referenced", () => {
 	it("references the worker while a download request is pending", async () => {
 		const worker = new FakeTinyWorker(() => {});
-		const client = new TinyTitleClient(async () => worker);
+		const client = new TinyModelClient(async () => worker);
 
 		try {
 			const download = client.downloadModel("lfm2.5-350m");
@@ -236,7 +310,7 @@ describe("issue #3291 — tiny-model downloads keep the worker referenced", () =
 
 	it("returns the worker error for failed download requests", async () => {
 		const worker = new FakeTinyWorker(() => {});
-		const client = new TinyTitleClient(async () => worker);
+		const client = new TinyModelClient(async () => worker);
 
 		try {
 			const download = client.downloadModel("lfm2.5-350m");

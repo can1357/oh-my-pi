@@ -10,6 +10,14 @@
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
+### Breaking Changes
+
+- Generic tiny-model APIs now live in `tiny/model-client`: import `TinyModelClient`, `TinyModelCompletionOptions`, `TinyModelDownloadOptions`, `TinyModelDownloadResult`, `tinyModelClient`, `shutdownTinyModelClient`, and `smokeTestTinyModelWorker` from that module. The `tiny/title-client` facade now keeps title policy only; its generic `complete`, `downloadModel`, `onProgress`, and `terminate` methods plus the `TinyTitleDownload*`, `shutdownTinyTitleClient`, and `smokeTestTinyTitleWorker` exports were removed. ([#11964](https://github.com/can1357/oh-my-pi/pull/11964) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Added
+
+- Added support for all registered local TINY models in generic completions, including small title models, without title normalization or truncation ([#11964](https://github.com/can1357/oh-my-pi/pull/11964) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
 ## [18.1.20] - 2026-09-13
 
 ### Added

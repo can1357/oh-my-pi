@@ -11,7 +11,7 @@ import {
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { tinyWorkerEnv } from "../tiny/model-client";
 import { safeSend } from "../utils/ipc";
 import { isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
 import type { TtsProgressEvent, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";

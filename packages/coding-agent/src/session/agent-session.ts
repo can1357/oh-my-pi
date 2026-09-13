@@ -198,7 +198,7 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
-import { shutdownTinyTitleClient } from "../tiny/title-client";
+import { shutdownTinyModelClient } from "../tiny/model-client";
 import type { ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
@@ -4762,7 +4762,7 @@ export class AgentSession {
 			this.#eval.disposeKernels(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
-			shutdownTinyTitleClient(),
+			shutdownTinyModelClient(),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),

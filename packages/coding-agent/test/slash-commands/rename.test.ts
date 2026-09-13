@@ -15,6 +15,7 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/model-client";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 
@@ -95,8 +96,8 @@ it("shows local model download progress while a TUI rename waits for a cold mode
 	const { session, execute, ctx } = createRuntime("TUI");
 	const input = new InputController(ctx);
 	session.setTitleGenerationStart(() => input.notifyTitleGenerationStart());
-	let progress: Parameters<typeof tinyTitleClient.onProgress>[0] | undefined;
-	vi.spyOn(tinyTitleClient, "onProgress").mockImplementation(listener => {
+	let progress: Parameters<typeof tinyModelClient.onProgress>[0] | undefined;
+	vi.spyOn(tinyModelClient, "onProgress").mockImplementation(listener => {
 		progress = listener;
 		return () => {
 			progress = undefined;
@@ -145,8 +146,8 @@ it("releases progress listeners after repeated warm-model renames with no progre
 	const { session, execute, ctx } = createRuntime("TUI");
 	const input = new InputController(ctx);
 	session.setTitleGenerationStart(() => input.notifyTitleGenerationStart());
-	const listeners = new Set<Parameters<typeof tinyTitleClient.onProgress>[0]>();
-	vi.spyOn(tinyTitleClient, "onProgress").mockImplementation(listener => {
+	const listeners = new Set<Parameters<typeof tinyModelClient.onProgress>[0]>();
+	vi.spyOn(tinyModelClient, "onProgress").mockImplementation(listener => {
 		listeners.add(listener);
 		return () => {
 			listeners.delete(listener);

@@ -94,7 +94,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
  */
 async function runSmokeTest(): Promise<void> {
 	const { smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
-	const { smokeTestTinyTitleWorker } = await import("./tiny/title-client");
+	const { smokeTestTinyModelWorker } = await import("./tiny/model-client");
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
@@ -120,7 +120,7 @@ async function runSmokeTest(): Promise<void> {
 		statsServer.stop();
 	}
 
-	await smokeTestTinyTitleWorker();
+	await smokeTestTinyModelWorker();
 	await smokeTestSttWorker();
 	await smokeTestJsEvalWorker();
 	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");

@@ -28,7 +28,8 @@ import titleSystemPrompt from "../src/prompts/system/title-system.md" with { typ
 import { preprocessTinyMessage } from "../src/tiny/message-preproc";
 import { isTinyTitleLocalModelKey } from "../src/tiny/models";
 import { normalizeGeneratedTitle } from "../src/tiny/text";
-import { shutdownTinyTitleClient, tinyTitleClient } from "../src/tiny/title-client";
+import { shutdownTinyModelClient } from "../src/tiny/model-client";
+import { tinyTitleClient } from "../src/tiny/title-client";
 
 /** A sampled prompt with the cleaned text actually fed to the models. */
 interface PreparedPrompt {
@@ -289,7 +290,7 @@ async function main(): Promise<void> {
 			);
 	}
 
-	await shutdownTinyTitleClient();
+	await shutdownTinyModelClient();
 
 	// Prompt-centric view: each row is one input with every model's title beside it.
 	const matrix = prepared.map(item => {

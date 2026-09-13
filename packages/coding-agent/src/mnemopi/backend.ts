@@ -20,7 +20,7 @@ import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-sy
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
-import { tinyModelClient } from "../tiny/title-client";
+import { tinyModelClient } from "../tiny/model-client";
 import { shortenPath } from "../tools/render-utils";
 import {
 	loadMnemopiConfig,

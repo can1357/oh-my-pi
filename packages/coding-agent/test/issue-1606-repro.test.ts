@@ -7,7 +7,7 @@
  * inside its own process; tearing the worker down ran the native destructor
  * in the parent's address space and crashed the CLI on exit.
  *
- * The fix relocates the worker to its own process: `title-client.ts` spawns
+ * The fix relocates the worker to its own process: `model-client.ts` spawns
  * `process.execPath … __omp_worker_tiny_inference` (detached, owning a
  * per-model socket), `cli.ts` dispatches that flag into `runTinyWorker`, and
  * the omp process only ever holds a socket to it — the native finalizer never
@@ -21,20 +21,20 @@ import * as path from "node:path";
 import {
 	connectTinyWorker,
 	onnxLaunch,
-	smokeTestTinyTitleWorker,
+	smokeTestTinyModelWorker,
 	TINY_WORKER_CLOSED,
-} from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+} from "@oh-my-pi/pi-coding-agent/tiny/model-client";
 
 describe("issue #1606 — tiny model lives in an isolated process", () => {
 	it("ping/pongs through the spawned worker process and tears it down cleanly", async () => {
-		await smokeTestTinyTitleWorker({ timeoutMs: 15_000 });
+		await smokeTestTinyModelWorker({ timeoutMs: 15_000 });
 	}, 30_000);
 
 	it("surfaces the worker going away so in-flight callers don't await forever, but not our own terminate()", async () => {
 		// The worker exits on `shutdown` exactly like an idle exit, an OOM kill,
 		// or an operator `kill -9` would look to us: the socket closes. That MUST
 		// fault callers via the `onError` channel — an earlier fix swallowed
-		// unexpected exits and left `TinyTitleClient.#pending` hanging forever —
+		// unexpected exits and left `TinyModelClient.#pending` hanging forever —
 		// while a `terminate()` we issued ourselves MUST NOT.
 		const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tiny-1606-"));
 		try {

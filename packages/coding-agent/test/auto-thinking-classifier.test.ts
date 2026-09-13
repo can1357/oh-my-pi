@@ -21,7 +21,7 @@ import {
 	resolveTaskEffortLevel,
 } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TinyMemoryLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/model-client";
 
 describe("auto thinking classifier helpers", () => {
 	afterEach(() => {

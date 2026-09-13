@@ -34,7 +34,7 @@ import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
-import { tinyTitleClient } from "../../tiny/title-client";
+import { tinyModelClient } from "../../tiny/model-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { resolveReadPath } from "../../tools/path-utils";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
@@ -269,7 +269,7 @@ export class InputController {
 				else remove();
 			}
 		};
-		const unsubscribe = tinyTitleClient.onProgress(update);
+		const unsubscribe = tinyModelClient.onProgress(update);
 		return remove;
 	}
 

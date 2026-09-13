@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/model-client";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -41,7 +41,7 @@ describe("tiny-models download model resolution", () => {
 			output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 			return true;
 		});
-		spyOn(tinyTitleClient, "downloadModel").mockResolvedValue({
+		spyOn(tinyModelClient, "downloadModel").mockResolvedValue({
 			ok: false,
 			error: "Error: runtime install failed\n    at worker",
 		});
@@ -63,7 +63,7 @@ describe("tiny-models download model resolution", () => {
 			output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 			return true;
 		});
-		spyOn(tinyTitleClient, "downloadModel").mockResolvedValue({
+		spyOn(tinyModelClient, "downloadModel").mockResolvedValue({
 			ok: false,
 			error: "Error: runtime install failed\n    at worker",
 		});
@@ -95,7 +95,7 @@ describe("tiny-models download model resolution", () => {
 			output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 			return true;
 		});
-		spyOn(tinyTitleClient, "downloadModel").mockResolvedValue({
+		spyOn(tinyModelClient, "downloadModel").mockResolvedValue({
 			ok: false,
 			error: diagnostic,
 		});

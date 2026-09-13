@@ -7,7 +7,7 @@ import {
 	TINY_LOCAL_MODELS,
 	type TinyLocalModelKey,
 } from "../tiny/models";
-import { shutdownTinyTitleClient, tinyTitleClient, tinyWorkerUsesMlx } from "../tiny/title-client";
+import { shutdownTinyModelClient, tinyModelClient, tinyWorkerUsesMlx } from "../tiny/model-client";
 import type { TinyTitleProgressEvent } from "../tiny/title-protocol";
 
 export type TinyModelsAction = "download" | "list";
@@ -117,7 +117,7 @@ async function downloadOne(modelKey: TinyLocalModelKey, json: boolean | undefine
 	const label = getTinyLocalModelSpec(modelKey)?.label ?? modelKey;
 	if (!json && !process.stdout.isTTY) writeLine(`Downloading ${label} (${modelKey})...`);
 	const progress = makeProgressReporter(modelKey, json);
-	const result = await tinyTitleClient.downloadModel(modelKey, { onProgress: progress.onProgress });
+	const result = await tinyModelClient.downloadModel(modelKey, { onProgress: progress.onProgress });
 	progress.finish(result.ok);
 	const error = downloadErrorSummary(result.error);
 	if (!json && !process.stdout.isTTY) {
@@ -141,7 +141,7 @@ export async function runTinyModelsCommand(command: TinyModelsCommandArgs): Prom
 			results.push(await downloadOne(model, command.flags.json));
 		}
 	} finally {
-		await shutdownTinyTitleClient();
+		await shutdownTinyModelClient();
 	}
 
 	if (command.flags.json) {

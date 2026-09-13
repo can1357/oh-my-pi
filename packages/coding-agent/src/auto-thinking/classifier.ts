@@ -37,7 +37,7 @@ import {
 	isTinyMemoryReasoningModelKey,
 	ONLINE_AUTO_THINKING_MODEL_KEY,
 } from "../tiny/models";
-import { tinyModelClient } from "../tiny/title-client";
+import { tinyModelClient } from "../tiny/model-client";
 
 /**
  * Rendered classifier prompts, keyed by whether `max` is offered as a label.
