@@ -41,6 +41,16 @@ export const Flag = {
 	FastModeUnsupported: 0x2000_0000,
 	/** OAuth refresh failed definitively — the stored grant is dead, re-login required. */
 	OAuthExpiry: 0x4000_0000,
+	/**
+	 * An Anthropic-compatible endpoint rejected the `cache_control` field with a
+	 * 400, so prompt-cache breakpoints must be dropped for it.
+	 *
+	 * Every bit from {@link Flag.Class} up is already taken, so this claims a low
+	 * bit instead. Those belong to the raw-status lane — an unclassified id is an
+	 * HTTP status (100-599, see `statusFromId`) — and 0x800 is 2048, above every
+	 * status value, so no raw status id can set it.
+	 */
+	CacheControlUnsupported: 0x0000_0800,
 	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
 	PayloadRejected: 0x8000_0000,
 } as const;
@@ -66,6 +76,7 @@ const KIND_MASK =
 	Flag.Abort |
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
+	Flag.CacheControlUnsupported |
 	Flag.OAuthExpiry;
 
 const RETRIABLE_KINDS =
@@ -248,6 +259,35 @@ const FAST_MODE_SPEED_PARAM_PATTERN = /\bspeed\b/i;
 const FAST_MODE_NOT_SUPPORTED_PATTERN = /not support/i;
 const FAST_MODE_RATE_LIMIT_PATTERN = /rate_limit_error/i;
 const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
+// Anthropic-compatible proxies that do not implement prompt caching reject the
+// `cache_control` field itself with a 400 naming it. Requires rejection wording
+// so a 400 that merely mentions the field for another reason stays terminal.
+//
+// The mention must also BE the rejected member rather than a path *under* it.
+// Validators name the field's own position, so dotted segments before the name
+// (`messages.0.content.0.cache_control`) are still field-level; a segment after
+// it (`cache_control.ttl`, `cache_control["ttl"]`) means the endpoint accepted
+// the field and refused a nested option. The fallback this predicate gates
+// strips every breakpoint and latches `cacheControlUnsupported` for the rest of
+// the session, which would disable the 5m caching such an endpoint still
+// supports — a refused `ttl: "1h"` belongs to the extended-cache-ttl beta path.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?!\.\w|\[\s*["'])/i;
+const CACHE_CONTROL_REJECTION_PATTERN =
+	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
+// Strict JSON decoders and OpenAI-compatible validators express the same schema
+// rejection as an unknown *member* rather than as a forbidden extra input:
+// `json: unknown field "cache_control"` (Go `DisallowUnknownFields`),
+// `unknown_parameter` (OpenAI-compatible error codes), `Unpermitted parameter`
+// (Rails strong parameters), `is not a valid field` (hand-rolled validators).
+// These negations stay anchored to a schema-member noun, so a 400 rejecting a
+// cache_control *value* rather than the field itself keeps caching enabled.
+const CACHE_CONTROL_UNKNOWN_MEMBER_PATTERN =
+	/\b(?:un(?:known|permitted)|not (?:an? )?(?:known|valid|accepted))[_ -](?:field|param(?:eter)?|argument|key|propert(?:y|ies)|attribute|member|option)s?\b/i;
+// Anthropic rejects a breakpoint on an empty text block with a 400 that names
+// `cache_control` too. That is a content-shape fault — dropping every
+// breakpoint neither fixes it nor proves the endpoint lacks prompt caching.
+const CACHE_CONTROL_EMPTY_TEXT_PATTERN =
+	/empty text block|text content block.*non-(?:empty|whitespace)|text.{0,40}must (?:be non-empty|not be empty)/i;
 // Definitive OAuth refresh failure — the stored grant/client is dead.
 const OAUTH_DEFINITIVE_FAILURE_PATTERN =
 	/invalid_grant|invalid_token|unauthorized_client|\brevoked\b|refresh[\s_]?token.*expired/i;
@@ -283,6 +323,13 @@ function matchesFastModeUnsupported(message: string, errorStatus: number | undef
 	return (
 		errorStatus === 429 && FAST_MODE_RATE_LIMIT_PATTERN.test(message) && FAST_MODE_ENTITLEMENT_PATTERN.test(message)
 	);
+}
+
+function matchesCacheControlRejection(message: string, errorStatus: number | undefined): boolean {
+	if (errorStatus !== 400) return false;
+	if (!CACHE_CONTROL_FIELD_PATTERN.test(message)) return false;
+	if (CACHE_CONTROL_EMPTY_TEXT_PATTERN.test(message)) return false;
+	return CACHE_CONTROL_REJECTION_PATTERN.test(message) || CACHE_CONTROL_UNKNOWN_MEMBER_PATTERN.test(message);
 }
 
 /** Whether an OAuth refresh error message means the grant is definitively dead. */
@@ -535,6 +582,7 @@ function classifyText(
 		if (statusClean === 400 && GENERATION_NAN_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
+		if (matchesCacheControlRejection(cleanMessage, statusClean)) kinds |= Flag.CacheControlUnsupported;
 	}
 	// Status-only 413: infer PayloadRejected unless prior classification carries token-context evidence (#9235).
 	const statusEvidence = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
@@ -725,6 +773,21 @@ export function isGrammarError(error: unknown): boolean {
  */
 export function isFastModeUnsupported(error: unknown): boolean {
 	return is(classify(error), Flag.FastModeUnsupported);
+}
+
+/**
+ * An Anthropic-compatible endpoint rejected the `cache_control` field, so the
+ * request must be replayed without prompt-cache breakpoints.
+ * Accessor for {@link Flag.CacheControlUnsupported}.
+ *
+ * Unlike the high-bit accessors this also requires a classified id. The flag
+ * sits in the raw-status lane (see {@link Flag.CacheControlUnsupported}), and
+ * while no HTTP status reaches 0x800, `is` is a bare bit test — the extra gate
+ * keeps a stray non-HTTP status out of the retry path.
+ */
+export function isCacheControlUnsupported(error: unknown): boolean {
+	const id = classify(error);
+	return isClassified(id) && is(id, Flag.CacheControlUnsupported);
 }
 
 const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfaces/i;

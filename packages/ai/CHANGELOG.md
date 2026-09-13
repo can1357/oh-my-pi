@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An Anthropic-compatible endpoint that rejects `cache_control` with a 400 no longer fails the turn. The request is replayed once without prompt-cache breakpoints, the rejection is remembered for the rest of the session per endpoint and model, the extended-cache-ttl beta is dropped alongside it, and the turn reports `prompt-cache` in `disabledFeatures` ([#11812](https://github.com/can1357/oh-my-pi/pull/11812) by [@camjac251](https://github.com/camjac251)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added
