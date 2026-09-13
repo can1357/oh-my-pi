@@ -530,7 +530,18 @@ impl GitRepo {
 		let Some(remote) = get(&format!("branch.{branch}.remote")) else {
 			return Ok(None);
 		};
-		let Some(merge) = get(&format!("branch.{branch}.merge")) else {
+		// `branch.<name>.merge` may hold several values (octopus pull); git's
+		// upstream is the first one, not the last-wins scalar.
+		let Some(merge) = config
+			.plumbing()
+			.raw_values(format!("branch.{branch}.merge").as_str())
+			.ok()
+			.and_then(|values| {
+				values
+					.into_iter()
+					.find_map(|v| nonempty(v.to_str_lossy().trim()))
+			})
+		else {
 			return Ok(None);
 		};
 		// A `.` remote tracks a local ref without fetch refspecs. git dwims the
@@ -552,19 +563,42 @@ impl GitRepo {
 		if !merge.starts_with("refs/") {
 			return Ok(None);
 		}
-		let full = format!("refs/heads/{branch}");
-		let Ok(name) = <&gix::refs::FullNameRef>::try_from(&full) else {
+		let Ok(merge_name) = <&gix::refs::FullNameRef>::try_from(&merge) else {
 			return Ok(None);
 		};
-		match repo.branch_remote_tracking_ref_name(name, gix::remote::Direction::Fetch) {
-			Some(Ok(tracked)) => Ok(Some(tracked.to_string())),
-			Some(Err(err)) => Err(Error::backend("git config", err)),
-			// No fetch refspec maps the merge ref (none configured, or none that
-			// match). git then reports no upstream — `%(upstream)` is empty and
-			// `@{upstream}` fails — even when a stale `refs/remotes/<remote>/*`
-			// still exists. Don't invent one.
-			None => Ok(None),
+		// Mirrors gix's `branch_remote_tracking_ref_name`, which we can't use
+		// directly because it reads the merge ref as a last-wins scalar.
+		let remote = match repo.try_find_remote(remote.as_str()) {
+			Some(Ok(remote)) => remote,
+			Some(Err(err)) => return Err(Error::backend("git config", err)),
+			None => return Ok(None),
+		};
+		let specs: Vec<_> = remote
+			.refspecs(gix::remote::Direction::Fetch)
+			.iter()
+			.map(gix::refspec::RefSpec::to_ref)
+			.filter(|spec| spec.source().is_some() && spec.destination().is_some())
+			.collect();
+		// No fetch refspec maps the merge ref (none configured, or none that
+		// match). git then reports no upstream — `%(upstream)` is empty and
+		// `@{upstream}` fails — even when a stale `refs/remotes/<remote>/*`
+		// still exists. Don't invent one.
+		if specs.is_empty() {
+			return Ok(None);
 		}
+		let null = repo.object_hash().null();
+		let matched = gix::refspec::MatchGroup { specs }.match_lhs(std::iter::once(
+			gix::refspec::match_group::Item {
+				full_ref_name: merge_name.as_bstr(),
+				target:        &null,
+				object:        None,
+			},
+		));
+		Ok(matched
+			.mappings
+			.into_iter()
+			.next()
+			.and_then(|mapping| mapping.rhs.map(|rhs| rhs.to_string())))
 	}
 
 	/// Read a scalar git config value.
@@ -1736,6 +1770,37 @@ mod tests {
 		assert_eq!(repo.status_summary()?.ahead, None);
 		git(root, &["config", "branch.feat.merge", "refs/heads/main"])?;
 		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/main");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_uses_first_of_multiple_merge_refs() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["branch", "one"])?;
+		git(root, &["checkout", "-b", "two"])?;
+		commit(root, "t1", "t1\n", "t1")?;
+		git(root, &["checkout", "-b", "feat", "main"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		// Octopus-pull configuration: two merge refs. git's upstream is the
+		// first; a scalar `config --get` would hand back the last.
+		git(root, &["config", "branch.feat.remote", "."])?;
+		git(root, &["config", "branch.feat.merge", "refs/heads/one"])?;
+		git(root, &["config", "--add", "branch.feat.merge", "refs/heads/two"])?;
+		let upstream =
+			|root: &Path| git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/feat"]);
+		assert_eq!(git(root, &["config", "--get", "branch.feat.merge"])?.trim(), "refs/heads/two");
+		assert_eq!(upstream(root)?.trim(), "refs/heads/one");
+		// Against `one` feat is (1, 0); against `two` it would be (1, 1).
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Same ordering when the merge refs map through a remote's fetch refspecs.
+		git(root, &["remote", "add", "origin", "."])?;
+		git(root, &["fetch", "origin"])?;
+		git(root, &["config", "branch.feat.remote", "origin"])?;
+		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/one");
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
 		Ok(())
 	}
