@@ -273,6 +273,9 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
+	#silentEmptyStopFallbackArmed = false;
+	/** True if any empty stop in the current retry cycle reported billed usage. */
+	#emptyStopCycleHadBilling = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
 	// event for the current arm, `#fallbackRouted` says how the CURRENT model was
@@ -406,6 +409,8 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
+		this.#silentEmptyStopFallbackArmed = false;
+		this.#emptyStopCycleHadBilling = false;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -589,6 +594,12 @@ export class TurnRecovery {
 			allowModelFallback?: boolean;
 			fireworksFastFallback?: boolean;
 			hardErrorFallback?: boolean;
+			/**
+			 * When true with hardErrorFallback, skip nested auto_retry_end /
+			 * synthetic persist so an outer caller (empty-stop cap) owns settlement.
+			 * Ordinary hard-error callers must omit this and settle normally.
+			 */
+			deferTerminalSettlement?: boolean;
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
@@ -815,10 +826,41 @@ export class TurnRecovery {
 		);
 	}
 
+	/** True when this empty stop reported no billable usage in any meter. */
+	#isZeroBilledEmptyStop(assistantMessage: AssistantMessage, providerEmptyOutput: boolean): boolean {
+		if (providerEmptyOutput || assistantMessage.content.length > 0) return false;
+		const outputTokensExcludingKnownReasoning = Math.max(
+			0,
+			assistantMessage.usage.output - (assistantMessage.usage.reasoningTokens ?? 0),
+		);
+		const orchestration = assistantMessage.usage.orchestration;
+		const credits = assistantMessage.usage.credits;
+		return (
+			assistantMessage.usage.input === 0 &&
+			assistantMessage.usage.output === 0 &&
+			assistantMessage.usage.cacheRead === 0 &&
+			assistantMessage.usage.cacheWrite === 0 &&
+			assistantMessage.usage.totalTokens === 0 &&
+			(assistantMessage.usage.contextTokens ?? 0) === 0 &&
+			(orchestration?.input ?? 0) === 0 &&
+			(orchestration?.output ?? 0) === 0 &&
+			(orchestration?.cacheRead ?? 0) === 0 &&
+			(assistantMessage.usage.premiumRequests ?? 0) === 0 &&
+			(assistantMessage.usage.cost?.total ?? 0) === 0 &&
+			(assistantMessage.usage.server?.webSearch ?? 0) === 0 &&
+			(assistantMessage.usage.server?.webFetch ?? 0) === 0 &&
+			(credits?.cost ?? 0) === 0 &&
+			(credits?.committedCost ?? 0) === 0 &&
+			(credits?.acuCost ?? 0) === 0 &&
+			outputTokensExcludingKnownReasoning === 0
+		);
+	}
+
 	async #handleEmptyAssistantStop(assistantMessage: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
 		const providerEmptyOutput = this.#isRecoverableProviderEmptyOutput(assistantMessage);
 		if (!isEmptyAssistantStop(assistantMessage) && !providerEmptyOutput) {
 			this.#emptyStopRetryCount = 0;
+			this.#emptyStopCycleHadBilling = false;
 			return undefined;
 		}
 
@@ -826,7 +868,12 @@ export class TurnRecovery {
 			this.#acceptTerminalEmptyStopForPrompt = false;
 			this.#discardAcceptedTerminalEmptyStop(assistantMessage);
 			this.#emptyStopRetryCount = 0;
+			this.#emptyStopCycleHadBilling = false;
 			return undefined;
+		}
+
+		if (!this.#isZeroBilledEmptyStop(assistantMessage, providerEmptyOutput)) {
+			this.#emptyStopCycleHadBilling = true;
 		}
 
 		this.#emptyStopRetryCount++;
@@ -852,6 +899,60 @@ export class TurnRecovery {
 				finalError =
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
 			}
+			const zeroBilled =
+				this.#isZeroBilledEmptyStop(assistantMessage, providerEmptyOutput) &&
+				!this.#emptyStopCycleHadBilling;
+
+			// Zero-billed empty stops are upstream dispatch failures laundered into a
+			// clean HTTP-200 stop (#9415): nothing was ever dispatched, so no usage
+			// bucket is nonzero. Consult modelFallback/fallbackChains ONCE per run,
+			// BEFORE the terminal `auto_retry_end` emission, so a configured chain can
+			// continue on a healthy provider instead of surfacing the retry-cap banner.
+			// hardErrorFallback skips same-model retry: no usable candidate means the
+			// existing terminal settle. The synthetic object keeps the original turn
+			// untouched — the original is dropped durably either way.
+			// Promotion also requires the whole retry cycle to be zero-billed: an earlier
+			// billed empty in the same cycle means the provider did process work, so a
+			// final zero-usage stop must not launder that into silent model fallback.
+			if (zeroBilled && !this.#silentEmptyStopFallbackArmed) {
+				this.#silentEmptyStopFallbackArmed = true;
+				logger.warn("Promoting zero-billed empty stop to retriable error for model fallback", {
+					attempts,
+					model: assistantMessage.model,
+					provider: assistantMessage.provider,
+				});
+				const synthetic: AssistantMessage = {
+					...assistantMessage,
+					stopReason: "error",
+					errorMessage: finalError,
+					errorId: AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient),
+				};
+				await this.#dropAssistantTurnDurably(assistantMessage);
+				const modelBeforeFallback = this.#host.model();
+				const didRetry = await this.handleRetryableError(synthetic, {
+					allowModelFallback: true,
+					hardErrorFallback: true,
+					deferTerminalSettlement: true,
+				});
+				const modelAfterFallback = this.#host.model();
+				// Effort-only selector changes (provider/model:high → :low) resolve the
+				// same model and must not count as takeover — otherwise the empty-stop
+				// counter resets and the same dead route gets another full cycle.
+				const modelIdentityChanged =
+					modelBeforeFallback !== undefined &&
+					modelAfterFallback !== undefined &&
+					!modelsAreEqual(modelBeforeFallback, modelAfterFallback);
+				if (didRetry && modelIdentityChanged) {
+					this.#emptyStopRetryCount = 0;
+					this.#emptyStopCycleHadBilling = false;
+					return "continue";
+				}
+				// No distinct model could take over: fall through to the visible
+				// terminal settle rather than granting the same dead pipe another
+				// empty-stop cycle.
+				this.#silentEmptyStopFallbackArmed = false;
+			}
+
 			assistantMessage.errorMessage = finalError;
 			if (providerEmptyOutput) assistantMessage.errorId = AIError.create();
 			logger.warn(finalError, {
@@ -1785,12 +1886,26 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
+		options?: {
+			pinFallback?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			/** When true, effort-only same-model candidates are rejected as not a takeover. */
+			requireModelIdentityChange?: boolean;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
+		}
+		const previousModel = this.#host.model();
+		if (
+			options?.requireModelIdentityChange &&
+			previousModel !== undefined &&
+			modelsAreEqual(previousModel, candidate)
+		) {
+			return false;
 		}
 		const apiKey =
 			options?.apiKey ??
@@ -1812,7 +1927,6 @@ export class TurnRecovery {
 				? requestedThinkingLevel
 				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
-		const previousModel = this.#host.model();
 		// Mark routing BEFORE the swap: `setModelWithProviderSessionReset` moves the
 		// model and fans `model_changed` out to subscribers synchronously, and a
 		// listener reading attribution in that window must already see the incoming
@@ -1867,10 +1981,12 @@ export class TurnRecovery {
 			excludeProvider?: string;
 			pinFallback?: boolean;
 			preserveFailedTurn?: boolean;
+			requireModelIdentityChange?: boolean;
 			wrapAround?: boolean;
 		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
+		const currentModel = this.#host.model();
 		const latestAssistant = options?.preserveFailedTurn
 			? failedMessage
 			: this.#host.agent.state.messages.findLast(
@@ -1883,6 +1999,15 @@ export class TurnRecovery {
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
 				if (options?.excludeProvider === candidate.provider) continue;
+				// Empty-stop / hard-error takeover requires a different provider/model.
+				// Effort-only chain entries (provider/model:high → :low) must not count.
+				if (
+					options?.requireModelIdentityChange &&
+					currentModel !== undefined &&
+					modelsAreEqual(currentModel, candidate)
+				) {
+					continue;
+				}
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
 				// model switch can satisfy neither constraint, so keep retrying the
@@ -2106,6 +2231,7 @@ export class TurnRecovery {
 			allowModelFallback?: boolean;
 			fireworksFastFallback?: boolean;
 			hardErrorFallback?: boolean;
+			deferTerminalSettlement?: boolean;
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
@@ -2316,6 +2442,7 @@ export class TurnRecovery {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
 					pinFallback: classifierRefusal,
 					preserveFailedTurn,
+					requireModelIdentityChange: options?.hardErrorFallback === true,
 					wrapAround: longUsageLimitFallback,
 				});
 			}
@@ -2335,6 +2462,15 @@ export class TurnRecovery {
 
 		if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
+				// Empty-stop fallback-only consults defer terminal ownership to the
+				// outer empty-stop cap (sole auto_retry_end). Ordinary hardErrorFallback
+				// callers have no such owner and must settle here.
+				if (options?.deferTerminalSettlement) {
+					// Outer empty-stop cap owns terminal settlement (`auto_retry_end`,
+					// `#retryAttempt` reset, and `resolveRetry()`). Clearing here races
+					// `#waitForPostPromptRecovery()` ahead of that owner.
+					return false;
+				}
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);
@@ -2379,17 +2515,19 @@ export class TurnRecovery {
 			return false;
 		}
 		// A fallback switch was the whole reason we entered (Fast→base degrade or
-		// a hard-error chain consult) but it could not happen (e.g. no candidate
-		// has a credential). Don't fall through to backing-off and retrying the
-		// failing model for an error the generic classifier wouldn't retry —
-		// surface it instead.
+		// a hard-error / fallback-only chain consult) but it could not happen
+		// (e.g. no candidate has a credential). Don't fall through to backing-off
+		// and retrying the failing model. Fireworks Fast still same-model-retries
+		// when the error is otherwise retryable; hardErrorFallback always surfaces.
 		if (
-			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
 			!switchedModel &&
-			!this.isRetryableError(message)
+			!switchedCredential &&
+			(options?.hardErrorFallback || (options?.fireworksFastFallback && !this.isRetryableError(message)))
 		) {
-			// Same auto_retry_end backstop as the classifier-refusal branch above.
-			if (this.#retryAttempt > 1) {
+			// Empty-stop consults defer terminal ownership to the outer cap (no nested
+			// auto_retry_end). Ordinary hardErrorFallback and Fireworks Fast still close
+			// an in-flight saga when attempt > 1.
+			if (!options?.deferTerminalSettlement && this.#retryAttempt > 1) {
 				await this.persistTerminalEmptyErrorTurn(message);
 				await this.#host.emitSessionEvent({
 					type: "auto_retry_end",
