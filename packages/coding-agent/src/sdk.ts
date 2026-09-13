@@ -4353,6 +4353,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		}
 
+		if (ownedMcpManager && !deferMCPDiscoveryForUI) {
+			const currentMcpManagerTools = ownedMcpManager.getTools();
+			let sameMcpManagerTools = currentMcpManagerTools.length === initialMcpManagerTools.length;
+			for (let i = 0; sameMcpManagerTools && i < currentMcpManagerTools.length; i++) {
+				sameMcpManagerTools = currentMcpManagerTools[i] === initialMcpManagerTools[i];
+			}
+			if (!sameMcpManagerTools) {
+				await session.refreshMCPTools(currentMcpManagerTools);
+			}
+		}
+
+
 		startDeferredMCPDiscovery?.(session);
 
 		// Route the initial tool surface through the Code Mode-aware path when the
