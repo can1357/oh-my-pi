@@ -31,6 +31,8 @@ const WEB_URL = "https://collab.example";
 interface HostContextState {
 	sessionId: string;
 	showStatus: string[];
+	/** Guest prompts the host forwarded into the session. */
+	prompts: string[];
 	subscribed: ((event: { type: string; [k: string]: unknown }) => void) | null;
 	/** Invoked on every `getSessionId()` read, i.e. each time the host checks the session it mirrors. */
 	onSessionIdRead: (() => void) | undefined;
@@ -47,6 +49,7 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 	const state: HostContextState = {
 		sessionId: `sess-${crypto.randomUUID()}`,
 		showStatus: [],
+		prompts: [],
 		subscribed: null,
 		onSessionIdRead: undefined,
 		tornDown: Promise.withResolvers<void>(),
@@ -81,7 +84,10 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 				return () => {};
 			},
 			emitNotice: () => {},
-			promptCustomMessage: () => Promise.resolve(),
+			promptCustomMessage: (message: { content: unknown }) => {
+				state.prompts.push(String(message.content));
+				return Promise.resolve();
+			},
 			abort: () => Promise.resolve(),
 		},
 		eventBus: undefined,
@@ -337,6 +343,52 @@ describe("collab host registry lifecycle (#6099)", () => {
 		await late.welcomed;
 		expect(early.saw()).toBe(false);
 		expect(late.saw()).toBe(true);
+	});
+
+	it("refuses guest actions from the moment stop() begins, while the goodbye is still draining", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+		const writer = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => writer.close());
+		const welcomed = Promise.withResolvers<void>();
+		writer.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+		};
+		writer.onOpen = () => writer.send({ t: "hello", proto: COLLAB_PROTO, name: "writer", writeToken });
+		writer.connect();
+		await welcomed.promise;
+
+		// Hold the goodbye drain open: stop() has begun but has not torn the
+		// room down, and the relay socket is still up — the window under test.
+		const drain = Promise.withResolvers<void>();
+		let hostSocket: CollabSocket | undefined;
+		const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(function (this: CollabSocket) {
+			hostSocket = this;
+			return drain.promise;
+		});
+		const stopping = host.stop("host stopped");
+		if (!hostSocket) throw new Error("stop() did not reach the goodbye flush");
+		const handled = Promise.withResolvers<void>();
+		const deliver = hostSocket.onFrame;
+		hostSocket.onFrame = (frame, fromPeer) => {
+			deliver?.(frame, fromPeer);
+			if (frame.t === "prompt") handled.resolve();
+		};
+
+		// A writable guest prompts inside that window: the host must not forward it.
+		writer.send({ t: "prompt", text: "after stop began" });
+		await handled.promise;
+		flush.mockRestore();
+		drain.resolve();
+		await stopping;
+
+		expect(state.prompts).toEqual([]);
+		expect(host.stopped).toBe(true);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
 	it("withdraws on a terminal (non-reconnecting) relay close", async () => {

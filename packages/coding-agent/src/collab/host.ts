@@ -183,6 +183,8 @@ export class CollabHost {
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	/** Set the moment `stop()` begins; `#stopped` follows once teardown has run. */
+	#stopping = false;
 	#stopped = false;
 
 	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
@@ -217,6 +219,16 @@ export class CollabHost {
 
 	get stopped(): boolean {
 		return this.#stopped;
+	}
+
+	/**
+	 * The room is ending or gone. Checked before any guest action or mirrored
+	 * frame: `stop()` drains the goodbye and awaits registry withdrawal before
+	 * the socket closes, and no guest prompt, abort, answer, or join may reach
+	 * the session — nor may any frame reach guests — once it has begun.
+	 */
+	#ending(): boolean {
+		return this.#stopping || this.#stopped;
 	}
 
 	/** True while a host-side question is retained for (or shown to) a writable guest. */
@@ -267,7 +279,7 @@ export class CollabHost {
 	 * must stay local rather than reach the previous session's guests.
 	 */
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (this.#stopped || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
+		if (this.#ending() || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
 		if (!this.#sessionStillCurrent()) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
@@ -384,8 +396,8 @@ export class CollabHost {
 		this.#pendingPublication = publishing;
 		const publication = await publishing;
 		this.#pendingPublication = null;
-		if (this.#stopped) {
-			// The relay closed fatally (or stop() ran) while publication was in
+		if (this.#ending()) {
+			// stop() began, or the relay closed fatally, while publication was in
 			// flight: withdraw it here too (close is idempotent) and refuse to
 			// finish startup instead of installing a dead host that stays discoverable.
 			if (publication) {
@@ -393,6 +405,7 @@ export class CollabHost {
 					.close()
 					.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
 			}
+			if (this.#stopping) throw new CollabHostStoppedError("collab host stopped during startup");
 			throw new Error("relay connection closed during startup");
 		}
 		this.#registryPublication = publication;
@@ -432,6 +445,7 @@ export class CollabHost {
 	async stop(reason: string): Promise<void> {
 		if (this.#teardownDone) return this.#teardownDone;
 		if (this.#stopped) return;
+		this.#stopping = true;
 		this.#abortStart?.(new CollabHostStoppedError(`collab host stopped: ${reason}`));
 		const socket = this.#socket;
 		if (socket) {
@@ -543,14 +557,15 @@ export class CollabHost {
 	}
 
 	#broadcast(frame: CollabFrame): void {
-		if (this.#stopped || !this.#socket || !this.#sessionStillCurrent()) return;
+		if (this.#ending() || !this.#socket || !this.#sessionStillCurrent()) return;
 		this.#socket.send(frame);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
 		// Inbound frames act on the mirrored session (join snapshots, prompts,
-		// aborts, agent control); none may reach a session this room never shared.
-		if (!this.#sessionStillCurrent()) return;
+		// aborts, agent control); none may reach a session this room never
+		// shared, or one whose room is already ending.
+		if (this.#ending() || !this.#sessionStillCurrent()) return;
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
