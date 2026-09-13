@@ -1577,6 +1577,16 @@ export async function runRootCommand(
 				plan: planModel,
 			});
 		}
+		// Apply --model-profile CLI flag (ephemeral, not persisted): activates a
+		// profile for this run only, without rewriting the persisted activeProfile.
+		// Explicit --model/--smol/--slow/--plan one-shot selections still take
+		// precedence over profile roles: they land in the runtime modelRoles
+		// layer, which sits above the profile layer during merge.
+		if (parsedArgs.modelProfile) {
+			// Validated activation: an unknown (or removed) profile name fails
+			// loudly instead of silently starting with base modelRoles.
+			await settingsInstance.setActiveProfile("runtime", parsedArgs.modelProfile);
+		}
 
 		// --print-thoughts (single-shot print mode) must surface reasoning, so un-hide
 		// thinking before the session is built — otherwise a passive omitThinking

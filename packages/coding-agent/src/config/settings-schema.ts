@@ -398,6 +398,35 @@ export interface ModelTagDef {
 export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
+/**
+ * A named model-role overlay. `modelRoles` uses the same selector values as the
+ * top-level `modelRoles` setting (e.g. `provider/modelId`, `@smol`, `*`), and
+ * only the roles listed here are overlaid — unspecified roles fall through to
+ * the normal configuration. A `null` selector is a write-time tombstone that
+ * removes the role from the profile on merge; it never persists. Reserved for
+ * future expansion beyond model roles, so consumers must not assume the object
+ * only ever carries `modelRoles`.
+ */
+export interface ProfileDefinition {
+	description?: string;
+	modelRoles?: Record<string, string | null>;
+	[key: string]: unknown;
+}
+
+export interface ProfilesSettings {
+	[key: string]: ProfileDefinition;
+}
+
+/** Which config layer(s) supply a profile definition. */
+export type ProfileScope = "global" | "project" | "overlay";
+
+/** Structured profile-state snapshot for agent visibility and diagnostics. */
+export interface ProfilesSnapshot {
+	active: string;
+	baseModelRoles: Record<string, string>;
+	effectiveModelRoles: Record<string, string>;
+	profiles: Record<string, { description?: string; modelRoles?: Record<string, string>; definedIn: ProfileScope[] }>;
+}
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
@@ -695,6 +724,13 @@ export const SETTINGS_SCHEMA = {
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
+	// ────────────────────────────────────────────────────────────────────────
+	// Profiles (named model-role overlays)
+	// ────────────────────────────────────────────────────────────────────────
+
+	activeProfile: { type: "string", default: "" },
+
+	profiles: { type: "record", default: {} as Record<string, ProfileDefinition> },
 
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 

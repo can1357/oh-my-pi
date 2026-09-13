@@ -143,6 +143,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--plan": (result, value) => {
 		result.plan = value;
 	},
+	"--model-profile": (result, value) => {
+		result.modelProfile = value;
+	},
 	"--prewalk-into": (result, value) => {
 		result.prewalkInto = value;
 	},

@@ -475,6 +475,12 @@ disabledProviders:
 
 String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels`, `providers` for `disabledProviders`, or `values` for either.
 
+#### Profiles
+
+A profile is a named model-role overlay. The `modelRoles` inside a profile use the same selector values as the top-level `modelRoles` — `@smol`, a concrete `provider/modelId`, or a role reference with an optional `:level` suffix. Roles not listed in the profile fall through to the base `modelRoles`.
+
+Set `activeProfile` to apply a profile's `modelRoles` on top of the base for the whole session, or pass `--model-profile <name>` to activate one for a single run only. Either way the base `modelRoles` are left untouched: a profile adds a layer rather than rewriting the stored roles.
+
 ## `/model` and `omp models`
 
 Both surfaces keep provider-prefixed concrete models visible and selectable.

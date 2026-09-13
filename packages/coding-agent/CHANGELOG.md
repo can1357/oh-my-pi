@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Added model-role Profiles: named model-role overlays in `profiles` config selected via `/profile` (manager, list/show/set-role/delete subcommands) or the one-shot `--model-profile` flag, with the active profile shown on the status line ([#11921](https://github.com/can1357/oh-my-pi/pull/11921) by [@fedoragobrowse-design](https://github.com/fedoragobrowse-design)).
+- Fixed debounced setting changes being silently lost when a profile write re-read the config file in the same 100 ms window.
+- Fixed a project-config `activeProfile` selection surviving its profile's deletion and masking a same-name global profile instead of falling back to it.
+- Fixed a profile switch while plan mode was active leaving plan-exit model restore pointed at the pre-switch model.
+- Fixed `--model-profile <name>` silently starting with base modelRoles when the named profile does not exist; it now fails with an explicit error.
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
