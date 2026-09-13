@@ -867,9 +867,9 @@ describe("CollabController", () => {
 		await settled(publishSpy, 1);
 		const first = ctx.collabHost;
 		if (!first) throw new Error("first room missing");
-		const goodbye = Promise.withResolvers<string>();
+		const goodbye = Promise.withResolvers<"bye">();
 		await joinAsWriter(first, frame => {
-			if (frame.t === "bye") goodbye.resolve(frame.reason);
+			if (frame.t === "bye") goodbye.resolve(frame.t);
 		});
 
 		// Record the old room's state at the moment the successor publishes.
@@ -887,7 +887,7 @@ describe("CollabController", () => {
 
 		expect(firstStoppedWhenSecondPublished).toBe(true);
 		// The writer in the old room was told explicitly, not left to time out.
-		expect(await goodbye.promise).toBe("session switched");
+		expect(await goodbye.promise).toBe("bye");
 		const second = ctx.collabHost;
 		expect(second).toBeDefined();
 		expect(second).not.toBe(first);

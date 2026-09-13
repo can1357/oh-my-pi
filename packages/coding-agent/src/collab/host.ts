@@ -841,10 +841,30 @@ export class CollabHost {
 				},
 				{ streamingBehavior: "steer", queueChipText: text },
 			)
+			.then(dispatched => {
+				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);
+			})
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
 				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
 			});
+	}
+
+	async #notifyPromptDropped(fromPeer: number): Promise<void> {
+		while (!this.ending && this.#ctx.session.isSessionTransitioning) {
+			await this.#ctx.session.waitForSessionTransition();
+		}
+		if (this.ending) return;
+		if (!this.#sessionStillCurrent()) {
+			await this.stop(
+				"session changed before a guest prompt was submitted. Rejoin and resend any prompt not shown in the conversation",
+			);
+			return;
+		}
+		this.#send(
+			{ t: "error", message: "Prompt was not submitted. Please resend it when the host is ready." },
+			fromPeer,
+		);
 	}
 
 	#handleAbort(fromPeer: number): void {

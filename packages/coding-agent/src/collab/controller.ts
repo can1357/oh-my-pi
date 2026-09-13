@@ -19,6 +19,9 @@ import type { CollabAccess } from "./registry";
 
 export type CollabAutoStart = "off" | CollabAccess;
 
+const SESSION_SWITCH_REASON =
+	"session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them";
+
 export interface CollabStartOptions {
 	/** Highest access the registry may hand out for the new room. */
 	access: CollabAccess;
@@ -126,7 +129,7 @@ export class CollabController {
 		const stopEpoch = this.#stopEpoch;
 		// Abort an in-flight or stale room before queuing behind its startup.
 		const stopping =
-			this.#host && this.#stopHost(this.#host, existing ? "restarting with control access" : "session switched");
+			this.#host && this.#stopHost(this.#host, existing ? "restarting with control access" : SESSION_SWITCH_REASON);
 		const started = this.#ops.then(async () => {
 			await stopping;
 			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
@@ -269,7 +272,7 @@ export class CollabController {
 		const stopEpoch = this.#stopEpoch;
 		// Stop synchronously so a room still connecting is aborted now rather than
 		// after the queued start settles; the chain then waits for that stop.
-		const stopping = previous && this.#stopHost(previous, "session switched");
+		const stopping = previous && this.#stopHost(previous, SESSION_SWITCH_REASON);
 		this.#ops = this.#ops
 			.then(async () => {
 				await stopping;

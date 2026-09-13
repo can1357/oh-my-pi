@@ -17,12 +17,20 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { type CollabGuestUiResult, CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 const RELAY_URL = "ws://localhost:8788";
@@ -152,6 +160,97 @@ afterEach(async () => {
 });
 
 describe("collab host registry lifecycle (#6099)", () => {
+	it.each(["navigateTree", "fork"] as const)(
+		"notifies the submitting guest when %s discards an admitted prompt",
+		async transition => {
+			const auth = await AuthStorage.create(":memory:");
+			auth.setRuntimeApiKey("anthropic", "test-key");
+			const models = new ModelRegistry(auth);
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Test model missing");
+			const manager = SessionManager.create(tmp, tmp);
+			manager.appendMessage({ role: "user", content: "Retained", timestamp: 1 });
+			const abandoned = manager.appendMessage({ role: "user", content: "Abandoned", timestamp: 2 });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: manager.buildSessionContext().messages,
+				},
+				streamFn: createMockModel({ responses: [{ content: ["Must not run"] }] }).stream,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: manager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: models,
+			});
+			const { ctx } = makeHostContext();
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const completed = Promise.withResolvers<boolean>();
+			const getApiKey = models.getApiKey.bind(models);
+			const keyLookup = spyOn(models, "getApiKey").mockImplementation(async (...args) => {
+				reached.resolve();
+				await release.promise;
+				return getApiKey(...args);
+			});
+			const prompt = session.promptCustomMessage.bind(session);
+			const submission = spyOn(session, "promptCustomMessage").mockImplementation(async (...args) => {
+				const result = await prompt(...args);
+				completed.resolve(result);
+				return result;
+			});
+			try {
+				host = new CollabHost({ ...ctx, session, sessionManager: manager });
+				await host.start(RELAY_URL, WEB_URL);
+				const parsed = parseCollabLink(host.link);
+				if ("error" in parsed || !parsed.writeToken) throw new Error("Control link missing");
+				const guest = new CollabSocket({
+					wsUrl: parsed.wsUrl,
+					role: "guest",
+					key: await importRoomKey(parsed.key),
+				});
+				guestCleanups.push(() => guest.close());
+				const welcomed = Promise.withResolvers<void>();
+				const rejected = Promise.withResolvers<CollabFrame>();
+				guest.onFrame = frame => {
+					if (frame.t === "welcome") welcomed.resolve();
+					if (frame.t === "error" || frame.t === "bye") rejected.resolve(frame);
+				};
+				guest.onOpen = () =>
+					guest.send({
+						t: "hello",
+						proto: COLLAB_PROTO,
+						name: "writer",
+						writeToken: Buffer.from(parsed.writeToken!).toString("base64url"),
+					});
+				guest.connect();
+				await welcomed.promise;
+				guest.send({ t: "prompt", text: "Admitted on the abandoned branch" });
+				await reached.promise;
+				if (transition === "fork") expect(await session.fork()).toBe(true);
+				else expect((await session.navigateTree(abandoned)).cancelled).toBe(false);
+				release.resolve();
+				expect(await completed.promise).toBe(false);
+				expect((await rejected.promise).t).toBe(transition === "fork" ? "bye" : "error");
+				expect(
+					manager
+						.getEntries()
+						.some(entry => entry.type === "custom_message" && entry.customType === "collab-prompt"),
+				).toBe(false);
+			} finally {
+				release.resolve();
+				await host?.stop("test cleanup");
+				keyLookup.mockRestore();
+				submission.mockRestore();
+				await session.dispose();
+				auth.close();
+			}
+		},
+	);
 	for (const completion of ["rollback", "commit", "stop", "writer-left"] as const) {
 		it("handles an old-room answer during provisional suspension followed by " + completion, async () => {
 			const { ctx, state } = makeHostContext();
