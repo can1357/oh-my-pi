@@ -10843,17 +10843,16 @@ export class AgentSession {
 	 * `notice` stream and survives only as a tombstone. Teardowns after
 	 * subscribing arrive live as `notice` events with source `auth`; pass the
 	 * {@link AgentSession.disabledCredentialNoticeMark} taken before
-	 * subscribing as `announcedAfter` so a teardown racing the replay is told
-	 * once. Bounded and best-effort: an unreachable broker yields no notices,
-	 * never an error.
+	 * subscribing as `announcedAfter` so a teardown racing the replay — even
+	 * one landing while the lookup is in flight — is told once. Bounded and
+	 * best-effort: an unreachable broker yields no notices, never an error.
 	 */
 	getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
-		const announced = new Set(
-			this.#announcedDisabledCredentialIds.slice(
-				options?.announcedAfter ?? this.#announcedDisabledCredentialIds.length,
-			),
+		const announcedAfter = options?.announcedAfter ?? this.#announcedDisabledCredentialIds.length;
+		// Membership is read when the lookup settles, not when it starts.
+		return collectDisabledCredentialNotices(this.#modelRegistry.authStorage, options?.nowMs ?? Date.now(), id =>
+			this.#announcedDisabledCredentialIds.includes(id, announcedAfter),
 		);
-		return collectDisabledCredentialNotices(this.#modelRegistry.authStorage, options?.nowMs ?? Date.now(), announced);
 	}
 
 	/**

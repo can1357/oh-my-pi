@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, pluralize } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "../mcp/json-rpc";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
@@ -60,7 +61,9 @@ function loginRemedy(provider: string): string {
 /**
  * What was signed out and how to get it back. A managed MCP OAuth credential
  * is stored under its own `mcp_oauth:*` id rather than a `/login` provider:
- * it is named by its server and recovered through `/mcp reauth`.
+ * it is named by its server and recovered through `/mcp reauth`. The id keeps
+ * the server URL's full query string, which can carry a key or token, so the
+ * displayed URL goes through the same redaction as MCP request logging.
  */
 function subjectAndRemedy(
 	provider: string,
@@ -70,7 +73,9 @@ function subjectAndRemedy(
 	if (isManagedMCPOAuthCredentialId(provider)) {
 		const serverUrl = mcpOAuthServerUrlFromCredentialId(provider);
 		return {
-			subject: serverUrl ? `MCP server ${truncateToWidth(serverUrl, TRUNCATE_LENGTHS.TITLE)}` : "an MCP server",
+			subject: serverUrl
+				? `MCP server ${truncateToWidth(redactUrlForLog(serverUrl), TRUNCATE_LENGTHS.TITLE)}`
+				: "an MCP server",
 			remedy: "Reauthorize it with /mcp reauth <name>.",
 		};
 	}
@@ -93,9 +98,10 @@ export function formatDisabledCredentialReplayNotice(summary: DisabledCredential
 
 /**
  * Notices for accounts that were signed out automatically and have not been
- * signed in again, replayed once when a session starts. `announced` names the
- * credentials a live `notice` already reached the caller's listener with, so
- * a teardown racing the replay is told once. Best-effort and bounded in time
+ * signed in again, replayed once when a session starts. `announced` answers,
+ * once the lookup has settled, whether a live `notice` already reached the
+ * caller's listener for a credential — a teardown racing the lookup itself is
+ * still told only once. Best-effort and bounded in time
  * and size: a broker that predates the tombstone endpoint, is unreachable, or
  * does not answer within {@link REPLAY_LOOKUP_BUDGET_MS} yields no notices
  * instead of delaying or breaking startup, and at most
@@ -104,12 +110,12 @@ export function formatDisabledCredentialReplayNotice(summary: DisabledCredential
 export async function collectDisabledCredentialNotices(
 	authStorage: AuthStorage,
 	nowMs: number,
-	announced?: ReadonlySet<number>,
+	announced: (credentialId: number) => boolean = () => false,
 ): Promise<string[]> {
 	try {
 		const disabled = (
 			await authStorage.listActionableDisabledCredentials(undefined, AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS))
-		).filter(summary => !announced?.has(summary.id));
+		).filter(summary => !announced(summary.id));
 		// Newest sign-out first, then bounded like other collapsed lists: the
 		// account that just dropped out must be named, not the oldest leftovers;
 		// `omp usage` has the full set.

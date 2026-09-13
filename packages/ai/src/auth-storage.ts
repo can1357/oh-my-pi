@@ -224,13 +224,16 @@ export interface CredentialAccountIdentity {
  * Whether a tombstone still represents lost capacity the user has to act on:
  * an OAuth credential torn down automatically (refresh failure, upstream
  * invalidation) whose identity has not signed in again. Rows the user replaced,
- * deleted, or logged out deliberately are lifecycle noise. A tombstone is
- * recovered by a live credential of the same provider with the same email or
- * account — unless both carry an organization and they disagree, since one
- * email can hold separate subscriptions per organization — or with the same
- * organization under a non-contradicting email. A tombstone with no identity
- * at all counts as recovered as soon as the provider has any live OAuth
- * credential; it could never match anything and would otherwise nag forever.
+ * deleted, or logged out deliberately are lifecycle noise.
+ *
+ * Recovery follows the persistence matcher: an org-scoped tombstone is only
+ * recovered inside its organization; a tombstone naming a person (email, or
+ * an account id that is not merely the shared workspace id) needs that person
+ * back — the same email when both sides carry one, otherwise the same personal
+ * account id; a tombstone with no per-user identity is recovered by any live
+ * credential of its organization, or of its provider when it has no
+ * organization either, since nothing could ever match it and it would
+ * otherwise nag forever.
  */
 export function isActionableCredentialDisable(
 	summary: DisabledCredentialSummary,
@@ -239,26 +242,38 @@ export function isActionableCredentialDisable(
 	if (summary.type !== "oauth") return false;
 	if (!isAutomaticDisableCause(summary.cause)) return false;
 	const summaryEmail = summary.email?.toLowerCase();
-	const summaryAccountId = summary.accountId?.toLowerCase();
 	const summaryOrgId = summary.orgId?.toLowerCase();
-	if (!summaryEmail && !summaryAccountId && !summaryOrgId) {
+	const summaryPersonId = personalAccountId(summary.accountId?.toLowerCase(), summaryOrgId);
+	if (!summaryEmail && !summaryPersonId && !summaryOrgId) {
 		return !activeAccounts.some(account => account.provider === summary.provider && account.type !== "api_key");
 	}
 	return !activeAccounts.some(account => {
 		if (account.provider !== summary.provider) return false;
 		const accountEmail = account.email?.toLowerCase();
-		const accountAccountId = account.accountId?.toLowerCase();
 		const accountOrgId = account.orgId?.toLowerCase();
 		// An org-scoped tombstone names a subscription; only a credential in that
-		// organization recovers it — mirroring the persistence matcher, where an
-		// org-less login never replaces an org-scoped row (the reverse upgrade does).
+		// organization recovers it — an org-less login never replaces an
+		// org-scoped row (the reverse upgrade does).
 		if (summaryOrgId && accountOrgId !== summaryOrgId) return false;
-		// When both sides name a person, that decides: openai-codex stores the shared
-		// workspace id as accountId and orgId, so two members must not recover each other.
+		// When both sides name a person, that decides.
 		if (summaryEmail && accountEmail) return summaryEmail === accountEmail;
-		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
-		return Boolean(summaryOrgId && accountOrgId && summaryOrgId === accountOrgId);
+		const accountPersonId = personalAccountId(account.accountId?.toLowerCase(), accountOrgId);
+		if (summaryPersonId && accountPersonId) return summaryPersonId === accountPersonId;
+		// A tombstone naming a person is not recovered by a colleague whose email
+		// is unknown; only one with no per-user identity is recovered by the
+		// organization alone.
+		return !summaryEmail && !summaryPersonId && Boolean(summaryOrgId && summaryOrgId === accountOrgId);
 	});
+}
+
+/**
+ * An account id that merely repeats the organization id carries no per-user
+ * identity: openai-codex stores the ChatGPT workspace id as both `accountId`
+ * and `orgId` for every member, so it cannot prove that one member signed in
+ * again. The persistence matcher refuses the same base identifier.
+ */
+function personalAccountId(accountId: string | undefined, orgId: string | undefined): string | undefined {
+	return accountId && accountId !== orgId ? accountId : undefined;
 }
 
 /** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause; never longer than 80 characters. */

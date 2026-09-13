@@ -61,10 +61,20 @@ describe("credential sign-out notices", () => {
 		expect(notices[0]).toContain("anthropic signed-out@example.com was signed out");
 		expect(notices[0]).toContain("grant revoked");
 		expect(notices[0]).toContain("/login anthropic");
-		// A teardown a live notice already announced to the caller is not repeated.
+		// A teardown a live notice already announced to the caller is not
+		// repeated, and membership is read once the lookup has settled, so an
+		// announcement landing mid-lookup still counts.
 		const [tombstone] = await authStorage.listDisabledCredentials("anthropic");
 		if (!tombstone) throw new Error("tombstone missing");
-		expect(await collectDisabledCredentialNotices(authStorage, Date.now(), new Set([tombstone.id]))).toEqual([]);
+		const announced = new Set<number>();
+		const listing = authStorage.listActionableDisabledCredentials.bind(authStorage);
+		vi.spyOn(authStorage, "listActionableDisabledCredentials").mockImplementationOnce(async (...args) => {
+			const result = await listing(...args);
+			expect(result.map(summary => summary.id)).toEqual([tombstone.id]);
+			announced.add(tombstone.id);
+			return result;
+		});
+		expect(await collectDisabledCredentialNotices(authStorage, Date.now(), id => announced.has(id))).toEqual([]);
 
 		await authStorage.set("anthropic", [oauthCredential(Date.now() + 3_600_000)]);
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
@@ -295,16 +305,17 @@ describe("credential sign-out notices", () => {
 				disabledCause: "disabled via auth-broker",
 			}),
 		).toBe("Signed out of kagi API key: disabled via auth-broker. Sign in again with /login kagi.");
-		// A managed MCP OAuth row is not a /login provider: name the server, point at /mcp reauth.
+		// A managed MCP OAuth row is not a /login provider: name the server (with any
+		// credential-bearing query parameter redacted), point at /mcp reauth.
 		expect(
 			formatCredentialDisabledNotice({
-				provider: "mcp_oauth:profile:default:https://mcp.example.com/sse?project_ref=abc",
+				provider: "mcp_oauth:profile:default:https://mcp.example.com/sse?ref=abc&apiKey=sk-secret",
 				credentialId: 3,
 				credentialType: "oauth",
 				disabledCause: "oauth refresh failed: invalid_grant",
 			}),
 		).toBe(
-			"Signed out of MCP server https://mcp.example.com/sse?project_ref=abc: invalid_grant. Reauthorize it with /mcp reauth <name>.",
+			"Signed out of MCP server https://mcp.example.com/sse?ref=abc&apiKey=[redacted]: invalid_grant. Reauthorize it with /mcp reauth <name>.",
 		);
 	});
 });

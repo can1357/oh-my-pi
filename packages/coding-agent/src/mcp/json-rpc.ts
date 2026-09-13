@@ -13,7 +13,9 @@ const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
 
 /**
  * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
- * requests never write secrets to the persistent log file.
+ * requests never write secrets to the persistent log file, and a signed-out
+ * server's URL can be shown to the user. The placeholder stays readable
+ * rather than percent-encoded.
  */
 export function redactUrlForLog(url: string): string {
 	try {
@@ -21,7 +23,7 @@ export function redactUrlForLog(url: string): string {
 		for (const name of parsed.searchParams.keys()) {
 			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
 		}
-		return parsed.toString();
+		return parsed.toString().replaceAll("%5Bredacted%5D", "[redacted]");
 	} catch {
 		// Unparseable URL — drop the query string entirely rather than risk leaking it.
 		return url.split("?")[0];
