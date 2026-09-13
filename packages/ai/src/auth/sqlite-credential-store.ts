@@ -1576,7 +1576,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				this.#deleteStmt.run(cause, id);
 				return;
 			}
-			this.#db.transaction(() => {
+			// Read-then-write under WAL: take the write lock up front so a
+			// concurrent writer cannot leave this a deferred snapshot that fails
+			// to upgrade (SQLITE_BUSY_SNAPSHOT) and silently keeps the row active.
+			const remove = this.#db.transaction(() => {
 				const stmt = this.#db.prepare(
 					"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ?",
 				);
@@ -1594,7 +1597,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						excludeIds: new Set([id]),
 					});
 				}
-			})();
+			});
+			remove.immediate();
 		} catch {
 			// Ignore delete failures
 		}
@@ -1633,7 +1637,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				this.#deleteByProviderStmt.run(cause, provider);
 				return;
 			}
-			this.#db.transaction(() => {
+			const logout = this.#db.transaction(() => {
 				const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
 				this.#deleteByProviderStmt.run(cause, provider);
 				const removed = rows.flatMap(row => deserializeCredential(row) ?? []);
@@ -1642,7 +1646,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					keepAutomatic: false,
 					excludeIds: new Set(rows.map(row => row.id)),
 				});
-			})();
+			});
+			logout.immediate();
 		} catch {
 			// Ignore delete failures
 		}
