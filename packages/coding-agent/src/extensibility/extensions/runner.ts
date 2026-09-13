@@ -664,6 +664,8 @@ export class ExtensionRunner {
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
+		this.runtime.getConfiguredThinkingLevel =
+			actions.getConfiguredThinkingLevel ?? (() => actions.getThinkingLevel());
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;

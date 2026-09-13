@@ -1,5 +1,6 @@
 import type { Settings } from "../config/settings";
 import type { ExtensionFactory } from "../extensibility/extensions";
+import codeModelToolPrompt from "../prompts/system/code-model-tool.md" with { type: "text" };
 import { runCodeModelMenu } from "./model-menu";
 import { installCodeModelSession } from "./session-mode";
 
@@ -11,8 +12,7 @@ export function createCodeModelExtension(settings: Settings): ExtensionFactory {
 			label: "Code Phase Model",
 			loadMode: "essential",
 			approval: "exec",
-			description:
-				"Switch the SAME conversation to its configured coding model and effort (start), restore the original model and effort for review (finish), or inspect settings (status). The main model autonomously chooses direct implementation or a coding phase based on task difficulty, scope, risk, model suitability, and total switching, checking, and recovery costs. When choosing a coding phase, call start as a standalone tool call before implementation; the coding model edits and runs targeted checks directly in the same conversation, then calls finish alone for original-model review. Existing permissions and provider safety approvals continue to apply.",
+			description: codeModelToolPrompt.trim(),
 			parameters: pi.zod.object({
 				action: pi.zod.enum(["start", "finish", "status"]).default("status"),
 			}),

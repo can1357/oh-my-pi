@@ -5,10 +5,11 @@ import {
 	availableCodeModels,
 	resolveCodeModelLanguage,
 	resolveCodeModelSelection,
+	runCodeModelMenu,
 	saveCodeModelSelection,
 } from "../src/code-model/model-menu";
 import type { Settings } from "../src/config/settings";
-import type { ExtensionContext } from "../src/extensibility/extensions/types";
+import type { ExtensionCommandContext, ExtensionContext } from "../src/extensibility/extensions/types";
 import { AUTO_THINKING } from "../src/thinking";
 
 function model(provider: string, id: string, options: { text?: boolean; tools?: boolean } = {}): Model {
@@ -97,6 +98,66 @@ describe("code-model menu configuration", () => {
 		await expect(
 			saveCodeModelSelection(state.settings, { model: coding, effort: ThinkingLevel.High }, "provider/old:low"),
 		).rejects.toThrow("CODE_MODEL_CONFIG_CONFLICT");
+		expect(state.writes).toEqual([]);
+	});
+	it("persists the scripted Provider, Model, Effort and Save flow", async () => {
+		const coding = model("provider", "coder");
+		const state = settingsStub(undefined);
+		const choices: Array<string | undefined> = [
+			"Provider",
+			"provider",
+			"Model",
+			"provider/coder",
+			"Effort",
+			"high",
+			"Save and Apply",
+		];
+		const previousLanguage = process.env.CODE_MODEL_LANG;
+		process.env.CODE_MODEL_LANG = "en";
+		try {
+			const ctx = {
+				hasUI: true,
+				models: { list: () => [coding] },
+				ui: {
+					async select() {
+						const choice = choices.shift();
+						if (choice === "Save and Apply") expect(state.writes).toEqual([]);
+						return choice;
+					},
+					notify() {},
+				},
+			} as unknown as ExtensionCommandContext;
+			await runCodeModelMenu("", ctx, state.settings);
+		} finally {
+			if (previousLanguage === undefined) delete process.env.CODE_MODEL_LANG;
+			else process.env.CODE_MODEL_LANG = previousLanguage;
+		}
+		expect(choices).toEqual([]);
+		expect(state.writes).toEqual([{ scope: "global", value: "provider/coder:high" }]);
+	});
+
+	it("leaves storage unchanged when Escape closes a staged menu", async () => {
+		const coding = model("provider", "coder");
+		const state = settingsStub(undefined);
+		const choices: Array<string | undefined> = ["Provider", "provider", undefined];
+		const previousLanguage = process.env.CODE_MODEL_LANG;
+		process.env.CODE_MODEL_LANG = "en";
+		try {
+			const ctx = {
+				hasUI: true,
+				models: { list: () => [coding] },
+				ui: {
+					async select() {
+						return choices.shift();
+					},
+					notify() {},
+				},
+			} as unknown as ExtensionCommandContext;
+			await runCodeModelMenu("", ctx, state.settings);
+		} finally {
+			if (previousLanguage === undefined) delete process.env.CODE_MODEL_LANG;
+			else process.env.CODE_MODEL_LANG = previousLanguage;
+		}
 		expect(state.writes).toEqual([]);
 	});
 });

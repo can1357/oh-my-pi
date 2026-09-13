@@ -669,6 +669,55 @@ describe("AgentSession concurrent prompt guard", () => {
 	// threw AgentBusyError. Surfaced as `RpcCommandError: prompt: Agent is
 	// already processing` from omp-rpc clients (robomp triage reminder path).
 
+	it("awaits session_before_idle before publishing public agent_end", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const { promise: finalizerGate, resolve: releaseFinalizer } = Promise.withResolvers<void>();
+		const { promise: beforeIdleReached, resolve: signalBeforeIdle } = Promise.withResolvers<void>();
+		const emit = vi.fn((event: { type: string }) => {
+			if (event.type !== "session_before_idle") return Promise.resolve(undefined);
+			signalBeforeIdle();
+			return finalizerGate;
+		});
+		const extensionRunner = {
+			emit,
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn().mockReturnValue(false),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry: sharedModelRegistry,
+			extensionRunner,
+		});
+
+		let publicAgentEndReached = false;
+		session.subscribe(event => {
+			if (event.type === "agent_end") publicAgentEndReached = true;
+		});
+
+		const prompt = session.prompt("First message");
+		await beforeIdleReached;
+		expect(emit).toHaveBeenCalledWith({
+			type: "session_before_idle",
+			messages: expect.any(Array),
+			willContinue: false,
+		});
+		expect(publicAgentEndReached).toBe(false);
+		releaseFinalizer();
+		await prompt;
+		await session.waitForIdle();
+		expect(publicAgentEndReached).toBe(true);
+	});
+
 	it("does not let extension notifications block public agent_end", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });

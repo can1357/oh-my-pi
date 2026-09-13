@@ -3313,6 +3313,11 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
+				await this.#extensionRunner?.emit({
+					type: "session_before_idle",
+					messages: [...activeMessages],
+					willContinue: options?.willContinue === true,
+				});
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can

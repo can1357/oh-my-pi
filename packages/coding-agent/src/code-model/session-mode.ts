@@ -1,9 +1,9 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { Settings } from "../config/settings";
 import type { ExtensionAPI, ExtensionContext } from "../extensibility/extensions/types";
-import type { ThinkingLevelChangeEntry } from "../session/session-entries";
+import type { ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
 import { availableCodeModels, resolveCodeModelSelection } from "./model-menu";
 
 export const CODE_MODEL_STATE_TYPE = "code-model-phase-v1";
@@ -77,22 +77,22 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 	const sessionId = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId();
 	const branch = (ctx: ExtensionContext) => ctx.sessionManager.getBranch();
 
-	function configuredThinkingLevel(ctx: ExtensionContext): ConfiguredThinkingLevel | undefined {
-		const entry = branch(ctx).findLast(item => item.type === "thinking_level_change") as
-			| ThinkingLevelChangeEntry
-			| undefined;
-		const configured = entry?.configured ?? entry?.thinkingLevel;
-		return parseConfiguredThinkingLevel(configured) ?? pi.getThinkingLevel();
+	function configuredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		return pi.getConfiguredThinkingLevel();
 	}
 
 	function snapshot(ctx: ExtensionContext): ModelState {
 		const model = ctx.models.current();
 		if (!model) throw new Error("The current session requires a valid model.");
-		return { provider: model.provider, id: model.id, effort: configuredThinkingLevel(ctx) };
+		return { provider: model.provider, id: model.id, effort: configuredThinkingLevel() };
 	}
 
 	function currentMatches(ctx: ExtensionContext, target: ModelState): boolean {
-		return sameModel(ctx.models.current(), target) && configuredThinkingLevel(ctx) === target.effort;
+		return sameModel(ctx.models.current(), target) && configuredThinkingLevel() === target.effort;
+	}
+	function retryFallbackIsActive(ctx: ExtensionContext): boolean {
+		const latest = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
+		return latest?.resolvedModelIsFallback === true;
 	}
 
 	function save(next: PhaseState | undefined): void {
@@ -135,6 +135,7 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 		if (
 			!options.force &&
 			!interrupted &&
+			!retryFallbackIsActive(ctx) &&
 			!currentMatches(ctx, previous.coding) &&
 			!currentMatches(ctx, previous.original)
 		) {
@@ -273,7 +274,7 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 			return { continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT };
 		}
 	});
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("session_before_idle", async (event, ctx) => {
 		if (!state || busy || event.willContinue) return;
 		try {
 			const result = await guarded(() => restore(ctx));

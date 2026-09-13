@@ -125,6 +125,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	getThinkingLevel(): ThinkingLevel {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
 
 	setThinkingLevel(): void {
 		throw new ExtensionRuntimeNotInitializedError();
@@ -301,6 +304,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	getThinkingLevel(): ThinkingLevel | undefined {
 		return this.runtime.getThinkingLevel();
+	}
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		return this.runtime.getConfiguredThinkingLevel?.() ?? this.runtime.getThinkingLevel();
 	}
 
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void {

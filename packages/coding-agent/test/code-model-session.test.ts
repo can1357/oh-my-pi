@@ -35,13 +35,21 @@ function model(provider: string, id: string): Model {
 	} as unknown as Model;
 }
 
-function harness(options: { role?: string; setModelAllowed?: boolean } = {}) {
+function harness(
+	options: {
+		role?: string;
+		setModelAllowed?: boolean;
+		initialEffort?: ConfiguredThinkingLevel;
+	} = {},
+) {
 	const main = model("main", "reviewer");
 	const coding = model("code", "implementer");
+	const fallback = model("fallback", "backup");
 	const manual = model("manual", "choice");
-	const models = [main, coding, manual];
+	const models = [main, coding, fallback, manual];
 	let current = main;
-	let effort: ConfiguredThinkingLevel | undefined = ThinkingLevel.Low;
+	let effort: ConfiguredThinkingLevel | undefined = options.initialEffort ?? ThinkingLevel.Low;
+	let effectiveEffort: ThinkingLevel | undefined = effort === AUTO_THINKING ? ThinkingLevel.Medium : effort;
 	let sessionId = "session-1";
 	let setModelAllowed = options.setModelAllowed ?? true;
 	const branch: Array<Record<string, unknown>> = [];
@@ -76,11 +84,15 @@ function harness(options: { role?: string; setModelAllowed?: boolean } = {}) {
 			return true;
 		},
 		getThinkingLevel() {
-			return effort === "auto" ? undefined : effort;
+			return effectiveEffort;
+		},
+		getConfiguredThinkingLevel() {
+			return effort;
 		},
 		setThinkingLevel(next: ConfiguredThinkingLevel | undefined) {
 			effort = next;
-			branch.push({ type: "thinking_level_change", thinkingLevel: next, configured: next });
+			effectiveEffort = next === AUTO_THINKING ? ThinkingLevel.Medium : next;
+			branch.push({ type: "thinking_level_change", thinkingLevel: effectiveEffort, configured: next });
 		},
 	} as unknown as ExtensionAPI;
 	const ctx = {
@@ -103,20 +115,35 @@ function harness(options: { role?: string; setModelAllowed?: boolean } = {}) {
 		branch,
 		coding,
 		ctx,
+		fallback,
 		handlers,
 		main,
 		manual,
 		notifications,
 		pi,
-		tools,
 		settings,
+		tools,
 		current: () => current,
 		effort: () => effort,
+		effectiveEffort: () => effectiveEffort,
 		setCurrent(next: Model, nextEffort: ConfiguredThinkingLevel | undefined) {
 			current = next;
 			effort = nextEffort;
+			effectiveEffort = nextEffort === AUTO_THINKING ? ThinkingLevel.Medium : nextEffort;
 			branch.push({ type: "model_change", model: `${next.provider}/${next.id}` });
-			branch.push({ type: "thinking_level_change", thinkingLevel: nextEffort, configured: nextEffort });
+			branch.push({
+				type: "thinking_level_change",
+				thinkingLevel: effectiveEffort,
+				configured: nextEffort,
+			});
+		},
+		setFallback() {
+			current = fallback;
+			branch.push({
+				type: "model_change",
+				model: `${fallback.provider}/${fallback.id}`,
+				resolvedModelIsFallback: true,
+			});
 		},
 		setModelAllowed(value: boolean) {
 			setModelAllowed = value;
@@ -139,6 +166,17 @@ describe("code-model session phase", () => {
 		const finished = await session.run("finish", state.ctx);
 		expect(finished.changed).toBe(true);
 		expect(finished.message).toContain(CODE_MODEL_REVIEW_PROMPT);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
+
+	it("restores the main model after an automatic retry fallback", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings);
+		await session.run("start", state.ctx);
+		state.setFallback();
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
 		expect(state.current()).toBe(state.main);
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
@@ -180,6 +218,19 @@ describe("code-model session phase", () => {
 		);
 		expect(result).toEqual({ continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT });
 		expect(state.current()).toBe(state.main);
+	});
+
+	it("awaits terminal restoration immediately before idle", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings);
+		await session.run("start", state.ctx);
+		const finalizer = state.handlers.get("session_before_idle");
+		expect(finalizer).toBeDefined();
+		await finalizer?.({ type: "session_before_idle", messages: [], willContinue: true }, state.ctx);
+		expect(state.current()).toBe(state.coding);
+		await finalizer?.({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
 	it("restores a persisted coding phase when the session resumes", async () => {
@@ -231,6 +282,15 @@ describe("code-model session phase", () => {
 		const again = await session.run("start", state.ctx);
 		expect(again.changed).toBe(false);
 		expect(again.phase).toBe("coding");
+	});
+
+	it("restores auto from a fresh session without a thinking-level entry", async () => {
+		const state = harness({ initialEffort: AUTO_THINKING });
+		const session = installCodeModelSession(state.pi, state.settings);
+		await session.run("start", state.ctx);
+		await session.run("finish", state.ctx);
+		expect(state.effort()).toBe(AUTO_THINKING);
+		expect(state.effectiveEffort()).toBe(ThinkingLevel.Medium);
 	});
 
 	it("restores auto thinking as the configured selector", async () => {
