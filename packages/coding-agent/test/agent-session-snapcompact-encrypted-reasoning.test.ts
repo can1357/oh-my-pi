@@ -10,9 +10,10 @@
  * inflated the removable baseline above the frame projection, so an
  * inflating image-frame result was accepted and persisted (context grew).
  *
- * Contract defended: opaque reasoning bytes are excluded symmetrically from the
- * no-reduction comparison, so a result that grows reliable local content is
- * rejected regardless of how large the archived region's signature is.
+ * Contract defended: opaque reasoning bytes are excluded symmetrically from
+ * the no-reduction comparison, and automatic compaction compares against its
+ * prepared local history rather than a provider-anchored trigger. A result
+ * that grows reliable local content is rejected in both paths.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -83,24 +84,20 @@ describe("AgentSession snapcompact no-reduction guard: opaque reasoning", () => 
 				"compaction.autoContinue": false,
 				"compaction.asyncEnabled": false,
 				"compaction.keepRecentTokens": 1,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,
 		});
 	});
 
-	afterEach(async () => {
-		await session?.dispose();
-		authStorage?.close();
-		vi.restoreAllMocks();
-	});
-
-	it("rejects an inflating snapcompact result even when the archived region has a huge opaque signature", async () => {
+	function stubInflatingSnapcompact() {
 		const branchEntries = sessionManager.getBranch();
 		const firstKeptEntry = branchEntries[branchEntries.length - 1];
 		if (!firstKeptEntry?.id) throw new Error("Expected branch entry with id");
-
 		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 } as const;
-		vi.spyOn(snapcompact, "compact").mockResolvedValue({
+		return vi.spyOn(snapcompact, "compact").mockResolvedValue({
 			summary: "archived onto frames",
 			shortSummary: "archived",
 			firstKeptEntryId: firstKeptEntry.id,
@@ -110,12 +107,59 @@ describe("AgentSession snapcompact no-reduction guard: opaque reasoning", () => 
 				snapcompact: { frames: [frame, frame, frame], totalChars: 12, truncatedChars: 0 },
 			},
 		});
+	}
+
+	afterEach(async () => {
+		await session?.dispose();
+		authStorage?.close();
+		vi.restoreAllMocks();
+	});
+
+	it("rejects an inflating snapcompact result even when the archived region has a huge opaque signature", async () => {
+		const compactSpy = stubInflatingSnapcompact();
 
 		// 3 frames ≈ 15k tokens >> the handful of tokens of real archived text,
 		// so this result grows reliable local content and must be rejected.
 		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
 			"snapcompact would not reduce context locally.",
 		);
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
+	});
+
+	it("rejects the same inflation when provider usage triggers automatic compaction", async () => {
+		const compactSpy = stubInflatingSnapcompact();
+		const model = session.model;
+		if (!model) throw new Error("Expected active model");
+		const compactionEnd = Promise.withResolvers<string | undefined>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end" && event.action === "snapcompact") {
+				compactionEnd.resolve(event.errorMessage);
+			}
+		});
+		const thresholdAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "threshold trigger" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop" as const,
+			usage: {
+				input: 88_483,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 88_493,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: thresholdAssistant });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [thresholdAssistant] });
+
+		expect(await compactionEnd.promise).toContain("would not reduce context");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
 	});
 });
