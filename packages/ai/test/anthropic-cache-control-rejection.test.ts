@@ -360,6 +360,54 @@ describe("Anthropic cache_control rejection fallback", () => {
 		expect(countBreakpoints(capture.bodies[2])).toBe(0);
 	});
 
+	it("leaves the caller's session map empty however many opaque clients learn a rejection", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createBreakpointRejectingFetch(capture);
+
+		// Three wrappers in a row is what an SDK that rebuilds its client per
+		// request produces. An opaque client is isolated by the map its state
+		// lives in, so none of them may register anything in the caller's — a
+		// per-client entry there would outlive the client that owns it and only
+		// be released when the whole session closes.
+		for (const baseURL of ["https://opaque-a.example/v1", "https://opaque-b.example/v1"]) {
+			const message = await streamAnthropic(MODEL, CONTEXT, {
+				client: createOpaqueClient(baseURL, fetchImpl),
+				providerSessionState: states,
+			}).result();
+			expect(message.stopReason).toBe("stop");
+		}
+		const third = await streamAnthropic(MODEL, CONTEXT, {
+			client: createOpaqueClient("https://opaque-c.example/v1", fetchImpl),
+			providerSessionState: states,
+		}).result();
+
+		expect(third.stopReason).toBe("stop");
+		// Two requests per client: every one of them took the rejection and
+		// learned from it, so the empty map is isolation without retention
+		// rather than state that was never created.
+		expect(capture.bodies).toHaveLength(6);
+		expect(states.size).toBe(0);
+	});
+
+	it("leaves no caller-map entry for an opaque injected client that learns nothing", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createFetch(capture, ["ok", "ok"]);
+
+		const proxied = await streamAnthropic(MODEL, CONTEXT, {
+			client: createOpaqueClient("https://opaque-proxy.example/v1", fetchImpl),
+			providerSessionState: states,
+		}).result();
+
+		expect(proxied.stopReason).toBe("stop");
+		expect(states.size).toBe(0);
+		// The same map still takes an entry for an endpoint it can name, so the
+		// assertion above reads a live map rather than one nothing writes to.
+		await runTurn(fetchImpl, states);
+		expect(states.size).toBe(1);
+	});
+
 	it("keeps the rejection scoped to the rejecting endpoint and model", async () => {
 		const capture: Capture = { bodies: [], betaHeaders: [] };
 		const states = new Map<string, ProviderSessionState>();

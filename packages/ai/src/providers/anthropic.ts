@@ -559,56 +559,58 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
  * entitlement) and the endpoint (direct Anthropic vs a gateway / Foundry /
  * Bedrock proxy), so it MUST NOT bleed onto unrelated anthropic-messages
  * requests in the same session. NUL separates the two components so neither can
- * forge the boundary. `endpoint` is whatever
- * {@link anthropicSessionEndpointKey} resolved for the request — a URL, or an
- * opaque client's own identity.
+ * forge the boundary. `endpoint` is the URL the request reaches: the
+ * model-resolved one, or an injected client's own `baseURL` when it publishes
+ * one. A client that publishes none is isolated by its store instead — see
+ * {@link opaqueInjectedClientStates}.
  */
 function anthropicProviderSessionStateKey(endpoint: string, modelId: string): string {
 	return `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:${endpoint}\u0000${modelId}`;
 }
 
 /**
- * Stable per-instance identities for injected clients that publish no endpoint.
- * A `WeakMap` keeps the id sticky for as long as the caller holds the client —
- * so a rejection learned on one turn still seeds the next through the same
- * client — and lets the entry die with it.
+ * Private state maps for injected clients that publish no endpoint. Such a
+ * client may target any transport, so attributing its rejection to the
+ * model-resolved endpoint would let an unknown proxy suppress caching for the
+ * official endpoint, for a sibling client, or for a later non-injected
+ * request. Isolation therefore comes from the map the state lives in, not from
+ * a synthetic key minted into the caller's: the caller's map never grows an
+ * entry for an opaque client, and everything the client learned is reclaimed
+ * with it. A caller that holds one client across turns still has its learning
+ * seeded on the next turn; one that wraps every request in a fresh object gets
+ * none, which is all an unrecognizable client can be worth.
+ *
+ * Living outside the caller's map also means the session-wide passes over it —
+ * {@link clearAnthropicFastModeFallback}, the caller's own `close()` sweep —
+ * never reach these states. Nothing is stranded by that: this state's
+ * `close()` only drops in-memory learning (four flags, a dropped-block set,
+ * and an LRU-capped `controlStates` map), never a timer, socket or server-side
+ * handle, so the collector releases exactly what `close()` would have.
  */
-const opaqueInjectedClientIds = new WeakMap<AnthropicMessagesClientLike, string>();
-let opaqueInjectedClientSeq = 0;
+const opaqueInjectedClientStates = new WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>();
 
-/**
- * Endpoint component of the provider-session key. Three cases, deliberately
- * distinct:
- * - no injected client: the model-resolved URL the request actually reaches;
- * - injected client with a readable endpoint: that endpoint, so two clients
- *   pointed at the same proxy share what one of them learned;
- * - opaque injected client: that instance's own identity, never the
- *   model-resolved URL. The client may target any transport, so attributing its
- *   rejection to the model's endpoint would let an unknown proxy suppress
- *   caching for the official endpoint, for a sibling client, or for a later
- *   non-injected request. The `\u0001` prefix cannot occur in a URL, so an
- *   identity can never collide with a real endpoint.
- */
-function anthropicSessionEndpointKey(client: AnthropicMessagesClientLike | undefined, baseUrl: string): string {
-	if (client === undefined) return baseUrl;
-	const clientBaseUrl = injectedClientBaseUrl(client);
-	if (clientBaseUrl !== undefined) return clientBaseUrl;
-	const existing = opaqueInjectedClientIds.get(client);
+function opaqueInjectedClientStore(client: AnthropicMessagesClientLike): Map<string, ProviderSessionState> {
+	const existing = opaqueInjectedClientStates.get(client);
 	if (existing !== undefined) return existing;
-	opaqueInjectedClientSeq++;
-	const created = `\u0001opaque-client-${opaqueInjectedClientSeq}`;
-	opaqueInjectedClientIds.set(client, created);
+	const created = new Map<string, ProviderSessionState>();
+	opaqueInjectedClientStates.set(client, created);
 	return created;
 }
 
 function getAnthropicProviderSessionState(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
-	endpoint: string,
+	client: AnthropicMessagesClientLike | undefined,
+	baseUrl: string,
 	modelId: string,
 ): AnthropicProviderSessionState | undefined {
+	// No map means the caller opted out of session state entirely — an injected
+	// client does not opt back in on their behalf.
 	if (!providerSessionState) return undefined;
-	const key = anthropicProviderSessionStateKey(endpoint, modelId);
-	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
+	const clientBaseUrl = client !== undefined ? injectedClientBaseUrl(client) : undefined;
+	const store =
+		client !== undefined && clientBaseUrl === undefined ? opaqueInjectedClientStore(client) : providerSessionState;
+	const key = anthropicProviderSessionStateKey(clientBaseUrl ?? baseUrl, modelId);
+	const existing = store.get(key) as AnthropicProviderSessionState | undefined;
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
 		existing.controlStates ??= new Map();
@@ -616,7 +618,7 @@ function getAnthropicProviderSessionState(
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
-	providerSessionState.set(key, created);
+	store.set(key, created);
 	return created;
 }
 
@@ -1949,7 +1951,7 @@ export function supportsAnthropicCompactionOnClient(
  * Effective endpoint of a caller-owned client. SDK clients and our own
  * {@link AnthropicMessagesClient} publish it as `baseURL`; a client that
  * exposes none keeps its transport opaque — see
- * {@link anthropicSessionEndpointKey} for what that costs.
+ * {@link opaqueInjectedClientStates} for what that costs.
  */
 function injectedClientBaseUrl(client: AnthropicMessagesClientLike): string | undefined {
 	// The interface declares `baseURL?: string`, but a third-party client is
@@ -2397,7 +2399,8 @@ const streamAnthropicOnce = (
 				: supportsAnthropicCompaction(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
-				anthropicSessionEndpointKey(options?.client, baseUrl),
+				options?.client,
+				baseUrl,
 				model.id,
 			);
 			let disableStrictTools =
