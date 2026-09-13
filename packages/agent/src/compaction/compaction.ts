@@ -459,6 +459,17 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 	return cutPoints;
 }
 
+function isTurnStartEntry(entry: SessionEntry): boolean {
+	if (entry.type === "branch_summary" || entry.type === "custom_message") {
+		return true;
+	}
+	if (entry.type === "message") {
+		const role = entry.message.role as string;
+		return role === "user" || role === "bashExecution";
+	}
+	return false;
+}
+
 /**
  * Find the user message (or bashExecution) that starts the turn containing the given entry index.
  * Returns -1 if no turn start found before the index.
@@ -466,16 +477,8 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
  */
 export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, startIndex: number): number {
 	for (let i = entryIndex; i >= startIndex; i--) {
-		const entry = entries[i];
-		// branch_summary and custom_message are user-role messages, can start a turn
-		if (entry.type === "branch_summary" || entry.type === "custom_message") {
+		if (isTurnStartEntry(entries[i])) {
 			return i;
-		}
-		if (entry.type === "message") {
-			const role = entry.message.role as string;
-			if (role === "user" || role === "bashExecution") {
-				return i;
-			}
 		}
 	}
 	return -1;
@@ -491,10 +494,11 @@ export interface CutPointResult {
 }
 
 /**
- * Find the cut point in session entries that keeps approximately `keepRecentTokens`.
+ * Find the oldest complete recent-history suffix that fits `keepRecentTokens`.
  *
- * Algorithm: Walk backwards from newest, accumulating estimated message sizes.
- * Stop when we've accumulated >= keepRecentTokens. Cut at that point.
+ * Walk backwards by valid cut points, measuring whole assistant/tool groups.
+ * Keep the newest group even when it alone exceeds the budget; never retain
+ * an additional older group that would push an otherwise fitting suffix over.
  *
  * Can cut at user OR assistant messages (never tool results). When cutting at an
  * assistant message with tool calls, its tool results come after and will be kept.
@@ -519,55 +523,45 @@ export function findCutPoint(
 		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
 	}
 
-	// Walk backwards from newest, accumulating estimated message sizes
+	// Evaluate the budget only at valid boundaries, after counting all results
+	// belonging to an assistant. Checking individual messages can either retain
+	// the oversized older assistant or miss its boundary and retain all history.
 	let accumulatedTokens = 0;
-	let cutIndex = cutPoints[0]; // Default: keep from first message (not header)
+	let cutPointIndex = cutPoints.length - 1;
+	let cutIndex = cutPoints[cutPointIndex];
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const entry = entries[i];
-		if (entry.type !== "message") continue;
-
-		// Estimate this message's size
-		const messageTokens = tokenizer.countMessage(entry.message);
-		accumulatedTokens += messageTokens;
-
-		// Check if we've exceeded the budget
-		if (accumulatedTokens >= keepRecentTokens) {
-			// Find the closest valid cut point at or after this entry
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
-			}
-			break;
-		}
+		const message = getMessageFromEntry(entry);
+		if (message) accumulatedTokens += tokenizer.countMessage(message);
+		if (i !== cutPoints[cutPointIndex]) continue;
+		if (accumulatedTokens > keepRecentTokens) break;
+		cutIndex = i;
+		cutPointIndex--;
 	}
 
-	// Scan backwards from cutIndex to include any non-message entries (bash, settings, etc.)
+	const isTurnStart = isTurnStartEntry(entries[cutIndex]);
+	const turnStartIndex = isTurnStart ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
+
+	// Scan backwards from cutIndex to include any non-message entries (settings changes, etc.)
 	while (cutIndex > startIndex) {
 		const prevEntry = entries[cutIndex - 1];
-		// Stop at session header or compaction boundaries
-		if (prevEntry.type === "compaction") {
+		// Stop at session header, compaction, or reset boundaries
+		if (prevEntry.type === "compaction" || prevEntry.type === "reset_boundary") {
 			break;
 		}
-		if (prevEntry.type === "message") {
-			// Stop if we hit any message
+		if (getMessageFromEntry(prevEntry)) {
+			// Stop if we hit any entry that contributes a message
 			break;
 		}
-		// Include this non-message entry (bash, settings change, etc.)
+		// Include this non-message entry (settings change, label, etc.)
 		cutIndex--;
 	}
-
-	// Determine if this is a split turn
-	const cutEntry = entries[cutIndex];
-	const isUserMessage = cutEntry.type === "message" && cutEntry.message.role === "user";
-	const turnStartIndex = isUserMessage ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
 
 	return {
 		firstKeptEntryIndex: cutIndex,
 		turnStartIndex,
-		isSplitTurn: !isUserMessage && turnStartIndex !== -1,
+		isSplitTurn: !isTurnStart && turnStartIndex !== -1,
 	};
 }
 

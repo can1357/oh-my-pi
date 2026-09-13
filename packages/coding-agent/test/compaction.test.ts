@@ -1343,6 +1343,62 @@ describe("prepareCompaction retained history", () => {
 });
 
 describe("findCutPoint", () => {
+	it("summarizes the older reasoning step when retaining it would exceed the recent-history budget", () => {
+		// #11365: one user turn contains a 22k-token reasoning step followed by
+		// an 18k-token step. Keeping both defeats the 20k retention budget.
+		const older = createAssistantMessage("");
+		older.content = [
+			{ type: "thinking", thinking: "r".repeat(87_382) },
+			{ type: "toolCall", id: "older-call", name: "read", arguments: {} },
+		];
+		const latest = createAssistantMessage("", createMockUsage(44_806, 18_840));
+		latest.content = [
+			{ type: "thinking", thinking: "r".repeat(67_448) },
+			{ type: "text", text: "t".repeat(1_412) },
+			{ type: "toolCall", id: "latest-call", name: "read", arguments: {} },
+		];
+		const result = (id: string): AgentMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text: "small result" }],
+			isError: false,
+			timestamp: 0,
+		});
+		const entries = [
+			createMessageEntry(createUserMessage("Continue the review")),
+			createMessageEntry(older),
+			createMessageEntry(result("older-call")),
+			createMessageEntry(latest),
+			createMessageEntry(result("latest-call")),
+		];
+		const preparation = prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 20_000 });
+		expect(preparation?.firstKeptEntryId).toBe(entries[3].id);
+		expect(preparation?.turnPrefixMessages).toContain(older);
+		expect(preparation?.recentMessages).toEqual([latest, entries[4].message]);
+		expect(tokenizer.countMessages(preparation!.recentMessages)).toBeLessThanOrEqual(20_000);
+	});
+
+	it("retains the newest oversized tool group without dragging all earlier history into the tail", () => {
+		const latest = createAssistantMessage("");
+		latest.content = [{ type: "toolCall", id: "large-call", name: "read", arguments: {} }];
+		const entries = [
+			createMessageEntry(createUserMessage("Old request")),
+			createMessageEntry(createAssistantMessage("Old answer")),
+			createMessageEntry(latest),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "large-call",
+				toolName: "read",
+				content: [{ type: "text", text: "x".repeat(100_000) }],
+				isError: false,
+				timestamp: 0,
+			}),
+		];
+		const cut = findCutPoint(entries, tokenizer, 0, entries.length, 20_000);
+		expect(cut.firstKeptEntryIndex).toBe(2);
+	});
+
 	it("should find cut point based on actual token differences", () => {
 		// Create entries with cumulative token counts
 		const entries: SessionEntry[] = [];
