@@ -23,6 +23,7 @@ import {
 	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
+import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
 import {
@@ -58,6 +59,7 @@ import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "../tools/render-utils";
+import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "../utils/image-loading";
@@ -203,6 +205,23 @@ const legacyLsSchema = Type.Object({
 	limit: Type.Optional(Type.Number({ description: "Maximum entries" })),
 });
 
+const legacyEditSchema = Type.Object({
+	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+	edits: Type.Array(
+		Type.Object({
+			oldText: Type.String({
+				description:
+					"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+			}),
+			newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		}),
+		{
+			description:
+				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+		},
+	),
+});
+
 function markToolDefinition<TParams extends TSchema, TDetails>(
 	tool: ToolDefinition<TParams, TDetails>,
 ): ToolDefinition<TParams, TDetails> {
@@ -259,16 +278,75 @@ async function executeBuiltinTool(
 	return tool.execute(toolCallId, params, signal, onUpdate);
 }
 
+/**
+ * Upstream pi 0.84.2 advertised `edit` as `{path, edits: [{oldText, newText}]}`;
+ * omp's edit advertises its own active-mode schema (`{input}` for hashline,
+ * `{old_string, new_string}` for replace, …). Legacy extensions merge
+ * `parameters.properties` with their own fields (e.g. SoL-Pi's `then_run`) and
+ * forward the upstream-shaped input to the wrapped execute, so the shim must
+ * speak the upstream schema and translate it onto omp's replace-mode tool.
+ */
+function legacyEditTool(cwd: string): ToolDefinition {
+	const base = legacyBuiltinTool(cwd, "edit");
+	const replaceTool = new EditTool(legacyToolSession(cwd), "replace");
+	const definition: LegacyBuiltinToolDefinition = {
+		...base,
+		[LEGACY_BUILTIN_TOOL_MARKER]: true as const,
+		description:
+			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping block of the current file content.",
+		parameters: arkToWireSchema(legacyEditSchema as never) as never,
+		approval: (args: unknown) => {
+			const target = (args as { path?: unknown } | null)?.path;
+			return typeof target === "string" ? resolveFileWriteApprovalTier(target) : "write";
+		},
+		execute: async (toolCallId, params, signal, onUpdate) => {
+			const { path, edits } = params as { path?: unknown; edits?: Array<{ oldText?: unknown; newText?: unknown }> };
+			if (typeof path !== "string" || !Array.isArray(edits) || edits.length === 0) {
+				throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
+			}
+			let result: AgentToolResult | undefined;
+			for (const edit of edits) {
+				if (typeof edit?.oldText !== "string" || typeof edit?.newText !== "string") {
+					throw new Error("Edit tool input is invalid. Every edits[] entry needs oldText and newText strings.");
+				}
+				result = await replaceTool.execute(
+					toolCallId,
+					{ path, old_string: edit.oldText, new_string: edit.newText },
+					signal,
+					onUpdate,
+				);
+			}
+			return result!;
+		},
+	};
+	return definition;
+}
+
 function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName): ToolDefinition {
 	const tool = createRegistryTool(cwd, name);
 	const definition: LegacyBuiltinToolDefinition = {
 		name: tool.name,
 		label: tool.label,
 		description: tool.description,
-		parameters: tool.parameters,
+		// The built-in edit/write tools expose arktype schemas (callable, no
+		// `.properties`). Legacy extensions written against TypeBox merge
+		// `parameters.properties` with extra fields (e.g. SoL-Pi's `then_run`),
+		// so hand them the plain JSON-Schema document the wire already uses.
+		parameters: isArkSchema(tool.parameters)
+			? (arkToWireSchema(tool.parameters) as unknown as typeof tool.parameters)
+			: tool.parameters,
 		hidden: tool.hidden,
 		deferrable: tool.deferrable,
 		approval: tool.approval,
+		// omp renders built-ins through the per-name renderer registry, not through
+		// definition methods; legacy wrappers (SoL-Pi) invoke `renderCall!` on the
+		// definitions they wrap, so supply simple call/result renderers.
+		renderCall: (params, optionsArg, themeArg) => {
+			const theme = renderTheme(optionsArg, themeArg);
+			const detail = stringField(params, "path") ?? stringField(params, "input") ?? "";
+			return new Text(`${themedTitle(theme, name)} ${themedMuted(theme, detail)}`.trimEnd(), 0, 0);
+		},
+		renderResult: legacyRenderResult,
 		execute: (toolCallId, params, signal, onUpdate) =>
 			executeBuiltinTool(cwd, name, toolCallId, params, signal, onUpdate),
 		[LEGACY_BUILTIN_TOOL_MARKER]: true,
@@ -717,7 +795,7 @@ export function createEditToolDefinition(cwd: string, options?: EditToolOptions)
 				"defineTool() instead of passing operations to createEditTool()/createEditToolDefinition().",
 		);
 	}
-	return legacyBuiltinTool(cwd, "edit");
+	return legacyEditTool(cwd);
 }
 
 /** Create the legacy edit tool. */

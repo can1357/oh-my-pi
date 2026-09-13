@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed legacy pi shim `edit`/`write` tool definitions exposing omp's callable arktype schemas: extensions merging `parameters.properties` (e.g. NVlabs/SoL-Pi Action Fusion) now see real `{path, content}` / `{path, edits[]}` fields, `edit` accepts the upstream `{path, edits: [{oldText, newText}]}` shape, and the definitions carry renderers instead of crashing wrappers that invoke them.
+
 ## [18.1.21] - 2026-09-14
 
 ### Fixed
