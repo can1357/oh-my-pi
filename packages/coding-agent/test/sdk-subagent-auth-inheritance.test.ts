@@ -142,6 +142,12 @@ describe("task subagent OAuth pin inheritance", () => {
 			expect(inheritedCredentialSessionId).toBe(parentProviderSessionId);
 			expect(await resolveApiKeyOnce(await inheritedGetApiKey(otherProviderModel))).toBe("openai-key");
 
+			// Rotate the parent's provider session (as `/fresh` does) after the child
+			// captured its resolver. The frozen affinity keeps the child on account B
+			// instead of drifting to the unpinned first account under the new id.
+			parent.agent.sessionId = "rotated-parent-session";
+			expect(await resolveApiKeyOnce(await inheritedGetApiKey(model))).toBe("access-b");
+
 			const { session: child } = await createAgentSession({
 				cwd: tempDir.path(),
 				agentDir: tempDir.path(),

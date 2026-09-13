@@ -1813,7 +1813,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			getApiKey: effectiveGetApiKey,
-			getCredentialSessionId: () => options.credentialSessionId ?? agent.sessionId,
+			// Snapshot the resolver AND its account affinity together at spawn time.
+			// A detached child outlives the parent turn, so a later parent `/fresh`
+			// (which rotates agent.sessionId) must not leave the child resolving a
+			// bearer token under the new affinity while its metadata still attributes
+			// the old account. Freezing both here keeps credential and metadata
+			// resolution on the same account for the child and every nested child.
+			getInheritedCredential: () => {
+				const credentialSessionId = options.credentialSessionId ?? agent.sessionId;
+				return {
+					getApiKey:
+						options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, credentialSessionId)),
+					credentialSessionId,
+				};
+			},
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
