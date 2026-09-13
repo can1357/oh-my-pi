@@ -738,9 +738,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Await the broker disable, conditional on the bearer when a fingerprint is
-	 * supplied. A peer rotation (412) returns false without removing the local
-	 * entry, after re-fetching the snapshot so the caller's follow-up `reload()`
-	 * already sees the rotated row instead of the stale bearer it attempted.
+	 * supplied. A lost CAS — a peer rotated the bearer (412) or removed the row
+	 * before the broker handled this request (404) — returns false without
+	 * removing the local entry, after re-fetching the snapshot so the caller's
+	 * follow-up `reload()` already sees the peer's outcome instead of the
+	 * stale row it attempted.
 	 */
 	async deleteAuthCredentialRemote(
 		id: number,
@@ -753,8 +755,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			await this.#client.disableCredential(id, disabledCause, { expectedAccessFingerprint });
 		} catch (error) {
-			if (error instanceof AuthBrokerError && error.status === 412) {
-				logger.debug("auth-broker disable rejected: bearer rotated", { id });
+			if (error instanceof AuthBrokerError && (error.status === 412 || error.status === 404)) {
+				logger.debug("auth-broker disable lost to a peer", { id, status: error.status });
 				await this.#reconcileAfterRejectedDisable();
 				return false;
 			}

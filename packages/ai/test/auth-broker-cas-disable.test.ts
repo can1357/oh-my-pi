@@ -186,15 +186,28 @@ describe("credential disable bearer CAS", () => {
 			const remoteStore = await openRemote();
 			storage.upsertCredential("anthropic", rotated);
 			expect(await remoteStore.deleteAuthCredentialRemote(id, cause, staleFingerprint)).toBe(false);
-			expect(remoteStore.listAuthCredentials("anthropic")).toMatchObject([{ id }]);
-			await waitUntil(() => {
-				const current = remoteStore.listAuthCredentials("anthropic")[0]?.credential;
-				return current?.type === "oauth" && current.access === rotated.access;
-			});
+			// Reconciliation is awaited: the rotated bearer is visible as soon as the
+			// CAS-loss result is, with background sync parked.
+			expect(remoteStore.listAuthCredentials("anthropic")).toMatchObject([
+				{ id, credential: { access: rotated.access } },
+			]);
 			expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
 			expect(await remoteStore.deleteAuthCredentialRemote(id, cause, currentFingerprint)).toBe(true);
 			expect(remoteStore.listAuthCredentials("anthropic")).toEqual([]);
 			expect(store.listAuthCredentials("anthropic")).toEqual([]);
+		});
+
+		test("remote disable reports a lost CAS, not a failure, when a peer removed the row first", async () => {
+			const remoteStore = await openRemote();
+			// The peer's disable lands on the broker while this client's snapshot still holds the row.
+			expect(storage.disableCredentialById(id, "oauth refresh failed: invalid_grant")).toBe(true);
+			expect(remoteStore.listAuthCredentials("anthropic")).toMatchObject([{ id }]);
+			expect(await remoteStore.deleteAuthCredentialRemote(id, cause, staleFingerprint)).toBe(false);
+			// Reconciled: the row is gone locally too, and the tombstone keeps the peer's cause.
+			expect(remoteStore.listAuthCredentials("anthropic")).toEqual([]);
+			expect(await store.listDisabledCredentials("anthropic")).toMatchObject([
+				{ id, cause: "oauth refresh failed: invalid_grant" },
+			]);
 		});
 
 		test("sync remote disable rejects mismatched serialized credentials without disabling the row", async () => {
