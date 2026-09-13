@@ -3120,6 +3120,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
 	extendedContext: () => extendedContextSignal.fire(),
+	"stt.cudaLease": value => {
+		if (typeof value === "boolean") sttCudaLeaseSignal.fire(value);
+	},
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
 		// Always call so an unset/empty value clears a previously-applied override.
@@ -3141,6 +3144,17 @@ const appendOnlyModeSignal = new SettingSignal<[value: string]>("provider.append
  * can register independently without overwriting each other.
  */
 export const onAppendOnlyModeChanged = (cb: (value: string) => void) => appendOnlyModeSignal.on(cb);
+
+/** Fires when `stt.cudaLease` changes at runtime. */
+const sttCudaLeaseSignal = new SettingSignal<[value: boolean]>("stt.cudaLease");
+
+/**
+ * Subscribe to `stt.cudaLease` changes so the STT worker subprocess (which
+ * only samples the setting at spawn time via an env var) can be recreated
+ * with the new value. Returns an unsubscribe function.
+ */
+export const onSttCudaLeaseChanged: (cb: (value: boolean) => void) => () => void =
+	sttCudaLeaseSignal.on.bind(sttCudaLeaseSignal);
 
 /** Fires when any model role changes at runtime. */
 const modelRolesSignal = new SettingSignal("modelRoles");

@@ -187,6 +187,9 @@
 ### Fixed
 
 - Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
+### Added
+
+- Added opt-in `stt.cudaLease` coordination so Linux OMP sessions and named profiles can safely transfer CUDA STT ownership without interrupting active transcription ([#11059](https://github.com/can1357/oh-my-pi/pull/11059) by [@Roden69](https://github.com/Roden69)).
 
 ## [18.1.12] - 2026-09-06
 
@@ -199,6 +202,7 @@
 ### Changed
 
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
+
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 - Transcript usage row now shows the prompt-to-yield time as a bare delta, keeping the clock icon for time to first token only.
 
