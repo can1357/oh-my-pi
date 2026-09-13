@@ -71,10 +71,17 @@ export type WorkerInitPayload =
 			 */
 			recover?: boolean;
 			/**
-			 * Whether the worker may raise this tab before capturing a screenshot. Unset
-			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
+			 * Whether the worker may activate this tab before capturing a screenshot.
+			 * Unset behaves as `true`; the supervisor clears it when it adopted a tab
+			 * the user was already looking at.
 			 */
 			activateForScreenshot?: boolean;
+			/**
+			 * The tab was created for this worker (`new_tab`) rather than adopted, so
+			 * closing the worker closes the tab. Adopted tabs belong to the user and
+			 * outlive the worker.
+			 */
+			ownsPage?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -134,7 +141,7 @@ export type WorkerOutbound =
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
-	| { type: "closed" };
+	| { type: "closed"; ok?: boolean; error?: string };
 
 export interface Transport {
 	send(msg: WorkerOutbound | WorkerInbound, transferList?: Transferable[]): void;

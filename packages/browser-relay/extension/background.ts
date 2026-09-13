@@ -10,6 +10,7 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { activateRelayTab, createRelayTab } from "../../coding-agent/src/tools/browser/relay/tab-ops";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -173,7 +174,7 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 				msg.params,
 			);
 		case "createTab": {
-			const tab = await chrome.tabs.create({ url: msg.url });
+			const tab = await createRelayTab(chrome.tabs, msg.url);
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };
@@ -181,12 +182,9 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 		case "removeTab":
 			await chrome.tabs.remove(msg.tabId);
 			return {};
-		case "activateTab": {
-			const tab = await chrome.tabs.get(msg.tabId);
-			await chrome.windows.update(tab.windowId, { focused: true });
-			await chrome.tabs.update(msg.tabId, { active: true });
+		case "activateTab":
+			await activateRelayTab(chrome.tabs, msg.tabId);
 			return {};
-		}
 		case "group":
 			return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
 		case "ungroup":

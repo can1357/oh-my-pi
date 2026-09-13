@@ -68,6 +68,9 @@ const browserSchema = type({
 	"name?": type("string").describe("tab id (default 'main')"),
 	"url?": type("string").describe("url to open"),
 	"app?": appSchema,
+	"new_tab?": type("boolean").describe(
+		"open a new background tab instead of adopting the user's current one (relay only)",
+	),
 	"viewport?": {
 		width: "number",
 		height: "number",
@@ -286,6 +289,7 @@ async function openBrowser(
 							}
 						: undefined,
 					target: params.app?.target,
+					newTab: params.new_tab,
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
 					dialogs: params.dialogs,

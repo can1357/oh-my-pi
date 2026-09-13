@@ -26,8 +26,9 @@ Application modes:
 - `app.path`: spawn the specified browser or Electron executable.
 - `app.cdp_url`: attach to an existing CDP endpoint.
 - `app.relay: true`: drive the user's Chrome through the omp relay. `app.target` selects a tab by URL/title substring; without it, the visible tab is adopted. Opening with `url` navigates that adopted tab.
-- Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. Name a target or create a dedicated tab; NEVER navigate the visible tab without authorization.
-- Closing releases the managed tab. It never closes relay/CDP-attached pages. Spawned browsers remain open unless `kill: true`.
+- `new_tab: true` (relay only) opens a background tab of its own instead of adopting one the user is working in, and closes it on release. Prefer it for anything that navigates; it ignores `app.target`. A screenshot still has to make that tab the active one in its window (no window is ever raised).
+- Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. Use `new_tab: true` or name a target; NEVER navigate the visible tab without authorization.
+- Closing releases the managed tab, and closes it when `new_tab: true` created it. It never closes a relay/CDP tab it merely adopted. Spawned browsers remain open unless `kill: true`.
 - Idle tabs auto-freeze at turn settle (animated pages stop burning CPU/GPU) and unfreeze on next use; tabs idle past the idle-close timeout are closed. Pass `persist: true` on `open` to keep a tab live across turns (e.g. multi-step login); `browser.close` still releases explicitly.
 </instruction>
 

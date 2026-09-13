@@ -40,6 +40,10 @@ class FakeCdpSocket implements RelaySocket {
 		const result = msg && "result" in msg && msg.result && typeof msg.result === "object" ? msg.result : undefined;
 		return result && "sessionId" in result && typeof result.sessionId === "string" ? result.sessionId : undefined;
 	}
+	/** The bridge's reply (or error) for a downstream command id. */
+	replyFor(commandId: number): Record<string, unknown> | undefined {
+		return this.messages.find(m => m.id === commandId);
+	}
 	/** Session ids the bridge announced through `Target.attachedToTarget`. */
 	attachedSessions(): string[] {
 		const out: string[] = [];
@@ -860,5 +864,96 @@ describe("RelayBridge attachment release", () => {
 				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual([]);
+	});
+});
+
+describe("RelayBridge activation policy", () => {
+	it("activates the tab for Page.bringToFront instead of forwarding it to Chrome", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 2);
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: commandId, sessionId, method: "Page.bringToFront" }));
+		await flush();
+
+		// Chrome implements `Page.bringToFront` by activating the tab's window,
+		// which steals OS focus from whatever the user is typing in. Forwarding
+		// it verbatim is the defect: the relay must activate the tab itself.
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.bringToFront")).toEqual([]);
+		const activations = ext.rpcs("activateTab");
+		expect(activations).toHaveLength(1);
+		expect(activations[0]!.tabId).toBe(2);
+
+		ack(bridge, ext, "activateTab");
+		await flush();
+		expect(cdp.replyFor(commandId)).toEqual({ id: commandId, sessionId, result: {} });
+	});
+
+	it("reports an activation failure to the caller rather than a silent success", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: commandId, sessionId, method: "Page.bringToFront" }));
+		await flush();
+		nack(bridge, ext, "activateTab", "tab is gone");
+		await flush();
+
+		const reply = cdp.replyFor(commandId);
+		expect(reply && "error" in reply).toBe(true);
+		expect(JSON.stringify(reply)).toContain("tab is gone");
+	});
+
+	it("reports a rejected removeTab RPC to the caller rather than a silent success", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, method: "Target.closeTarget", params: { targetId: "PAGE1" } }),
+		);
+		await flush();
+		nack(bridge, ext, "removeTab", "tab cannot be closed");
+		await flush();
+
+		const reply = cdp.replyFor(commandId);
+		expect(reply && "error" in reply).toBe(true);
+		expect(JSON.stringify(reply)).toContain("tab cannot be closed");
+	});
+
+	it("activates the tab for Target.activateTarget through activateTab RPC without raising window", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, method: "Target.activateTarget", params: { targetId: "PAGE2" } }),
+		);
+		await flush();
+
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Target.activateTarget")).toEqual([]);
+		const activations = ext.rpcs("activateTab");
+		expect(activations).toHaveLength(1);
+		expect(activations[0]!.tabId).toBe(2);
+
+		ack(bridge, ext, "activateTab");
+		await flush();
+		expect(cdp.replyFor(commandId)).toEqual({ id: commandId, result: {} });
 	});
 });
