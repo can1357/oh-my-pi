@@ -5,7 +5,18 @@ import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { type CheckpointMeta, WorkspaceCheckpointService } from "../../src/checkpoints";
-import * as git from "../../src/utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import * as git from "../../src/checkpoints/git-plumbing";
+
+const gitHelpers = {
+	head: { sha: async (cwd: string): Promise<string | null> => (await vcs.git(cwd)?.headSha()) ?? null },
+	branch: { current: async (cwd: string): Promise<string | null> => (await vcs.git(cwd)?.currentBranch()) ?? null },
+	ref: {
+		resolve: async (cwd: string, refName: string): Promise<string | null> =>
+			(await vcs.git(cwd)?.resolveRef(refName)) ?? null,
+		list: async (cwd: string, prefix: string) => await git.refList(cwd, prefix),
+	},
+};
 
 /**
  * Integration test for multi-session isolation.
@@ -70,7 +81,7 @@ async function makeMultiSessionRepo(): Promise<MultiSessionRepo> {
 	const metaB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-iso-metaB-"));
 	tracked.push(metaA, metaB);
 
-	const initialSha = (await git.head.sha(repoDir)) ?? "";
+	const initialSha = (await gitHelpers.head.sha(repoDir)) ?? "";
 	if (!initialSha) throw new Error("could not resolve initial HEAD sha");
 
 	return {
@@ -142,15 +153,15 @@ describe("multi-session checkpoint + rollback isolation across linked worktrees"
 		expect(await readFileText(A, "foo.txt")).toBe(A1);
 		expect(await readFileText(B, "foo.txt")).toBe(B2);
 		// HEAD and branch are unchanged in both checkouts.
-		expect(await git.head.sha(A)).toBe(initialSha);
-		expect(await git.branch.current(A)).toBe("main");
-		expect(await git.head.sha(B)).toBe(initialSha);
-		expect(await git.branch.current(B)).toBe("feature");
+		expect(await gitHelpers.head.sha(A)).toBe(initialSha);
+		expect(await gitHelpers.branch.current(A)).toBe("main");
+		expect(await gitHelpers.head.sha(B)).toBe(initialSha);
+		expect(await gitHelpers.branch.current(B)).toBe("feature");
 		// Both session ref namespaces coexist in the SHARED ref store.
-		expect(await git.ref.resolve(A, a1.refName)).not.toBeNull();
-		expect(await git.ref.resolve(B, b1.refName)).not.toBeNull();
-		const sessARefs = (await git.ref.list(A, "refs/omp/checkpoints/sess-A")).map(entry => entry.refName);
-		const sessBRefs = (await git.ref.list(A, "refs/omp/checkpoints/sess-B")).map(entry => entry.refName);
+		expect(await gitHelpers.ref.resolve(A, a1.refName)).not.toBeNull();
+		expect(await gitHelpers.ref.resolve(B, b1.refName)).not.toBeNull();
+		const sessARefs = (await gitHelpers.ref.list(A, "refs/omp/checkpoints/sess-A")).map(entry => entry.refName);
+		const sessBRefs = (await gitHelpers.ref.list(A, "refs/omp/checkpoints/sess-B")).map(entry => entry.refName);
 		expect(sessARefs).toContain(a1.refName);
 		expect(sessBRefs).toContain(b1.refName);
 		// The pre-rollback safety capture also landed under sess-A.
@@ -173,15 +184,18 @@ describe("multi-session checkpoint + rollback isolation across linked worktrees"
 		expect(await readFileText(A, "foo.txt")).toBe(A2);
 		expect(await readFileText(B, "foo.txt")).toBe(B1);
 		// The worktree list is intact: both checkouts are still registered.
-		const wtList = await git.worktree.list(A);
+		const wtList = (await vcs.requireGit(A).worktrees()).map(entry => ({
+			path: entry.path as string,
+			branch: (entry.branch ?? null) as string | null,
+		}));
 		const wtPaths = new Set(wtList.map(entry => path.resolve(entry.path)));
 		expect(wtPaths.has(path.resolve(A))).toBe(true);
 		expect(wtPaths.has(path.resolve(B))).toBe(true);
 		// Neither rollback touched a branch ref.
-		expect(await git.head.sha(A)).toBe(initialSha);
-		expect(await git.branch.current(A)).toBe("main");
-		expect(await git.head.sha(B)).toBe(initialSha);
-		expect(await git.branch.current(B)).toBe("feature");
+		expect(await gitHelpers.head.sha(A)).toBe(initialSha);
+		expect(await gitHelpers.branch.current(A)).toBe("main");
+		expect(await gitHelpers.head.sha(B)).toBe(initialSha);
+		expect(await gitHelpers.branch.current(B)).toBe("feature");
 
 		// ── Step 8: wrong-workspace rejection through the REAL path. A checkpoint
 		//    captured by sess-A must be refused when sess-B (cwd B) tries to apply

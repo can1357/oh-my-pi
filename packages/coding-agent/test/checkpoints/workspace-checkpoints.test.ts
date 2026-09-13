@@ -12,7 +12,8 @@ import {
 	onWorkspaceRolledBack,
 	WorkspaceCheckpointService,
 } from "../../src/checkpoints";
-import * as git from "../../src/utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import * as git from "../../src/checkpoints/git-plumbing";
 
 /**
  * Every case runs against a real `git init` repository in a temp dir with the
@@ -54,6 +55,42 @@ async function readFileText(...segments: string[]): Promise<string | null> {
 	}
 }
 
+/** Assertion oracles backed by the sanctioned natives repo object. */
+const gitOracle = {
+	repoRoot: (cwd: string): string | null => vcs.git(cwd)?.info().repoRoot ?? null,
+	headSha: async (cwd: string): Promise<string | null> => (await vcs.git(cwd)?.headSha()) ?? null,
+	branch: async (cwd: string): Promise<string | null> => (await vcs.git(cwd)?.currentBranch()) ?? null,
+	status: async (cwd: string): Promise<string> =>
+		(await vcs.git(cwd)?.statusPorcelain({ nulTerminated: true, untracked: "all" })) ?? "",
+	treePaths: async (cwd: string, treeSha: string): Promise<string[]> => await vcs.requireGit(cwd).lsTree(treeSha, []),
+	refResolve: async (cwd: string, refName: string): Promise<string | null> =>
+		(await vcs.git(cwd)?.resolveRef(refName)) ?? null,
+};
+
+// The tests below were written against the pre-port git helper API; these
+// aliases keep the call sites readable while routing every observation
+// through the sanctioned natives repo object.
+const gitHelpers = {
+	repo: { root: gitOracle.repoRoot },
+	head: { sha: gitOracle.headSha },
+	branch: { current: gitOracle.branch },
+	status: gitOracle.status,
+	ls: { tree: gitOracle.treePaths },
+	ref: {
+		resolve: gitOracle.refResolve,
+		update: (cwd: string, refName: string, sha: string) => vcs.requireGit(cwd).checkpointRefUpdate(refName, sha),
+		delete: async (cwd: string, refName: string): Promise<void> => {
+			await vcs.requireGit(cwd).checkpointRefDelete(refName);
+		},
+	},
+	worktree: {
+		list: async (cwd: string): Promise<Array<{ path: string; branch: string | null }>> => {
+			const repo = vcs.requireGit(cwd);
+			return (await repo.worktrees()).map(entry => ({ path: entry.path, branch: entry.branch ?? null }));
+		},
+	},
+};
+
 afterEach(async () => {
 	for (const dir of workspaces.splice(0)) await removeWithRetries(dir).catch(() => {});
 });
@@ -67,29 +104,29 @@ describe("WorkspaceCheckpointService capture", () => {
 		expect(meta.refName).toBe(`refs/omp/checkpoints/s1/${meta.id}`);
 		expect(meta.label).toBe("clean");
 		expect(meta.reason).toBe("manual");
-		const resolvedRoot = await git.repo.root(repoDir);
+		const resolvedRoot = await gitHelpers.repo.root(repoDir);
 		expect(resolvedRoot).not.toBeNull();
 		expect(meta.identity.worktreePath).toBe(resolvedRoot ?? "");
-		expect(meta.headShaAtCapture).toBe(await git.head.sha(repoDir));
+		expect(meta.headShaAtCapture).toBe(await gitHelpers.head.sha(repoDir));
 		expect(meta.bytesCaptured).toBeGreaterThan(0);
 		expect(meta.skippedFiles).toEqual([]);
 		expect(meta.metaPath).toBe(path.join(metadataRoot, "s1", `${meta.id}.json`));
-		expect(await git.ref.resolve(repoDir, meta.refName)).not.toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, meta.refName)).not.toBeNull();
 		expect(await Bun.file(meta.metaPath).exists()).toBe(true);
 	});
 
 	test("HEAD, branch, and index are untouched by a capture", async () => {
 		const { repoDir, service } = await makeWorkspace();
-		const headBefore = await git.head.sha(repoDir);
+		const headBefore = await gitHelpers.head.sha(repoDir);
 		await Bun.write(path.join(repoDir, "staged.txt"), "staged\n");
 		await $`git add staged.txt`.cwd(repoDir).quiet();
-		const statusBefore = await git.status(repoDir);
+		const statusBefore = await gitHelpers.status(repoDir);
 
 		await service.create({ sessionId: "s1", cwd: repoDir, reason: "auto" });
 
-		expect(await git.head.sha(repoDir)).toBe(headBefore);
-		expect(await git.branch.current(repoDir)).toBe("main");
-		expect(await git.status(repoDir)).toBe(statusBefore);
+		expect(await gitHelpers.head.sha(repoDir)).toBe(headBefore);
+		expect(await gitHelpers.branch.current(repoDir)).toBe("main");
+		expect(await gitHelpers.status(repoDir)).toBe(statusBefore);
 	});
 
 	test("captures dirty tracked content, untracked files, and binary payloads; skips ignored files", async () => {
@@ -102,7 +139,7 @@ describe("WorkspaceCheckpointService capture", () => {
 		await Bun.write(path.join(repoDir, "nested", "deep", "file.txt"), "nested\n");
 
 		const meta = await service.create({ sessionId: "s1", cwd: repoDir, reason: "manual" });
-		const paths = await git.ls.tree(repoDir, meta.treeSha);
+		const paths = await gitHelpers.ls.tree(repoDir, meta.treeSha);
 
 		expect(paths).toContain("tracked.txt");
 		expect(paths).toContain("untracked.txt");
@@ -128,7 +165,7 @@ describe("WorkspaceCheckpointService capture", () => {
 		await Bun.write(path.join(repoDir, "small.txt"), "tiny\n");
 
 		const meta = await service.create({ sessionId: "s1", cwd: repoDir, reason: "manual" });
-		const paths = await git.ls.tree(repoDir, meta.treeSha);
+		const paths = await gitHelpers.ls.tree(repoDir, meta.treeSha);
 
 		expect(meta.skippedFiles).toEqual(["huge.bin"]);
 		expect(paths).not.toContain("huge.bin");
@@ -204,7 +241,11 @@ describe("WorkspaceCheckpointService queries", () => {
 			metaPath: path.join(metadataRoot, "s1", "abcdef0123.json"),
 		};
 		await Bun.write(foreign.metaPath, JSON.stringify(foreign));
-		await git.ref.update(repoDir, foreign.refName, (await git.ref.resolve(repoDir, meta.refName)) ?? "HEAD");
+		await gitHelpers.ref.update(
+			repoDir,
+			foreign.refName,
+			(await gitHelpers.ref.resolve(repoDir, meta.refName)) ?? "HEAD",
+		);
 
 		expect((await service.list("s1", repoDir)).map(entry => entry.id)).toEqual([meta.id]);
 	});
@@ -216,11 +257,11 @@ describe("WorkspaceCheckpointService queries", () => {
 		// Ref without metadata (crash before the metadata rename).
 		await fs.rm(meta.metaPath);
 		expect(await service.list("s1", repoDir)).toEqual([]);
-		expect(await git.ref.resolve(repoDir, meta.refName)).not.toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, meta.refName)).not.toBeNull();
 
 		// Metadata without ref (crash/GC after the ref was lost).
 		await Bun.write(meta.metaPath, JSON.stringify(meta));
-		await git.ref.delete(repoDir, meta.refName);
+		await gitHelpers.ref.delete(repoDir, meta.refName);
 		expect(await service.list("s1", repoDir)).toEqual([]);
 
 		// Unparsable metadata is filtered too.
@@ -233,7 +274,7 @@ describe("WorkspaceCheckpointService rollback", () => {
 	test("restores a modified tracked file and leaves HEAD alone", async () => {
 		const { repoDir, service } = await makeWorkspace();
 		const meta = await service.create({ sessionId: "s1", cwd: repoDir, reason: "manual" });
-		const headBefore = await git.head.sha(repoDir);
+		const headBefore = await gitHelpers.head.sha(repoDir);
 		await Bun.write(path.join(repoDir, "tracked.txt"), "broken\n");
 
 		const result = await service.rollback(meta, { sessionId: "s1", cwd: repoDir });
@@ -242,11 +283,11 @@ describe("WorkspaceCheckpointService rollback", () => {
 		expect(result.restoredFiles).toBe(1);
 		// Worktree and index both hold the restored content, so a rolled-back file
 		// that matches HEAD leaves no phantom staged diff behind.
-		expect(await git.status(repoDir)).toBe("");
+		expect(await gitHelpers.status(repoDir)).toBe("");
 		expect(result.removedFiles).toBe(0);
 		expect(await readFileText(repoDir, "tracked.txt")).toBe("original\n");
-		expect(await git.head.sha(repoDir)).toBe(headBefore);
-		expect(await git.branch.current(repoDir)).toBe("main");
+		expect(await gitHelpers.head.sha(repoDir)).toBe(headBefore);
+		expect(await gitHelpers.branch.current(repoDir)).toBe("main");
 	});
 
 	test("restores a deleted file and removes a file created after the checkpoint", async () => {
@@ -337,7 +378,7 @@ describe("WorkspaceCheckpointService rollback", () => {
 		const { repoDir, service } = await makeWorkspace();
 		const meta = await service.create({ sessionId: "s1", cwd: repoDir, reason: "manual" });
 		await Bun.write(path.join(repoDir, "tracked.txt"), "dirty\n");
-		await git.ref.delete(repoDir, meta.refName);
+		await gitHelpers.ref.delete(repoDir, meta.refName);
 
 		const result = await service.rollback(meta, { sessionId: "s1", cwd: repoDir });
 
@@ -432,21 +473,21 @@ describe("WorkspaceCheckpointService retention", () => {
 		expect(remaining.map(meta => meta.id)).toContain(kept.id);
 		expect(remaining.map(meta => meta.id)).toEqual([created[3].id, created[2].id, kept.id]);
 		// Pruned checkpoints release their refs too, so the objects can be GC'd.
-		expect(await git.ref.resolve(repoDir, created[0].refName)).toBeNull();
-		expect(await git.ref.resolve(repoDir, created[1].refName)).toBeNull();
-		expect(await git.ref.resolve(repoDir, kept.refName)).not.toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, created[0].refName)).toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, created[1].refName)).toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, kept.refName)).not.toBeNull();
 	});
 
 	test("prune drops refs that no valid metadata points at", async () => {
 		const { repoDir, service } = await makeWorkspace();
 		const meta = await service.create({ sessionId: "s1", cwd: repoDir, reason: "manual" });
 		const orphanRef = "refs/omp/checkpoints/s1/dead0dead0";
-		await git.ref.update(repoDir, orphanRef, (await git.ref.resolve(repoDir, meta.refName)) ?? "HEAD");
+		await gitHelpers.ref.update(repoDir, orphanRef, (await gitHelpers.ref.resolve(repoDir, meta.refName)) ?? "HEAD");
 
 		await service.pruneSession("s1", repoDir);
 
-		expect(await git.ref.resolve(repoDir, orphanRef)).toBeNull();
-		expect(await git.ref.resolve(repoDir, meta.refName)).not.toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, orphanRef)).toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, meta.refName)).not.toBeNull();
 	});
 
 	test("deleteForSession removes every ref and metadata file for that session only", async () => {
@@ -458,10 +499,10 @@ describe("WorkspaceCheckpointService retention", () => {
 		const removed = await service.deleteForSession("s1", repoDir);
 
 		expect(removed).toBe(1);
-		expect(await git.ref.resolve(repoDir, mine.refName)).toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, mine.refName)).toBeNull();
 		expect(await Bun.file(mine.metaPath).exists()).toBe(false);
 		expect(await service.countForSession("s1", repoDir)).toBe(0);
-		expect(await git.ref.resolve(repoDir, other.refName)).not.toBeNull();
+		expect(await gitHelpers.ref.resolve(repoDir, other.refName)).not.toBeNull();
 		expect((await service.list("s2", repoDir)).map(entry => entry.id)).toEqual([other.id]);
 	});
 });

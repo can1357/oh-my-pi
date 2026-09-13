@@ -1764,6 +1764,163 @@ fn write_loose_ref(git_dir: &Path, name: &str, id: gix::hash::ObjectId) -> Resul
 	fs::write(path, format!("{}\n", id.to_hex()))?;
 	Ok(())
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Workspace-checkpoint plumbing
+// ════════════════════════════════════════════════════════════════════════════
+
+impl GitRepo {
+	/// Snapshot the full working tree into a tree object without touching the
+	/// repository's real index, HEAD, or working tree.
+	///
+	/// Staging happens in a throwaway index (`index_path`), so a concurrent
+	/// `git add`/commit by the user cannot collide with the capture and the
+	/// capture cannot clobber the user's staged state. `excludes` are exact
+	/// worktree-relative paths (literal, no globbing) that are never
+	/// snapshotted — used to skip oversize files.
+	pub fn capture_worktree_tree(&self, excludes: &[String], index_path: &Path) -> Result<String> {
+		let repo = self.gix()?;
+		let root = self.root().to_path_buf();
+
+		// Start the throwaway index from HEAD (or empty for an unborn HEAD) so
+		// tracked paths keep their cached metadata; staging then refreshes every
+		// selected path and adds untracked ones.
+		let head_tree = head_tree(&repo)?;
+		let mut index = match head_tree {
+			Some(tree) => repo
+				.index_from_tree(&tree)
+				.map_err(|e| Error::backend("checkpoint capture read-tree", e))?,
+			None => gix::index::File::at(index_path, repo.object_hash(), false, Default::default())
+				.map_err(|e| Error::backend("checkpoint capture init index", e))?,
+		};
+
+		// Candidate paths exactly like `git add -A`: tracked paths plus
+		// untracked paths surviving the standard ignore stack. Excludes are
+		// literal exact matches, filtered before staging.
+		let excluded: BTreeSet<String> = excludes.iter().map(|p| normalize_stage_path(p)).collect();
+		let mut selected: BTreeSet<String> = BTreeSet::new();
+		for path in self.ls_files(false, false)?.into_iter().chain(self.ls_files(true, true)?) {
+			if !excluded.contains(&path) {
+				selected.insert(path);
+			}
+		}
+
+		if precompose_unicode_enabled(&repo) {
+			selected = remap_composed_index_paths(&root, &index, selected);
+		}
+		for path in &selected {
+			if fs::symlink_metadata(root.join(path)).is_ok() {
+				stage_one(&repo, &root, &mut index, path)?;
+			}
+		}
+		// The snapshot must match the VISIBLE workspace: any index entry whose
+		// worktree file is gone (deleted and/or `git rm --cached`) drops out,
+		// even when `ls_files` no longer reported it as selected.
+		index.remove_entries(|_, p, _| {
+			let path = p.to_str_lossy().into_owned();
+			fs::symlink_metadata(root.join(&path)).is_err()
+		});
+		index.sort_entries();
+		Ok(write_index_tree(&repo, &index)?.to_hex().to_string())
+	}
+
+	/// Wrap a tree in a commit object WITHOUT moving HEAD or any branch, and
+	/// without running commit hooks. Author identity is passed explicitly so
+	/// the call succeeds in repositories with no configured identity.
+	pub fn commit_tree_object(
+		&self,
+		tree_sha: &str,
+		parents: &[String],
+		author_name: &str,
+		author_email: &str,
+		author_date: Option<&str>,
+		message: &str,
+	) -> Result<String> {
+		let repo = self.gix()?;
+		let tree = resolve_tree(&repo, tree_sha)?;
+		let parent_ids = parents
+			.iter()
+			.map(|sha| {
+				repo
+					.rev_parse_single(sha.as_str())
+					.map(|id| id.detach())
+					.map_err(|_| Error::ObjectNotFound { spec: sha.to_owned() })
+			})
+			.collect::<Result<Vec<_>>>()?;
+
+		let time = match author_date {
+			Some(date) => gix::date::parse(date, None).map_err(|err| Error::backend("git commit-tree", err))?,
+			None => gix::date::Time::now_local_or_utc(),
+		};
+		let signature = gix::actor::Signature {
+			name:  author_name.to_owned().into(),
+			email: author_email.to_owned().into(),
+			time,
+		};
+		let mut author_buf = gix::date::parse::TimeBuf::default();
+		let mut committer_buf = gix::date::parse::TimeBuf::default();
+		let commit = repo
+			.new_commit_as(
+				signature.to_ref(&mut committer_buf),
+				signature.to_ref(&mut author_buf),
+				message,
+				tree,
+				parent_ids,
+			)
+			.map_err(|err| Error::backend("git commit-tree", err))?;
+		Ok(commit.id.to_string())
+	}
+}
+
+impl GitRepo {
+	/// Point `name` at `sha` (`git update-ref`). Creates the ref when absent;
+	/// never touches HEAD, reflogs, or hooks.
+	pub fn checkpoint_ref_update(&self, name: &str, sha: &str) -> Result<()> {
+		let repo = self.gix()?;
+		let id = repo
+			.rev_parse_single(sha)
+			.map(|id| id.detach())
+			.map_err(|_| Error::ObjectNotFound { spec: sha.to_owned() })?;
+		let expected = if self.ref_exists(name)? {
+			gix::refs::transaction::PreviousValue::MustExist
+		} else {
+			gix::refs::transaction::PreviousValue::MustNotExist
+		};
+		update_reference(&repo, "git update-ref", name, id, expected, "checkpoint", false)
+	}
+
+	/// Delete `name` (`git update-ref -d`). Missing refs are not an error so
+	/// cleanup paths stay idempotent.
+	pub fn checkpoint_ref_delete(&self, name: &str) -> Result<()> {
+		if !self.ref_exists(name)? {
+			return Ok(());
+		}
+		if self.is_reftable() {
+			let out = super::cli::run_sync(
+				self.root(),
+				&["update-ref".to_owned(), "-d".to_owned(), name.to_owned()],
+				super::cli::COMMAND_TIMEOUT,
+			)?;
+			return out.into_checked(&["update-ref".to_owned(), "-d".to_owned(), name.to_owned()]).map(|_| ());
+		}
+		let repo = self.gix()?;
+		repo
+			.edit_reference(gix::refs::transaction::RefEdit {
+				change: gix::refs::transaction::Change::Delete {
+					log:  gix::refs::transaction::RefLog::AndReference,
+					expected: gix::refs::transaction::PreviousValue::Any,
+				},
+				name: name
+					.try_into()
+					.map_err(|err| Error::backend("git update-ref -d", err))?,
+				deref: true,
+			})
+			.map(|_| ())
+			.map_err(|err| Error::backend("git update-ref -d", err))
+	}
+}
+
+
 #[cfg(test)]
 mod tests {
 	use std::process::Command;

@@ -8,8 +8,9 @@
  * repeated checkpoints of an unchanged tree cost nothing on disk.
  */
 import * as fs from "node:fs/promises";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as path from "node:path";
-import * as git from "../utils/git";
+import * as git from "./git-plumbing";
 import { CheckpointError, type WorkspaceIdentity } from "./types";
 
 /** Author/committer identity stamped on snapshot commits (never the user's). */
@@ -33,15 +34,25 @@ export interface CaptureOutcome {
  * @throws CheckpointError when `cwd` is not inside a git repository.
  */
 export async function resolveWorkspaceIdentity(cwd: string, signal?: AbortSignal): Promise<WorkspaceIdentity> {
-	const repository = await git.repo.resolve(cwd);
+	const repository = vcs.git(cwd);
 	if (!repository) throw new CheckpointError(`not a git repository: ${cwd}`);
-	const worktreePath = repository.repoRoot;
+	const worktreePath = repository.info().repoRoot;
 	const [primaryRoot, headSha, branch] = await Promise.all([
-		git.repo.primaryRoot(worktreePath, signal),
-		git.head.sha(worktreePath, signal),
-		git.branch.current(worktreePath, signal),
+		Promise.resolve(repository.primaryRoot()),
+		repoHeadSha(worktreePath, signal),
+		repoBranchCurrent(worktreePath, signal),
 	]);
 	return { repoRoot: primaryRoot ?? worktreePath, worktreePath, headSha, branch };
+}
+
+/** HEAD commit SHA for the worktree, or `null` for an unborn HEAD. */
+async function repoHeadSha(worktreePath: string, signal?: AbortSignal): Promise<string | null> {
+	return (await vcs.requireGit(worktreePath).headSha(signal)) ?? null;
+}
+
+/** Current branch name, or `null` when HEAD is detached. */
+async function repoBranchCurrent(worktreePath: string, signal?: AbortSignal): Promise<string | null> {
+	return (await vcs.requireGit(worktreePath).currentBranch(signal)) ?? null;
 }
 
 /**
@@ -74,7 +85,7 @@ export async function findOversizeFiles(
 	maxFileBytes: number,
 	signal?: AbortSignal,
 ): Promise<string[]> {
-	const raw = await git.status(worktreeRoot, { z: true, untrackedFiles: "all", signal });
+	const raw = await vcs.requireGit(worktreeRoot).statusPorcelain({ nulTerminated: true, untracked: "all" }, signal);
 	const candidates = parseStatusPaths(raw);
 	const oversize: string[] = [];
 	await Promise.all(
@@ -111,7 +122,7 @@ export async function captureWorkspaceTree(
 		excludePaths: skippedFiles,
 		signal: options.signal,
 	});
-	const blobs = await git.ls.treeBlobs(worktreeRoot, treeSha, options.signal);
+	const blobs = await git.treeBlobs(worktreeRoot, treeSha, { signal: options.signal });
 	let bytesCaptured = 0;
 	for (const blob of blobs) bytesCaptured += blob.size;
 	return { treeSha, bytesCaptured, skippedFiles };
@@ -141,7 +152,7 @@ export async function writeCheckpointRef(
 				parents: options.parentSha ? [options.parentSha] : [],
 				signal: options.signal,
 			});
-			await git.ref.update(worktreeRoot, options.refName, commitSha, options.signal);
+			await git.refUpdate(worktreeRoot, options.refName, commitSha, options.signal);
 			return commitSha;
 		},
 		options.signal,

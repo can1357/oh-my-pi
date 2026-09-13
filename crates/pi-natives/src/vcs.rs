@@ -1252,6 +1252,81 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Snapshot the working tree into a throwaway-index tree object.
+	#[napi]
+	pub fn capture_worktree_tree(
+		&self,
+		excludes: Vec<String>,
+		index_path: String,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		blocking("vcs.captureWorktreeTree", self.inner.clone(), signal, move |r| {
+			r.capture_worktree_tree(&excludes, Path::new(&index_path))
+		})
+	}
+
+	/// Wrap a tree in a commit object without moving HEAD or any branch.
+	#[napi]
+	pub fn commit_tree_object(
+		&self,
+		tree_sha: String,
+		parents: Vec<String>,
+		author_name: String,
+		author_email: String,
+		author_date: Option<String>,
+		message: String,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		blocking("vcs.commitTree", self.inner.clone(), signal, move |r| {
+			r.commit_tree_object(
+				&tree_sha,
+				&parents,
+				&author_name,
+				&author_email,
+				author_date.as_deref(),
+				&message,
+			)
+		})
+	}
+
+	/// `diff-tree --name-status -z` between two trees (raw records).
+	#[napi]
+	pub fn tree_status(&self, base: String, head: String, signal: Option<Unknown>) -> Promise<String> {
+		blocking("vcs.treeStatus", self.inner.clone(), signal, move |r| {
+			r.tree_status(&base, &head)
+		})
+	}
+
+	/// Refs under `prefix` as `name\0sha` lines (`for-each-ref` equivalent).
+	#[napi]
+	pub fn checkpoint_ref_list(&self, prefix: String, signal: Option<Unknown>) -> Promise<Vec<String>> {
+		blocking("vcs.checkpointRefList", self.inner.clone(), signal, move |r| {
+			r.checkpoint_ref_list(&prefix)
+		})
+	}
+
+	/// Point a ref at a sha (`update-ref` equivalent; never moves HEAD).
+	#[napi]
+	pub fn checkpoint_ref_update(&self, name: String, sha: String, signal: Option<Unknown>) -> Promise<()> {
+		blocking("vcs.checkpointRefUpdate", self.inner.clone(), signal, move |r| {
+			r.checkpoint_ref_update(&name, &sha)
+		})
+	}
+
+	/// Delete a ref; missing refs are not an error.
+	#[napi]
+	pub fn checkpoint_ref_delete(&self, name: String, signal: Option<Unknown>) -> Promise<()> {
+		blocking("vcs.checkpointRefDelete", self.inner.clone(), signal, move |r| {
+			r.checkpoint_ref_delete(&name)
+		})
+	}
+
+	/// `ls-tree -r -l -z` raw records for checkpoint disk accounting.
+	#[napi]
+	pub fn tree_blobs_raw(&self, treeish: String, signal: Option<Unknown>) -> Promise<String> {
+		blocking("vcs.treeBlobs", self.inner.clone(), signal, move |r| r.tree_blobs_raw(&treeish))
+	}
+
 	/// Apply patch.
 	#[napi]
 	pub fn apply_patch(

@@ -378,7 +378,6 @@ describe("sessions manager — narrow widths and timers", () => {
 		const intervals: number[] = [];
 		const original = global.setInterval;
 		// Record the requested delay and return a no-op timer so no real clock is bound.
-		// @ts-expect-error test shim
 		global.setInterval = (_fn: () => void, delay?: number): NodeJS.Timeout => {
 			intervals.push(delay ?? 0);
 			return { unref() {} } as unknown as NodeJS.Timeout;

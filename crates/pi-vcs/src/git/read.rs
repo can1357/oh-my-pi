@@ -1222,6 +1222,71 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 	ShowResult { bytes, truncated }
 }
 
+
+impl GitRepo {
+	/// `diff-tree --name-status -z` between two trees: raw NUL-delimited
+	/// status/path records for the TS-side parser (rename/copy records are
+	/// suppressed with `--no-renames`).
+	pub fn tree_status(&self, base: &str, head: &str) -> Result<String> {
+		cli_text_owned(
+			self.root(),
+			&[
+				"diff-tree".to_owned(),
+				"--name-status".to_owned(),
+				"-z".to_owned(),
+				"--no-renames".to_owned(),
+				"-r".to_owned(),
+				base.to_owned(),
+				head.to_owned(),
+			],
+			super::cli::COMMAND_TIMEOUT,
+		)
+	}
+
+	/// Refs under `prefix` (`git for-each-ref`) as `name\0sha` lines.
+	pub fn checkpoint_ref_list(&self, prefix: &str) -> Result<Vec<String>> {
+		if self.is_reftable() {
+			return Ok(cli_lines(self.root(), &["for-each-ref", "--format=%(refname)%00%(objectname)", prefix])?);
+		}
+		let repo = self.gix()?;
+		let refs = repo
+			.references()
+			.map_err(|err| Error::backend("git for-each-ref", err))?;
+		let iter = refs.prefixed(prefix.trim_end_matches('/').as_bytes()).map_err(|err| Error::backend("git for-each-ref", err))?;
+		let mut out = Vec::new();
+		for reference in iter {
+			let reference = reference.map_err(|err| Error::backend("git for-each-ref", err))?;
+			let name = reference
+				.name()
+				.as_bstr()
+				.to_str()
+				.map_err(|err| Error::backend("git for-each-ref", err))?
+				.to_owned();
+			let Some(id) = reference.try_id() else { continue };
+			out.push(format!("{name}\0{}", id.to_hex()));
+		}
+		Ok(out)
+	}
+
+	/// Every blob in a tree with its recorded object size (`ls-tree -r -l -z`),
+	/// the single-subprocess answer to "how many bytes does this snapshot
+	/// represent" for checkpoint disk accounting. Records keep the raw
+	/// `"<mode> <type> <oid> <size>\t<path>"` shape for the TS-side parser.
+	pub fn tree_blobs_raw(&self, treeish: &str) -> Result<String> {
+		cli_text_owned(
+			self.root(),
+			&[
+				"ls-tree".to_owned(),
+				"-r".to_owned(),
+				"-l".to_owned(),
+				"-z".to_owned(),
+				treeish.to_owned(),
+			],
+			super::cli::COMMAND_TIMEOUT,
+		)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{fs, process::Command};

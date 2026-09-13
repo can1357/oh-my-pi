@@ -27,5 +27,17 @@
  * @property {EmbeddedAddonArchive=} archive
  */
 
-/** @type {EmbeddedAddon|null} */
-export const embeddedAddon = null;
+import archivePath from "../native/embedded-addons.linux-x64.tar.gz" with { type: "file" };
+
+export const embeddedAddon = {
+	platformTag: "linux-x64",
+	version: "18.1.19",
+	archive: {
+		format: "tar.gz",
+		filename: "embedded-addons.linux-x64.tar.gz",
+		filePath: archivePath,
+	},
+	files: [
+		{ variant: "modern", filename: "pi_natives.linux-x64-modern.node", size: 210397864 },
+	],
+};

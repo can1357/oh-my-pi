@@ -21,8 +21,9 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { toError } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
+import * as git from "./git-plumbing";
 import { captureWorkspaceTree } from "./capture";
 import { clearJournal, writeJournal } from "./store";
 import type { CheckpointMeta, RollbackJournal, RollbackPhase, RollbackResult, WorkspaceIdentity } from "./types";
@@ -69,7 +70,9 @@ async function applyTarget(
 			for (const relative of plan.remove) {
 				await fs.rm(path.join(worktreeRoot, relative), { force: true, recursive: true });
 			}
-			if (plan.remove.length > 0) await git.stage.removeCached(worktreeRoot, plan.remove, signal);
+			if (plan.remove.length > 0) {
+				await vcs.requireGit(worktreeRoot).unstage([...plan.remove], signal);
+			}
 			if (plan.restore.length > 0) {
 				await git.restorePathsFromTree(worktreeRoot, targetTreeSha, plan.restore, { signal });
 			}
@@ -90,9 +93,9 @@ export async function verifyRollback(
 	skippedFiles: readonly string[],
 	signal?: AbortSignal,
 ): Promise<{ ok: boolean; residual: string[] }> {
-	const verifyTree = await git.captureWorktreeTree(worktreeRoot, { excludePaths: skippedFiles, signal });
+	const verifyTree = await git.captureWorktreeTree(worktreeRoot, { excludePaths: [...skippedFiles], signal });
 	if (verifyTree === targetTreeSha) return { ok: true, residual: [] };
-	const entries = await git.diff.treeStatus(worktreeRoot, verifyTree, targetTreeSha, { signal });
+	const entries = await git.treeStatus(worktreeRoot, verifyTree, targetTreeSha, { signal });
 	const skipped = new Set(skippedFiles);
 	const residual = entries.filter(entry => !skipped.has(entry.path)).map(entry => entry.path);
 	return { ok: residual.length === 0, residual };
@@ -158,14 +161,19 @@ export async function runRollbackTransaction(request: RollbackRequest): Promise<
 		safetyCheckpoint = await request.captureSafety();
 		await advance("safety", { safetyCheckpointId: safetyCheckpoint.id });
 
-		// APPLY: minimal change set, worktree + index, HEAD untouched.
-		const entries = await git.diff.treeStatus(worktreeRoot, base.treeSha, target.treeSha, { signal });
-		plan = buildApplyPlan(entries, base.skippedFiles);
+		// APPLY: minimal change set, worktree + index, HEAD untouched. Files the
+		// TARGET checkpoint never captured (oversize-guard skips) must never be
+		// touched either: the base→target diff can report such a path as deleted
+		// when the base captured it, but applying that deletion would destroy
+		// content the target has no record of.
+		const entries = await git.treeStatus(worktreeRoot, base.treeSha, target.treeSha, { signal });
+		const skipped = [...new Set([...base.skippedFiles, ...target.skippedFiles])];
+		plan = buildApplyPlan(entries, skipped);
 		await applyTarget(worktreeRoot, target.treeSha, plan, signal);
 		await advance("apply");
 
 		// VERIFY
-		const verified = await verifyRollback(worktreeRoot, target.treeSha, base.skippedFiles, signal);
+		const verified = await verifyRollback(worktreeRoot, target.treeSha, skipped, signal);
 		if (!verified.ok) {
 			const detail = `workspace does not match checkpoint ${target.id} after apply (${verified.residual.length} path(s) differ: ${verified.residual.slice(0, 5).join(", ")})`;
 			await advance("failed", { error: detail });

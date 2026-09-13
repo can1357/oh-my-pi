@@ -569,7 +569,7 @@ export async function getProviderDashboardStats(range?: string | null): Promise<
 	return {
 		providers,
 		hourly: getProviderHourlyBurn(cutoff ?? undefined),
-		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs, bucketOrigin),
+		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
 		usageSeries,
 		windowInsights,
 	};
@@ -581,6 +581,9 @@ export async function getProviderDashboardStats(range?: string | null): Promise<
  */
 export async function getSessionSummaries(range?: string | null): Promise<SessionSummary[]> {
 	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
+	// Session managers present these as per-session lifetime totals, so an
+	// unspecified range must mean ALL-TIME, not the dashboard's 24-hour
+	// default cutoff (which would zero out older sessions).
+	const { cutoff } = getTimeRangeConfig(range ?? "all");
 	return getSessionSummariesFromDb(cutoff ?? undefined);
 }

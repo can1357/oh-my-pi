@@ -26,7 +26,7 @@ import { getSessionSummaries as fetchSessionSummaries, type SessionSummary } fro
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { settings, type Settings } from "../config/settings";
 import { AgentRegistry } from "../registry/agent-registry";
-import { branch as gitBranch, status as gitStatusCmd } from "../utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import { FileSessionStorage } from "./session-storage";
 
@@ -111,8 +111,6 @@ interface CachedRowMetrics {
 	tokensOut?: number;
 	branch?: string | null;
 	dirty?: { staged: number; unstaged: number; untracked: number };
-	agentCounts?: { running: number; idle: number; parked: number };
-	liveState?: "streaming" | "idle" | "paused";
 }
 
 /** In-module cache of best-effort metrics, keyed by `path@mtime`. */
@@ -133,13 +131,13 @@ function getMtime(filePath: string): number {
 
 async function defaultGitResolver(cwd: string): Promise<GitRepoStatus | undefined> {
 	try {
-		const [summary, branchName] = await Promise.all([gitStatusCmd.summary(cwd), gitBranch.current(cwd)]);
+		const repo = vcs.git(cwd);
+		if (!repo) return undefined;
+		const [summary, branchName] = await Promise.all([repo.statusSummary(), repo.currentBranch()]);
 		if (!summary && branchName === null) return undefined;
 		return {
-			branch: branchName,
-			dirty: summary
-				? { staged: summary.staged, unstaged: summary.unstaged, untracked: summary.untracked }
-				: { staged: 0, unstaged: 0, untracked: 0 },
+			branch: branchName ?? null,
+			dirty: { staged: summary.staged, unstaged: summary.unstaged, untracked: summary.untracked },
 		};
 	} catch {
 		return undefined;
@@ -230,8 +228,6 @@ export async function enumerateSessions(opts: EnumerateOptions): Promise<Session
 			tokensOut = cached.tokensOut;
 			branch = cached.branch;
 			dirty = cached.dirty;
-			agentCounts = cached.agentCounts;
-			liveState = cached.liveState;
 		} else {
 			const summary = summaryMap.get(info.path);
 			if (summary) {
@@ -246,20 +242,15 @@ export async function enumerateSessions(opts: EnumerateOptions): Promise<Session
 					dirty = git.dirty;
 				}
 			}
-			if (isCurrent) {
-				liveState = deriveLiveState(registry, gate);
-				agentCounts = countAgents(registry);
-			}
-			metricsCache.set(cacheKey, {
-				mtime,
-				cost,
-				tokensIn,
-				tokensOut,
-				branch,
-				dirty,
-				agentCounts,
-				liveState,
-			});
+			metricsCache.set(cacheKey, { mtime, cost, tokensIn, tokensOut, branch, dirty });
+		}
+		// Live registry/gate truth is computed on EVERY enumeration: pause state
+		// and agent counts can change while the transcript file's mtime stays
+		// put, so caching them by path@mtime would serve stale state to
+		// registry-triggered refreshes, pause toggles, and explicit resyncs.
+		if (isCurrent) {
+			liveState = deriveLiveState(registry, gate);
+			agentCounts = countAgents(registry);
 		}
 
 		const row: SessionRow = {
@@ -278,9 +269,11 @@ export async function enumerateSessions(opts: EnumerateOptions): Promise<Session
 		if (isCurrent) {
 			if (deps.session?.model !== undefined) row.model = deps.session.model;
 			const settingsWithProfile = settings as Settings & { getActiveProfile?: () => string };
-			const profile = deps.profile ?? (typeof settingsWithProfile.getActiveProfile === "function"
-				? settingsWithProfile.getActiveProfile()
-				: undefined);
+			const profile =
+				deps.profile ??
+				(typeof settingsWithProfile.getActiveProfile === "function"
+					? settingsWithProfile.getActiveProfile()
+					: undefined);
 			if (profile) row.profile = profile;
 		}
 

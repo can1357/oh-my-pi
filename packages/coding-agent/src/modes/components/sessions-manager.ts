@@ -14,7 +14,7 @@
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import { matchesKey, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatAge, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatAge, formatNumber, logger, toError } from "@oh-my-pi/pi-utils";
 import { type CheckpointMeta, WorkspaceCheckpointService } from "../../checkpoints";
 import { theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -377,6 +377,21 @@ export class SessionsManagerComponent implements Component {
 
 	async #deleteSession(path: string): Promise<void> {
 		try {
+			// Drop the session's checkpoint refs and metadata too: after the JSONL
+			// is gone no row can reach them, and the retained git objects would
+			// otherwise leak until a manual ref sweep.
+			const row = this.#rows.find(candidate => candidate.info.path === path);
+			const sessionId = row?.info.id;
+			if (sessionId) {
+				try {
+					await this.#checkpointService.deleteForSession(sessionId, row?.info.cwd ?? this.#cwd);
+				} catch (error) {
+					logger.warn("Failed to clean checkpoints during session delete", {
+						sessionId,
+						error: toError(error).message,
+					});
+				}
+			}
 			await this.#ctx.sessionManager.dropSession(path);
 			this.#notice = undefined;
 		} catch (error) {

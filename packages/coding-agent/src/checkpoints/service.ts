@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
-import * as git from "../utils/git";
+import * as git from "./git-plumbing";
 import { captureWorkspaceTree, resolveWorkspaceIdentity, writeCheckpointRef } from "./capture";
 import { emitWorkspaceRolledBack } from "./notify";
 import { runRollbackTransaction } from "./rollback";
@@ -152,7 +152,7 @@ export class WorkspaceCheckpointService {
 			meta => meta.sessionId === sessionId && identityMatches(meta.identity, identity),
 		);
 		const resolved = await Promise.all(
-			metas.map(async meta => ((await git.ref.resolve(identity.worktreePath, meta.refName)) ? meta : undefined)),
+			metas.map(async meta => ((await git.refResolve(identity.worktreePath, meta.refName)) ? meta : undefined)),
 		);
 		return resolved
 			.filter((meta): meta is CheckpointMeta => meta !== undefined)
@@ -210,7 +210,7 @@ export class WorkspaceCheckpointService {
 				error: `checkpoint ${meta.id} was captured in ${meta.identity.worktreePath}, not ${identity.worktreePath}`,
 			};
 		}
-		if (!(await git.ref.resolve(identity.worktreePath, meta.refName))) {
+		if (!(await git.refResolve(identity.worktreePath, meta.refName))) {
 			return {
 				ok: false,
 				restoredFiles: 0,
@@ -262,7 +262,7 @@ export class WorkspaceCheckpointService {
 
 		const removedIds = new Set(removals.map(meta => meta.id));
 		const keptRefs = new Set(metas.filter(meta => !removedIds.has(meta.id)).map(meta => meta.refName));
-		const orphanRefs = (await git.ref.list(identity.worktreePath, refPrefixFor(sessionId)))
+		const orphanRefs = (await git.refList(identity.worktreePath, refPrefixFor(sessionId)))
 			.map(entry => entry.refName)
 			.filter(refName => !keptRefs.has(refName));
 
@@ -270,7 +270,7 @@ export class WorkspaceCheckpointService {
 			await git.withRepoLock(identity.worktreePath, async () => {
 				for (const refName of orphanRefs) {
 					try {
-						await git.ref.delete(identity.worktreePath, refName);
+						await git.refDelete(identity.worktreePath, refName);
 					} catch (error) {
 						logger.warn("Failed to delete checkpoint ref during prune", {
 							refName,
@@ -294,12 +294,12 @@ export class WorkspaceCheckpointService {
 		const removed = (await listMetaFileNames(root, sessionId)).length;
 		const identity = await this.#identityOrNull(cwd);
 		if (identity) {
-			const refs = await git.ref.list(identity.worktreePath, refPrefixFor(sessionId));
+			const refs = await git.refList(identity.worktreePath, refPrefixFor(sessionId));
 			if (refs.length > 0) {
 				await git.withRepoLock(identity.worktreePath, async () => {
 					for (const entry of refs) {
 						try {
-							await git.ref.delete(identity.worktreePath, entry.refName);
+							await git.refDelete(identity.worktreePath, entry.refName);
 						} catch (error) {
 							logger.warn("Failed to delete checkpoint ref during session delete", {
 								refName: entry.refName,
