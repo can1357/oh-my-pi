@@ -2758,4 +2758,86 @@ mod tests {
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);
 	}
+
+	#[test]
+	fn capture_worktree_tree_matches_visible_workspace() {
+		let (dir, repo) = fixture();
+
+		// tracked-modified + untracked additions + a staged deletion + a plain
+		// deletion: the snapshot must mirror exactly what a fresh `git status`
+		// sees, regardless of what the real index still holds.
+		fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
+		fs::write(dir.path().join("untracked.txt"), "new\n").unwrap();
+		fs::write(dir.path().join("staged-del.txt"), "gone\n").unwrap();
+		git(dir.path(), &["add", "staged-del.txt"]);
+		git(dir.path(), &["commit", "-qm", "add staged-del"]);
+		git(dir.path(), &["rm", "--cached", "-q", "staged-del.txt"]);
+		fs::remove_file(dir.path().join("staged-del.txt")).unwrap();
+		fs::remove_file(dir.path().join("tracked.txt")).unwrap_or(());
+
+		let index_path = dir.path().join("throwaway-index");
+		let tree = repo.capture_worktree_tree(&[], &index_path).unwrap();
+
+		let status = git(dir.path(), &["ls-tree", "-r", "--name-only", &tree]);
+		let paths: BTreeSet<String> = status
+			.lines()
+			.map(|line| line.trim().to_owned())
+			.filter(|line| !line.is_empty())
+			.collect();
+		assert!(paths.contains("untracked.txt"), "{paths:?}");
+		assert!(!paths.contains("staged-del.txt"), "{paths:?}");
+		// tracked.txt was deleted before the capture, so it must be absent even
+		// though HEAD's tree still carries it.
+		assert!(!paths.contains("tracked.txt"), "{paths:?}");
+
+		// Real index untouched: the staged deletion is still recorded there.
+		let staged_paths = git(dir.path(), &["diff-index", "--cached", "--name-status", "HEAD"]);
+		assert!(staged_paths.contains("staged-del.txt"), "real index must be untouched: {staged_paths:?}");
+	}
+
+	#[test]
+	fn commit_tree_object_writes_commit_without_moving_head() {
+		let (dir, repo) = fixture();
+		let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+		let tree = repo.write_tree(None).unwrap();
+		let parent = head_before.trim();
+		let sha = repo
+			.commit_tree_object(
+				&tree,
+				&[parent.to_owned()],
+				"omp checkpoints",
+				"checkpoints@oh-my-pi.local",
+				None,
+				"checkpoint: test",
+			)
+			.unwrap();
+
+		assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before, "HEAD must not move");
+		let subject = git(dir.path(), &["log", "-1", "--format=%s", &sha]);
+		assert_eq!(subject, "checkpoint: test");
+		assert_eq!(git(dir.path(), &["rev-parse", &format!("{sha}^")]), head_before.trim().to_owned());
+	}
+
+	#[test]
+	fn checkpoint_ref_update_and_delete_round_trip() {
+		let (dir, repo) = fixture();
+		let head = git(dir.path(), &["rev-parse", "HEAD"]);
+
+		repo.checkpoint_ref_update("refs/omp/checkpoints/s1/abc", head.trim()).unwrap();
+		assert_eq!(
+			repo.resolve_ref("refs/omp/checkpoints/s1/abc").unwrap().as_deref(),
+			Some(head.trim())
+		);
+		let refs = repo.checkpoint_ref_list("refs/omp/checkpoints/s1/").unwrap();
+		assert_eq!(refs.len(), 1);
+		assert!(refs[0].starts_with("refs/omp/checkpoints/s1/abc\0"));
+
+		repo.checkpoint_ref_delete("refs/omp/checkpoints/s1/abc").unwrap();
+		assert!(repo.checkpoint_ref_list("refs/omp/checkpoints/s1/").unwrap().is_empty());
+		// Deleting a missing ref stays idempotent.
+		repo.checkpoint_ref_delete("refs/omp/checkpoints/s1/abc").unwrap();
+		assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head, "HEAD untouched by ref ops");
+	}
+
 }
