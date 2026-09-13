@@ -1067,6 +1067,36 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(AIError.is(AIError.classify(verdict), AIError.Flag.AccountPolicy)).toBe(true);
 	});
 
+	test("the verdict is withheld while an untried sibling is still unblocked", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "denied-earlier", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "never-tried", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		// An earlier request left a model-scope block on A; B has never been asked.
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, "earlier", { modelId: DAYBREAK_MODEL })).toBe(
+			"denied-earlier",
+		);
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, "earlier", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "denied-earlier",
+			}),
+		).toBe(true);
+
+		// A later request whose bearer a peer rotated mid-flight: rotation blocks
+		// nothing, and B is still available — not exhaustion.
+		expect(await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
+	});
+
 	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
 		if (!store) throw new Error("test setup failed");
 		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });

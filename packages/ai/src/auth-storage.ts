@@ -7018,6 +7018,7 @@ export class AuthStorage {
 
 		const nowMs = Date.now();
 		let deniedCount = 0;
+		let available = 0;
 		const tried: string[] = [];
 		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
 			const label =
@@ -7035,13 +7036,18 @@ export class AuthStorage {
 			const blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, routing.siblingBlockScopes);
 			if (blockedUntil !== undefined) {
 				tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
+				continue;
 			}
+			available += 1;
 		}
 		// Rotation records the denial as a model-scoped block on the stored
 		// credential it served. Without one, the request did not run on this
 		// pool (a pinned runtime/config key, say) and the denial is not ours to
-		// explain.
-		if (deniedCount === 0) return undefined;
+		// explain. And while any eligible credential is still unblocked — the
+		// failed bearer was rotated by a peer mid-request, so nothing was blocked
+		// this time, but an older block exists on a sibling — re-resolution can
+		// still reach it, so this is not exhaustion either.
+		if (deniedCount === 0 || available > 0) return undefined;
 		const named = tried.slice(0, ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX);
 		const unnamed = tried.length - named.length;
 		const parts = [
