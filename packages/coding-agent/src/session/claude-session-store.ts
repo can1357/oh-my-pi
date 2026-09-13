@@ -149,17 +149,19 @@ function imageContent(value: unknown): ImageContent | undefined {
 	return data && mimeType ? { type: "image", data, mimeType } : undefined;
 }
 
+function userPart(value: unknown): TextContent | ImageContent | undefined {
+	if (!isRecord(value)) return undefined;
+	if (value.type === "text" && typeof value.text === "string") return { type: "text", text: value.text };
+	return imageContent(value);
+}
+
 function userContent(value: unknown): string | (TextContent | ImageContent)[] | undefined {
 	if (typeof value === "string") return value;
 	if (!Array.isArray(value)) return undefined;
 	const content: (TextContent | ImageContent)[] = [];
 	for (const block of value) {
-		if (!isRecord(block)) continue;
-		if (block.type === "text" && typeof block.text === "string") content.push({ type: "text", text: block.text });
-		else {
-			const image = imageContent(block);
-			if (image) content.push(image);
-		}
+		const part = userPart(block);
+		if (part) content.push(part);
 	}
 	return content.length > 0 ? content : undefined;
 }
@@ -268,11 +270,28 @@ function convertRecord(
 	const rawContent = record.message.content;
 	if (Array.isArray(rawContent)) {
 		const results: ConvertedMessage[] = [];
+		let content: (TextContent | ImageContent)[] = [];
+		let contentStart = 0;
+		const flushContent = () => {
+			if (content.length === 0) return;
+			results.push({
+				message: { role: "user", content, timestamp },
+				suffix: `user-${contentStart}`,
+			});
+			content = [];
+		};
 		for (let index = 0; index < rawContent.length; index += 1) {
 			const block = rawContent[index];
+			const part = userPart(block);
+			if (part) {
+				if (content.length === 0) contentStart = index;
+				content.push(part);
+				continue;
+			}
 			if (!isRecord(block) || block.type !== "tool_result") continue;
 			const toolCallId = stringField(block, "tool_use_id");
 			if (!toolCallId) continue;
+			flushContent();
 			const message: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId,
@@ -283,6 +302,7 @@ function convertRecord(
 			};
 			results.push({ message, suffix: `tool-${index}` });
 		}
+		flushContent();
 		if (results.length > 0) return results;
 	}
 	const content = userContent(rawContent);

@@ -320,6 +320,8 @@ export interface AgentSessionConfig {
 	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
+	/** Config problems collected during WATCHDOG.yml discovery. */
+	advisorConfigWarnings?: string[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
@@ -477,6 +479,10 @@ export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;
+	/** Prior side-conversation messages, copied before the conversion pipeline runs. */
+	history?: readonly Message[];
+	/** Session-local key for serialized side turns; rotate after cancellation or failure. */
+	conversationKey?: string;
 	/** Omit tool definitions and request no tool calls. Rejects before inference on transports with mandatory native tools (Cursor). Tool calls are never executed, even when this option is omitted. */
 	tools?: false;
 	/** Optional positive safe-integer output-token cap. Models that omit output limits reject this option before inference. */

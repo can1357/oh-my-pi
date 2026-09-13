@@ -839,6 +839,104 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
+	it("preserves the provider prefix when ephemeral followups append structured history", async () => {
+		const model = buildModel({
+			id: "side-stream-model",
+			name: "Side Stream Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const contexts: Context[] = [];
+		const options: SimpleStreamOptions[] = [];
+		const sideStreamFn: StreamFn = (_model, context, streamOptions) => {
+			contexts.push({ ...context, messages: structuredClone(context.messages) });
+			options.push(streamOptions ?? {});
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("Side answer");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "Side answer", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const tool: AgentTool = {
+			name: "side_tool",
+			label: "Side Tool",
+			description: "A tool in the main catalog",
+			parameters: { type: "object", properties: {} },
+			execute: async () => ({ content: [], details: {} }),
+		};
+		const agent = new Agent({
+			promptCacheKey: "parent-cache",
+			initialState: {
+				model,
+				systemPrompt: ["system prompt"],
+				messages: [{ role: "user", content: "Main question", timestamp: 1 }],
+				tools: [tool],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+		const mainMessages = agent.state.messages;
+		const mainSnapshot = structuredClone(mainMessages);
+		const journalSnapshot = structuredClone(session.sessionManager.getEntries());
+
+		const first = await session.runEphemeralTurn({ promptText: "Question?", conversationKey: "topic-a" });
+		const history: readonly Message[] = [
+			{
+				role: "user",
+				content: [{ type: "text", text: "Question?" }],
+				attribution: "agent",
+				timestamp: 2,
+			},
+			first.assistantMessage,
+		];
+		const historySnapshot = structuredClone(history);
+		await session.runEphemeralTurn({ promptText: "Followup?", history, conversationKey: "topic-a" });
+		await session.runEphemeralTurn({ promptText: "Question?", history: [], conversationKey: "topic-b" });
+
+		const [initial, followup, emptyHistory] = contexts;
+		expect(initial.messages.map(message => message.role)).toEqual(["user", "developer", "user"]);
+		expect(followup.messages.map(message => message.role)).toEqual([
+			"user",
+			"developer",
+			"user",
+			"assistant",
+			"user",
+		]);
+		// Compare prompt-bearing fields, not per-request timestamps or usage metadata.
+		const promptMessages = (context: Context) => context.messages.map(({ role, content }) => ({ role, content }));
+		expect(followup.systemPrompt).toEqual(initial.systemPrompt);
+		expect(followup.tools).toEqual(initial.tools);
+		expect(initial.tools?.map(tool => tool.name)).toEqual(["side_tool"]);
+		expect(promptMessages(followup).slice(0, initial.messages.length)).toEqual(promptMessages(initial));
+		expect(followup.messages.at(-2)?.content).toEqual([{ type: "text", text: "Side answer" }]);
+		expect(getConvertedUserText(followup.messages.at(-1))).toBe("Followup?");
+		expect(promptMessages(emptyHistory)).toEqual(promptMessages(initial));
+		expect(options.map(option => option.promptCacheKey)).toEqual(["parent-cache", "parent-cache", "parent-cache"]);
+		expect(options[1]?.sessionId).toBe(options[0]?.sessionId);
+		expect(options[2]?.sessionId).not.toBe(options[0]?.sessionId);
+		for (const option of options) {
+			expect(option.sessionId).toStartWith(`${session.sessionId}:side:`);
+		}
+		expect(history).toEqual(historySnapshot);
+		expect(agent.state.messages).toBe(mainMessages);
+		expect(agent.state.messages).toEqual(mainSnapshot);
+		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
+	});
+
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
 		"encodes the output cap and omits tools in the %s HTTP request",
 		async api => {
@@ -1196,9 +1294,12 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.openrouterVariant).toBe("nitro");
 	});
 
-	it("obfuscates user messages on ephemeral side-channel requests", async () => {
+	it("snapshots and obfuscates ephemeral history before asynchronous context conversion", async () => {
 		const api = "test-ephemeral-secret-redaction";
 		const secret = "EPHEMERAL_SECRET_TOKEN_12345";
+		const conversionStarted = Promise.withResolvers<void>();
+		const continueConversion = Promise.withResolvers<void>();
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
 		let capturedContext: Context | undefined;
 		registerCustomApi(api, (_model, context, _options) => {
 			capturedContext = context;
@@ -1235,16 +1336,42 @@ describe("AgentSession message pipeline", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: createModelRegistryStub() as never,
-			obfuscator: new SecretObfuscator([{ type: "plain", content: secret }]),
+			obfuscator,
+			transformContext: async messages => {
+				conversionStarted.resolve();
+				await continueConversion.promise;
+				return messages;
+			},
 		});
 		sessions.push(session);
 
-		const result = await session.runEphemeralTurn({ promptText: `question about ${secret}` });
+		const questionBlock: TextContent = { type: "text", text: `previous question about ${secret}` };
+		const answerBlock: TextContent = { type: "text", text: `previous answer about ${secret}` };
+		const history: Message[] = [
+			{ role: "user", content: [questionBlock], timestamp: 1 },
+			{ ...createAssistantMessage(""), content: [answerBlock] },
+		];
+		const originalHistory = structuredClone(history);
+		const pendingTurn = session.runEphemeralTurn({ promptText: `question about ${secret}`, history });
+		await conversionStarted.promise;
+		expect(history).toEqual(originalHistory);
+		questionBlock.text = "caller replaced question";
+		answerBlock.text = "caller replaced answer";
+		history.push({ role: "user", content: "caller appended question", timestamp: 2 });
+		const mutatedHistory = structuredClone(history);
+		continueConversion.resolve();
+		const result = await pendingTurn;
 
 		expect(result.replyText).toBe("Answer");
-		expect(capturedContext).toBeDefined();
-		// The secret entered only via the user prompt, which the opt-in obfuscator redacts.
+		const messages = capturedContext!.messages;
+		expect(messages.map(message => message.role)).toEqual(["developer", "user", "assistant", "user"]);
+		expect(getConvertedUserText(messages[1])).toBe(obfuscator.obfuscate(`previous question about ${secret}`));
+		expect(messages[2].content).toEqual([
+			{ type: "text", text: obfuscator.obfuscate(`previous answer about ${secret}`) },
+		]);
+		expect(getConvertedUserText(messages[3])).toBe(obfuscator.obfuscate(`question about ${secret}`));
 		expect(JSON.stringify(capturedContext)).not.toContain(secret);
+		expect(history).toEqual(mutatedHistory);
 	});
 
 	it("keeps obfuscated side-channel stable prefix byte-identical to the main turn", async () => {

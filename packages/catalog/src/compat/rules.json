@@ -13,6 +13,7 @@
 		"auth/baseten.kdl",
 		"auth/bedrock-mantle.kdl",
 		"auth/cerebras.kdl",
+		"auth/charm-hyper.kdl",
 		"auth/cline-pass.kdl",
 		"auth/cloudflare-ai-gateway.kdl",
 		"auth/commandcode.kdl",
@@ -114,6 +115,7 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/charm-hyper.kdl",
 		"providers/cline-pass.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
 		"providers/commandcode.kdl",
@@ -3927,6 +3929,28 @@
 				}
 			},
 			{
+				"source": "classes/anthropic.kdl:181",
+				"class": "anthropic",
+				"providers": [
+					"anthropic"
+				],
+				"family": "fable",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "5.1.0"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cacheRead": 0.25,
+						"cacheWrite": 12.5
+					}
+				}
+			},
+			{
 				"source": "classes/anthropic.kdl:165",
 				"class": "anthropic",
 				"providers": [
@@ -3947,7 +3971,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:177",
+				"source": "classes/anthropic.kdl:194",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3967,7 +3991,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:195",
+				"source": "classes/anthropic.kdl:212",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3990,7 +4014,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:200",
+				"source": "classes/anthropic.kdl:217",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4010,7 +4034,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:206",
+				"source": "classes/anthropic.kdl:223",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4039,7 +4063,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:220",
+				"source": "classes/anthropic.kdl:237",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4063,7 +4087,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:226",
+				"source": "classes/anthropic.kdl:243",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4083,7 +4107,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:235",
+				"source": "classes/anthropic.kdl:252",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4108,7 +4132,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:241",
+				"source": "classes/anthropic.kdl:258",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4127,7 +4151,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:246",
+				"source": "classes/anthropic.kdl:263",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4150,7 +4174,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:251",
+				"source": "classes/anthropic.kdl:268",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4170,7 +4194,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:257",
+				"source": "classes/anthropic.kdl:274",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4189,7 +4213,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:262",
+				"source": "classes/anthropic.kdl:279",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4209,7 +4233,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:270",
+				"source": "classes/anthropic.kdl:287",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4228,7 +4252,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:275",
+				"source": "classes/anthropic.kdl:292",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4248,7 +4272,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:283",
+				"source": "classes/anthropic.kdl:300",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4268,7 +4292,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:293",
+				"source": "classes/anthropic.kdl:310",
 				"class": "anthropic",
 				"family": "haiku",
 				"revision": [
@@ -4282,7 +4306,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:299",
+				"source": "classes/anthropic.kdl:316",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity",
@@ -4294,7 +4318,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:303",
+				"source": "classes/anthropic.kdl:320",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity"
@@ -5990,9 +6014,10 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:32",
+				"source": "classes/minimax.kdl:34",
 				"class": "minimax",
 				"providers": [
+					"charm-hyper",
 					"minimax",
 					"minimax-cn",
 					"minimax-code",
@@ -6002,6 +6027,10 @@
 					{
 						"kind": "exact",
 						"value": "MiniMax-M3"
+					},
+					{
+						"kind": "exact",
+						"value": "minimax-m3"
 					}
 				],
 				"catalog": {
@@ -6012,7 +6041,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:39",
+				"source": "classes/minimax.kdl:41",
 				"class": "minimax",
 				"providers": [
 					"alibaba-coding-plan",
@@ -6025,7 +6054,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:44",
+				"source": "classes/minimax.kdl:46",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock",
@@ -6042,7 +6071,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:48",
+				"source": "classes/minimax.kdl:50",
 				"class": "minimax",
 				"providers": [
 					"kilo",
@@ -6060,7 +6089,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:54",
+				"source": "classes/minimax.kdl:56",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6077,7 +6106,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:62",
+				"source": "classes/minimax.kdl:64",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6099,7 +6128,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:52",
+				"source": "classes/minimax.kdl:54",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6111,7 +6140,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:72",
+				"source": "classes/minimax.kdl:74",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -6123,7 +6152,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:76",
+				"source": "classes/minimax.kdl:78",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -7587,6 +7616,55 @@
 					"supportsStrictMode": true,
 					"supportsUsageInStreaming": false,
 					"toolStrictMode": "all_strict"
+				},
+				"thinking": {
+					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:72",
+				"providers": [
+					"charm-hyper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "glm-5.1"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 20275
+					}
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:77",
+				"providers": [
+					"charm-hyper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "minimax-m2.7"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 26214
+					}
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:9",
+				"providers": [
+					"charm-hyper"
+				],
+				"wire": {
+					"supportsDeveloperRole": false,
+					"supportsStore": false,
+					"maxTokensField": "max_tokens",
+					"reasoningContentField": "reasoning_content"
 				},
 				"thinking": {
 					"mode": "effort"
@@ -9763,11 +9841,15 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:85",
+				"source": "providers/deepseek.kdl:89",
 				"providers": [
 					"deepseek"
 				],
 				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
 					{
 						"kind": "exact",
 						"value": "deepseek-v4-flash"
@@ -9782,7 +9864,16 @@
 					"reasoningContentField": "reasoning_content",
 					"requiresAssistantContentForToolCalls": true,
 					"requiresReasoningContentForToolCalls": true,
+					"allowsSyntheticReasoningContentForToolCalls": false,
 					"supportsToolChoice": false
+				},
+				"thinking": {
+					"upgradeNeutral": true,
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
@@ -18344,6 +18435,30 @@
 					"instructions": "Create or copy a Provider API key from Command Code Studio",
 					"prompt": "Paste your Command Code API key",
 					"placeholder": "user_..."
+				}
+			},
+			{
+				"id": "charm-hyper",
+				"apiKeyFormat": "bearer",
+				"name": "Charm Hyper",
+				"env": {
+					"vars": [
+						"CHARM_HYPER_API_KEY",
+						"HYPER_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://hyper.charm.land/",
+					"instructions": "Create or copy an API key from the Charm Hyper dashboard",
+					"prompt": "Paste your Charm Hyper API key",
+					"placeholder": "sk-hyper-...",
+					"normalize": "strip-bearer",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Charm Hyper",
+						"url": "https://hyper.charm.land/v1/credits"
+					}
 				}
 			},
 			{

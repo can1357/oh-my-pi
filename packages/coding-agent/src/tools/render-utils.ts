@@ -836,19 +836,51 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten any home-prefixed segments inside free text, preserving surrounding
- *  punctuation so error strings with embedded paths stay readable. */
-export function shortenEmbeddedPaths(text: string): string {
-	return text
+/** Shorten home-prefixed paths inside free text, preserving surrounding
+ * punctuation so error strings with embedded paths stay readable. */
+export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
+	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
+	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const homePattern = new RegExp(
+		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+		windowsStyle ? "gi" : "g",
+	);
+	const textWithShortenedHome =
+		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
+	return textWithShortenedHome
 		.split(" ")
 		.map(segment => {
 			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
 			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
 			const end = segment.length - trailing.length;
 			if (leading.length >= end) return segment;
-			return `${leading}${shortenPath(segment.slice(leading.length, end))}${trailing}`;
+			const shortened = shortenPath(segment.slice(leading.length, end), homeDir);
+			const normalized = shortened.startsWith("~")
+				? shortened.replaceAll(path.win32.sep, path.posix.sep)
+				: shortened;
+			return `${leading}${normalized}${trailing}`;
 		})
 		.join(" ");
+}
+
+/** Sanitize warning text before showing it in TUI, including embedded home paths. */
+export function sanitizeDisplayWarning(text: string): string {
+	return shortenEmbeddedPaths(
+		replaceTabs(sanitizeText(text))
+			.replace(/[\r\n]+/g, " ")
+			.trim(),
+	);
+}
+
+/** Sanitize and bound warning text before showing it in TUI. */
+export function sanitizeDisplayWarnings(warnings: readonly string[]): string[] {
+	const visible = warnings
+		.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
+		.map(warning => truncateToWidth(sanitizeDisplayWarning(warning), TRUNCATE_LENGTHS.LONG));
+	const hidden = warnings.length - visible.length;
+	if (hidden > 0) visible.push(`… ${hidden} more ${pluralize("warning", hidden)}`);
+	return visible;
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

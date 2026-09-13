@@ -117,6 +117,8 @@ async function createContext() {
 	const handleBtwCopyKey = vi.fn(async () => true);
 	const canBranchBtw = vi.fn(() => false);
 	const canCopyBtw = vi.fn(() => false);
+	const canFollowUpBtw = vi.fn(() => false);
+	const handleBtwFollowUpKey = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
 	const editor: FakeEditor = {
@@ -233,6 +235,8 @@ async function createContext() {
 		canBranchBtw,
 		canCopyBtw,
 		handleBtwCopyKey,
+		canFollowUpBtw,
+		handleBtwFollowUpKey,
 		showError,
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
@@ -270,6 +274,8 @@ async function createContext() {
 			handlesBtwBranchKey,
 			handleBtwCopyKey,
 			canCopyBtw,
+			canFollowUpBtw,
+			handleBtwFollowUpKey,
 			showError,
 		},
 	};
@@ -313,7 +319,7 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.hideToolActivity).toBe(true);
 		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
 		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
 	});
 
@@ -528,6 +534,34 @@ describe("InputController keybinding setup", () => {
 		expect(focusedPasteText).not.toHaveBeenCalled();
 		expect(editor.pendingImages).toHaveLength(0);
 		expect(editor.getText()).toBe("");
+	});
+
+	it("opens inline follow-up only with an empty focused editor and a ready BTW answer", async () => {
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		expect(dispatchInput(listeners, "f")).toBeUndefined();
+		spies.canFollowUpBtw.mockReturnValue(true);
+		editor.setText("finish this draft");
+		expect(dispatchInput(listeners, "f")).toBeUndefined();
+		editor.setText("");
+		setFocused({ pasteText: vi.fn() });
+		expect(dispatchInput(listeners, "f")).toBeUndefined();
+		expect(spies.handleBtwFollowUpKey).not.toHaveBeenCalled();
+
+		setFocused(ctx.editor);
+		expect(dispatchInput(listeners, "f")).toEqual({ consume: true });
+		expect(spies.handleBtwFollowUpKey).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves x as ordinary input while a BTW panel is active", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		spies.hasActiveBtw.mockReturnValue(true);
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "x")).toBeUndefined();
 	});
 
 	it("routes c to copy a copyable /btw panel when the editor is empty", async () => {
