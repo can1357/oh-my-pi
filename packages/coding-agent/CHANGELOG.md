@@ -9,6 +9,9 @@
 ### Added
 
 - Added the `disallowedTools:` frontmatter field for agent definitions: it removes tools by exact name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+### Fixed
+
+- TTSR stream buffers now reset at every assistant message boundary, not only at turn start, so a `scope: text` or tool-argument rule can no longer fire on a later message because of text streamed by an earlier response in the same turn ([#11957](https://github.com/can1357/oh-my-pi/pull/11957) by [@srobroek](https://github.com/srobroek)).
 
 ### Changed
 
@@ -27,6 +30,7 @@
 ### Fixed
 
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
+- Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
 
 ## [18.1.19] - 2026-09-12
 
