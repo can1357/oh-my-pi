@@ -92,6 +92,10 @@
 - LiteLLM model groups keep the image input their deployment declares, instead of having attachments replaced with the "model does not support vision" placeholder ([#11982](https://github.com/can1357/oh-my-pi/issues/11982), [#11985](https://github.com/can1357/oh-my-pi/pull/11985) by [@lz37](https://github.com/lz37)).
 - Fixed OpenCode Zen/Go Muse Spark models failing every tool-call turn with a 400 "reasoning encrypted_content was not issued to this caller" error: the gateways proxy the Responses lane to Meta but can't round-trip encrypted reasoning, so those SKUs no longer request or replay it ([#11928](https://github.com/can1357/oh-my-pi/issues/11928)).
 
+### Changed
+
+- Updated DEFAULT_ANTIGRAVITY_VERSION fallback to 2.13.0 matching current Cloud Code Assist releases ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

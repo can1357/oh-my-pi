@@ -276,7 +276,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | Variable                    | Default / behavior                                              |
 | --------------------------- | --------------------------------------------------------------- |
 | `PI_AI_GEMINI_CLI_VERSION`  | Overrides Gemini CLI user-agent version tag (`0.46.0` if unset) |
-| `PI_AI_ANTIGRAVITY_VERSION` | Overrides the auto-discovered Antigravity hub user-agent version; when unset and discovery fails, the fallback is `2.8.0` |
+| `PI_AI_ANTIGRAVITY_VERSION` | Overrides the auto-discovered Antigravity hub user-agent version; when unset and discovery fails, the fallback is `2.13.0` |
 | `PI_AI_ANTIGRAVITY_CL`      | Overrides Antigravity hub user-agent build changelist (`963137146` if unset) |
 | `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (pinned `darwin` if unset) |
 | `PI_AI_ANTIGRAVITY_ARCH`    | Overrides Antigravity hub user-agent arch (pinned `arm64` if unset) |
