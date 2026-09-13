@@ -10,9 +10,9 @@
  * post-await re-check queues the loser as a steer into the winner's turn.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -25,6 +25,11 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { assistantMsg } from "./utilities";
+
+interface BtwBranchResult {
+	cancelled: boolean;
+	sessionFile: string | undefined;
+}
 
 describe("AgentSession concurrent prompt dispatch", () => {
 	let session: AgentSession;
@@ -45,7 +50,7 @@ describe("AgentSession concurrent prompt dispatch", () => {
 		}
 		authStorage?.close();
 		authStorage = undefined;
-		if (sessionDir) await rm(sessionDir, { recursive: true, force: true });
+		if (sessionDir) await fs.rm(sessionDir, { recursive: true, force: true });
 		sessionDir = undefined;
 	});
 
@@ -78,7 +83,7 @@ describe("AgentSession concurrent prompt dispatch", () => {
 	it.each(["navigateTree", "branch", "fork", "branchFromBtw"] as const)(
 		"drops an admitted custom prompt when %s replaces its branch before dispatch",
 		async transition => {
-			sessionDir = await mkdtemp(join(tmpdir(), "omp-prompt-transition-"));
+			sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prompt-transition-"));
 			const manager = SessionManager.create(sessionDir, sessionDir);
 			const retained = manager.appendMessage({ role: "user", content: "Retained", timestamp: 1 });
 			const abandoned = manager.appendMessage({ role: "user", content: "Abandoned", timestamp: 2 });
@@ -92,7 +97,7 @@ describe("AgentSession concurrent prompt dispatch", () => {
 				return getApiKey(...args);
 			});
 			const releaseFlush = Promise.withResolvers<void>();
-			let btwBranch: ReturnType<AgentSession["branchFromBtw"]> | undefined;
+			let btwBranch: Promise<BtwBranchResult> | undefined;
 			if (transition === "branchFromBtw") {
 				// /btw checks idle before flushing. A prompt can be admitted during
 				// that await, before the final identity check and branch commit.

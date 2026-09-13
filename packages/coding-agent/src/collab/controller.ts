@@ -33,6 +33,8 @@ export class CollabController {
 	#host: CollabHost | undefined;
 	/** Serializes stop/start sequences so a rotation never interleaves with another. */
 	#ops: Promise<void> = Promise.resolve();
+	/** Explicit stop invalidates launch requests, not the saved auto-start policy. */
+	#stopEpoch = 0;
 	/** Installed when the first room starts; a process that never hosts never subscribes. */
 	#unsubscribeSessionChange: (() => void) | undefined;
 	/** Guests may drive the session only once interactive startup has finished. */
@@ -76,7 +78,7 @@ export class CollabController {
 		this.#observeSessionChanges();
 		const access = this.autoStartMode;
 		if (access === "off" || this.#shutdown || this.host || this.#ctx.collabGuest) return;
-		const started = this.#launchReporting(access);
+		const started = this.#launchReporting(access, this.#stopEpoch);
 		this.#ops = this.#ops.then(() => started);
 	}
 
@@ -103,17 +105,19 @@ export class CollabController {
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		const existing = this.host;
 		if (existing && (existing.access === "control" || options.access === "view")) return existing;
+		const stopEpoch = this.#stopEpoch;
 		// Abort an in-flight view connection before queuing behind its startup.
 		const stopping = existing?.stop("restarting with control access");
 		const started = this.#ops.then(async () => {
 			await stopping;
 			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+			if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 			// A preceding manual start or rotation may have installed a room while
 			// this request waited. Reuse or upgrade it rather than racing its launch.
 			const current = this.host;
 			if (current && (current.access === "control" || options.access === "view")) return current;
 			if (current) await current.stop("restarting with control access");
-			return this.#launch(options.access, options.relay);
+			return this.#launch(options.access, stopEpoch, options.relay);
 		});
 		// Report manual failures to the caller without poisoning later rotations.
 		this.#ops = started.then(
@@ -123,8 +127,9 @@ export class CollabController {
 		return started;
 	}
 
-	/** Stop the current room; also awaits a stop that is already in flight. */
+	/** Cancel pending launches and stop the current room, including a stop already in flight. */
 	async stop(reason: string): Promise<void> {
+		this.#stopEpoch++;
 		await this.#host?.stop(reason);
 	}
 
@@ -161,8 +166,9 @@ export class CollabController {
 	 * can be retained. During a session transition, wait for its final identity
 	 * and state first. Connect only after the previous room is fully gone.
 	 */
-	async #launch(access: CollabAccess, relay?: string): Promise<CollabHost> {
+	async #launch(access: CollabAccess, stopEpoch: number, relay?: string): Promise<CollabHost> {
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		// Identity cleanup callbacks can precede awaited hooks and message replacement.
 		// Pin and expose only the session left after commit or rollback.
 		if (this.#ctx.session.isSessionTransitioning) {
@@ -170,8 +176,9 @@ export class CollabController {
 			await Promise.race([this.#ctx.session.waitForSessionTransition(), shutdown]);
 		}
 		// Manual upgrades may reach this after awaiting the old room's stop.
-		// Shutdown is terminal even if it overtook that await.
+		// Shutdown or an explicit stop may have overtaken either wait.
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
 		this.#observeSessionChanges();
@@ -203,9 +210,9 @@ export class CollabController {
 	 * was still connecting — session switch, access upgrade, shutdown — is not
 	 * a failure; its replacement, if any, is already on its way.
 	 */
-	async #launchReporting(access: CollabAccess): Promise<void> {
+	async #launchReporting(access: CollabAccess, stopEpoch: number): Promise<void> {
 		try {
-			await this.#launch(access);
+			await this.#launch(access, stopEpoch);
 		} catch (err) {
 			if (this.#shutdown || err instanceof CollabHostStoppedError) return;
 			logger.warn("Collab auto-start failed", { error: String(err) });
@@ -225,14 +232,15 @@ export class CollabController {
 	#onSessionChanged(): void {
 		const previous = this.host;
 		if (previous && previous.sessionId === this.#ctx.sessionManager.getSessionId()) return;
+		const stopEpoch = this.#stopEpoch;
 		// Stop synchronously so a room still connecting is aborted now rather than
 		// after the queued start settles; the chain then waits for that stop.
 		const stopping = previous?.stop("session switched");
 		this.#ops = this.#ops.then(async () => {
 			await stopping;
-			if (this.#shutdown || this.host || this.#ctx.collabGuest) return;
+			if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
 			const access = this.autoStartMode;
-			if (access !== "off") await this.#launchReporting(access);
+			if (access !== "off") await this.#launchReporting(access, stopEpoch);
 		});
 	}
 }

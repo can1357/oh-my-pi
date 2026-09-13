@@ -626,6 +626,9 @@ async function runInteractiveMode(
 			// controller observing its eventual restoration without hosting replicas.
 			mode.collabController.autoStart();
 		}
+		// Keep guest mutations gated through setup dialogs and transcript replay,
+		// not just init. Only a successful outer startup opens the room for input.
+		mode.collabController.startupComplete();
 	} catch (error) {
 		// Init publishes before startup dialogs, so any later startup failure
 		// must withdraw the room before restoring the terminal.

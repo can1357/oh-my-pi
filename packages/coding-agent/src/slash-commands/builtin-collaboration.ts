@@ -2,7 +2,7 @@ import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
-import { listCollabHosts } from "../collab/registry";
+import { type CollabHostSnapshot, listCollabHosts } from "../collab/registry";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
@@ -307,10 +307,6 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const args = command.args.trim();
 			const { verb, rest } = parseSubcommand(args);
 			if (verb === "stop") {
-				if (!ctx.collabHost) {
-					ctx.showStatus("Not hosting a collab session");
-					return;
-				}
 				await ctx.collabController.stop("host stopped");
 				ctx.showStatus("Collab stopped");
 				return;
@@ -341,7 +337,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					ctx.showError(`Usage: /collab list — for links or JSON use \`${APP_NAME} collab link|list\``);
 					return;
 				}
-				let hosts: Awaited<ReturnType<typeof listCollabHosts>>;
+				let hosts: CollabHostSnapshot[];
 				try {
 					hosts = await listCollabHosts();
 				} catch (err) {
@@ -465,8 +461,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await ctx.collabGuest.leave("left");
 				return;
 			}
-			if (ctx.collabHost) {
-				await ctx.collabController.stop("host stopped");
+			const wasHosting = ctx.collabHost !== undefined;
+			await ctx.collabController.stop("host stopped");
+			if (wasHosting) {
 				ctx.showStatus("Collab stopped");
 				return;
 			}

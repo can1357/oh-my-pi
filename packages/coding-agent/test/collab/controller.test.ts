@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
-import type { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { type CollabHost, CollabHostStoppedError } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
@@ -31,6 +31,7 @@ import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-c
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
@@ -126,6 +127,7 @@ function makeControllerContext(over: Partial<Pick<ControllerContextState, "autoS
 			},
 		},
 		eventBus: undefined,
+		editor: { setText: () => {} },
 		statusLine: {
 			setCollabStatus: (status: unknown) => {
 				if (status === null) state.tornDown.shift()?.();
@@ -636,6 +638,103 @@ describe("CollabController", () => {
 			]);
 		});
 	}
+
+	for (const command of ["/collab stop", "/leave"]) {
+		it(`${command} cancels a queued rotation without disabling the next session's auto-start`, async () => {
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			ctx.collabController = controller;
+			controller.autoStart();
+			await controller.idle();
+			const drain = Promise.withResolvers<void>();
+			const transition = Promise.withResolvers<void>();
+			const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
+			state.transition = transition.promise;
+			let stopping: Promise<string | boolean> | undefined;
+			try {
+				switchSession(state, "cancelled-session");
+				// The old room has left the command's public slot, but its goodbye is
+				// still draining and the replacement is queued behind it.
+				expect(ctx.collabHost).toBeUndefined();
+				stopping = executeBuiltinSlashCommand(command, { ctx });
+			} finally {
+				drain.resolve();
+				flush.mockRestore();
+				state.transition = undefined;
+				transition.resolve();
+			}
+			expect(await stopping).toBe(true);
+			await controller.idle();
+			expect(publishSpy).toHaveBeenCalledTimes(1);
+			expect(controller.host).toBeUndefined();
+			expect(ctx.collabHost).toBeUndefined();
+			expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+			expect(controller.autoStartMode).toBe("control");
+
+			switchSession(state, "later-session");
+			await controller.idle();
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+				{ generation: 2, sessionId: "later-session", access: "control" },
+			]);
+		});
+	}
+
+	it("explicit stop cancels a launch already waiting for session hooks", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await controller.idle();
+		const transition = Promise.withResolvers<void>();
+		const waiting = Promise.withResolvers<void>();
+		state.transition = transition.promise;
+		state.transitionWaited = waiting.resolve;
+		switchSession(state, "cancelled-session");
+		try {
+			await waiting.promise;
+			expect(ctx.collabHost).toBeUndefined();
+			await controller.stop("host stopped");
+		} finally {
+			state.transition = undefined;
+			transition.resolve();
+		}
+		await controller.idle();
+		expect(publishSpy).toHaveBeenCalledTimes(1);
+		expect(controller.host).toBeUndefined();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		expect(state.showStatus.filter(message => /auto-start failed/.test(message))).toEqual([]);
+	});
+
+	it("explicit stop cancels a queued manual upgrade but permits a later manual start", async () => {
+		const { ctx } = makeControllerContext({ autoStart: "view" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await controller.idle();
+		const drain = Promise.withResolvers<void>();
+		const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
+		const upgrade = controller.start({ access: "control" }).then(
+			host => ({ host, error: undefined }),
+			(error: unknown) => ({ host: undefined, error }),
+		);
+		let stopping: Promise<void> | undefined;
+		try {
+			expect(ctx.collabHost).toBeUndefined();
+			stopping = controller.stop("host stopped");
+		} finally {
+			drain.resolve();
+			flush.mockRestore();
+		}
+		await stopping;
+		const result = await upgrade;
+		expect(result.error).toBeInstanceOf(CollabHostStoppedError);
+		expect(result.host).toBeUndefined();
+		expect(publishSpy).toHaveBeenCalledTimes(1);
+		expect(controller.host).toBeUndefined();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+
+		const room = await controller.start({ access: "control" });
+		expect(controller.host).toBe(room);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 2, access: "control" }]);
+	});
 
 	it("keeps a manual control upgrade when a session rotation overlaps its predecessor stop", async () => {
 		const { ctx, state } = makeControllerContext({ autoStart: "view" });
