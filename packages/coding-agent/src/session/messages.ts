@@ -23,6 +23,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
@@ -1324,6 +1325,7 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	const cached = convertCache.get(m);
 	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
 	const fragment = convertOne(m, interruptedNext);
+	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
 }
