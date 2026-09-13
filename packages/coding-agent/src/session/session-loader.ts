@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
@@ -31,6 +31,14 @@ export interface VisitEntriesFromFileStreamOptions {
 	yieldEveryEntries?: number;
 	/** Called once for every malformed JSONL record skipped by the stream. */
 	onMalformedRecord?: () => void;
+	/** Rethrow missing source instead of visiting nothing (fork backstop). */
+	throwIfMissing?: boolean;
+}
+
+/** Controls how a missing session file is handled. */
+export interface LoadSessionOptions {
+	/** Propagate ENOENT instead of treating the path as a new empty session. */
+	throwIfMissing?: boolean;
 }
 
 /** Parsed session entries plus corruption metadata needed by writable loaders. */
@@ -229,15 +237,20 @@ export async function visitEntriesFromFileStream(
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;
-		if (isEnoent(err)) return undefined;
+		if (isEnoent(err) || isEnotdir(err)) {
+			if (options.throwIfMissing) throw err;
+			return undefined;
+		}
 		throw err;
 	}
 
 	return titleSlot;
 }
-
 /** Exported for testing — the ≥8MiB streaming path (works on any file size). */
-export async function loadEntriesFromFileStream(filePath: string): Promise<SessionLoadResult> {
+export async function loadEntriesFromFileStream(
+	filePath: string,
+	options?: Pick<VisitEntriesFromFileStreamOptions, "throwIfMissing">,
+): Promise<SessionLoadResult> {
 	const entries: FileEntry[] = [];
 	let malformedRecords = 0;
 	const titleSlot = await visitEntriesFromFileStream(
@@ -249,6 +262,7 @@ export async function loadEntriesFromFileStream(filePath: string): Promise<Sessi
 			onMalformedRecord: () => {
 				malformedRecords++;
 			},
+			throwIfMissing: options?.throwIfMissing,
 		},
 	);
 	return {
@@ -258,19 +272,22 @@ export async function loadEntriesFromFileStream(filePath: string): Promise<Sessi
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
 	};
 }
-
 /** Exported for compaction.test.ts */
 export function parseSessionEntries(content: string): FileEntry[] {
 	return parseSessionContent(content).entries;
 }
-
 function shouldStreamEntries(storage: SessionStorage, size: number): boolean {
 	return storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES;
 }
 
-async function loadWithKnownSize(filePath: string, storage: SessionStorage, size: number): Promise<SessionLoadResult> {
+async function loadWithKnownSize(
+	filePath: string,
+	storage: SessionStorage,
+	size: number,
+	options?: { throwIfMissing?: boolean },
+): Promise<SessionLoadResult> {
 	const loaded = shouldStreamEntries(storage, size)
-		? await loadEntriesFromFileStream(filePath)
+		? await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing })
 		: parseSessionContent(await storage.readText(filePath));
 	return loaded.invalidHeader ? { ...loaded, entries: [] } : loaded;
 }
@@ -279,11 +296,15 @@ async function loadWithKnownSize(filePath: string, storage: SessionStorage, size
 export async function loadSessionFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	options: LoadSessionOptions = {},
 ): Promise<SessionLoadResult> {
 	try {
-		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size);
+		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size, options);
 	} catch (err) {
-		if (isEnoent(err)) return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		if (isEnoent(err) || isEnotdir(err)) {
+			if (options?.throwIfMissing) throw err;
+			return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		}
 		throw err;
 	}
 }
@@ -292,8 +313,9 @@ export async function loadSessionFile(
 export async function loadEntriesFromFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	options?: { throwIfMissing?: boolean },
 ): Promise<FileEntry[]> {
-	return (await loadSessionFile(filePath, storage)).entries;
+	return (await loadSessionFile(filePath, storage, options)).entries;
 }
 
 /**
