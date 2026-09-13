@@ -295,5 +295,16 @@ describe("credential sign-out notices", () => {
 				disabledCause: "disabled via auth-broker",
 			}),
 		).toBe("Signed out of kagi API key: disabled via auth-broker. Sign in again with /login kagi.");
+		// A managed MCP OAuth row is not a /login provider: name the server, point at /mcp reauth.
+		expect(
+			formatCredentialDisabledNotice({
+				provider: "mcp_oauth:profile:default:https://mcp.example.com/sse?project_ref=abc",
+				credentialId: 3,
+				credentialType: "oauth",
+				disabledCause: "oauth refresh failed: invalid_grant",
+			}),
+		).toBe(
+			"Signed out of MCP server https://mcp.example.com/sse?project_ref=abc: invalid_grant. Reauthorize it with /mcp reauth <name>.",
+		);
 	});
 });

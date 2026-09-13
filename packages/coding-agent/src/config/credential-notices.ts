@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, pluralize } from "@oh-my-pi/pi-utils";
+import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
 /**
@@ -56,20 +57,38 @@ function loginRemedy(provider: string): string {
 		: "Sign in again with /login and choose the provider.";
 }
 
+/**
+ * What was signed out and how to get it back. A managed MCP OAuth credential
+ * is stored under its own `mcp_oauth:*` id rather than a `/login` provider:
+ * it is named by its server and recovered through `/mcp reauth`.
+ */
+function subjectAndRemedy(
+	provider: string,
+	credentialType: DisabledCredentialSummary["type"],
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "orgId" | "orgName">,
+): { subject: string; remedy: string } {
+	if (isManagedMCPOAuthCredentialId(provider)) {
+		const serverUrl = mcpOAuthServerUrlFromCredentialId(provider);
+		return {
+			subject: serverUrl ? `MCP server ${truncateToWidth(serverUrl, TRUNCATE_LENGTHS.TITLE)}` : "an MCP server",
+			remedy: "Reauthorize it with /mcp reauth <name>.",
+		};
+	}
+	const account = credentialType === "api_key" ? "API key" : accountLabel(identity);
+	return { subject: `${providerLabel(provider)} ${account}`, remedy: loginRemedy(provider) };
+}
+
 /** One-line warning for a credential torn down while this session was running. */
 export function formatCredentialDisabledNotice(event: CredentialDisabledEvent): string {
-	const account = event.credentialType === "api_key" ? "API key" : accountLabel(event);
-	return sanitizeDisplayWarning(
-		`Signed out of ${providerLabel(event.provider)} ${account}: ${causeSummary(event.disabledCause)}. ${loginRemedy(event.provider)}`,
-	);
+	const { subject, remedy } = subjectAndRemedy(event.provider, event.credentialType, event);
+	return sanitizeDisplayWarning(`Signed out of ${subject}: ${causeSummary(event.disabledCause)}. ${remedy}`);
 }
 
 /** Startup replay for a tombstone the user has not acted on yet (see `AuthStorage.listActionableDisabledCredentials`). */
 export function formatDisabledCredentialReplayNotice(summary: DisabledCredentialSummary, nowMs: number): string {
 	const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
-	return sanitizeDisplayWarning(
-		`${providerLabel(summary.provider)} ${accountLabel(summary)} was signed out${ago}: ${causeSummary(summary.cause)}. ${loginRemedy(summary.provider)}`,
-	);
+	const { subject, remedy } = subjectAndRemedy(summary.provider, summary.type, summary);
+	return sanitizeDisplayWarning(`${subject} was signed out${ago}: ${causeSummary(summary.cause)}. ${remedy}`);
 }
 
 /**
