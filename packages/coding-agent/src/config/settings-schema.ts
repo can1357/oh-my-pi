@@ -223,6 +223,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
 		"Available Tools",
+		"Workspace Checkpoints",
 		"Todos",
 		"Grep & Browser",
 		"Computer",
@@ -4514,6 +4515,74 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "Checkpoint/Rewind",
 			description: "Enable the checkpoint and rewind tools for context checkpointing",
+		},
+	},
+
+	// Workspace checkpoints (`/checkpoint`, `/rollback`) — distinct from the
+	// conversation-context `checkpoint.enabled` tool above.
+	"checkpoints.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Workspace Checkpoints",
+			label: "Workspace Checkpoints",
+			description:
+				"Enable git-backed workspace snapshots and rollback (/checkpoint, /rollback). Snapshots live in refs/omp/checkpoints and never move HEAD or your branch",
+		},
+	},
+
+	"checkpoints.auto.gitOperations": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Workspace Checkpoints",
+			label: "Auto Checkpoint Before Git Operations",
+			description:
+				"Capture a workspace checkpoint before destructive git commands (reset --hard, clean -fd, checkout/restore over the tree, force push, branch -D, rebase)",
+		},
+	},
+
+	"checkpoints.auto.riskyEdits": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Workspace Checkpoints",
+			label: "Auto Checkpoint Before Risky Edits",
+			description:
+				"Capture a workspace checkpoint before an edit application that crosses the multi-file/large-payload threshold",
+		},
+	},
+
+	"checkpoints.retention.maxPerSession": {
+		type: "number",
+		default: 20,
+		ui: {
+			tab: "tools",
+			group: "Workspace Checkpoints",
+			label: "Max Checkpoints Per Session",
+			description:
+				"Retention cap per session. Oldest automatic checkpoints are pruned beyond this count; manual and pre-rollback checkpoints are never pruned",
+		},
+	},
+
+	"checkpoints.maxFileBytes": {
+		type: "number",
+		default: 10_485_760,
+		ui: {
+			tab: "tools",
+			group: "Workspace Checkpoints",
+			label: "Checkpoint Max File Size",
+			description:
+				"Files larger than this are excluded from a workspace checkpoint and recorded as skipped, so one huge blob cannot inflate the object database",
+			options: [
+				{ value: "1048576", label: "1 MiB" },
+				{ value: "10485760", label: "10 MiB" },
+				{ value: "52428800", label: "50 MiB" },
+				{ value: "104857600", label: "100 MiB" },
+			],
 		},
 	},
 

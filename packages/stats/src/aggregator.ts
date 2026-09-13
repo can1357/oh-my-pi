@@ -17,6 +17,7 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
+	getSessionSummaries as getSessionSummariesFromDb,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
@@ -33,6 +34,7 @@ import {
 	setFileOffset,
 	updateToolResults,
 	updateUserMessageLinks,
+	type SessionSummary,
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
@@ -571,4 +573,17 @@ export async function getProviderDashboardStats(range?: string | null): Promise<
 		usageSeries,
 		windowInsights,
 	};
+}
+/**
+ * Per-session usage summaries (requests, tokens, cost), grouped by session
+ * file. Consistent with the other aggregator wrappers: resolves `range` to a
+ * cutoff via {@link getTimeRangeConfig} and delegates to the db query.
+ */
+export async function getSessionSummaries(range?: string | null): Promise<SessionSummary[]> {
+	await initDb();
+	// Session managers present these as per-session lifetime totals, so an
+	// unspecified range must mean ALL-TIME, not the dashboard's 24-hour
+	// default cutoff (which would zero out older sessions).
+	const { cutoff } = getTimeRangeConfig(range ?? "all");
+	return getSessionSummariesFromDb(cutoff ?? undefined);
 }

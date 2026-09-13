@@ -100,6 +100,7 @@ import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import { emitInternalBeforeToolCall, registerAutoCheckpoints } from "../checkpoints/auto-trigger";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
@@ -1707,6 +1708,13 @@ export class AgentSession {
 		// time so a block/revision lands before concurrency resolution,
 		// tool_execution_start, and the wrapper's approval gate.
 		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
+		// Wire auto-checkpoint triggers (W2b). The subscription is process-wide and
+		// idempotent; it is inert until `checkpoints.*` settings enable it, so this
+		// unconditional call is safe on every session construction.
+		registerAutoCheckpoints({
+			getSessionId: () => this.sessionManager.getSessionId(),
+			getCwd: () => this.sessionManager.getCwd(),
+		});
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
@@ -4013,6 +4021,17 @@ export class AgentSession {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		// Auto-checkpoint internal pre-tool hook (W2b). Runs before the extension
+		// `tool_call` emit so a destructive git op or risky edit captures a checkpoint
+		// *before* the tool mutates the workspace. Gated entirely at event time and
+		// failure-isolated, so it can never block or break the command it guards.
+		await emitInternalBeforeToolCall({
+			toolName: ctx.tool.name,
+			args: ctx.args,
+			cwd: this.sessionManager.getCwd(),
+			sessionId: this.sessionManager.getSessionId(),
+			signal,
+		});
 		const runner = this.#extensionRunner;
 		if (!runner?.hasHandlers("tool_call")) return undefined;
 		const metadata = ctx.toolCall.providerMetadata;

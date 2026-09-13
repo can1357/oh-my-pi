@@ -6240,6 +6240,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	showAgentsDashboard(): void {
 		void this.#selectorController.showAgentsDashboard();
 	}
+	showSessionsDashboard(): void {
+		void this.#selectorController.showSessionsDashboard();
+	}
 	showGitUi(revision?: string): void {
 		void this.#selectorController.showGitTui(revision);
 	}

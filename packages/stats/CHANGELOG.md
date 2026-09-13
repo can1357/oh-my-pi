@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added `getSessionSummaries()`: a per-session usage query that groups `messages` by `session_file` (requests, input/output/cache tokens, cost), reused by the coding-agent `/sessions` manager.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed
