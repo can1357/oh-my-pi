@@ -345,9 +345,9 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(late.saw()).toBe(true);
 	});
 
-	it("refuses guest actions from the moment stop() begins, while the goodbye is still draining", async () => {
+	it("refuses guest actions and discovery from the moment stop() begins, while the goodbye is still draining", async () => {
 		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx);
+		host = new CollabHost(ctx, { instanceId: "stopping-host" });
 		await host.start(RELAY_URL, WEB_URL);
 		const parsed = parseCollabLink(host.link);
 		if ("error" in parsed) throw new Error(parsed.error);
@@ -382,6 +382,12 @@ describe("collab host registry lifecycle (#6099)", () => {
 		// A writable guest prompts inside that window: the host must not forward it.
 		writer.send({ t: "prompt", text: "after stop began" });
 		await handled.promise;
+		// Nor may discovery still offer the room: it is omitted (not pruned —
+		// teardown withdraws it) and no link is handed out.
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		await expect(registry.resolveCollabHostLink("stopping-host", "control", { dir: tmp })).rejects.toMatchObject({
+			code: "not_found",
+		});
 		flush.mockRestore();
 		drain.resolve();
 		await stopping;

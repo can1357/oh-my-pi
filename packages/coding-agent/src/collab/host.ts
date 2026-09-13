@@ -545,11 +545,13 @@ export class CollabHost {
 
 	/**
 	 * Non-capability snapshot; URLs are only ever returned by `link`. A host
-	 * whose session is not the active one answers `snapshot_unavailable`, so a
-	 * listing omits it — without pruning — instead of describing the other
-	 * session under this room's identity.
+	 * that is ending, or whose session is not the active one, answers
+	 * `snapshot_unavailable` to every registry op (the link op reads the
+	 * snapshot first), so a listing omits it — without pruning — and no link
+	 * is handed out for a room that already refuses joins.
 	 */
 	#registrySnapshot(): CollabHostSnapshot {
+		if (this.ending) throw new Error("collab host stopping");
 		if (!this.#sessionStillCurrent()) throw new Error("session switched");
 		const model = this.#ctx.session.model;
 		return {
