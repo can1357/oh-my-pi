@@ -1546,6 +1546,126 @@ export default function (pi) {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("drains a reload-triggered resources_discover sendUserMessage via refreshSkills (regression: PR #9379 review, session-tools.ts refreshSkills)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-refresh-drain-"));
+		const authStorage = createInMemoryAuthStorage();
+		// `AgentSession.prompt` preflights a provider key through the registry; the
+		// reload-triggered turn below must not depend on the developer's env.
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		let session: AgentSession | undefined;
+		try {
+			// A `resources_discover` handler that only announces itself on a
+			// *reload* pass (mirrors a real extension reacting to `/reload-plugins`),
+			// via `pi.sendUserMessage()` — the same shared action context every
+			// other handler uses. The handler returns synchronously, but
+			// `sendUserMessage` starts an async turn the action never exposes a
+			// promise for; `refreshSkills()`'s own call site went out of scope
+			// long before this fires, so nothing but the runner-level tracking
+			// this regresses can settle it.
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "reload-announce.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", event => {
+		if (event.reason === "reload") {
+			pi.sendUserMessage("announcing a reload");
+		}
+		return undefined;
+	});
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			// The model call blocks on a manually-released gate, and
+			// `modelCallStarted` flips synchronously the instant the handler is
+			// invoked — a deterministic proof that `refreshSkills()` did or didn't
+			// wait for the turn, with no wall-clock race.
+			let modelCallStarted = false;
+			const { promise: modelGate, resolve: releaseModelGate } = Promise.withResolvers<void>();
+			const mock = createMockModel({
+				handler: async () => {
+					modelCallStarted = true;
+					await modelGate;
+					return { content: ["ack"] };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+				// A fixed snapshot merged from resources_discover (rather than a
+				// full reloadable rescan) keeps `refreshSkills()`'s own skill-side
+				// work a no-op when the handler contributes no directories (as
+				// here), isolating the assertion below to the drain this
+				// regresses instead of racing an unrelated full-rescan cost.
+				skills: [],
+				skillsReloadable: false,
+				mergeDiscoveredSkillPaths: true,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+			expect(runtimeErrors).toEqual([]);
+			// Startup's own resources_discover pass fires with reason "startup",
+			// not "reload" — no send yet.
+			expect(session.isStreaming).toBe(false);
+
+			let refreshSettled = false;
+			const refreshPromise = session.refreshSkills().then(() => {
+				refreshSettled = true;
+			});
+			while (!modelCallStarted) {
+				await Bun.sleep(1);
+			}
+			// The reload-triggered turn has started but is still gated — a caller
+			// that fails to drain pending sends would have already returned here.
+			expect(refreshSettled).toBe(false);
+
+			releaseModelGate();
+			await refreshPromise;
+
+			expect(session.isStreaming).toBe(false);
+			expect(
+				session.messages.some(
+					m => m.role === "assistant" && m.content.some(c => c.type === "text" && c.text === "ack"),
+				),
+			).toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 });
 
 describe("collision handling", () => {
