@@ -64,12 +64,12 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
 }
 
-/** Detects consecutive identical assistant tool calls across model turns. */
+/** Detects repeated calls and bounded cycles with unchanged observed outcomes. */
 export class ToolCallLoopGuard {
 	#threshold: number;
 	#exemptTools: ReadonlySet<string>;
-	#lastHash: string | undefined;
-	#count = 0;
+	#recent: { hash: string; outcome: string | undefined }[] = [];
+	#warned = false;
 
 	constructor(options: ToolCallLoopGuardOptions) {
 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
@@ -79,34 +79,57 @@ export class ToolCallLoopGuard {
 	/** Records one completed turn and returns the threshold hit, if any. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
-		if (toolCalls.length === 0) {
-			this.#lastHash = undefined;
-			this.#count = 0;
-			return null;
-		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
-			this.#lastHash = undefined;
-			this.#count = 0;
+			this.#recent.length = 0;
+			this.#warned = false;
 			return null;
 		}
 
 		const canonicalCalls = toolCalls
 			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
 			.sort();
-		const turnHash = JSON.stringify(canonicalCalls);
-		if (turnHash === this.#lastHash) {
-			this.#count++;
-		} else {
-			this.#lastHash = turnHash;
-			this.#count = 1;
+		const turnHash = Bun.hash(JSON.stringify(canonicalCalls)).toString();
+		const outcomes = toolCalls.map(tc => {
+			const result = turn.toolResults.find(candidate => candidate.toolCallId === tc.id);
+			return result
+				? JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments), result.isError, result.content])
+				: undefined;
+		});
+		const outcome = outcomes.every(value => value !== undefined)
+			? Bun.hash(outcomes.sort().join("\n")).toString()
+			: undefined;
+		this.#recent.push({ hash: turnHash, outcome });
+		// Retain only enough turns to prove cycles bounded by the existing threshold.
+		if (this.#recent.length > this.#threshold * this.#threshold) this.#recent.shift();
+		const end = this.#recent.length;
+		let recurring = false;
+		for (let period = 1; period <= Math.min(this.#threshold, Math.floor(end / this.#threshold)); period++) {
+			recurring = true;
+			for (let index = end - 1; index >= end - period * (this.#threshold - 1); index--) {
+				const current = this.#recent[index]!;
+				const previous = this.#recent[index - period]!;
+				if (
+					current.hash !== previous.hash ||
+					(period > 1 && (current.outcome === undefined || previous.outcome === undefined)) ||
+					(current.outcome !== undefined && previous.outcome !== undefined && current.outcome !== previous.outcome)
+				) {
+					recurring = false;
+					break;
+				}
+			}
+			if (recurring) break;
 		}
-
-		if (this.#count !== this.#threshold) return null;
+		if (!recurring) {
+			this.#warned = false;
+			return null;
+		}
+		if (this.#warned) return null;
+		this.#warned = true;
 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
-			count: this.#count,
+			count: this.#threshold,
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),

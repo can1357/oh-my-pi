@@ -18,6 +18,11 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	getLatestTodoPhasesFromEntries,
+	type TodoPhase,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -115,6 +120,7 @@ async function createHarness(
 	options?: {
 		onAgentEnd?: (willContinue: boolean | undefined) => void;
 		resolveFallbackTool?: (name: string) => AgentTool | undefined;
+		persist?: boolean;
 	},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
@@ -145,7 +151,9 @@ async function createHarness(
 		resolveFallbackTool: options?.resolveFallbackTool,
 	});
 
-	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const sessionManager = options?.persist
+		? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"))
+		: SessionManager.inMemory(tempDir.path());
 	let extensionRunner: ExtensionRunner | undefined;
 	if (options?.onAgentEnd) {
 		const runtime = new ExtensionRuntime();
@@ -213,6 +221,98 @@ async function expectNoActiveCheckpointError(session: AgentSession): Promise<voi
 }
 
 describe("AgentSession checkpoint rewind branch context", () => {
+	it("preserves canonical todo status and blockers through exploration rewind and reload", async () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Implementation",
+				tasks: [
+					{ content: "Preserve completed work", status: "completed" },
+					{ content: "Promote usage fixture", status: "blocked", blocker: "Consumer migration" },
+				],
+			},
+		];
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "inspect" } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report: "inspection complete" } }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+		session.setTodoPhases(phases);
+		await session.prompt("inspect with checkpoint");
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(getLatestTodoPhasesFromEntries(session.sessionManager.getBranch())).toEqual(phases);
+	});
+
+	it.each(["append", "clear"])(
+		"persists a post-checkpoint %s without changing ordinary branch history",
+		async operation => {
+			const original: TodoPhase[] = [
+				{ name: "Work", tasks: [{ content: "Existing obligation", status: "in_progress" }] },
+			];
+			const next: TodoPhase[] =
+				operation === "clear"
+					? []
+					: [
+							{ name: "Work", tasks: [{ content: "Existing obligation", status: "completed" }] },
+							{
+								name: "Follow-up",
+								tasks: [{ content: "New obligation", status: "blocked", blocker: "External dependency" }],
+							},
+						];
+			const todo: AgentTool = {
+				name: "todo",
+				label: "Todo",
+				description: "Update canonical obligations",
+				parameters: type({}),
+				async execute() {
+					session.setTodoPhases(next);
+					return {
+						content: [{ type: "text", text: "Updated" }],
+						details: { op: operation === "clear" ? "rm" : "append", phases: next },
+					};
+				},
+			};
+			const { session } = await createHarness(
+				[
+					{
+						content: [{ type: "toolCall", id: "cp", name: "checkpoint", arguments: { goal: "inspect" } }],
+						stopReason: "toolUse",
+					},
+					{ content: [{ type: "toolCall", id: "update", name: "todo", arguments: {} }], stopReason: "toolUse" },
+					{
+						content: [
+							{ type: "toolCall", id: "rw", name: "rewind", arguments: { report: "inspection complete" } },
+						],
+						stopReason: "toolUse",
+					},
+					{ content: ["DONE"], stopReason: "stop" },
+				],
+				[checkpointTool as AgentTool, rewindTool as AgentTool, todo],
+				{ persist: true },
+			);
+			session.setTodoPhases(original);
+			const originalEntry = session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
+				phases: original,
+			});
+			await session.prompt("inspect and reconcile obligations");
+			expect(session.getTodoPhases()).toEqual(next);
+			await session.sessionManager.flush();
+			const reopened = await SessionManager.open(session.sessionManager.getSessionFile()!);
+			try {
+				expect(getLatestTodoPhasesFromEntries(reopened.getBranch())).toEqual(next);
+				reopened.branch(originalEntry);
+				expect(getLatestTodoPhasesFromEntries(reopened.getBranch())).toEqual(original);
+			} finally {
+				await reopened.close();
+			}
+		},
+	);
+
 	it("rebuilds active history through branch_summary before the post-rewind assistant turn", async () => {
 		const report = "findings: kept checkpoint; risks: stale signed thinking";
 		const { session, mock } = await createHarness([

@@ -2952,7 +2952,7 @@ export class AgentSession {
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
 		if (event.type === "message_end" && event.message.role === "toolResult") {
-			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			this.#todo.onToolResult(event.message.toolName, event.message.isError, event.message);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
@@ -8368,16 +8368,18 @@ export class AgentSession {
 		if (!checkpointState) {
 			return;
 		}
+		const rewindDetails = {
+			startedAt: checkpointState.startedAt,
+			checkpointTodoPhases: this.#todo.phases,
+		};
 		this.#bash.withBranchTransition(() => {
 			try {
-				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
-					startedAt: checkpointState.startedAt,
-				});
+				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, rewindDetails);
 			} catch (error) {
 				logger.warn("Rewind branch checkpoint missing, falling back to root", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
+				this.sessionManager.branchWithSummary(null, report, rewindDetails);
 			}
 		});
 

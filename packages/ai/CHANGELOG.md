@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Repeated-call steering detects bounded alternating cycles with unchanged outcomes and allows fresh results without a false warning ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Exploration rewind preserves canonical todo updates, including appended tasks, blockers, and explicit clears, through disk reload ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+- Bounded source reads retain their selected lines under a smaller generic artifact-spill policy ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+- Enabled checkpoint and rewind tools expose native schemas; malformed device payloads return their expected schema without execution ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+- Todo mutation accounting distinguishes applied AST edits from previews and observations without disabling stop-time reminders ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

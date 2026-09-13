@@ -146,7 +146,6 @@ describe("advisor tool-call loop guard", () => {
 		// abort after one already-scheduled request, bounding twenty repeats at 7.
 		expect(contexts).toHaveLength(7);
 		const delivered = JSON.stringify(contexts[3]!.messages);
-		expect(delivered).toContain("You called `read` 3 consecutive times");
 		expect(delivered).toContain("ENOENT: no such file or directory");
 		const redirects = advisor.state.messages.filter(
 			message => message.role === "user" && JSON.stringify(message.content).includes("tool_call_loop_detected"),

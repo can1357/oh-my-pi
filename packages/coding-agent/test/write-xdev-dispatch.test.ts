@@ -52,6 +52,50 @@ function createTestXdevState(tools: Tool[], builtInNames: Iterable<string> = too
 }
 
 describe("read and write route xd:// device URLs", () => {
+	it("exposes enabled checkpoint and rewind with native parameter schemas", async () => {
+		const tools = await createTools(
+			xdevSession(process.cwd(), {
+				settings: Settings.isolated({ "checkpoint.enabled": true }),
+			}),
+		);
+		for (const name of ["checkpoint", "rewind"]) {
+			const tool = tools.find(tool => tool.name === name);
+			expect(tool).toBeDefined();
+			expect(tool!.parameters).toBeDefined();
+		}
+		const disabled = await createTools(
+			xdevSession(process.cwd(), {
+				settings: Settings.isolated({ "checkpoint.enabled": false }),
+			}),
+		);
+		expect(disabled.some(tool => tool.name === "checkpoint" || tool.name === "rewind")).toBe(false);
+	});
+
+	it("returns the expected schema for malformed device payloads without executing them", async () => {
+		let executions = 0;
+		const target: AgentTool = {
+			name: "inspect_target",
+			label: "Inspect",
+			description: "Inspect the requested resource",
+			parameters: type({ resource: "string" }),
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "Executed" }] };
+			},
+		};
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev: createTestXdevState([target]) }));
+		for (const content of ['{"resource":', "[]", "{}"]) {
+			const result = await write.execute("invalid-device", { path: "xd://inspect_target", content });
+			expect(result.isError).toBe(true);
+			const text = result.content.find(part => part.type === "text")?.text ?? "";
+			expect(text).toContain("resource");
+			expect(text).toContain("string");
+		}
+		expect(executions).toBe(0);
+		await write.execute("valid-device", { path: "xd://inspect_target", content: '{"resource":"file.ts"}' });
+		expect(executions).toBe(1);
+	});
+
 	it("lists, documents, and dispatches an ast_edit device", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-"));
 		try {

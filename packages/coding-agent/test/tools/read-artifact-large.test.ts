@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatTruncationMetaNotice, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -68,6 +71,115 @@ describe("read tool large artifact handling", () => {
 		unregisterArtifactsDir?.();
 		resetRegisteredArtifactDirsForTests();
 		await fs.rm(testDir, { recursive: true, force: true });
+	});
+
+	it("keeps an explicit source range visible under a smaller generic spill policy", async () => {
+		const source = Array.from({ length: 56 }, (_, n) => `const declaration_${n} = "${"x".repeat(64)}";`).join("\n");
+		await Bun.write(path.join(testDir, "bounded.ts"), source);
+		const session = makeSession(testDir);
+		session.settings = Settings.isolated({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactTailLines": 5,
+		});
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const context = {
+			settings: session.settings,
+			sessionManager: SessionManager.inMemory(testDir),
+		} as unknown as AgentToolContext;
+		for (const selector of [":1-56", ":raw:1-56"]) {
+			const result = await wrapped.execute(
+				"bounded-source",
+				{ path: `bounded.ts${selector}` },
+				undefined,
+				undefined,
+				context,
+			);
+			const output = getTextOutput(result);
+			expect(output).toContain('const declaration_28 = "');
+			expect(output).not.toContain("artifact://");
+			if (selector.includes("raw")) expect(output).toContain(source);
+		}
+	});
+
+	it("keeps an ACP-buffer bounded selection visible under a smaller generic spill policy", async () => {
+		const source = Array.from({ length: 56 }, (_, n) => `const declaration_${n} = "${"x".repeat(64)}";`).join("\n");
+		await Bun.write(path.join(testDir, "bounded.ts"), source);
+		const session = makeSession(testDir);
+		session.settings = Settings.isolated({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactTailLines": 5,
+		});
+		// The editor buffer is the source of truth and differs from disk, so a
+		// disk fallback cannot mask whether the bridge result was returned.
+		const buffer = source.replace("declaration_28", "buffered_28");
+		const bridgeReads: string[] = [];
+		session.getClientBridge = () => ({
+			capabilities: { readTextFile: true },
+			readTextFile: async ({ path: bridgePath }) => {
+				bridgeReads.push(bridgePath);
+				return buffer;
+			},
+		});
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const context = {
+			settings: session.settings,
+			sessionManager: SessionManager.inMemory(testDir),
+		} as unknown as AgentToolContext;
+		const selectors = [":1-56", ":raw:1-56", ":1-29,31-56"];
+		for (const selector of selectors) {
+			const result = await wrapped.execute(
+				"bounded-bridge",
+				{ path: `bounded.ts${selector}` },
+				undefined,
+				undefined,
+				context,
+			);
+			const output = getTextOutput(result);
+			expect(output).toContain("buffered_28");
+			expect(output).not.toContain("artifact://");
+		}
+		expect(bridgeReads).toEqual(selectors.map(() => path.join(testDir, "bounded.ts")));
+	});
+
+	it.each([false, true])("preserves a maximum source window with renderer overhead (ACP=%s)", async acp => {
+		const source = Array.from({ length: DEFAULT_MAX_LINES * 2 }, (_, n) => `const m${n}=0;`).join("\n");
+		await Bun.write(path.join(testDir, "maximum.ts"), source);
+		const session = makeSession(testDir);
+		session.settings = Settings.isolated({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactTailLines": 5,
+		});
+		if (acp) {
+			session.getClientBridge = () => ({
+				capabilities: { readTextFile: true },
+				readTextFile: async () => source,
+			});
+		}
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const context = {
+			settings: session.settings,
+			sessionManager: SessionManager.inMemory(testDir),
+		} as unknown as AgentToolContext;
+		for (const selector of [`:1-${DEFAULT_MAX_LINES}`, `:raw:1-${DEFAULT_MAX_LINES}`]) {
+			const result = await wrapped.execute(
+				"maximum-window",
+				{ path: `maximum.ts${selector}` },
+				undefined,
+				undefined,
+				context,
+			);
+			const output = getTextOutput(result);
+			expect(output.match(/const m\d+=/g)?.length).toBe(DEFAULT_MAX_LINES);
+			expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+		}
+		const oversized = await wrapped.execute(
+			"oversized-window",
+			{ path: `maximum.ts:1-${DEFAULT_MAX_LINES},${DEFAULT_MAX_LINES + 1}-${DEFAULT_MAX_LINES * 2}` },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(oversized.details?.meta?.truncation?.artifactId).toBeDefined();
 	});
 
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
