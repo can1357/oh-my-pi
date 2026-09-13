@@ -496,7 +496,8 @@ export interface AgentIdentity {
 	 * Registry id of the direct parent agent as supplied to
 	 * `createAgentSession`; undefined for the top-level session. Reported
 	 * verbatim — linkage, not a spawn guarantee (a `parentAgentId`-only caller
-	 * is `kind: "main"`). A `/tan` fork reports the job-owning main session.
+	 * is `kind: "main"`; a `parentTaskPrefix`-only caller is `"sub"` with this
+	 * field absent). A `/tan` fork reports the job-owning main session.
 	 */
 	readonly parentId?: string;
 	/**
@@ -504,9 +505,11 @@ export interface AgentIdentity {
 	 * own id. Entries are the parent links as supplied at spawn time, so an
 	 * entry can be an id that is not currently registered in the registry —
 	 * chain membership is linkage, not a liveness guarantee. `[]` for the
-	 * top-level session and every child of `"Main"` (`parentId` is still
-	 * `"Main"` there). Frozen like the surrounding identity: copy rather than
-	 * mutate.
+	 * top-level session, for every child of `"Main"` (`parentId` is still
+	 * `"Main"` there), and for a `parentTaskPrefix`-only caller that supplies
+	 * no `parentAgentId` to walk from — the chain follows `parentAgentId`, not
+	 * `parentTaskPrefix`. Frozen like the surrounding identity: copy rather
+	 * than mutate.
 	 */
 	readonly parentChain: readonly string[];
 }
