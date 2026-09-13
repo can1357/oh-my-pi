@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -1231,6 +1232,54 @@ describe("model cache spec round trip", () => {
 			expect(cached.stale).toBe(false);
 			expect(fetches).toBe(2);
 		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("warns with redacted identities when an authoritative discovery drops previously advertised models", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-dropped-discovery-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const provider = "catalog apiKey=provider-secret";
+		const keptModel = completionsSpec({ id: "https://models.example/model?token=kept-secret&ref=keep", provider });
+		const entitledModel = completionsSpec({
+			id: "https://models.example/model?token=dropped-secret&ref=keep",
+			provider,
+		});
+		const labelledModel = completionsSpec({ id: "family apiKey=labelled-secret", provider });
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] = [keptModel, entitledModel, labelledModel];
+		let currentTime = 1_000_000;
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const options = {
+			providerId: provider,
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => discoveredModels,
+		};
+		try {
+			await resolveProviderModels(options, "online");
+			expect(warnSpy).not.toHaveBeenCalled();
+
+			// The account holding the entitlement was signed out: the next
+			// authoritative catalog no longer carries its model.
+			discoveredModels = [keptModel];
+			currentTime += 3 * 60 * 60 * 1_000;
+			const shrunk = await resolveProviderModels(options, "online");
+			expect(shrunk.models.map(model => model.id)).toEqual([keptModel.id]);
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0]?.[1]).toEqual({
+				provider: "catalog apiKey=[redacted]",
+				dropped: ["https://models.example/model?token=[redacted]&ref=keep", "family apiKey=[redacted]"],
+			});
+
+			// A stable catalog is not news.
+			warnSpy.mockClear();
+			currentTime += 3 * 60 * 60 * 1_000;
+			await resolveProviderModels(options, "online");
+			expect(warnSpy).not.toHaveBeenCalled();
+		} finally {
+			warnSpy.mockRestore();
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});

@@ -9,10 +9,25 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
+	$env,
+	$envExact,
+	extractRetryHint,
+	formatDuration,
+	getAgentDbPath,
+	logger,
+	redactSecrets,
+	redactUrlSecrets,
+	sanitizeText,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
+import {
+	copyOAuthCredentialIdentity,
+	isAutomaticDisableCause,
+	isOAuthCredentialIdentityRecovered,
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
+	resolveOAuthCredentialIdentity,
 	SqliteAuthCredentialStore,
 	serializeCredential,
 	USAGE_REPORT_TTL_MS,
@@ -77,7 +92,12 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
-export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export {
+	isAutomaticDisableCause,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	SqliteAuthCredentialStore,
+} from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -195,13 +215,106 @@ export interface DisabledCredentialSummary {
 	type: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
+	/** Google project the credential was scoped to (`google-gemini-cli`, `google-antigravity`). */
+	projectId?: string;
 	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
-	/** Verbatim disable cause captured when the row was torn down. */
+	/** Disable cause; AuthStorage projects credential-redacted text for display/transport. */
 	cause: string;
 	/** Epoch ms the row was disabled (SQLite `updated_at`), when known. */
 	disabledAtMs?: number;
+}
+
+/** Account identity of a live credential, matched against tombstones by {@link isActionableCredentialDisable}. */
+export interface CredentialAccountIdentity {
+	provider: string;
+	/** Only an OAuth credential can recover an OAuth tombstone; an API key for the same provider proves nothing. */
+	type?: AuthCredential["type"];
+	email?: string;
+	accountId?: string;
+	projectId?: string;
+	orgId?: string;
+}
+
+/**
+ * Whether an automatically disabled OAuth credential still needs a re-login.
+ * Recovery shares persistence's provider-specific identity priority, one-way
+ * organization upgrades, and alternate-identity matching. Only email is case
+ * insensitive; all identity fields are trimmed. An API key proves no recovery.
+ *
+ * Summaries expose identity fields, not tokens. If matching requires an alternate
+ * token claim absent from those fields, keep the notice rather than infer recovery.
+ */
+export function isActionableCredentialDisable(
+	summary: DisabledCredentialSummary,
+	activeAccounts: readonly CredentialAccountIdentity[],
+): boolean {
+	if (summary.type !== "oauth" || !isAutomaticDisableCause(summary.cause)) return false;
+	const identity = resolveOAuthCredentialIdentity(summary.provider, summary);
+	return !activeAccounts.some(account => {
+		if (account.provider !== summary.provider || account.type === "api_key") return false;
+		return isOAuthCredentialIdentityRecovered(identity, resolveOAuthCredentialIdentity(account.provider, account));
+	});
+}
+
+/**
+ * Human-sized disable cause: the upstream `error_description` when embedded,
+ * else the first clause; never longer than 80 characters. A token endpoint's
+ * failure body can echo the submitted refresh token or client secret, so
+ * credential-shaped values are redacted first — the verbatim cause stays only
+ * in the store.
+ */
+export function summarizeDisableCause(cause: string): string {
+	const redacted = redactSecrets(cause);
+	const description = redacted.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
+	const stripped = description ?? redacted.replace(/^oauth refresh failed:\s*/i, "");
+	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
+	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
+}
+
+/**
+ * Display label for an OAuth account: email, account id, or Google project,
+ * qualified by the organization when it is a distinct value. `mask` runs over
+ * each part so redacting surfaces (`omp usage --redact`) can substitute
+ * placeholders.
+ */
+export function credentialAccountLabel(
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "projectId" | "orgId" | "orgName">,
+	mask: (part: string) => string = part => part,
+): string {
+	const base = identity.email ?? identity.accountId ?? identity.projectId ?? "OAuth account";
+	const org = identity.orgName ?? identity.orgId;
+	if (!org || org === base) return mask(base);
+	return `${mask(base)} · ${mask(org)}`;
+}
+
+/** Bounds, in terminal columns, for provider-controlled text inside a {@link AIError.ModelEntitlementError} message. */
+const ENTITLEMENT_DIAGNOSTIC_LABEL_MAX = 60;
+const ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX = 80;
+const ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX = 200;
+/** Budget for the tombstone lookup while explaining a denial; the error itself is already known. */
+const ENTITLEMENT_LOOKUP_BUDGET_MS = 2_000;
+/** Accounts named in a verdict before the rest are counted; large broker pools must not overflow the renderer. */
+const ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX = 8;
+
+/**
+ * One line of provider-controlled text, safe for a terminal error renderer and
+ * no wider than `maxColumns`. Measured in display columns (wide CJK glyphs and
+ * emoji count double) and cut at a code point, never inside a surrogate pair.
+ */
+function boundedDiagnostic(text: string, maxColumns: number): string {
+	const clean = sanitizeText(redactSecrets(text)).replace(/\s+/g, " ").trim();
+	if (Bun.stringWidth(clean) <= maxColumns) return clean;
+	let kept = "";
+	let width = 0;
+	for (const glyph of clean) {
+		const glyphWidth = Bun.stringWidth(glyph);
+		if (width + glyphWidth > maxColumns - 1) break;
+		kept += glyph;
+		width += glyphWidth;
+	}
+	return `${kept}…`;
 }
 
 /**
@@ -401,7 +514,7 @@ export interface AuthCredentialStore {
 	 * per-credential data; local SQLite stores omit it — their reads are
 	 * always current.
 	 */
-	refreshSnapshot?(): Promise<unknown>;
+	refreshSnapshot?(signal?: AbortSignal): Promise<unknown>;
 	/**
 	 * Disabled credential tombstones (see {@link DisabledCredentialSummary}).
 	 * Optional: remote stores forward to the broker's
@@ -571,9 +684,12 @@ export interface AuthCredentialStore {
 /**
  * Event payload describing a credential that was just soft-disabled.
  *
- * Today the only call site is OAuth refresh failures with a definitive cause
- * (`invalid_grant`, `401/403` not from a network blip, etc.) — the
- * disabled_cause string is the verbatim error captured for forensics.
+ * Fired by every automatic teardown — a definitive OAuth refresh failure
+ * (`invalid_grant`, `revoked`, …), an upstream response that invalidated the
+ * bearer, or a broker-issued disable. The disabled_cause string is the
+ * verbatim error captured for forensics; the identity fields mirror the
+ * tombstone's {@link DisabledCredentialSummary} so a subscriber can name the
+ * account that was signed out.
  *
  * Subscribers can use this to surface a notification, banner, or auto-launch
  * a re-login flow instead of letting the credential silently disappear.
@@ -581,6 +697,35 @@ export interface AuthCredentialStore {
 export interface CredentialDisabledEvent {
 	provider: string;
 	disabledCause: string;
+	/** Database row id of the tombstoned credential (matches {@link StoredAuthCredential.id}). */
+	credentialId: number;
+	/** Named `credentialType`, not `type`: the extension runner spreads this event under its own `type` discriminator. */
+	credentialType: AuthCredential["type"];
+	email?: string;
+	accountId?: string;
+	projectId?: string;
+	orgId?: string;
+	orgName?: string;
+}
+
+/** Build the {@link CredentialDisabledEvent} for a row that is being torn down. */
+function credentialDisabledEvent(
+	provider: string,
+	credentialId: number,
+	credential: AuthCredential,
+	disabledCause: string,
+): CredentialDisabledEvent {
+	const event: CredentialDisabledEvent = {
+		provider,
+		disabledCause,
+		credentialId,
+		credentialType: credential.type,
+	};
+	if (credential.type === "oauth") {
+		copyOAuthCredentialIdentity(event, credential);
+		if (credential.orgName) event.orgName = credential.orgName;
+	}
+	return event;
 }
 
 export type AuthStorageOptions = {
@@ -1508,10 +1653,7 @@ export class AuthStorage {
 			try {
 				listener(this.#generation);
 			} catch (error) {
-				logger.debug("AuthStorage generation listener failed", {
-					reason,
-					error: String(error),
-				});
+				logger.debug("AuthStorage generation listener failed", { reason, error: redactSecrets(String(error)) });
 			}
 		}
 	}
@@ -1681,6 +1823,7 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
+		this.#remapIndexedCredentialState(provider, current, credentials);
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -1697,6 +1840,56 @@ export class AuthStorage {
 			this.#data.set(provider, credentials);
 		}
 		this.#bumpGeneration("credentials");
+	}
+
+	/**
+	 * In-memory backoff and session stickiness use a credential's position in the provider
+	 * array. A reload that removes or reorders rows — a refreshed broker
+	 * snapshot, a sibling process's login — would otherwise leave every block
+	 * attached to whichever credential now occupies its old index, and an
+	 * exhaustion scan could charge one account's model denial to an untried
+	 * sibling. Carry each entry over by credential id and drop the ones whose
+	 * row is gone; persisted blocks are keyed by id already.
+	 */
+	#remapIndexedCredentialState(
+		provider: string,
+		previous: readonly StoredCredential[],
+		next: readonly StoredCredential[],
+	): void {
+		if (previous.every((entry, index) => next[index]?.id === entry.id)) return;
+		const nextIndexById = new Map(next.map((entry, index) => [entry.id, index] as const));
+		// Keys are `provider:type` or `provider:type\0scope`; match per type so a
+		// provider id that is a prefix of another (managed MCP ids embed URLs)
+		// cannot claim the other's maps.
+		const providerKeys = (["oauth", "api_key"] as const).map(type => this.#getProviderTypeKey(provider, type));
+		const belongs = (backoffKey: string): boolean =>
+			providerKeys.some(key => backoffKey === key || backoffKey.startsWith(`${key}\0`));
+		const remap = <T>(maps: Map<string, Map<number, T>>): void => {
+			for (const [backoffKey, byIndex] of maps) {
+				if (!belongs(backoffKey)) continue;
+				const remapped = new Map<number, T>();
+				for (const [index, value] of byIndex) {
+					const id = previous[index]?.id;
+					const nextIndex = id === undefined ? undefined : nextIndexById.get(id);
+					if (nextIndex !== undefined) remapped.set(nextIndex, value);
+				}
+				if (remapped.size === 0) maps.delete(backoffKey);
+				else maps.set(backoffKey, remapped);
+			}
+		};
+		remap(this.#credentialBackoff);
+		remap(this.#credentialBackoffProviderTimed);
+		remap(this.#credentialBackoffProbeAfter);
+		const sessions = this.#sessionLastCredential.get(provider);
+		if (sessions) {
+			for (const [sessionId, value] of sessions) {
+				const id = previous[value.index]?.id;
+				const index = id === undefined ? undefined : nextIndexById.get(id);
+				if (index === undefined || next[index]?.credential.type !== value.type) sessions.delete(sessionId);
+				else value.index = index;
+			}
+			if (sessions.size === 0) this.#sessionLastCredential.delete(provider);
+		}
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -1938,6 +2131,32 @@ export class AuthStorage {
 			) {
 				blockedUntil = persistedScopedBlockedUntil;
 			}
+		}
+		return blockedUntil;
+	}
+
+	/**
+	 * Block expiry written under exactly `blockScope` — in memory or persisted —
+	 * ignoring the unscoped provider key that
+	 * {@link AuthStorage.#getCredentialBlockedUntil} always folds in. Answers
+	 * "was this credential blocked for this scope", not "is it usable now".
+	 */
+	#getScopedCredentialBlockedUntil(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		blockScope: string,
+	): number | undefined {
+		let blockedUntil = this.#getCredentialBlockedUntilForKey(
+			this.#toScopedBackoffKey(providerKey, blockScope),
+			credentialIndex,
+			Date.now(),
+		);
+		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
+		if (credentialId === undefined) return blockedUntil;
+		const persistedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
+		if (persistedBlockedUntil !== undefined && (blockedUntil === undefined || persistedBlockedUntil > blockedUntil)) {
+			blockedUntil = persistedBlockedUntil;
 		}
 		return blockedUntil;
 	}
@@ -2443,7 +2662,7 @@ export class AuthStorage {
 		const updated = entries.filter((_value, idx) => idx !== index);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
-		this.#emitCredentialDisabled({ provider, disabledCause });
+		this.#emitCredentialDisabled(credentialDisabledEvent(provider, target.id, expectedCredential, disabledCause));
 		return true;
 	}
 
@@ -2499,6 +2718,22 @@ export class AuthStorage {
 	}
 
 	#emitCredentialDisabled(event: CredentialDisabledEvent): void {
+		// The only log line any automatic teardown produces in a plain session:
+		// extension handlers are optional and the broker daemon is the only
+		// built-in subscriber, so without this an account can vanish from the
+		// pool with no trace in ~/.omp/logs. A managed MCP credential's id embeds
+		// its server URL, query string included, and a token endpoint's failure
+		// body can echo what was submitted, so both are redacted first.
+		logger.warn("Auth credential disabled", {
+			...event,
+			email: event.email === undefined ? undefined : redactSecrets(event.email),
+			accountId: event.accountId === undefined ? undefined : redactSecrets(event.accountId),
+			projectId: event.projectId === undefined ? undefined : redactSecrets(event.projectId),
+			orgId: event.orgId === undefined ? undefined : redactSecrets(event.orgId),
+			orgName: event.orgName === undefined ? undefined : redactSecrets(event.orgName),
+			provider: redactSecrets(redactUrlSecrets(event.provider)),
+			disabledCause: redactSecrets(event.disabledCause),
+		});
 		if (this.#credentialDisabledListeners.size === 0) {
 			// No subscribers — buffer for later replay. Cap the backlog so a process that runs
 			// without subscribers for a long time can't grow memory unboundedly; drop oldest
@@ -2523,8 +2758,8 @@ export class AuthStorage {
 	): void {
 		const logListenerError = (error: unknown): void => {
 			logger.warn("onCredentialDisabled listener threw", {
-				provider: event.provider,
-				error: String(error),
+				provider: redactSecrets(redactUrlSecrets(event.provider)),
+				error: redactSecrets(String(error)),
 			});
 		};
 		try {
@@ -2751,7 +2986,7 @@ export class AuthStorage {
 									})),
 							);
 							this.#resetProviderAssignments(provider);
-							this.#emitCredentialDisabled({ provider, disabledCause });
+							this.#emitCredentialDisabled(credentialDisabledEvent(provider, row.id, current, disabledCause));
 							return { credential: undefined, refreshed: false, removed: true };
 						}
 						await this.reload();
@@ -3558,8 +3793,8 @@ export class AuthStorage {
 				});
 			}
 			logger.debug("AuthStorage usage fetch failed", {
-				provider: request.provider,
-				error: String(error),
+				provider: redactSecrets(redactUrlSecrets(request.provider)),
+				error: redactSecrets(String(error)),
 			});
 			return null;
 		}
@@ -5295,9 +5530,9 @@ export class AuthStorage {
 					const errorMsg = String(error);
 					const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
 					logger.debug("OAuth preflight refresh failed", {
-						provider,
+						provider: redactSecrets(redactUrlSecrets(provider)),
 						index: candidate.selection.index,
-						error: errorMsg,
+						error: redactSecrets(errorMsg),
 						isDefinitiveFailure,
 					});
 					if (isDefinitiveFailure) {
@@ -5449,7 +5684,7 @@ export class AuthStorage {
 			const latestCredential = latestRow?.credential;
 			if (latestCredential?.type === "oauth" && latestCredential.refresh !== attemptedCredential.refresh) {
 				logger.debug("OAuth refresh race detected; another process rotated token first", {
-					provider,
+					provider: redactSecrets(redactUrlSecrets(provider)),
 					index,
 					credentialId,
 				});
@@ -5476,7 +5711,10 @@ export class AuthStorage {
 						`oauth refresh failed: ${errorMsg}`,
 					);
 		if (!disabled) {
-			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", { provider, index });
+			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", {
+				provider: redactSecrets(redactUrlSecrets(provider)),
+				index,
+			});
 			await this.reload();
 			return "cas-lost";
 		}
@@ -5836,9 +6074,9 @@ export class AuthStorage {
 			const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
 
 			logger.warn("OAuth token refresh failed", {
-				provider,
+				provider: redactSecrets(redactUrlSecrets(provider)),
 				index: selection.index,
-				error: errorMsg,
+				error: redactSecrets(errorMsg),
 				isDefinitiveFailure,
 			});
 
@@ -6827,6 +7065,152 @@ export class AuthStorage {
 	}
 
 	/**
+	 * The terminal verdict for an exact model-entitlement denial (Codex ChatGPT
+	 * account, Cursor plan) that {@link AuthStorage.rotateSessionCredential}
+	 * could not rotate away from: every credential of the provider is now
+	 * blocked for the model. Names the accounts that were denied or are parked
+	 * for another reason, the accounts torn down recently, and the way back in,
+	 * so the user is not left with the provider's bare sentence after a silent
+	 * fall-through to whichever sibling account remained.
+	 *
+	 * `undefined` for any other error, when no request model is known, and
+	 * whenever the stored pool is not proven exhausted: the failed bearer
+	 * (`options.apiKey`) must resolve to a stored credential that carries the
+	 * model-scope block — a runtime/config override, an env key, or a bearer a
+	 * peer has since refreshed resolves to nothing, and a credential parked by
+	 * an unrelated backoff was never denied this model — and no credential of
+	 * the same type may remain unblocked, since that is the pool
+	 * re-resolution rotates within (an OAuth pool is never abandoned for a
+	 * stored API key).
+	 *
+	 * The verdict becomes an assistant `errorMessage`, so every part a provider
+	 * controls — identities, disable causes, the raw Cursor sentence — is
+	 * sanitized and bounded here. The tombstone lookup is best-effort and
+	 * bounded by `options.signal` plus a short budget: an unreachable broker
+	 * must not delay an error we already know.
+	 */
+	async modelEntitlementError(
+		provider: string,
+		modelId: string | undefined,
+		error: unknown,
+		options?: { apiKey?: string; signal?: AbortSignal },
+	): Promise<AIError.ModelEntitlementError | undefined> {
+		if (typeof modelId !== "string" || options?.apiKey === undefined) return undefined;
+		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
+		const exactCodexModelPolicy =
+			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, modelId);
+		if (!exactCodexModelPolicy && !AIError.isCursorPlanAccountPolicyError(error, provider)) return undefined;
+		const modelPolicyScope = modelAccountPolicyBlockScope(provider, modelId);
+		if (modelPolicyScope === undefined) return undefined;
+
+		// The verdict is terminal, so it is judged against the pool as it is now,
+		// not a broker client's cached snapshot: another client may have signed in
+		// or unblocked a sibling since. One bounded budget covers this and the
+		// tombstone lookup. Failure to refresh cannot prove exhaustion.
+		const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
+		const lookupSignal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
+		let disabled: DisabledCredentialSummary[] = [];
+		try {
+			disabled = await this.listDisabledCredentials(provider, lookupSignal);
+		} catch (listError) {
+			logger.debug("Disabled credential lookup skipped while explaining a model denial", {
+				provider,
+				error: redactSecrets(String(listError)),
+			});
+		}
+		try {
+			await this.revalidateCredentials(lookupSignal);
+		} catch (revalidateError) {
+			logger.debug("Credential snapshot revalidation failed; withholding the entitlement verdict", {
+				provider,
+				error: redactSecrets(String(revalidateError)),
+			});
+			return undefined;
+		}
+
+		// Evidence that this request ran on the stored pool and was refused
+		// there: the failed bearer resolves to a stored credential blocked for
+		// exactly this model. The folding lookup would also accept an unrelated
+		// global backoff, which is not a denial.
+		const failed = await this.#resolveCredentialTarget(provider, undefined, { apiKey: options.apiKey });
+		if (!failed) return undefined;
+		const failedProviderKey = this.#getProviderTypeKey(provider, failed.type);
+		if (
+			this.#getScopedCredentialBlockedUntil(provider, failedProviderKey, failed.index, modelPolicyScope) ===
+			undefined
+		) {
+			return undefined;
+		}
+
+		const rawMessage = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+		// The provider's own sentence leads so text classification keeps matching;
+		// the Codex sentence comes from the same template the classifier is built
+		// on. The echoed model id is provider-controlled text like everything else
+		// here: a clean id re-classifies byte-for-byte, and a hostile one is
+		// neutralized while the structural flags and the preserved classification
+		// message still carry the denial.
+		const head = exactCodexModelPolicy
+			? AIError.codexChatGPTAccountPolicyMessage(boundedDiagnostic(deniedModel, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX))
+			: boundedDiagnostic(rawMessage, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX).replace(/[.\s]*$/, ".");
+
+		const nowMs = Date.now();
+		const tried: string[] = [];
+		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
+			// Rotation and re-resolution stay within the failed credential's type.
+			if (credential.type !== failed.type) continue;
+			const label =
+				credential.type === "oauth"
+					? boundedDiagnostic(credentialAccountLabel(credential), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX)
+					: "API key";
+			if (
+				this.#getScopedCredentialBlockedUntil(provider, failedProviderKey, index, modelPolicyScope) !== undefined
+			) {
+				tried.push(`${label} denied`);
+				continue;
+			}
+			// Rotation also skips siblings parked by a usage limit or backoff.
+			const routing = this.#credentialBlockRouting(provider, credential.type, modelId, modelPolicyScope);
+			const blockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				failedProviderKey,
+				index,
+				routing.siblingBlockScopes,
+			);
+			if (blockedUntil === undefined) {
+				// An untried sibling is still reachable: a mid-flight peer rotation
+				// may have left nothing blocked this time, but this is not exhaustion.
+				return undefined;
+			}
+			tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
+		}
+		const named = tried.slice(0, ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX);
+		const unnamed = tried.length - named.length;
+		const parts = [
+			head,
+			`No other signed-in ${provider} account can serve it: ${named.join(", ")}${unnamed > 0 ? `, and ${unnamed} more` : ""}.`,
+		];
+
+		// No await follows the refreshed pool scan: diagnostic lookup cannot reload it.
+		const activeAccounts =
+			disabled.length === 0
+				? []
+				: this.#getCredentialsForProvider(provider).map(credential => ({ ...credential, provider }));
+		const recentlySignedOut = disabled
+			.filter(summary => isActionableCredentialDisable(summary, activeAccounts))
+			.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
+			.slice(0, 3)
+			.map(summary => {
+				const ago =
+					summary.disabledAtMs !== undefined ? `, ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+				const label = boundedDiagnostic(credentialAccountLabel(summary), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX);
+				return `${label} (${boundedDiagnostic(summarizeDisableCause(summary.cause), ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX)}${ago})`;
+			});
+		if (recentlySignedOut.length > 0) parts.push(`Recently signed out: ${recentlySignedOut.join(", ")}.`);
+		parts.push(`Sign in with /login ${provider} using an account entitled to this model.`);
+		return new AIError.ModelEntitlementError(parts.join(" "), provider, modelId);
+	}
+
+	/**
 	 * Rotate away from the credential that failed after a retryable auth error —
 	 * step (c) of the auth-retry policy. Prefer the failed stored row id supplied
 	 * in `options.credentialId`, then the failed bearer supplied in
@@ -6943,7 +7327,11 @@ export class AuthStorage {
 		);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
-			const disabledCause = message ?? "upstream reported invalidated OAuth token";
+			const disabledCause = message
+				? `upstream reported invalidated OAuth token: ${message}`
+				: "upstream reported invalidated OAuth token";
+			// The broker persists (and logs) a remote disable on its own host; this
+			// session still observed the invalidation and must announce it here.
 			const deleted = this.#store.deleteAuthCredentialRemote
 				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause)
 				: this.disableCredentialById(target.id, disabledCause);
@@ -6953,6 +7341,11 @@ export class AuthStorage {
 					provider,
 					latestRows.map(row => ({ id: row.id, credential: row.credential })),
 				);
+				if (this.#store.deleteAuthCredentialRemote) {
+					this.#emitCredentialDisabled(
+						credentialDisabledEvent(provider, target.id, target.credential, disabledCause),
+					);
+				}
 			}
 			return deleted && hasSibling;
 		}
@@ -7003,6 +7396,13 @@ export class AuthStorage {
 					apiKey: previousKey,
 				});
 				if (!switched) {
+					// A model no account is entitled to is terminal for this request:
+					// re-resolving would only hand back an already-denied bearer.
+					const exhausted = await this.modelEntitlementError(provider, modelId, error, {
+						apiKey: previousKey,
+						signal,
+					});
+					if (exhausted) throw exhausted;
 					const status = AIError.status(error);
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 					// Preserve no-sibling quota backoff instead of re-resolving an
@@ -7064,7 +7464,63 @@ export class AuthStorage {
 	 */
 	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
 		if (!this.#store.listDisabledCredentials) return [];
-		return this.#store.listDisabledCredentials(provider, signal);
+		const disabled = await this.#store.listDisabledCredentials(provider, signal);
+		// Keep identity raw for account matching; forensic causes remain in the store.
+		return disabled.map(summary => ({ ...summary, cause: redactSecrets(summary.cause) }));
+	}
+
+	/**
+	 * Tombstones that still need the user's attention (see
+	 * {@link isActionableCredentialDisable}), matched against the live OAuth
+	 * credentials of the same provider. Sessions replay these at startup so an
+	 * account signed out while nobody was watching is not discovered days later
+	 * as a missing model.
+	 *
+	 * The tombstone listing is always current, so the active side must be too:
+	 * a sibling process may have disabled a row this instance still holds in
+	 * memory, and a broker client may be running on a disk-cached snapshot.
+	 * Both are revalidated first; `signal` bounds the whole lookup. When the
+	 * revalidation itself fails (unreachable or slow broker) the loaded
+	 * snapshot is not trusted to prove a re-login, so the automatic tombstones
+	 * are reported without identity suppression: a stale reminder beats the
+	 * silent sign-out this exists to catch.
+	 */
+	async listActionableDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+	): Promise<DisabledCredentialSummary[]> {
+		const disabled = (await this.#store.listDisabledCredentials?.(provider, signal)) ?? [];
+		if (disabled.length === 0) return [];
+		let activeAccounts: CredentialAccountIdentity[] = [];
+		try {
+			await this.revalidateCredentials(signal);
+			activeAccounts = this.listCredentialAccountIdentities(provider);
+		} catch (error) {
+			logger.debug("Credential snapshot revalidation failed before tombstone replay; reporting without recovery", {
+				error: redactSecrets(String(error)),
+			});
+		}
+		return disabled
+			.filter(summary => isActionableCredentialDisable(summary, activeAccounts))
+			.map(summary => ({ ...summary, cause: redactSecrets(summary.cause) }));
+	}
+
+	/** Loaded OAuth identities, including primary token claims but never token bytes. Revalidate before inferring recovery. */
+	listCredentialAccountIdentities(provider?: string): CredentialAccountIdentity[] {
+		const activeAccounts: CredentialAccountIdentity[] = [];
+		for (const [entryProvider, entries] of this.#data) {
+			if (provider !== undefined && entryProvider !== provider) continue;
+			for (const entry of entries) {
+				if (entry.credential.type !== "oauth") continue;
+				const account: CredentialAccountIdentity = {
+					provider: entryProvider,
+					type: "oauth",
+				};
+				copyOAuthCredentialIdentity(account, entry.credential);
+				activeAccounts.push(account);
+			}
+		}
+		return activeAccounts;
 	}
 
 	/**
@@ -7074,8 +7530,8 @@ export class AuthStorage {
 	 * per-credential data with stored identities (`omp usage`) use this so a
 	 * disk-cached snapshot cannot misattribute fresh reports.
 	 */
-	async revalidateCredentials(): Promise<void> {
-		if (this.#store.refreshSnapshot) await this.#store.refreshSnapshot();
+	async revalidateCredentials(signal?: AbortSignal): Promise<void> {
+		if (this.#store.refreshSnapshot) await this.#store.refreshSnapshot(signal);
 		await this.reload();
 	}
 
@@ -7189,19 +7645,25 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Disable the credential with the given id and emit a
-	 * {@link CredentialDisabledEvent}. Used by the auth-broker server to honour
-	 * `POST /v1/credential/:id/disable`. Returns `false` when no such row exists.
+	 * Disable the credential with the given id. Used by the auth-broker server
+	 * to honour `POST /v1/credential/:id/disable`. Returns `false` when no such
+	 * row exists. A {@link CredentialDisabledEvent} is emitted only for an
+	 * automatic cause: a remote client's own `remove()` arrives here as
+	 * `deleted by user`, and the event contract excludes user-initiated
+	 * removals just as the local path does.
 	 */
 	disableCredentialById(id: number, disabledCause: string): boolean {
 		for (const [provider, entries] of this.#data) {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;
+			const target = entries[index]!;
 			this.#store.deleteAuthCredential(id, disabledCause);
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.#setStoredCredentials(provider, next);
 			this.#resetProviderAssignments(provider);
-			this.#emitCredentialDisabled({ provider, disabledCause });
+			if (isAutomaticDisableCause(disabledCause)) {
+				this.#emitCredentialDisabled(credentialDisabledEvent(provider, id, target.credential, disabledCause));
+			}
 			return true;
 		}
 		return false;

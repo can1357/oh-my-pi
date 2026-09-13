@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { ModelEntitlementError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -437,6 +437,43 @@ describe("withAuth", () => {
 		await expect(
 			withAuth(
 				ctx => (ctx.error === undefined ? "k0" : undefined),
+				async key => {
+					keys.push(key);
+					throw original;
+				},
+			),
+		).rejects.toBe(original);
+		expect(keys).toEqual(["k0"]);
+	});
+
+	it("surfaces the resolver's entitlement verdict instead of the provider's denial", async () => {
+		const keys: string[] = [];
+		const verdict = new ModelEntitlementError("No account can serve it.", "openai-codex", "gpt-x");
+		await expect(
+			withAuth(
+				ctx => {
+					if (ctx.error === undefined) return "k0";
+					if (ctx.lastChance) throw verdict;
+					return "k1";
+				},
+				async key => {
+					keys.push(key);
+					throw authError(403);
+				},
+			),
+		).rejects.toBe(verdict);
+		expect(keys).toEqual(["k0"]);
+	});
+
+	it("still swallows any other resolver failure and keeps the provider's error", async () => {
+		const keys: string[] = [];
+		const original = authError();
+		await expect(
+			withAuth(
+				ctx => {
+					if (ctx.error === undefined) return "k0";
+					throw new Error("broker offline");
+				},
 				async key => {
 					keys.push(key);
 					throw original;

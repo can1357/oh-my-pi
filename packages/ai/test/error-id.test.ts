@@ -246,6 +246,20 @@ describe("error-id classification", () => {
 		expect(AIError.codexChatGPTAccountPolicyModel(oversized)).toBeUndefined();
 		expect(AIError.is(AIError.classifyMessage(oversized), AIError.Flag.AccountPolicy)).toBe(false);
 	});
+	it("re-classifies a denial rebuilt from the canonical Codex sentence template", () => {
+		// The entitlement verdict leads with this sentence so the account-policy
+		// retry path keys off it; template and classifier must not drift apart.
+		const rebuilt = message({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-daybreak-blue-latest",
+			errorStatus: 400,
+			errorMessage: `${AIError.codexChatGPTAccountPolicyMessage("gpt-daybreak-blue-latest")} No other signed-in openai-codex account can serve it: a@example.com denied.`,
+		});
+		expect(AIError.codexChatGPTAccountPolicyModel(rebuilt)).toBe("gpt-daybreak-blue-latest");
+		expect(AIError.isCodexChatGPTAccountPolicyError(rebuilt, rebuilt.provider, rebuilt.model)).toBe(true);
+		expect(AIError.is(AIError.classifyMessage(rebuilt), AIError.Flag.AccountPolicy)).toBe(true);
+	});
 	it("classifies only Cursor plan-gate resource exhaustion as account policy", () => {
 		for (const errorMessage of [
 			'Connect error resource_exhausted: Error [details: {"error":"ERROR_RATE_LIMITED_CHANGEABLE","details":{"title":"Named models unavailable","detail":"Free plans can only use Auto."}}]',

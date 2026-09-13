@@ -19,6 +19,31 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/**
+ * The stored credential pool cannot serve the requested model
+ * (Codex "not supported when using Codex with a ChatGPT account", Cursor plan
+ * policy), so rotation has nowhere left to go.
+ *
+ * Thrown by a credential resolver at the `lastChance` step; the auth-retry
+ * loop surfaces it in place of the provider's bare sentence so the user learns
+ * which accounts were tried, which were signed out recently, and how to get
+ * back in. The message starts with a sanitized, bounded provider sentence;
+ * structural flags preserve classification even when redaction or truncation
+ * changes that sentence. Stream failures retain the original classification text.
+ */
+export class ModelEntitlementError extends Error {
+	readonly provider: string;
+	readonly modelId: string;
+
+	constructor(message: string, provider: string, modelId: string) {
+		super(message);
+		this.name = "ModelEntitlementError";
+		this.provider = provider;
+		this.modelId = modelId;
+		attach(this, create(Flag.AccountPolicy | Flag.ContentBlocked));
+	}
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {

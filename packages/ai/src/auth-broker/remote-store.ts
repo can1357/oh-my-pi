@@ -8,7 +8,8 @@
  * runs isn't required.
  */
 import * as os from "node:os";
-import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
+import { getAppName, getInstallId, logger, redactSecrets } from "@oh-my-pi/pi-utils";
+import { resolveOAuthCredentialIdentity } from "../auth/sqlite-credential-store";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
@@ -40,7 +41,7 @@ import type {
 export type AuthBrokerAccountPool = ReadonlyMap<string, ReadonlySet<string>>;
 
 function isCredentialInAccountPool(
-	entry: Pick<SnapshotEntry, "provider" | "credential" | "identityKey">,
+	entry: Pick<SnapshotEntry, "provider" | "identityKey"> & { credential: Pick<SnapshotEntry["credential"], "type"> },
 	accountPool: AuthBrokerAccountPool | undefined,
 ): boolean {
 	if (entry.credential.type !== "oauth") return true;
@@ -330,7 +331,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			onSnapshot(snapshot, generation);
 		} catch (error) {
-			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
+			logger.debug("auth-broker snapshot callback failed", { error: redactSecrets(String(error)) });
 		}
 	}
 	#protectNewSnapshotBlocks(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[], nowMs: number): void {
@@ -394,7 +395,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 							logger.debug("auth-broker snapshot stream unsupported; falling back to long-poll");
 							continue;
 						}
-						logger.debug("auth-broker snapshot stream failed; backing off", { error: String(error) });
+						logger.debug("auth-broker snapshot stream failed; backing off", {
+							error: redactSecrets(String(error)),
+						});
 						await this.#backoffWait(backoffMs);
 						backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
 					}
@@ -411,7 +414,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				} catch (error) {
 					if (this.#closed || this.#backgroundAbort.signal.aborted) break;
 					if (watchdog.idled()) continue;
-					logger.debug("auth-broker background snapshot sync failed", { error: String(error) });
+					logger.debug("auth-broker background snapshot sync failed", { error: redactSecrets(String(error)) });
 					await this.#backoffWait(backoffMs);
 					backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
 				}
@@ -566,10 +569,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshotReceivedAt = Date.now();
 	}
 
-	/** Re-hydrate the in-memory snapshot from the broker. */
-	async refreshSnapshot(): Promise<SnapshotResponse> {
+	/** Re-hydrate the in-memory snapshot from the broker; `signal` bounds the fetch. */
+	async refreshSnapshot(signal?: AbortSignal): Promise<SnapshotResponse> {
 		this.#noteActivity();
-		const result = await this.#client.fetchSnapshot();
+		const result = await this.#client.fetchSnapshot({ signal });
 		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
 		return this.#snapshot;
 	}
@@ -589,10 +592,26 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return out;
 	}
 
-	/** Broker-backed disabled tombstones; empty against brokers predating the endpoint. */
-	listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
+	/**
+	 * Tombstones follow the active view pool using their canonical projected identity.
+	 * Missing identities are excluded by explicit pools just like live entries;
+	 * unconfigured providers and API keys remain unrestricted. Older brokers return no history.
+	 */
+	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
 		this.#noteActivity();
-		return this.#client.listDisabledCredentials(provider, signal);
+		const disabled = await this.#client.listDisabledCredentials(provider, signal);
+		if (!this.#accountPool) return disabled;
+		return disabled.filter(summary => {
+			if (summary.type !== "oauth" || !this.#accountPool?.has(summary.provider)) return true;
+			return isCredentialInAccountPool(
+				{
+					provider: summary.provider,
+					credential: summary,
+					identityKey: resolveOAuthCredentialIdentity(summary.provider, summary).key,
+				},
+				this.#accountPool,
+			);
+		});
 	}
 
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
@@ -653,9 +672,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			.catch(error => {
 				logger.warn("auth-broker credential block propagation failed", {
 					id: block.credentialId,
-					providerKey: block.providerKey,
-					blockScope: block.blockScope,
-					error: String(error),
+					providerKey: redactSecrets(block.providerKey),
+					blockScope: redactSecrets(block.blockScope),
+					error: redactSecrets(String(error)),
 				});
 			});
 	}
@@ -681,7 +700,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			.catch(error => {
 				logger.warn("auth-broker credential blocks delete propagation failed", {
 					id: credentialId,
-					error: String(error),
+					error: redactSecrets(String(error)),
 				});
 			});
 	}
@@ -712,7 +731,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#removeCredentialById(id);
 		// Fire-and-forget: tell the broker to persist the disable.
 		this.#client.disableCredential(id, disabledCause).catch(error => {
-			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+			logger.warn("auth-broker disable propagation failed", { id, error: redactSecrets(String(error)) });
 		});
 	}
 
@@ -817,9 +836,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				await this.#client.disableCredential(entry.id, "replaced by newer credential");
 			} catch (error) {
 				logger.warn("auth-broker disable during replace failed", {
-					provider,
+					provider: redactSecrets(provider),
 					id: entry.id,
-					error: String(error),
+					error: redactSecrets(String(error)),
 				});
 			}
 		}
@@ -846,9 +865,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				await this.#client.disableCredential(entry.id, disabledCause);
 			} catch (error) {
 				logger.warn("auth-broker disable during delete failed", {
-					provider,
+					provider: redactSecrets(provider),
 					id: entry.id,
-					error: String(error),
+					error: redactSecrets(String(error)),
 				});
 			}
 		}
@@ -975,7 +994,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#maybeRefreshSnapshot(reason: string): void {
 		if (this.#streamingActive) return;
 		void this.refreshSnapshot().catch(error => {
-			logger.debug("auth-broker snapshot refresh after write failed", { reason, error: String(error) });
+			logger.debug("auth-broker snapshot refresh after write failed", {
+				reason: redactSecrets(reason),
+				error: redactSecrets(String(error)),
+			});
 		});
 	}
 
@@ -1013,7 +1035,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#noteActivity();
 		this.#invalidateUsageCache();
 		await this.#client.notifyUsageStale(signal).catch(err => {
-			logger.warn("auth-broker notification of stale usage failed", { error: String(err) });
+			logger.warn("auth-broker notification of stale usage failed", { error: redactSecrets(String(err)) });
 		});
 	}
 
@@ -1047,7 +1069,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 		if (!this.#streamingActive) {
 			await this.refreshSnapshot().catch(error => {
-				logger.debug("auth-broker snapshot refresh after credential refresh failed", { error: String(error) });
+				logger.debug("auth-broker snapshot refresh after credential refresh failed", {
+					error: redactSecrets(String(error)),
+				});
 			});
 		}
 		const refreshed = entry.credential;
@@ -1247,7 +1271,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				return body.reports;
 			})
 			.catch(error => {
-				logger.warn("auth-broker usage fetch failed", { error: String(error) });
+				logger.warn("auth-broker usage fetch failed", { error: redactSecrets(String(error)) });
 				// Documented 15s TTL fallback: cache the null so sequential callers
 				// don't re-hit the broker while it's still down. See
 				// docs/auth-broker-gateway.md § "Client-side single-flight".
@@ -1328,7 +1352,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 					logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });
 					return;
 				}
-				logger.debug("auth-broker observed usage flush failed; retrying next flush", { error: String(error) });
+				logger.debug("auth-broker observed usage flush failed; retrying next flush", {
+					error: redactSecrets(String(error)),
+				});
 				// Merge the failed group back under the (possibly refilled) buffer so
 				// nothing is lost; bounded because entries are keyed per
 				// (identity, provider, model).

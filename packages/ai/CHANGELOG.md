@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity. Actionable summaries use canonical claims and fresh recovery state, respect broker account pools, and redact diagnostic causes while protected forensic data remains intact ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed automatic OAuth credential disables leaving no trace in a plain session: every teardown (definitive refresh failure, upstream token invalidation, broker disable) now logs one warning naming the provider, credential id, account identity, and cause, and `credential_disabled` events carry `credentialId`, `credentialType`, and the account identity. A broker-backed session announces the disable it observed instead of leaving it to the broker host. Added `AuthStorage.listActionableDisabledCredentials` plus the shared `isActionableCredentialDisable`, `summarizeDisableCause`, and `credentialAccountLabel` helpers.
+- When every signed-in account is denied a Codex ChatGPT-account (or Cursor plan) model, the error now names the accounts that were denied or parked, any account signed out recently, and the `/login` step, instead of the provider's bare sentence ([#11913](https://github.com/can1357/oh-my-pi/pull/11913) by [@alphastorm](https://github.com/alphastorm)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

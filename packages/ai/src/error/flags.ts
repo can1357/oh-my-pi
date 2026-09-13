@@ -172,8 +172,22 @@ const PROVIDER_FINISH_ERROR_PATTERN = /\bProvider (?:returned error finish_reaso
 const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN =
-	/\bThe ['"]([^'"\r\n]+)['"] model is not supported when using Codex with a ChatGPT account\./i;
+/**
+ * Codex's exact ChatGPT-account model denial. The regex below and
+ * {@link codexChatGPTAccountPolicyMessage} are both derived from this one
+ * template so a verdict rebuilt from it always re-classifies: if the
+ * provider's wording changes, both move together.
+ */
+const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_SUFFIX = " model is not supported when using Codex with a ChatGPT account.";
+const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN = new RegExp(
+	`\\bThe ['"]([^'"\\r\\n]+)['"]${CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_SUFFIX.replace(/[.]/g, "\\$&")}`,
+	"i",
+);
+
+/** The canonical Codex ChatGPT-account denial for `modelId`, byte-matchable by the classifier. */
+export function codexChatGPTAccountPolicyMessage(modelId: string): string {
+	return `The '${modelId}'${CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_SUFFIX}`;
+}
 const CODEX_CHATGPT_ACCOUNT_MODEL_MAX_LENGTH = 256;
 const CURSOR_PLAN_POLICY_MARKER_PATTERN = /\bERROR_RATE_LIMITED_CHANGEABLE\b/i;
 const CURSOR_PLAN_POLICY_PATTERN = /\bNamed models unavailable\b|\bModel unavailable on\b|\bFree plans can only use\b/i;
