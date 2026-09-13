@@ -824,12 +824,12 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 			expect(bound?.items.map(item => item.value)).toContain("memory://<memory-id>");
 
 			// Typing into the child instead binds to its hindsight backend, which has
-			// no addressable ids, rather than to the peer bank in the same cwd.
+			// no addressable ids and no file-backed root, so it is offered nothing.
 			const childBound = await getInternalUrlSuggestions("memory://", undefined, undefined, () => ({
 				cwd: sharedCwd,
 				sessionFile: childSessionFile,
 			}));
-			expect(childBound?.items.map(item => item.value)).not.toContain("memory://<memory-id>");
+			expect(childBound).toBeNull();
 
 			// A caller that is no longer registered is offered nothing at all.
 			expect(
@@ -948,5 +948,125 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 		await expect(router.resolve("memory://a1b2c3d4e5f6")).rejects.toThrow(
 			/Unknown memory namespace: a1b2c3d4e5f6\. Supported: root/,
 		);
+	});
+});
+
+/**
+ * Register a live session on a throwaway cwd whose file-backed memory root is
+ * deliberately absent — the state every server-side backend is permanently in,
+ * because only the local consolidation pipeline ever creates that directory.
+ */
+async function withBackendSession(
+	backend: string,
+	fn: (ctx: { cwd: string; sessionId: string; memoryRoot: string }) => Promise<void>,
+): Promise<void> {
+	const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-root-backend-"));
+	const previousAgentDir = getAgentDir();
+	try {
+		const agentDir = path.join(cleanupRoot, "agent");
+		const cwd = path.join(cleanupRoot, "project");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(cwd, { recursive: true });
+		setAgentDir(agentDir);
+		const sessionId = `test-${backend}-root`;
+		AgentRegistry.global().register({
+			id: sessionId,
+			displayName: sessionId,
+			kind: "main",
+			session: {
+				sessionManager: {
+					getCwd: () => cwd,
+					getArtifactsDir: () => null,
+					getSessionId: () => sessionId,
+				},
+				settings: Settings.isolated({ "memory.backend": backend }),
+			} as unknown as AgentSession,
+			sessionFile: null,
+		});
+		await fn({ cwd, sessionId, memoryRoot: getMemoryRoot(agentDir, cwd) });
+	} finally {
+		setAgentDir(previousAgentDir);
+		await removeWithRetries(cleanupRoot);
+	}
+}
+
+describe("MemoryProtocolHandler — file-backed root (issue #11909)", () => {
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	// Regression: under hindsight the old message prescribed enabling memories
+	// that were already enabled, so the agent had no way to learn that
+	// memory:// is simply not its access path.
+	it("names the active backend instead of advising that memories be enabled", async () => {
+		await withBackendSession("hindsight", async ({ cwd, sessionId }) => {
+			const error = await InternalUrlRouter.instance()
+				.resolve("memory://root", { cwd, sessionId })
+				.then(
+					() => undefined,
+					(err: unknown) => err as Error,
+				);
+
+			expect(error?.message).toContain("memory.backend=local");
+			expect(error?.message).toContain("active backend: hindsight");
+			expect(error?.message).not.toContain("Run a session with memories enabled first");
+		});
+	});
+
+	// The local backend genuinely can populate the root, so its advice stays.
+	it("keeps the actionable advice for the file-backed backend", async () => {
+		await withBackendSession("local", async ({ cwd, sessionId }) => {
+			await expect(InternalUrlRouter.instance().resolve("memory://root", { cwd, sessionId })).rejects.toThrow(
+				"Run a session with memories enabled first",
+			);
+		});
+	});
+
+	// Regression: the old error interpolated the rejected input directly after
+	// "require the root namespace", so it named `memory://**` as its own fix.
+	it("names the expected namespace form instead of echoing the rejected pattern", async () => {
+		await withMemoryFixture(async ({ cwd }) => {
+			const error = await createGlobTool(cwd)
+				.execute("memory-glob-bare-namespace", { path: "memory://**" })
+				.then(
+					() => undefined,
+					(err: unknown) => err as Error,
+				);
+
+			expect(error?.message).toContain("memory://root/**");
+		});
+	});
+
+	// Regression: completion gated on `memoryRootsForContext(...).length`, which
+	// counts the path a root *would* occupy, so `memory://root` was advertised
+	// under hindsight, where nothing ever creates it.
+	it("advertises memory://root under hindsight only once the root exists", async () => {
+		await withBackendSession("hindsight", async ({ cwd, memoryRoot }) => {
+			const absent = await getInternalUrlSuggestions("memory://", cwd);
+			expect(absent?.items.map(item => item.value) ?? []).not.toContain("memory://root");
+
+			// A directory left behind by an earlier local run is readable, so it
+			// is offered again even though hindsight would never create one.
+			await fs.mkdir(memoryRoot, { recursive: true });
+			InternalUrlRouter.resetForTests();
+
+			const present = await getInternalUrlSuggestions("memory://", cwd);
+			expect(present?.items.map(item => item.value) ?? []).toContain("memory://root");
+		});
+	});
+
+	// The local pipeline owns this namespace, so its affordance survives even
+	// before the first consolidation writes anything.
+	it("keeps advertising memory://root under the local backend before consolidation", async () => {
+		await withBackendSession("local", async ({ cwd }) => {
+			const suggestions = await getInternalUrlSuggestions("memory://", cwd);
+			expect(suggestions?.items.map(item => item.value) ?? []).toContain("memory://root");
+		});
 	});
 });

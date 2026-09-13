@@ -53,6 +53,43 @@ function memoryRootsForContext(context: ResolveContext | undefined, caller: Agen
 	return memoryRootsFromRegistry();
 }
 
+/**
+ * `memory://root` reads the summary that the *local* consolidation pipeline
+ * writes. A server-side backend never creates that directory, so the generic
+ * "enable memories" advice names a fix the caller has already applied. Point
+ * those callers at the tools that can actually answer instead (issue #11909).
+ */
+function fileBackedUnavailableError(backend: string | undefined): Error {
+	if (backend === "hindsight" || backend === "mnemopi") {
+		return new Error(
+			`File-backed memory artifacts only exist with memory.backend=local (active backend: ${backend}). Use \`recall\` to search stored memories, or \`reflect\` to synthesize across them.`,
+		);
+	}
+	return new Error(
+		"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
+	);
+}
+
+/**
+ * Whether `memory://root` is worth advertising. The local pipeline owns that
+ * namespace, so it stays offered there even before the first consolidation —
+ * its "not available yet" error names a real next step. A server-side backend
+ * never writes the root, so offering it is a guaranteed dead end unless an
+ * earlier local run left the directory behind (issue #11909).
+ */
+async function offersFileBackedRoot(backend: string | undefined, roots: string[]): Promise<boolean> {
+	if (backend !== "hindsight" && backend !== "mnemopi") return roots.length > 0;
+	for (const root of roots) {
+		try {
+			await fs.stat(root);
+			return true;
+		} catch {
+			// Completion is advisory: a missing or unreadable root is simply not offered.
+		}
+	}
+	return false;
+}
+
 function ensureWithinRoot(targetPath: string, rootPath: string): void {
 	if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
 		throw new Error("memory:// URL escapes memory root");
@@ -95,7 +132,9 @@ export function splitMemoryGlobPattern(input: string): MemoryGlobPattern {
 	const url = parseInternalUrl(urlMatch[1]);
 	const namespace = url.rawHost || url.hostname;
 	if (url.protocol !== "memory:" || namespace !== MEMORY_NAMESPACE) {
-		throw new Error(`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace: ${input}`);
+		throw new Error(
+			`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace (e.g. memory://${MEMORY_NAMESPACE}/**); got: ${input}`,
+		);
 	}
 
 	const rawPathname = urlMatch[2] ?? "";
@@ -426,9 +465,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 
 		const roots = memoryRootsForContext(context, caller.session);
 		if (roots.length === 0) {
-			throw new Error(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			throw fileBackedUnavailableError(backend);
 		}
 
 		let anyExists = false;
@@ -445,9 +482,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		}
 
 		if (!anyExists) {
-			throw new Error(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			throw fileBackedUnavailableError(backend);
 		}
 
 		throw new Error(`Memory file not found: ${url.href}`);
@@ -457,7 +492,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		const caller = resolveMemoryCaller(context);
 		if (caller.backend === "off") return [];
 		const completions: UrlCompletion[] = [];
-		if (memoryRootsForContext(context, caller.session).length > 0) {
+		if (await offersFileBackedRoot(caller.backend, memoryRootsForContext(context, caller.session))) {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
 		const mnemopiAvailable = caller.legacy
