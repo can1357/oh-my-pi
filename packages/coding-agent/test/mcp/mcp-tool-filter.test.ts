@@ -102,6 +102,19 @@ test("literal entries with glob metacharacters match only their exact spelling",
 	expect(result.allowed).toEqual(["a.b"]);
 });
 
+test("a literal entry does not admit an underscore-variant sibling", () => {
+	// `_` is part of the advertised-name alphabet, so `_read` and `foo__bar` are
+	// distinct tools from `read` and `foo_bar`. The filter's sanitizer must be
+	// injective over that alphabet: collapsing or trimming underscores would let
+	// `enabledTools: ["read"]` expose `_read`.
+	expect(run(["read", "_read"], ["read"]).allowed).toEqual(["read"]);
+	expect(run(["read", "_read"], ["_read"]).allowed).toEqual(["_read"]);
+	expect(run(["foo_bar", "foo__bar"], ["foo_bar"]).allowed).toEqual(["foo_bar"]);
+	expect(run(["foo_bar", "foo__bar"], ["foo__bar"]).allowed).toEqual(["foo__bar"]);
+	// The denylist direction is the mirror image.
+	expect(filterMCPTools({ toolNames: ["read", "_read"], disabledTools: ["read"] }).allowed).toEqual(["_read"]);
+});
+
 test("a literal entry does not admit a differently-cased sibling", () => {
 	// SEP-986 names are `[a-zA-Z0-9_-]`, and a server may advertise `read` and
 	// `READ` as distinct tools. Folding case in the filter's sanitizer would let
