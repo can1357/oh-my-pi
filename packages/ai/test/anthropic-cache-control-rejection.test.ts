@@ -669,6 +669,22 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(true);
 	});
 
+	it("detects the field-level 400 even when Pydantic's diagnostic tail names a cache_control member", () => {
+		// Unabridged form of the row above: Pydantic appends the offending input,
+		// so `type` appears later in the same message. The nested-member veto is
+		// adjacency-bounded, not a message-wide member search — widening it here
+		// would suppress the exact 400 this fallback exists for.
+		expect(
+			isCacheControlUnsupported(
+				makeStatusError(
+					400,
+					"400 messages.0.content.0.cache_control: Extra inputs are not permitted " +
+						"[type=extra_forbidden, input_value={'type': 'ephemeral'}, input_type=dict]",
+				),
+			),
+		).toBe(true);
+	});
+
 	it("detects a strict JSON decoder refusing cache_control as an unknown field", () => {
 		// Go `DisallowUnknownFields` wording — a schema rejection with none of the
 		// extra-input/not-permitted vocabulary.
@@ -716,15 +732,28 @@ describe("isCacheControlUnsupported", () => {
 	// refused one nested option, so its ordinary 5m caching still works. The
 	// fallback would strip every breakpoint and latch `cacheControlUnsupported`
 	// for the session, disabling caching that the endpoint supports; a refused
-	// `ttl: "1h"` is the extended-cache-ttl beta's problem instead. Each row
-	// pairs a different bare rejection wording with a different path shape — the
-	// last reuses the exact wording of the field-level 400 above, so only the
-	// trailing segment separates it from a true positive.
+	// `ttl: "1h"` is the extended-cache-ttl beta's problem instead.
+	//
+	// Nesting is keyed on the member name, not on the punctuation joining it to
+	// the field, so every validator's path syntax collapses to one rule. Rows
+	// span the three `CacheControlEphemeral` members and each distinct joiner
+	// width the rule admits, up to the four-character pretty-printed maximum.
 	it.each([
 		["an unsupported ttl value", `messages.0.content.0.cache_control.ttl: unsupported value "1h"`],
-		["an unrecognized scope value", `cache_control.scope: unrecognized value "global"`],
 		["a bracketed ttl path", `cache_control["ttl"]: "1h" is not allowed on this endpoint`],
-		["an extra-input ttl member", "messages.0.content.0.cache_control.ttl: Extra inputs are not permitted"],
+		[
+			"a Pydantic location array naming ttl",
+			`{"loc":["body","messages",0,"content",0,"cache_control","ttl"],"msg":"Extra inputs are not permitted"}`,
+		],
+		[
+			"a pretty-printed location array naming ttl",
+			`{ "loc": [ "cache_control", "ttl" ], "msg": "Extra inputs are not permitted" }`,
+		],
+		[
+			"a JSON Pointer naming scope",
+			`{"pointer":"/messages/0/content/0/cache_control/scope","detail":"unrecognized member"}`,
+		],
+		["a bracketed-symbol path naming type", "Unpermitted parameter: cache_control[:type]"],
 	])("keeps caching enabled when a 400 refuses %s under cache_control", (_shape, message) => {
 		expect(isCacheControlUnsupported(makeStatusError(400, `400 invalid_request_error: ${message}`))).toBe(false);
 	});
