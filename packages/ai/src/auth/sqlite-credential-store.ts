@@ -157,6 +157,19 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 	return null;
 }
 
+/**
+ * Whether a persisted `disabled_cause` records an automatic teardown (refresh
+ * failure, upstream invalidation, broker disable) rather than a deliberate or
+ * lifecycle action. Every writer of a hygiene cause is enumerated here:
+ * `replaced by …` (re-login / API-key rotation), `deleted by user` and
+ * `logged out by user` (logout paths), and `deduplicated duplicate credential`.
+ * Retention and every display surface (`omp usage`, session notices) share
+ * this one split so a row is never kept by one and hidden by the other.
+ */
+export function isAutomaticDisableCause(cause: string): boolean {
+	return !/^(replaced by|deleted by user|logged out by user|deduplicated )/i.test(cause);
+}
+
 function normalizeDisabledCause(disabledCause: string): string {
 	const normalized = disabledCause.trim();
 	return normalized.length > 0 ? normalized : "disabled";

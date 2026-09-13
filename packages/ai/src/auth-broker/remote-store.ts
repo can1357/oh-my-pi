@@ -566,10 +566,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshotReceivedAt = Date.now();
 	}
 
-	/** Re-hydrate the in-memory snapshot from the broker. */
-	async refreshSnapshot(): Promise<SnapshotResponse> {
+	/** Re-hydrate the in-memory snapshot from the broker; `signal` bounds the fetch. */
+	async refreshSnapshot(signal?: AbortSignal): Promise<SnapshotResponse> {
 		this.#noteActivity();
-		const result = await this.#client.fetchSnapshot();
+		const result = await this.#client.fetchSnapshot({ signal });
 		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
 		return this.#snapshot;
 	}

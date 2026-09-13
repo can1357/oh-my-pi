@@ -18,7 +18,6 @@ import {
 	logger,
 	normalizePathForComparison,
 	postmortem,
-	sanitizeText,
 	setInteractiveHost,
 	setProjectDir,
 	VERSION,
@@ -2057,6 +2056,18 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
+			// Headless runs have no /login surface, but a silently signed-out account is
+			// exactly what makes a scripted run fail on a model it used yesterday — and
+			// when it was the last usable credential, the `No models available` exit
+			// below is the only thing the user would otherwise see.
+			if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui") {
+				for (const notice of await collectDisabledCredentialNotices(
+					session.modelRegistry.authStorage,
+					Date.now(),
+				)) {
+					process.stderr.write(`${notice}\n`);
+				}
+			}
 			if (!isInteractive && !session.model) {
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
@@ -2130,14 +2141,6 @@ export async function runRootCommand(
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
-				// Headless runs have no /login surface, but a silently signed-out account is
-				// exactly what makes a scripted run fail on a model it used yesterday.
-				for (const notice of await collectDisabledCredentialNotices(
-					session.modelRegistry.authStorage,
-					Date.now(),
-				)) {
-					process.stderr.write(`${sanitizeText(notice)}\n`);
-				}
 				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,

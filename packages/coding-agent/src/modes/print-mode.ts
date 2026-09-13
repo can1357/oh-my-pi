@@ -158,6 +158,14 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+			return;
+		}
+		// Text mode has no transcript to carry a notice: a warning raised mid-run
+		// (an account signed out while a sibling took the request) goes to stderr,
+		// where the run's other diagnostics already live.
+		if (event.type === "notice" && event.level !== "info") {
+			const message = event.source ? `${event.source}: ${event.message}` : event.message;
+			process.stderr.write(`${sanitizeText(message)}\n`);
 		}
 	});
 

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -505,14 +508,67 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect(actionable.map(summary => summary.id)).toEqual([4]);
 		});
 
-		test("ignores API-key rows and deliberate replacements or deletions", async () => {
+		test("ignores API-key rows and every deliberate or lifecycle cause the store writes", async () => {
 			const authStorage = openStorageWithTombstones([
 				tombstone({ id: 1, type: "api_key", email: undefined }),
 				tombstone({ id: 2, cause: "replaced by newer credential" }),
-				tombstone({ id: 3, cause: "deleted by user" }),
+				tombstone({ id: 3, cause: "replaced by oauth login" }),
+				tombstone({ id: 4, cause: "deleted by user" }),
+				tombstone({ id: 5, cause: "logged out by user" }),
+				tombstone({ id: 6, cause: "deduplicated duplicate credential" }),
 			]);
 
 			expect(await authStorage.listActionableDisabledCredentials()).toEqual([]);
+		});
+
+		test("keeps a tombstone whose organization disagrees with the live credential, and another member of the same workspace", async () => {
+			const authStorage = openStorageWithTombstones([
+				// Same person, different subscription: org A was lost, org B is live.
+				tombstone({ id: 1, orgId: "org-a" }),
+				// openai-codex stores the shared workspace id as accountId and orgId for every member.
+				tombstone({ id: 2, email: "alice@example.com", accountId: "ws-team", orgId: "ws-team" }),
+				// Same workspace under a member whose email is unknown: recovered by the shared id.
+				tombstone({ id: 3, email: undefined, accountId: "ws-team", orgId: "ws-team" }),
+			]);
+			await authStorage.set("anthropic", [
+				{ ...expiredOAuth(), orgId: "org-b" },
+				{ ...expiredOAuth(), email: "bob@example.com", accountId: "ws-team", orgId: "ws-team" },
+			]);
+
+			const actionable = await authStorage.listActionableDisabledCredentials();
+			expect(actionable.map(summary => summary.id)).toEqual([1, 2]);
+		});
+
+		test("treats an identity-less tombstone as recovered by any live credential of its provider", async () => {
+			const authStorage = openStorageWithTombstones([
+				tombstone({ id: 1, email: undefined }),
+				tombstone({ id: 2, provider: "openai", email: undefined }),
+			]);
+			await authStorage.set("anthropic", [expiredOAuth()]);
+
+			const actionable = await authStorage.listActionableDisabledCredentials();
+			expect(actionable.map(summary => summary.id)).toEqual([2]);
+		});
+
+		test("sees a disable performed by a sibling process instead of trusting its own loaded snapshot", async () => {
+			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-siblings-"));
+			const dbPath = path.join(tempDir, "agent.db");
+			const writer = await AuthStorage.create(dbPath);
+			const reader = await AuthStorage.create(dbPath);
+			try {
+				await writer.set("anthropic", [expiredOAuth()]);
+				await reader.reload();
+				const id = reader.exportSnapshot().credentials[0]!.id;
+				expect(writer.disableCredentialById(id, "oauth refresh failed: invalid_grant")).toBe(true);
+
+				// The reader still holds the row as active in memory; the listing must not
+				// let that stale copy pass for a re-login of the same identity.
+				expect((await reader.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([id]);
+			} finally {
+				reader.close();
+				writer.close();
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			}
 		});
 	});
 });

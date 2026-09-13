@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
+	isAutomaticDisableCause,
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
 	SqliteAuthCredentialStore,
@@ -77,7 +78,12 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
-export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export {
+	isAutomaticDisableCause,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	SqliteAuthCredentialStore,
+} from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -215,28 +221,37 @@ export interface CredentialAccountIdentity {
 /**
  * Whether a tombstone still represents lost capacity the user has to act on:
  * an OAuth credential torn down automatically (refresh failure, upstream
- * invalidation) whose identity has not signed in again. Rows the user replaced
- * or deleted deliberately are lifecycle noise, and a tombstone whose email,
- * account, or organization matches a live credential of the same provider has
- * already been recovered.
+ * invalidation) whose identity has not signed in again. Rows the user replaced,
+ * deleted, or logged out deliberately are lifecycle noise. A tombstone is
+ * recovered by a live credential of the same provider with the same email or
+ * account — unless both carry an organization and they disagree, since one
+ * email can hold separate subscriptions per organization — or with the same
+ * organization under a non-contradicting email. A tombstone with no identity
+ * at all counts as recovered as soon as the provider has any live OAuth
+ * credential; it could never match anything and would otherwise nag forever.
  */
 export function isActionableCredentialDisable(
 	summary: DisabledCredentialSummary,
 	activeAccounts: readonly CredentialAccountIdentity[],
 ): boolean {
 	if (summary.type !== "oauth") return false;
-	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+	if (!isAutomaticDisableCause(summary.cause)) return false;
 	const summaryEmail = summary.email?.toLowerCase();
 	const summaryAccountId = summary.accountId?.toLowerCase();
 	const summaryOrgId = summary.orgId?.toLowerCase();
+	if (!summaryEmail && !summaryAccountId && !summaryOrgId) {
+		return !activeAccounts.some(account => account.provider === summary.provider);
+	}
 	return !activeAccounts.some(account => {
 		if (account.provider !== summary.provider) return false;
 		const accountEmail = account.email?.toLowerCase();
 		const accountAccountId = account.accountId?.toLowerCase();
 		const accountOrgId = account.orgId?.toLowerCase();
-		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
+		if (summaryOrgId && accountOrgId && summaryOrgId !== accountOrgId) return false;
+		// When both sides name a person, that decides: openai-codex stores the shared
+		// workspace id as accountId and orgId, so two members must not recover each other.
+		if (summaryEmail && accountEmail) return summaryEmail === accountEmail;
 		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
-		// Organization match: the same subscription re-authorized under another member/email.
 		return Boolean(summaryOrgId && accountOrgId && summaryOrgId === accountOrgId);
 	});
 }
@@ -462,7 +477,7 @@ export interface AuthCredentialStore {
 	 * per-credential data; local SQLite stores omit it — their reads are
 	 * always current.
 	 */
-	refreshSnapshot?(): Promise<unknown>;
+	refreshSnapshot?(signal?: AbortSignal): Promise<unknown>;
 	/**
 	 * Disabled credential tombstones (see {@link DisabledCredentialSummary}).
 	 * Optional: remote stores forward to the broker's
@@ -7176,9 +7191,16 @@ export class AuthStorage {
 	/**
 	 * Tombstones that still need the user's attention (see
 	 * {@link isActionableCredentialDisable}), matched against the live OAuth
-	 * credentials currently loaded for the same provider. Sessions replay these
-	 * at startup so an account signed out while nobody was watching is not
-	 * discovered days later as a missing model.
+	 * credentials of the same provider. Sessions replay these at startup so an
+	 * account signed out while nobody was watching is not discovered days later
+	 * as a missing model.
+	 *
+	 * The tombstone listing is always current, so the active side must be too:
+	 * a sibling process may have disabled a row this instance still holds in
+	 * memory, and a broker client may be running on a disk-cached snapshot.
+	 * Both are revalidated first (best-effort: an unreachable broker keeps the
+	 * loaded snapshot rather than failing the listing); `signal` bounds the
+	 * whole lookup.
 	 */
 	async listActionableDisabledCredentials(
 		provider?: string,
@@ -7186,6 +7208,11 @@ export class AuthStorage {
 	): Promise<DisabledCredentialSummary[]> {
 		const disabled = await this.listDisabledCredentials(provider, signal);
 		if (disabled.length === 0) return [];
+		try {
+			await this.revalidateCredentials(signal);
+		} catch (error) {
+			logger.debug("Credential snapshot revalidation skipped before tombstone replay", { error: String(error) });
+		}
 		const activeAccounts: CredentialAccountIdentity[] = [];
 		for (const [entryProvider, entries] of this.#data) {
 			if (provider !== undefined && entryProvider !== provider) continue;
@@ -7209,8 +7236,8 @@ export class AuthStorage {
 	 * per-credential data with stored identities (`omp usage`) use this so a
 	 * disk-cached snapshot cannot misattribute fresh reports.
 	 */
-	async revalidateCredentials(): Promise<void> {
-		if (this.#store.refreshSnapshot) await this.#store.refreshSnapshot();
+	async revalidateCredentials(signal?: AbortSignal): Promise<void> {
+		if (this.#store.refreshSnapshot) await this.#store.refreshSnapshot(signal);
 		await this.reload();
 	}
 
