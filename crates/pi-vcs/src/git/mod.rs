@@ -283,11 +283,15 @@ fn parse_core_worktree(content: &str) -> Option<String> {
 		if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
 			continue;
 		}
-		if let Some(section) = line.strip_prefix('[') {
-			in_core = section
-				.strip_suffix(']')
-				.is_some_and(|name| name.trim().eq_ignore_ascii_case("core"));
-			continue;
+		if let Some(rest) = line.strip_prefix('[') {
+			in_core = match rest.split_once(']') {
+				Some((name, trailer)) => {
+					let trailer = trailer.trim_start();
+					(trailer.is_empty() || trailer.starts_with('#') || trailer.starts_with(';'))
+						&& name.trim().eq_ignore_ascii_case("core")
+				},
+				None => false,
+			};
 		}
 		if !in_core {
 			continue;
@@ -468,6 +472,30 @@ mod tests {
 		// `git config --get core.worktree` on this exact text returns `/main`.
 		assert_eq!(
 			parse_core_worktree("[core]\n\tworktree = /wrong\n\tworktree = /main\n"),
+			Some("/main".to_owned())
+		);
+	}
+
+	#[test]
+	fn core_worktree_recognizes_section_header_with_trailing_hash_comment() {
+		// Git accepts a comment after a section header's closing `]` on the
+		// same line. A relocated git directory (submodule, `--separate-git-dir`)
+		// whose `config` was hand-edited or written with such a comment must
+		// still have its `core.worktree` recognized, or the resolver falls back
+		// to the common dir and a linked worktree derives a different Mnemopi
+		// bank root than direct access to the same checkout.
+		assert_eq!(
+			parse_core_worktree("[core] # relocated by git-submodule\n\tworktree = /main\n"),
+			Some("/main".to_owned())
+		);
+	}
+
+	#[test]
+	fn core_worktree_recognizes_section_header_with_trailing_semicolon_comment() {
+		// Same as the `#` case above, but with git's other valid inline-comment
+		// marker.
+		assert_eq!(
+			parse_core_worktree("[core]; relocated by git-submodule\n\tworktree = /main\n"),
 			Some("/main".to_owned())
 		);
 	}
