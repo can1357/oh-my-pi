@@ -194,4 +194,108 @@ describe("AgentSession.newSession boundary", () => {
 		if (!reportedFile) throw new Error("Expected session_switch to report a persisted session file");
 		expect(await Bun.file(reportedFile).exists()).toBe(true);
 	});
+
+	it("maintains isSessionTransitionInFlight from before-switch through id commit and clears before session_switch", async () => {
+		let inBeforeSwitch: boolean | undefined;
+		let inPreCommitAwait: boolean | undefined;
+		let inSessionSwitch: boolean | undefined;
+
+		const pending = Promise.withResolvers<void>();
+
+		const { session, sessionManager } = await createHarness({
+			extension: {
+				name: "observe-transition-window",
+				register: pi => {
+					pi.on("session_before_switch", () => {
+						inBeforeSwitch = session.isSessionTransitionInFlight;
+						void pending.promise.then(() => {
+							inPreCommitAwait = session.isSessionTransitionInFlight;
+						});
+					});
+					pi.on("session_switch", () => {
+						inSessionSwitch = session.isSessionTransitionInFlight;
+					});
+				},
+			},
+		});
+
+		const originalNewSession = sessionManager.newSession.bind(sessionManager);
+		sessionManager.newSession = async options => {
+			pending.resolve();
+			await Promise.resolve();
+			return originalNewSession(options);
+		};
+
+		expect(await session.newSession()).toBe(true);
+
+		expect(inBeforeSwitch).toBe(true);
+		expect(inPreCommitAwait).toBe(true);
+		expect(inSessionSwitch).toBe(false);
+	});
+
+	it("holds isSessionTransitionInFlight across a branch, which mints a new id of its own", async () => {
+		let inBeforeBranch: boolean | undefined;
+		let inSessionBranch: boolean | undefined;
+
+		const { session, sessionManager } = await createHarness({
+			extension: {
+				name: "observe-branch-window",
+				register: pi => {
+					pi.on("session_before_branch", () => {
+						inBeforeBranch = session.isSessionTransitionInFlight;
+					});
+					pi.on("session_branch", () => {
+						inSessionBranch = session.isSessionTransitionInFlight;
+					});
+				},
+			},
+		});
+
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "branch me" }],
+			timestamp: Date.now(),
+		});
+		const entries = sessionManager.getBranch();
+		const target = entries.find(entry => entry.type === "message" && entry.message.role === "user");
+		if (!target) throw new Error("Expected a user entry to branch from");
+		const previousSessionId = sessionManager.getSessionId();
+
+		const result = await session.branch(target.id);
+
+		expect(result.cancelled).toBe(false);
+		expect(sessionManager.getSessionId()).not.toBe(previousSessionId);
+		expect(inBeforeBranch).toBe(true);
+		expect(inSessionBranch).toBe(false);
+	});
+
+	it("reports a transition as settled even when it is cancelled and no id changes", async () => {
+		// The rollback path restores the previous id without a change
+		// notification, so settlement is the only signal an observer gets that
+		// the outcome is final. A cancelled transition exercises that same
+		// scope-exit release.
+		let settledCount = 0;
+		const { session, sessionManager } = await createHarness({
+			extension: {
+				name: "cancel-the-switch",
+				register: pi => {
+					pi.on("session_before_switch", () => ({ cancel: true }));
+				},
+			},
+		});
+		const unregister = session.registerSessionTransitionSettledCallback(() => {
+			settledCount++;
+		});
+		const previousSessionId = sessionManager.getSessionId();
+
+		expect(await session.newSession()).toBe(false);
+
+		expect(sessionManager.getSessionId()).toBe(previousSessionId);
+		expect(settledCount).toBe(1);
+		expect(session.isSessionTransitionInFlight).toBe(false);
+
+		unregister();
+		expect(await session.newSession()).toBe(false);
+		expect(settledCount).toBe(1);
+	});
 });

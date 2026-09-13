@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added extension-facing collab hosting methods (`pi.startCollab()`, `pi.getCollabLinks()`, and `pi.stopCollab()`) to start, inspect, and stop live session sharing programmatically without routing through terminal commands ([#9525](https://github.com/can1357/oh-my-pi/pull/9525) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

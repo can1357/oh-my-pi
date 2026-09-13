@@ -37,6 +37,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 import { resolvePath, withHostGuard } from "../utils";
 import type {
 	AssistantThinkingRenderer,
+	CollabHostLinks,
 	ComposerShapeDefinition,
 	Extension,
 	ExtensionAPI,
@@ -48,6 +49,7 @@ import type {
 	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
+	StartCollabOptions,
 	ToolDefinition,
 	ToolInfo,
 } from "./types";
@@ -142,6 +144,18 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	setSessionName(): Promise<void> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	startCollab(): Promise<CollabHostLinks> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	getCollabLinks(): CollabHostLinks | undefined {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	stopCollab(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 }
@@ -323,6 +337,18 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	setSessionName(name: string): Promise<void> {
 		return this.runtime.setSessionName(name);
+	}
+
+	startCollab(options?: StartCollabOptions): Promise<CollabHostLinks> {
+		return this.runtime.startCollab(options);
+	}
+
+	getCollabLinks(): CollabHostLinks | undefined {
+		return this.runtime.getCollabLinks();
+	}
+
+	stopCollab(): Promise<void> {
+		return this.runtime.stopCollab();
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {

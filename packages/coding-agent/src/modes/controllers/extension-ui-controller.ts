@@ -1,6 +1,12 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
+import {
+	activeCollabHostLinks,
+	collabHostLinks,
+	startCollabHosting,
+	stopCollabHosting,
+} from "../../collab/start-hosting";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
 	CompactOptions,
@@ -200,6 +206,11 @@ export class ExtensionUiController {
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
+			startCollab: async options => collabHostLinks(await startCollabHosting(this.ctx, options)),
+			getCollabLinks: () => activeCollabHostLinks(this.ctx),
+			stopCollab: async () => {
+				await stopCollabHosting(this.ctx);
+			},
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,
@@ -436,6 +447,11 @@ export class ExtensionUiController {
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
+			startCollab: async options => collabHostLinks(await startCollabHosting(this.ctx, options)),
+			getCollabLinks: () => activeCollabHostLinks(this.ctx),
+			stopCollab: async () => {
+				await stopCollabHosting(this.ctx);
+			},
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,

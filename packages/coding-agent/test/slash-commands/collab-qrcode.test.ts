@@ -53,6 +53,17 @@ function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveMo
 		showError,
 		present,
 		settings: { get: settingsGet },
+		// startCollabHosting stamps every reservation with the live session id.
+		sessionManager: { getSessionId: () => "sess-1" },
+		// startCollabHosting refuses while session transitions are in flight, and
+		// subscribes to settlement so a rolled-back session's room is reaped.
+		session: {
+			isSessionTransitionInFlight: false,
+			registerSessionTransitionSettledCallback: () => () => {},
+		},
+		// A published host installs its status segment and requests a render.
+		statusLine: { setCollabStatus: () => {}, invalidate: () => {} },
+		ui: { requestRender: () => {} },
 		collabHost: options?.collabHost,
 	} as unknown as InteractiveModeContext;
 	return {

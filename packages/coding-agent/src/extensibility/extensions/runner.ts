@@ -90,6 +90,15 @@ function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
 }
 
+function throwUnsupportedCollabAction(): never {
+	throw new Error("This extension host does not support collab hosting (interactive TUI only)");
+}
+
+/** Non-TUI hosts never host a room, so undefined is the honest answer. */
+function noCollabLinks(): undefined {
+	return undefined;
+}
+
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
 }
@@ -669,6 +678,9 @@ export class ExtensionRunner {
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		this.runtime.startCollab = actions.startCollab ?? throwUnsupportedCollabAction;
+		this.runtime.getCollabLinks = actions.getCollabLinks ?? noCollabLinks;
+		this.runtime.stopCollab = actions.stopCollab ?? throwUnsupportedCollabAction;
 		this.runtime.registerProvider = (name, config, sourceId) => {
 			this.modelRegistry.registerProvider(name, config, sourceId);
 		};

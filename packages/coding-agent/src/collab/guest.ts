@@ -55,6 +55,49 @@ export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
 	exit: true,
 	quit: true,
 };
+
+/**
+ * Guest transitions in flight per session, counted rather than flagged.
+ *
+ * Both windows leave `ctx.collabGuest` unset while the live session is still
+ * the guest's replica: a join has not published itself yet, and a rollback has
+ * already cleared itself while the local session is still being restored. A
+ * hosting start in either window would bind its room to a session that is
+ * about to vanish. Counting matters because the two nest: the conflict branch
+ * of a join calls {@link CollabGuestLink.leave}'s restore path, and a flag
+ * would let the inner exit release the outer's reservation.
+ */
+interface GuestTransitions {
+	joins: number;
+	restores: number;
+}
+
+const guestTransitions = new WeakMap<InteractiveModeContext, GuestTransitions>();
+
+function enterGuestTransition(ctx: InteractiveModeContext, kind: keyof GuestTransitions): void {
+	const state = guestTransitions.get(ctx) ?? { joins: 0, restores: 0 };
+	state[kind] += 1;
+	guestTransitions.set(ctx, state);
+}
+
+function exitGuestTransition(ctx: InteractiveModeContext, kind: keyof GuestTransitions): void {
+	const state = guestTransitions.get(ctx);
+	if (!state) return;
+	state[kind] = Math.max(0, state[kind] - 1);
+	if (state.joins === 0 && state.restores === 0) guestTransitions.delete(ctx);
+}
+
+/** Whether a `/join` handshake is mid-flight for this session. */
+export function hasInFlightCollabJoin(ctx: InteractiveModeContext): boolean {
+	return (guestTransitions.get(ctx)?.joins ?? 0) > 0;
+}
+
+/** Whether a guest handshake or a guest rollback is mid-flight. */
+export function hasInFlightCollabGuestTransition(ctx: InteractiveModeContext): boolean {
+	const state = guestTransitions.get(ctx);
+	return state !== undefined && (state.joins > 0 || state.restores > 0);
+}
+
 /**
  * How long the guest waits for the host's small `welcome` frame before giving
  * up on the join. The welcome carries metadata only (`entryCount`, header,
@@ -254,6 +297,29 @@ export class CollabGuestLink {
 	}
 
 	async join(link: string): Promise<void> {
+		if (this.#ctx.collabHost) {
+			throw new Error("Already hosting a collab session (/collab stop first)");
+		}
+		// One join per session. A session has one transcript, so a second
+		// concurrent join has nothing coherent to do, and refusing keeps the
+		// join count owned by exactly one caller.
+		if (hasInFlightCollabJoin(this.#ctx)) {
+			throw new Error("Already joining a collab session (/leave first)");
+		}
+		// Claimed synchronously, before the first await, and held until the
+		// guest is published or the join fails. A hosting start that publishes
+		// while this is held would bind its room to the replica session this
+		// join is about to roll back, so `startCollabHosting` observes it the
+		// same way `/join` observes an in-flight hosting start.
+		enterGuestTransition(this.#ctx, "joins");
+		try {
+			await this.#join(link);
+		} finally {
+			exitGuestTransition(this.#ctx, "joins");
+		}
+	}
+
+	async #join(link: string): Promise<void> {
 		const parsed = parseCollabLink(link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		this.#roomId = parsed.roomId;
@@ -296,6 +362,10 @@ export class CollabGuestLink {
 				.then(async () => {
 					if (frame.t === "welcome") {
 						this.#clearWelcomeTimer();
+						if (this.#ctx.collabHost) {
+							firstWelcome.reject(new Error("Already hosting a collab session (/collab stop first)"));
+							return;
+						}
 						this.#beginWelcome(frame, joined);
 						if (frame.entryCount === 0) {
 							await this.#finalizeSnapshot();
@@ -306,6 +376,10 @@ export class CollabGuestLink {
 					if (frame.t === "snapshot-chunk") {
 						const ready = this.#accumulateSnapshotChunk(frame);
 						if (ready) {
+							if (this.#ctx.collabHost) {
+								firstWelcome.reject(new Error("Already hosting a collab session (/collab stop first)"));
+								return;
+							}
 							await this.#finalizeSnapshot();
 							finishJoin();
 						}
@@ -365,6 +439,17 @@ export class CollabGuestLink {
 			this.#joinReject = null;
 			this.#clearWelcomeTimer();
 			this.#clearSnapshotProgressTimer();
+		}
+		if (this.#ctx.collabHost) {
+			// The replica session is already active here, so it has to be rolled
+			// back. #restoreLocalSession latches #left itself and no-ops when it
+			// is already set, so latching first would strand the replica and
+			// leave the user in a session the host is about to stop broadcasting.
+			// Restoring before the close also keeps onClose from announcing an
+			// ended session for a join that never completed.
+			await this.#restoreLocalSession();
+			socket.close();
+			throw new Error("Already hosting a collab session (/collab stop first)");
 		}
 
 		this.#ctx.collabGuest = this;
@@ -742,29 +827,41 @@ export class CollabGuestLink {
 	async #restoreLocalSession(): Promise<void> {
 		if (this.#left) return;
 		this.#left = true;
-		this.#socket = null;
-		this.#ctx.collabGuest = undefined;
-		this.#ctx.statusLine.setCollabStatus(null);
-		this.#flushPendingTranscripts();
-		this.#clearAgentMirror();
-		this.#ctx.syncRunningSubagentBadge();
-		this.#ctx.resetObserverRegistry();
-		this.#clearTransientUi();
-		// Replica file stays on disk: it is a valid session file outside the
-		// sessions dir, so it never shows up in /resume but remains readable.
-		if (this.#returnSessionFile) {
-			await this.#ctx.handleResumeSession(this.#returnSessionFile);
-			return;
+		// Held across the whole rollback. `ctx.collabGuest` is cleared on the
+		// next line while the local session is still being restored, and the
+		// session switch below awaits its own handlers, so an extension calling
+		// startCollab() from one would otherwise see no guest and bind a room
+		// to the outgoing replica.
+		enterGuestTransition(this.#ctx, "restores");
+		try {
+			this.#socket = null;
+			this.#ctx.collabGuest = undefined;
+			if (!this.#ctx.collabHost) {
+				this.#ctx.statusLine.setCollabStatus(null);
+			}
+			this.#flushPendingTranscripts();
+			this.#clearAgentMirror();
+			this.#ctx.syncRunningSubagentBadge();
+			this.#ctx.resetObserverRegistry();
+			this.#clearTransientUi();
+			// Replica file stays on disk: it is a valid session file outside the
+			// sessions dir, so it never shows up in /resume but remains readable.
+			if (this.#returnSessionFile) {
+				await this.#ctx.handleResumeSession(this.#returnSessionFile);
+				return;
+			}
+			await this.#ctx.session.newSession();
+			setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
+			this.#ctx.statusLine.invalidate();
+			this.#ctx.statusLine.resetActiveTime();
+			this.#ctx.ui.requestRender();
+			this.#ctx.updateEditorBorderColor();
+			await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+			await this.#ctx.reloadTodos();
+			this.#ctx.ui.requestRender(true, { clearScrollback: true });
+		} finally {
+			exitGuestTransition(this.#ctx, "restores");
 		}
-		await this.#ctx.session.newSession();
-		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
-		this.#ctx.statusLine.invalidate();
-		this.#ctx.statusLine.resetActiveTime();
-		this.#ctx.ui.requestRender();
-		this.#ctx.updateEditorBorderColor();
-		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
-		await this.#ctx.reloadTodos();
-		this.#ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
 	#updateStatusSegment(): void {
