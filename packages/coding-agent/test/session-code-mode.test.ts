@@ -141,6 +141,21 @@ describe("resolveCodeMode", () => {
 		});
 		expect([...r.directToolNames]).toEqual(["eval"]);
 	});
+	test("the signal-driven compact tool stays direct", () => {
+		// `compact` only requests a rewrite: the turn-end hook scans the turn's
+		// completed tool results for one NAMED `compact` carrying the request
+		// marker. Bridged, the completed outer result is named `eval`, so that
+		// scan never sees it and the tool reports success while nothing is
+		// rewritten — the same failure that keeps checkpoint/rewind direct.
+		const r = resolveCodeMode({
+			provider: "openai-codex",
+			toolMode: "code_mode_only",
+			setting: "auto",
+			enabledToolNames: ["eval", "read", "compact"],
+			evalTransportAvailable: true,
+		});
+		expect([...r.directToolNames].sort()).toEqual(["compact", "eval"]);
+	});
 	test("reserved eval bridge names stay direct", () => {
 		// `callSessionTool` consumes these before the registry, so demoting a tool
 		// that shares one of those names would make it unreachable.

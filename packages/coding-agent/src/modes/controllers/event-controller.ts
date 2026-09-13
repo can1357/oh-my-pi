@@ -2011,6 +2011,18 @@ export class EventController {
 		this.#resolveDisplaceablePoll();
 		this.#resolveDisplaceableTodo();
 		this.ctx.flushPendingCommandOutput();
+		// A model-requested compaction (the `compact` tool) runs detached and
+		// never passes through `CommandController.executeCompaction()`, whose
+		// completion is what normally drains this queue, and it emits no
+		// `auto_compaction_end` either. So text the user typed while
+		// `isCompacting` was true — parked by the input controller and reported
+		// as "queued for after compaction" — had no flush site at all and waited
+		// for an unrelated later turn. The terminal end is that site: the pass is
+		// over by the time one is emitted, and it is a no-op when the queue is
+		// empty. Not `willRetry`, since no retry is pending at a terminal end.
+		if (!this.ctx.session.isCompacting) {
+			await this.ctx.flushCompactionQueue({ willRetry: false });
+		}
 		this.#lastAssistantComponent = undefined;
 		// When the interrupted/failed turn died on a tool call, this replaces the
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
@@ -2110,17 +2122,24 @@ export class EventController {
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		// A requested pass emits no `auto_compaction_start`, so there is no loader
+		// to tear down and no "cancelled" state to report: the tool either
+		// completed, skipped, or failed by the time this fires.
 		if (event.aborted) {
 			this.ctx.showStatus(
-				isHandoffAction
-					? "Auto-handoff cancelled"
-					: isRemoteAction
-						? "Auto server compaction cancelled"
-						: isShakeAction
-							? "Auto-shake cancelled"
-							: isSnapcompactAction
-								? "Auto-snapcompact cancelled"
-								: "Auto context-full maintenance cancelled",
+				// A requested pass is the agent's own operation, so the message must
+				// not report automatic threshold maintenance.
+				event.action === "requested"
+					? "Agent-requested compaction cancelled"
+					: isHandoffAction
+						? "Auto-handoff cancelled"
+						: isRemoteAction
+							? "Auto server compaction cancelled"
+							: isShakeAction
+								? "Auto-shake cancelled"
+								: isSnapcompactAction
+									? "Auto-snapcompact cancelled"
+									: "Auto context-full maintenance cancelled",
 			);
 		} else if (isShakeAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
@@ -2171,6 +2190,10 @@ export class EventController {
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
 			// to compact yet. Not a failure — suppress the warning.
+		} else if (event.action === "requested") {
+			// The agent asked for this pass, so the message names the requester
+			// rather than implying an automatic threshold fired.
+			this.ctx.showWarning("Agent-requested compaction failed; continuing without compacting");
 		} else if (isSnapcompactAction) {
 			this.ctx.showWarning("Auto-snapcompact maintenance failed; continuing without maintenance");
 		} else if (isRemoteAction) {

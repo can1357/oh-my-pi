@@ -824,9 +824,13 @@ describe("callSessionTool", () => {
 		expect(rawExecute).not.toHaveBeenCalled();
 	});
 
-	it("rejects checkpoint and rewind before reaching the registry", async () => {
+	it("rejects checkpoint, rewind and compact before reaching the registry", async () => {
 		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const session = createSession([createTool("checkpoint", execute), createTool("rewind", execute)]);
+		const session = createSession([
+			createTool("checkpoint", execute),
+			createTool("rewind", execute),
+			createTool("compact", execute),
+		]);
 
 		await expect(callSessionTool("checkpoint", { goal: "g" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
@@ -834,6 +838,9 @@ describe("callSessionTool", () => {
 		await expect(callSessionTool("rewind", { report: "r" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
 		);
+		// Same reason as the other two: the session reads the request off a tool
+		// result named `compact`, and a bridged call is named `eval`.
+		await expect(callSessionTool("compact", {}, { session })).rejects.toThrow("cannot run through the eval bridge");
 		expect(execute).not.toHaveBeenCalled();
 	});
 

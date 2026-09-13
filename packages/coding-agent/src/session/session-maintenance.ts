@@ -332,8 +332,11 @@ export interface SessionMaintenanceHost {
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
-	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
-	dropImages(): Promise<{ removed: number }>;
+	shake(
+		mode: ShakeMode,
+		options?: { config?: ShakeConfig; signal?: AbortSignal; fromCompaction?: boolean },
+	): Promise<ShakeResult>;
+	dropImages(opts?: { fromCompaction?: boolean }): Promise<{ removed: number }>;
 	generateHandoffDocument(
 		customInstructions?: string,
 		options?: SessionHandoffOptions,
@@ -637,9 +640,14 @@ export class SessionMaintenance {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; fromCompaction?: boolean } = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
-			const { removed } = await this.#host.dropImages();
+			// Forward the opt-out: a pass-driven `shake("images")` must not wait
+			// on the pass that is calling it.
+			const { removed } = await this.#host.dropImages({ fromCompaction: opts.fromCompaction });
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
 
@@ -3152,7 +3160,11 @@ export class SessionMaintenance {
 		let elideSink = "placeholders";
 		if (!options.skipElide) {
 			try {
-				const result = await this.#host.shake("elide", { config: RESCUE_SHAKE_CONFIG, signal });
+				const result = await this.#host.shake("elide", {
+					config: RESCUE_SHAKE_CONFIG,
+					signal,
+					fromCompaction: true,
+				});
 				elided = result.toolResultsDropped + result.blocksDropped;
 				elidedTokens = result.tokensFreed;
 				if (result.artifactId) elideSink = "an artifact";
@@ -3179,7 +3191,7 @@ export class SessionMaintenance {
 		if (signal.aborted) return false;
 		let imagesDropped = 0;
 		try {
-			imagesDropped = (await this.#host.dropImages()).removed;
+			imagesDropped = (await this.#host.dropImages({ fromCompaction: true })).removed;
 			if (imagesDropped > 0) this.#host.rebaseAfterCompaction();
 		} catch (error) {
 			logger.warn("Dead-end image-drop rescue failed", {
@@ -4499,7 +4511,7 @@ export class SessionMaintenance {
 		const signal = controller.signal;
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
-			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
+			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal, fromCompaction: true });
 			if (signal.aborted) {
 				await this.#emitLifecycleEvent(
 					{

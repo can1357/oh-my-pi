@@ -4517,6 +4517,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compact.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Compact Tool",
+			description: "Enable the agent-callable compact tool for self-initiated context compaction",
+		},
+	},
+
 	// Fetching and browser
 	"fetch.enabled": {
 		type: "boolean",

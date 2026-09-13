@@ -226,9 +226,10 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
 		return await runEvalWorkpool(args, options);
 	}
-	if (name === "checkpoint" || name === "rewind") {
-		// The session recognizes checkpoint/rewind only as direct toolResult
-		// messages; a bridged call would report success without taking effect.
+	if (name === "checkpoint" || name === "rewind" || name === "compact") {
+		// The session recognizes these only as direct toolResult messages, keyed
+		// on the result's own `toolName`; a bridged call would report success
+		// without taking effect.
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const tool = getTool(options.session, name);

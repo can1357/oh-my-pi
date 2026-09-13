@@ -44,6 +44,7 @@ import { BashTool } from "./bash";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
+import { CompactTool } from "./compact";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -79,6 +80,7 @@ export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./compact";
 export * from "./computer";
 export * from "./computer/supervisor";
 export * from "./context-notes";
@@ -259,6 +261,14 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/**
+	 * Set when this session is a spawned subagent (the parent task's id prefix),
+	 * mirroring the SDK's `agentKind` classification. A `/tan` background clone
+	 * copies the parent's tools and sets this while leaving {@link taskDepth} at
+	 * 0, so identity — not depth alone — distinguishes a disposable subagent from
+	 * a genuine top-level session.
+	 */
+	parentTaskPrefix?: string;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -476,6 +486,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	rewind: RewindTool.createIf,
 	context_notes: ContextNotesTool.createIf,
 	new_context: NewContextTool.createIf,
+	compact: CompactTool.createIf,
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
@@ -651,6 +662,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				session.settings.get("checkpoint.enabled") &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
+		if (name === "compact") return session.settings.get("compact.enabled");
 		if (name === "hub") {
 			return (
 				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
