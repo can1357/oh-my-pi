@@ -243,6 +243,42 @@ describe("parseRateLimitReason", () => {
 		).toBe("QUOTA_EXHAUSTED");
 	});
 
+	// Cloud Code Assist answers this exact body — RESOURCE_EXHAUSTED, no
+	// `google.rpc.ErrorInfo` detail, no cause beyond the "(e.g. check quota)"
+	// boilerplate — for request-content rejections as well as real caps.
+	// Measured with the account's Google 5-hour window at 0% and weekly at 6.4%:
+	// every model family returned it, and the same request with one character
+	// changed in the system instruction returned 200. Nothing in the body names
+	// a quota, so it must not buy the 30-minute QUOTA_EXHAUSTED cooldown.
+	it("classifies a detail-less Google RESOURCE_EXHAUSTED body as MODEL_CAPACITY_EXHAUSTED", () => {
+		const body = `Cloud Code Assist API error (429): ${JSON.stringify({
+			error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" },
+		})}`;
+		expect(parseRateLimitReason(body)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		// Rotation is unchanged: USAGE_LIMIT_PATTERN still matches, so a sibling
+		// credential is tried before the short backoff (same contract as #7032).
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	it("keeps a detail-less RESOURCE_EXHAUSTED body QUOTA_EXHAUSTED when the message names a cap", () => {
+		const body = `Cloud Code Assist API error (429): ${JSON.stringify({
+			error: {
+				code: 429,
+				message: "You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
+				status: "RESOURCE_EXHAUSTED",
+			},
+		})}`;
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+	});
+
+	it("keeps a structured ErrorInfo detail authoritative over the generic message", () => {
+		expect(
+			parseRateLimitReason(
+				googleRpc429("QUOTA_EXHAUSTED", undefined, "Resource has been exhausted (e.g. check quota)."),
+			),
+		).toBe("QUOTA_EXHAUSTED");
+	});
+
 	it("uses structured QUOTA_EXHAUSTED before capacity message heuristics", () => {
 		const body = googleRpc429(
 			"QUOTA_EXHAUSTED",
