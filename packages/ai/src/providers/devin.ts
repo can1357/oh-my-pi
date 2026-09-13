@@ -68,7 +68,6 @@ export interface DevinOptions extends StreamOptions {
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
-const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
 
 /** Connect streaming framing: flag byte bit 0x01 = gzip payload, 0x02 = end-of-stream JSON trailers. */
 const CONNECT_COMPRESSED_FLAG = 0x01;
@@ -89,6 +88,8 @@ const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
  * to benefit from the existing context-overflow maintenance path.
  */
 const LARGE_HISTORY_RECOVERY_BYTES = 512 * 1024;
+/** Native Devin caps chat requests at 128k even when the catalog advertises a larger model output limit. */
+const DEVIN_MAX_OUTPUT_TOKENS = 128_000;
 
 export const streamDevin: StreamFunction<"devin-agent"> = (
 	model: Model<"devin-agent">,
@@ -594,10 +595,7 @@ function buildDevinChatRequest(
 	turn: DevinTurn,
 	assignment: ModelAssignment | undefined,
 ) {
-	const stopPatterns =
-		options?.stopSequences && options.stopSequences.length > 0
-			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
-			: DEVIN_DEFAULT_STOP_PATTERNS;
+	const maxTokens = Math.min(options?.maxTokens ?? model.maxTokens ?? 64_000, DEVIN_MAX_OUTPUT_TOKENS);
 	return create(GetChatMessageRequestSchema, {
 		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
@@ -613,14 +611,12 @@ function buildDevinChatRequest(
 		executionId: crypto.randomUUID(),
 		configuration: create(CompletionConfigurationSchema, {
 			numCompletions: 1n,
-			maxTokens: BigInt(options?.maxTokens ?? model.maxTokens ?? 64000),
-			maxNewlines: 200n,
-			temperature: options?.temperature ?? 0.4,
-			firstTemperature: options?.temperature ?? 0.4,
-			topK: 50n,
-			topP: options?.topP ?? 1,
-			stopPatterns,
-			fimEotProbThreshold: 1,
+			maxTokens: BigInt(maxTokens),
+			maxNewlines: 400n,
+			temperature: options?.temperature ?? 1,
+			topK: 40n,
+			topP: options?.topP ?? 0.95,
+			stopPatterns: options?.stopSequences ?? [],
 		}),
 		tools: (context.tools ?? []).map((tool: Tool) =>
 			create(ChatToolDefinitionSchema, {
