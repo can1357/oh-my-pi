@@ -18,6 +18,7 @@ import {
 	logger,
 	redactSecrets,
 	redactUrlSecrets,
+	sanitizeText,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import {
@@ -286,6 +287,19 @@ export function credentialAccountLabel(
 	const org = identity.orgName ?? identity.orgId;
 	if (!org || org === base) return mask(base);
 	return `${mask(base)} · ${mask(org)}`;
+}
+
+/** Bounds for provider-controlled text inside a {@link AIError.ModelEntitlementError} message. */
+const ENTITLEMENT_DIAGNOSTIC_LABEL_MAX = 60;
+const ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX = 80;
+const ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX = 200;
+/** Budget for the tombstone lookup while explaining a denial; the error itself is already known. */
+const ENTITLEMENT_LOOKUP_BUDGET_MS = 2_000;
+
+/** One line of provider-controlled text, safe for a terminal error renderer and no longer than `max`. */
+function boundedDiagnostic(text: string, max: number): string {
+	const clean = sanitizeText(text).replace(/\s+/g, " ").trim();
+	return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
 /**
@@ -6966,12 +6980,20 @@ export class AuthStorage {
 	 * for another reason, the accounts torn down recently, and the way back in,
 	 * so the user is not left with the provider's bare sentence after a silent
 	 * fall-through to whichever sibling account remained. `undefined` for any
-	 * other error, or when no request model is known.
+	 * other error, when no request model is known, or when no stored credential
+	 * carries the model-scope block (the request never rotated through the pool).
+	 *
+	 * The verdict becomes an assistant `errorMessage`, so every part a provider
+	 * controls — identities, disable causes, the raw Cursor sentence — is
+	 * sanitized and bounded here. The tombstone lookup is best-effort and
+	 * bounded by `signal` plus a short budget: an unreachable broker must not
+	 * delay an error we already know.
 	 */
 	async modelEntitlementError(
 		provider: string,
 		modelId: string | undefined,
 		error: unknown,
+		signal?: AbortSignal,
 	): Promise<AIError.ModelEntitlementError | undefined> {
 		if (typeof modelId !== "string") return undefined;
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
@@ -6986,13 +7008,16 @@ export class AuthStorage {
 		// the Codex sentence comes from the same template the classifier is built on.
 		const head = exactCodexModelPolicy
 			? AIError.codexChatGPTAccountPolicyMessage(deniedModel)
-			: rawMessage.trim().replace(/[.\s]*$/, ".");
+			: boundedDiagnostic(rawMessage, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX).replace(/[.\s]*$/, ".");
 
 		const nowMs = Date.now();
 		let deniedCount = 0;
 		const tried: string[] = [];
 		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
-			const label = credential.type === "oauth" ? credentialAccountLabel(credential) : "API key";
+			const label =
+				credential.type === "oauth"
+					? boundedDiagnostic(credentialAccountLabel(credential), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX)
+					: "API key";
 			const providerKey = this.#getProviderTypeKey(provider, credential.type);
 			if (this.#getCredentialBlockedUntil(provider, providerKey, index, modelPolicyScope) !== undefined) {
 				deniedCount += 1;
@@ -7015,13 +7040,16 @@ export class AuthStorage {
 
 		let recentlySignedOut: string[] = [];
 		try {
-			recentlySignedOut = (await this.listActionableDisabledCredentials(provider))
+			const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
+			const lookupSignal = signal ? AbortSignal.any([signal, budget]) : budget;
+			recentlySignedOut = (await this.listActionableDisabledCredentials(provider, lookupSignal))
 				.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
 				.slice(0, 3)
 				.map(summary => {
 					const ago =
 						summary.disabledAtMs !== undefined ? `, ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
-					return `${credentialAccountLabel(summary)} (${summarizeDisableCause(summary.cause)}${ago})`;
+					const label = boundedDiagnostic(credentialAccountLabel(summary), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX);
+					return `${label} (${boundedDiagnostic(summarizeDisableCause(summary.cause), ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX)}${ago})`;
 				});
 		} catch (listError) {
 			logger.debug("Disabled credential lookup skipped while explaining a model denial", {
@@ -7222,7 +7250,7 @@ export class AuthStorage {
 				if (!switched) {
 					// A model no account is entitled to is terminal for this request:
 					// re-resolving would only hand back an already-denied bearer.
-					const exhausted = await this.modelEntitlementError(provider, modelId, error);
+					const exhausted = await this.modelEntitlementError(provider, modelId, error, signal);
 					if (exhausted) throw exhausted;
 					const status = AIError.status(error);
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;

@@ -1031,4 +1031,49 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			),
 		).toBeUndefined();
 	});
+
+	test("the verdict sanitizes and bounds provider-controlled text and never waits on a stalled tombstone lookup", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "hostile",
+				refresh: "ref-H",
+				expires: farExpiry(),
+				email: `evil\x1b[2J\n${"a".repeat(120)}@example.com`,
+			},
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-hostile";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("hostile");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "hostile",
+			}),
+		).toBe(false);
+
+		// A broker that never answers the tombstone listing: the verdict must not wait for it.
+		vi.spyOn(codexStorage, "listDisabledCredentials").mockImplementation((_provider, signal) => {
+			const { promise, reject } = Promise.withResolvers<never>();
+			signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+			return promise;
+		});
+		const startedAt = Date.now();
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial);
+		expect(Date.now() - startedAt).toBeLessThan(5_000);
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
+		expect(verdict.message).toContain("evil");
+		expect(verdict.message).not.toContain("a".repeat(120));
+		expect(verdict.message).not.toContain("Recently signed out");
+		expect(verdict.message).toMatch(/Sign in with \/login openai-codex using an account entitled to this model\.$/);
+	});
 });
