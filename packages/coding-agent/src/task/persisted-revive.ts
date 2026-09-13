@@ -170,6 +170,13 @@ export function createPersistedSubagentReviverFactory(
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
+				// Mirrors the task executor's own internal-spawner opt-in
+				// (executor.ts, `buildSubagentSessionOptions`): `initializeExtensions`
+				// below re-runs `discoverStartupSkillPaths()` once session_start
+				// fires, and without this the merge is a no-op, silently dropping
+				// any resources_discover contribution the revived subagent's own
+				// extensions make (PR #9379 review).
+				mergeDiscoveredSkillPaths: true,
 				systemPrompt: () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
@@ -200,7 +207,9 @@ export function createPersistedSubagentReviverFactory(
 			// touches a runtime action trips the fail-closed gate in `emitToolCall`,
 			// blocking every tool — including the hidden `yield` — in the revived
 			// agent. `session_start` also re-runs so extensions restore per-session
-			// state (issue #8824).
+			// state (issue #8824), and its `discoverStartupSkillPaths()` call now
+			// actually merges into this revive's snapshot (see
+			// `mergeDiscoveredSkillPaths` above).
 			await initializeExtensions(session, {
 				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
 				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),

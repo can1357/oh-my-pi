@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for declaring skill directories in plugin manifests (`omp.skills` / `pi.skills`), including entries pointing directly at a single skill directory ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Added the `initializeExtensions` SDK export so direct-embed sessions can opt into `session_start`/`resources_discover` extension lifecycle events ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+
+### Fixed
+
+- Fixed skill discovery not finding skills nested one namespace level deep (e.g. `skills/<namespace>/<skill>/SKILL.md`) ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Extension-contributed skill paths (`resources_discover`) are now honored at session start — including in `/skill:` autocomplete — and on `/reload-plugins` ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed freshly created task subagents missing extension-contributed skills that print, RPC, and TUI sessions already receive at startup ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed `/reload-plugins` skipping the `resources_discover` event entirely for sessions with a fixed skill snapshot; it now fires (matching startup) and only skips the skill rescan ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed task subagent startup dropping extension messages sent from a `resources_discover` handler by draining them before the first prompt ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed task/eval/vibe subagents silently dropping skills their own `resources_discover` handlers discovered at startup; those directories now merge into the inherited snapshot instead of being scanned and thrown away ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed print mode, RPC mode, and revived task subagents potentially throwing `AgentBusyError` or reordering the initial turn when a `session_start`/`resources_discover` extension handler sent a message during startup, by draining those sends the same way the task executor already does ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
