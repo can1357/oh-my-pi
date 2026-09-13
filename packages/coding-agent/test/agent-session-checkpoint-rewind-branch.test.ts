@@ -11,13 +11,20 @@ import {
 } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	type CheckpointState,
+	CheckpointTool,
+	type CheckpointToolDetails,
+	RewindTool,
+	type ToolSession,
+} from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -365,6 +372,39 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(text).toBe("Checkpoint: inspect\nFinish exploration and formulate findings.");
 		expect(text).not.toContain("Run your investigation");
 		expect(text).not.toContain("call rewind");
+	});
+
+	it("does not activate a checkpoint when an extension rejects its result", async () => {
+		let state: CheckpointState | undefined;
+		const session = createToolSession({
+			getCheckpointState: () => state,
+			setCheckpointState: value => {
+				state = value ?? undefined;
+			},
+		});
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("tool_result", event =>
+					event.toolName === "checkpoint" ? { content: event.content, isError: true } : undefined,
+				);
+			},
+			import.meta.dir,
+			new EventBus(),
+			runtime,
+			"reject-checkpoint",
+		);
+		const manager = SessionManager.inMemory(import.meta.dir);
+		const auth = await AuthStorage.create(":memory:");
+		const registry = new ModelRegistry(auth, path.join(import.meta.dir, "models.yml"));
+		const runner = new ExtensionRunner([extension], runtime, import.meta.dir, manager, registry);
+		const tool = new CheckpointTool(session);
+		const wrapped = new ExtensionToolWrapper<typeof tool.parameters, CheckpointToolDetails>(tool, runner);
+		const result = await wrapped.execute("call_checkpoint", { goal: "inspect package" });
+
+		expect(result.isError).toBe(true);
+		expect(state).toBeUndefined();
+		await auth.close();
 	});
 
 	it("ignores a completed cycle's rewind result after rebuilding context", async () => {
