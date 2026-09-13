@@ -275,14 +275,18 @@ export interface AsyncJobRunResult {
  * Failure-path counterpart of {@link AsyncJobRunResult}: a run callback that
  * throws this error attaches executor metadata (`exitCode`, `timedOut`, …)
  * which the manager merges into {@link AsyncJob.latestDetails} at settlement.
+ * `terminalTextSource` identifies raw output already represented by progress,
+ * allowing the completion to retain only terminal leftovers.
  */
 export class AsyncJobRunError extends Error {
 	readonly details: AsyncJobDetails;
+	readonly terminalTextSource: string | undefined;
 
-	constructor(message: string, details: AsyncJobDetails, options?: ErrorOptions) {
+	constructor(message: string, details: AsyncJobDetails, options?: ErrorOptions, terminalTextSource?: string) {
 		super(message, options);
 		this.name = "AsyncJobRunError";
 		this.details = details;
+		this.terminalTextSource = terminalTextSource;
 	}
 }
 
@@ -559,13 +563,18 @@ export class AsyncJobManager {
 				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
 				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
 				const errorText = error instanceof Error ? error.message : String(error);
+				const terminalTextSource = error instanceof AsyncJobRunError ? error.terminalTextSource : undefined;
 				job.terminalTextProvenance = "terminal";
 				if (this.#isCancelled(job)) {
 					job.errorText = errorText;
 					this.#scheduleEviction(job);
 					return;
 				}
-				await this.#settleAgentProgress(job);
+				await this.#settleAgentProgress(
+					job,
+					terminalTextSource === undefined ? undefined : errorText,
+					terminalTextSource,
+				);
 				// Mirror the success-path guard: cancellation can occur while
 				// the failure waits for its final progress sink to drain.
 				if (this.#isCancelled(job)) {

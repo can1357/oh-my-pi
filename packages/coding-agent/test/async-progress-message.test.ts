@@ -382,6 +382,64 @@ describe("async progress messages", () => {
 		expect(raw).not.toContain(theme.fg("success", `${theme.status.done} Background command completed`));
 	});
 
+	test("does not repeat raw progress in a failed completion preview", () => {
+		const rawResult =
+			"stdout-1\nstdout-2\nASYNC_ERROR_MESSAGE\n\nWall time: 5.01 seconds\n\nCommand exited with code 7";
+		const completionMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "bg_failed",
+				result: rawResult,
+				job: {
+					...job("bg_failed"),
+					status: "failed",
+					latestDetails: { exitCode: 7 },
+					terminalTextProvenance: "progress",
+				},
+				durationMs: 5_000,
+				epoch: 0,
+				progressSummary: {
+					artifactId: "art-failed",
+					leftover: { text: "ASYNC_ERROR_MESSAGE", truncated: false },
+				},
+			},
+		]);
+		if (!completionMessage) throw new Error("Expected completion message");
+
+		const rendered = Bun.stripANSI(buildAsyncResultBlock(completionMessage).render(80).join("\n"));
+
+		expect(rendered).toContain("ASYNC_ERROR_MESSAGE");
+		expect(rendered).not.toContain("stdout-1");
+		expect(rendered).not.toContain("Wall time: 5.01 seconds");
+		expect(rendered).not.toContain("Command exited with code 7");
+	});
+
+	test("does not repeat raw progress in a failed completion preview without an artifact", () => {
+		const rawResult =
+			"stdout-1\nstdout-2\nASYNC_ERROR_MESSAGE\n\nWall time: 5.01 seconds\n\nCommand exited with code 7";
+		const completionMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "bg_failed",
+				result: rawResult,
+				job: {
+					...job("bg_failed"),
+					status: "failed",
+					latestDetails: { exitCode: 7 },
+					terminalTextProvenance: "progress",
+				},
+				durationMs: 5_000,
+				epoch: 0,
+			},
+		]);
+		if (!completionMessage) throw new Error("Expected completion message");
+
+		const rendered = Bun.stripANSI(buildAsyncResultBlock(completionMessage).render(80).join("\n"));
+
+		expect(rendered).toContain("Background command failed bg_failed (exit 7)");
+		expect(rendered).not.toContain("stdout-1");
+		expect(rendered).not.toContain("ASYNC_ERROR_MESSAGE");
+		expect(rendered).not.toContain("Wall time: 5.01 seconds");
+	});
+
 	test("strips the task-result envelope from completion previews", () => {
 		const taskJob: AsyncJob = {
 			...job("task_1"),
