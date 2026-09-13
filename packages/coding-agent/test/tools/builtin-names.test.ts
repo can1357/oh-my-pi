@@ -78,8 +78,15 @@ describe("isToolDisallowed", () => {
 		expect(isToolDisallowed(CAPPED_MINTED_NAME, [LONG_SERVER_PATTERN], LONG_SERVER_NAME)).toBe(true);
 		// A different server's metadata does not match.
 		expect(isToolDisallowed(CAPPED_MINTED_NAME, [LONG_SERVER_PATTERN], "other-server")).toBe(false);
-		// Uncapped names still match by prefix regardless of metadata.
-		expect(isToolDisallowed("mcp__foo_bar", ["mcp__foo_*"], "irrelevant-server")).toBe(true);
+		// An uncapped name whose metadata names the pattern's server matches —
+		// through ownership, which is authoritative when present.
+		expect(isToolDisallowed("mcp__foo_bar", ["mcp__foo_*"], "foo")).toBe(true);
+		// Metadata naming a DIFFERENT server is a non-match even though the name
+		// prefix coincides: the prefix is lossy (server `foo_bar` mints names
+		// starting `mcp__foo_`), so ownership decides. Without metadata the prefix
+		// remains the only available signal.
+		expect(isToolDisallowed("mcp__foo_bar", ["mcp__foo_*"], "irrelevant-server")).toBe(false);
+		expect(isToolDisallowed("mcp__foo_bar", ["mcp__foo_*"])).toBe(true);
 	});
 
 	test("mcpServerName metadata sanitizes the raw name against the pattern segment", () => {
@@ -109,6 +116,18 @@ describe("isToolDisallowed", () => {
 		expect(isToolDisallowed("mcp__foo_other", ["mcp__foo_query*"], "foo")).toBe(false);
 		// The bare server wildcard keeps the ownership fallback.
 		expect(isToolDisallowed("mcp__foo_other", ["mcp__foo_*"], "foo")).toBe(true);
+	});
+
+	test("a server wildcard decides by ownership before the lossy name prefix", () => {
+		// Server `foo` and server `foo_bar` both mint names starting `mcp__foo_`,
+		// so the prefix test alone stripped the unrelated server's tools — and its
+		// resources and instructions with them.
+		expect(isToolDisallowed("mcp__foo_query", ["mcp__foo_*"], "foo")).toBe(true);
+		expect(isToolDisallowed("mcp__foo_bar_query", ["mcp__foo_*"], "foo_bar")).toBe(false);
+		// An ownership mismatch must not stop the remaining patterns being judged.
+		expect(isToolDisallowed("mcp__foo_bar_query", ["mcp__foo_*", "mcp__foo_bar_*"], "foo_bar")).toBe(true);
+		// Without metadata the prefix remains the only available signal.
+		expect(isToolDisallowed("mcp__foo_bar_query", ["mcp__foo_*"])).toBe(true);
 	});
 
 	test("mcp__* keeps matching every MCP tool regardless of metadata", () => {

@@ -247,13 +247,19 @@ export function isToolDisallowed(
 	if (HIDDEN_TOOL_NAMES.includes(name as HiddenToolName) && isBuiltIn !== false) return false;
 	for (const pattern of patterns) {
 		if (pattern.endsWith("*")) {
-			if (name.startsWith(pattern.slice(0, -1))) return true;
-			if (mcpServerName !== undefined) {
-				const serverSegment = mcpWildcardServerSegment(pattern);
-				if (serverSegment !== undefined && sanitizeMCPToolNamePart(mcpServerName, "server") === serverSegment) {
-					return true;
-				}
+			// When the tool's raw server is known, ownership decides a
+			// `mcp__<server>_*` pattern BEFORE the name-prefix fallback. The prefix is
+			// lossy — server `foo` and server `foo_bar` both produce names starting
+			// `mcp__foo_`, so the prefix test would strip an unrelated server's tools,
+			// resources, and instructions with them.
+			const serverSegment = mcpWildcardServerSegment(pattern);
+			if (mcpServerName !== undefined && serverSegment !== undefined) {
+				// Decided by ownership: a match denies, a mismatch moves on to the
+				// remaining patterns WITHOUT the lossy prefix test.
+				if (sanitizeMCPToolNamePart(mcpServerName, "server") === serverSegment) return true;
+				continue;
 			}
+			if (name.startsWith(pattern.slice(0, -1))) return true;
 		} else if (name === pattern || (pattern === "exec" && (name === "eval" || name === "bash"))) {
 			return true;
 		}

@@ -3245,9 +3245,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				enforceToolAllowlist || disallowedPatterns.length > 0
 					? (name: string): boolean => cursorScopeAllows(name)
 					: undefined,
-			// Resource-only servers (no owned tool) stay readable when the scope
-			// does not target this server; the handler gate must agree with the
-			// adapter's per-server filtering.
+			// Live liveness, not just the scope: the executor strips `todo` from a
+			// non-prewalk subagent after construction, and these server-resolved frames
+			// bypass `resolveFrameTool`'s gate entirely.
+			isToolActive: name => toolSession.isToolActive?.(name) === true,
+			// Resource-only servers (no owned tool) stay readable when the scope does
+			// not target this server, so the handler gate agrees with the adapter.
 			allowToollessMcpServers: resourceOnlyServerAllowed,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,

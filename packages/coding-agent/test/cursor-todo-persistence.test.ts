@@ -25,13 +25,14 @@ interface Harness {
 	uiTodos: () => TodoPhase[] | null;
 }
 
-function newHarness(initial: TodoPhase[] = []): Harness {
+function newHarness(initial: TodoPhase[] = [], isToolActive?: (name: string) => boolean): Harness {
 	const entries: SessionEntry[] = [];
 	const events: AgentEvent[] = [];
 	let phases = initial;
 	const handlers = new CursorExecHandlers({
 		cwd: "/tmp",
 		tools: new Map(),
+		isToolActive,
 		getTodoPhases: () => phases,
 		setTodoPhases: next => {
 			phases = next;
@@ -76,6 +77,30 @@ describe("cursor todo persistence", () => {
 
 	afterAll(() => {
 		resetSettingsForTest();
+	});
+
+	it("leaves state untouched when the executor removed the todo tool at runtime", () => {
+		// The executor strips `todo` from a non-prewalk subagent AFTER session
+		// construction, so no static scope predicate sees it. These server-resolved
+		// frames bypass the frame-tool gate, so without a liveness check the removed
+		// tool's calls would still mutate and persist the child's todo state.
+		const h = newHarness([], name => name !== "todo");
+		const result = h.handlers.todoSync(
+			{ merged: false, todos: [{ content: "step one", status: "in_progress" }] },
+			"call-1",
+		);
+
+		expect(h.current()).toEqual([]);
+		expect(h.reload()).toEqual([]);
+		expect(result.details).toBeUndefined();
+	});
+
+	it("mirrors normally when the session still has the todo tool", () => {
+		// The pairing for the test above: a live `todo` must not be gated off.
+		const h = newHarness([], name => name === "todo");
+		h.handlers.todoSync({ merged: false, todos: [{ content: "step one", status: "in_progress" }] }, "call-1");
+
+		expect(h.current()).toEqual([{ name: "Tasks", tasks: [{ content: "step one", status: "in_progress" }] }]);
 	});
 
 	it("survives a reload, which replays session entries rather than memory", () => {

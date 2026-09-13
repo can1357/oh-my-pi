@@ -72,6 +72,14 @@ interface CursorExecBridgeOptions {
 	 */
 	isToolExecutable?: (name: string) => boolean;
 	/**
+	 * Live liveness of a tool in the owning session. Scope alone is not enough
+	 * for `todo`: the executor removes it as parent-owned bookkeeping after
+	 * session construction (unless prewalk owns it), which a static scope
+	 * predicate cannot see, and the server-resolved `update_todos`/`read_todos`
+	 * frames never pass through {@link resolveFrameTool}'s gate.
+	 */
+	isToolActive?: (name: string) => boolean;
+	/**
 	 * Per-server gate for resource-only servers (advertise resources, no tools):
 	 * such servers have no registry tool to satisfy {@link isToolExecutable},
 	 * so the handler consults this predicate instead. A scope that does not
@@ -989,7 +997,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// persisted by calls the scope refuses everywhere else. The call still
 		// settles (the interactive card resolves on this result), it just never
 		// mirrors — the same "leave local state untouched" contract as a refused
-		if (this.options.isToolExecutable && !this.options.isToolExecutable("todo")) {
+		const todoScopedOut =
+			(this.options.isToolExecutable !== undefined && !this.options.isToolExecutable("todo")) ||
+			// Removed at runtime by the executor rather than by the scope: mirroring
+			// would still mutate and persist state for a tool the session does not have.
+			this.options.isToolActive?.("todo") === false;
+		if (todoScopedOut) {
 			// Still settle the interactive card: resolved todo blocks never run
 			// through the agent loop (which emits `tool_execution_end` for
 			// ordinary calls), so this event is the only thing that clears the
