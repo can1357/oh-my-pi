@@ -137,6 +137,8 @@
 ### Added
 
 - Added `getOAuthCredentialProvider()` to resolve login aliases, such as `openai-codex-device`, to the provider where their credentials are stored.
+- Added an opt-in bounded prompt-cache diagnostic journal with HMAC-derived request/prefix fingerprints, Anthropic attempt correlation, captured-wire/prepared-body provenance, honest usage estimates, reset classifications, and no persisted prompt content (`PI_PROMPT_CACHE_DEBUG=1`) ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
+- Added `getOAuthCredentialProvider()` to resolve a login alias (such as `openai-codex-device`) to the provider its credentials are stored under ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
