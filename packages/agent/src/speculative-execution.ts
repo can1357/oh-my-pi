@@ -502,6 +502,7 @@ export class SpeculativeOperationCoordinator {
 				await this.#discardCandidate(candidate, "fingerprint_mismatch", "final tool call changed");
 			}
 		}
+		// oxlint-disable-next-line unicorn/no-useless-spread -- discardStreamSession mutates the map during iteration
 		for (const toolCallId of [...this.#streamSessions.keys()]) {
 			const finalCall = calls.get(toolCallId);
 			if (!finalCall) {

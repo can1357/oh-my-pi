@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +24,10 @@ async function makeRoot(): Promise<string> {
 
 afterAll(async () => {
 	for (const root of ROOTS) await fs.rm(root, { recursive: true, force: true });
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
 });
 
 describe("Chrome-for-Testing layout goldens", () => {
@@ -165,7 +169,6 @@ test("install streams and extracts stored, deflated, nested, executable, and sym
 			expect((await fs.stat(path.join(installed.path, "chrome-linux64/nested/data.txt"))).mode & 0o777).toBe(0o640);
 		}
 		expect(await fs.readlink(path.join(installed.path, "chrome-linux64/chrome-link"))).toBe("chrome");
-		expect(progress.length).toBeGreaterThan(0);
 		expect(progress.at(-1)?.downloadedBytes).toBe(fixture.size);
 		expect(progress.at(-1)?.totalBytes).toBe(fixture.size);
 	} finally {
@@ -214,6 +217,90 @@ test("install rejects archive traversal", async () => {
 		).rejects.toThrow("did not contain its expected executable");
 		expect(await fs.readdir(root)).not.toContain("escaped.txt");
 	} finally {
+		server.stop(true);
+	}
+});
+
+test("concurrent installs download once without replacing the winner's browser", async () => {
+	const root = await makeRoot();
+	const fixture = Bun.file(path.join(import.meta.dir, "fixtures/browsers/synthetic-chrome.zip"));
+	const requested = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let requests = 0;
+	const server = Bun.serve({
+		port: 0,
+		async fetch() {
+			requests++;
+			requested.resolve();
+			await release.promise;
+			return new Response(fixture);
+		},
+	});
+	const options = {
+		browser: Browser.CHROME,
+		platform: BrowserPlatform.LINUX,
+		buildId: BUILD_ID,
+		cacheDir: root,
+		baseUrl: String(server.url),
+	};
+	try {
+		const first = install(options);
+		const second = install(options);
+		await requested.promise;
+		release.resolve();
+		const results = await Promise.all([first, second]);
+		expect(requests).toBe(1);
+		for (const result of results) {
+			expect(await Bun.file(result.executablePath).text()).toBe("#!/bin/sh\necho synthetic chrome\n");
+		}
+	} finally {
+		release.resolve();
+		server.stop(true);
+	}
+});
+
+test("a timed-out download releases its lock and partial archive so installation can be retried", async () => {
+	const root = await makeRoot();
+	const fixture = Bun.file(path.join(import.meta.dir, "fixtures/browsers/synthetic-chrome.zip"));
+	const progressed = Promise.withResolvers<void>();
+	const deadline = new AbortController();
+	let stall = true;
+	const server = Bun.serve({
+		port: 0,
+		fetch() {
+			if (!stall) return new Response(fixture);
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						// Flush beyond the HTTP server's small-chunk buffer before stalling.
+						controller.enqueue(new Uint8Array(64 * 1024));
+					},
+				}),
+			);
+		},
+	});
+	const options = {
+		browser: Browser.CHROME,
+		platform: BrowserPlatform.LINUX,
+		buildId: BUILD_ID,
+		cacheDir: root,
+		baseUrl: String(server.url),
+		downloadProgressCallback: () => progressed.resolve(),
+	};
+	// Drive the real fetch/body abort without waiting for the five-minute CDN deadline.
+	const timeout = spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+	try {
+		const pending = install(options);
+		await progressed.promise;
+		deadline.abort(new DOMException("Download deadline elapsed", "TimeoutError"));
+		await expect(pending).rejects.toThrow();
+		expect((await fs.readdir(root)).filter(name => name.startsWith(".browser-"))).toEqual([]);
+		timeout.mockRestore();
+		stall = false;
+		const installed = await install(options);
+		expect(await Bun.file(installed.executablePath).text()).toBe("#!/bin/sh\necho synthetic chrome\n");
+	} finally {
+		timeout.mockRestore();
 		server.stop(true);
 	}
 });
