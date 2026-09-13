@@ -67,6 +67,20 @@ function cacheControlRejectionResponse(): Response {
 	);
 }
 
+/**
+ * A terminal 400 that has nothing to do with prompt caching: no retry arm
+ * claims it, so it fails the turn after the breakpoint-free replay went out.
+ */
+function unrelatedRejectionResponse(): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: { type: "invalid_request_error", message: "max_tokens: must be greater than 0" },
+		}),
+		{ status: 400, headers: { "Content-Type": "application/json" } },
+	);
+}
+
 function successResponse(): Response {
 	const events: Array<Record<string, unknown>> = [
 		{ type: "message_start", message: { id: "msg_ok", usage: { input_tokens: 10, output_tokens: 0 } } },
@@ -109,8 +123,13 @@ function createFetch(capture: Capture, modes: Array<"reject" | "ok">): FetchImpl
  * A caching-unaware proxy modeled faithfully: every body that carries a
  * breakpoint anywhere is refused, so the turn can only complete once the
  * provider ships a body with none at all.
+ *
+ * `failBreakpointFreeAttempts` then fails that many breakpoint-free requests
+ * for an unrelated reason, which is how a cache-motivated replay reaches a
+ * turn that never completes.
  */
-function createBreakpointRejectingFetch(capture: Capture): FetchImpl {
+function createBreakpointRejectingFetch(capture: Capture, failBreakpointFreeAttempts = 0): FetchImpl {
+	let failuresLeft = failBreakpointFreeAttempts;
 	return async (input, init) => {
 		const raw = init?.body;
 		const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
@@ -118,7 +137,12 @@ function createBreakpointRejectingFetch(capture: Capture): FetchImpl {
 		capture.bodies.push(body);
 		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
 		capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
-		return countBreakpoints(body) > 0 ? cacheControlRejectionResponse() : successResponse();
+		if (countBreakpoints(body) > 0) return cacheControlRejectionResponse();
+		if (failuresLeft > 0) {
+			failuresLeft--;
+			return unrelatedRejectionResponse();
+		}
+		return successResponse();
 	};
 }
 
@@ -229,6 +253,31 @@ describe("Anthropic cache_control rejection fallback", () => {
 		// turn's first attempt from being rejected again.
 		expect(capture.bodies).toHaveLength(3);
 		expect(countBreakpoints(capture.bodies[2])).toBe(0);
+	});
+
+	it("leaves the rejection unlearned when the breakpoint-free replay never completes", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		// The refusal is parsed, the replay goes out — and then dies for a reason
+		// that says nothing about `cache_control`.
+		const fetchImpl = createBreakpointRejectingFetch(capture, 1);
+
+		const failed = await runTurn(fetchImpl, states);
+		const next = await runTurn(fetchImpl, states);
+
+		expect(failed.stopReason).toBe("error");
+		expect(next.stopReason).toBe("stop");
+		// Four requests: the next turn still offered breakpoints, because nothing
+		// had yet shown the endpoint's refusal to be real. `isCacheControlUnsupported`
+		// classifies a free-text 400, and a misparse that is never confirmed by a
+		// completed turn must cost one request, not a session of suppressed
+		// caching. Learning from the parse alone makes the third request
+		// breakpoint-free and there is no fourth.
+		expect(capture.bodies).toHaveLength(4);
+		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+		expect(countBreakpoints(capture.bodies[3])).toBe(0);
+		// And the turn that did complete still reports the feature it gave up.
+		expect(next.disabledFeatures).toContain("prompt-cache");
 	});
 
 	it("stops advertising the extended-cache-ttl beta once breakpoints are dropped", async () => {
