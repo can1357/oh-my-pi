@@ -83,6 +83,10 @@ export class TtsrCoordinator {
 	async checkMessageUpdate(event: AgentEvent): Promise<boolean> {
 		if (event.type !== "message_update" || !this.#manager?.hasRules()) return false;
 		const assistantEvent = event.assistantMessageEvent;
+		if (assistantEvent.type === "start") {
+			this.#manager.resetBuffer();
+			return false;
+		}
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
 		let delta: string | undefined;
