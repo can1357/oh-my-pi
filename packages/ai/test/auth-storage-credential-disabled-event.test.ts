@@ -690,22 +690,27 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				fresh: { email: "person@example.com" },
 				recovered: true,
 			},
-		])("retention survives recovery while reminders follow identity: $name", async ({ provider, old, fresh, recovered }) => {
-			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-			try {
-				const [row] = store.upsertAuthCredentialForProvider(provider, oauthIdentity(old));
-				store.deleteAuthCredential(row!.id, "invalid_grant");
-				const [summary] = await store.listDisabledCredentials(provider);
-				expect(isActionableCredentialDisable(summary!, [{ provider, type: "oauth", ...fresh }])).toBe(!recovered);
-				store.upsertAuthCredentialForProvider(provider, oauthIdentity(fresh));
-				const retained = await store.listDisabledCredentials(provider);
-				expect(retained).toEqual([summary!]);
-				const active = store.listAuthCredentials(provider).map(entry => ({ provider, ...entry.credential }));
-				expect(isActionableCredentialDisable(retained[0]!, active)).toBe(!recovered);
-			} finally {
-				store.close();
-			}
-		});
+		])(
+			"retention survives recovery while reminders follow identity: $name",
+			async ({ provider, old, fresh, recovered }) => {
+				const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+				try {
+					const [row] = store.upsertAuthCredentialForProvider(provider, oauthIdentity(old));
+					store.deleteAuthCredential(row!.id, "invalid_grant");
+					const [summary] = await store.listDisabledCredentials(provider);
+					expect(isActionableCredentialDisable(summary!, [{ provider, type: "oauth", ...fresh }])).toBe(
+						!recovered,
+					);
+					store.upsertAuthCredentialForProvider(provider, oauthIdentity(fresh));
+					const retained = await store.listDisabledCredentials(provider);
+					expect(retained).toEqual([summary!]);
+					const active = store.listAuthCredentials(provider).map(entry => ({ provider, ...entry.credential }));
+					expect(isActionableCredentialDisable(retained[0]!, active)).toBe(!recovered);
+				} finally {
+					store.close();
+				}
+			},
+		);
 
 		test("an API key does not recover named or identity-less OAuth tombstones", async () => {
 			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
