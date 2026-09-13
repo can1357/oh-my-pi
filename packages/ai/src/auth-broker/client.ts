@@ -23,6 +23,8 @@ import type {
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
 	HealthzResponse,
+	ProviderLogoutRequest,
+	ProviderLogoutResponse,
 	SnapshotResponse,
 	SnapshotStreamEvent,
 	UsageHistoryResponse,
@@ -40,6 +42,7 @@ import {
 	credentialUploadResponseSchema,
 	disabledCredentialsResponseSchema,
 	healthzResponseSchema,
+	providerLogoutResponseSchema,
 	snapshotResponseSchema,
 	snapshotStreamEventSchema,
 	usageHistoryResponseSchema,
@@ -58,6 +61,7 @@ const RESPONSE_SCHEMAS = {
 	credentialUploadResponseSchema,
 	disabledCredentialsResponseSchema,
 	healthzResponseSchema,
+	providerLogoutResponseSchema,
 	usageHistoryResponseSchema,
 	usageResponseSchema,
 	usageStaleResponseSchema,
@@ -338,6 +342,16 @@ export class AuthBrokerClient {
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: "credentialDisableResponseSchema",
+			signal,
+		});
+	}
+
+	/** Remove all active credentials and prior disabled history for one provider. */
+	async logoutProvider(provider: string, signal?: AbortSignal): Promise<ProviderLogoutResponse> {
+		const body: ProviderLogoutRequest = { provider };
+		return this.#request<ProviderLogoutResponse>("POST", "/v1/provider/logout", {
+			body,
+			schema: "providerLogoutResponseSchema",
 			signal,
 		});
 	}

@@ -581,7 +581,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				},
 			});
 			await authStorage.set("anthropic", [expiredOAuth()]);
-			// A remote client's own `remove()` reaches the broker host as `deleted by user`.
+			// A remote client's own `removeCredential()` reaches the broker host as `deleted by user`.
 			expect(authStorage.disableCredentialById(1, "deleted by user")).toBe(true);
 
 			expect(authStorage.exportSnapshot().credentials).toEqual([]);

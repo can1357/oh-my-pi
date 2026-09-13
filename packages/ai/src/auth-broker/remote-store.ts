@@ -854,23 +854,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Logout: disable every active credential for the provider on the broker,
-	 * then drop them from the local snapshot. Refresh fetches the authoritative
-	 * post-state in the background.
+	 * Whole-provider logout also clears prior tombstones, including unidentified
+	 * rows and history with no remaining active credentials. Only drop the local
+	 * snapshot after the broker persists the operation successfully.
 	 */
-	async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
-		const existing = this.listAuthCredentials(provider);
-		for (const entry of existing) {
-			try {
-				await this.#client.disableCredential(entry.id, disabledCause);
-			} catch (error) {
-				logger.warn("auth-broker disable during delete failed", {
-					provider: redactSecrets(provider),
-					id: entry.id,
-					error: redactSecrets(String(error)),
-				});
-			}
-		}
+	async deleteAuthCredentialsRemote(provider: string): Promise<void> {
+		this.#noteActivity();
+		await this.#client.logoutProvider(provider);
 		this.#removeProviderEntries(provider);
 		this.#maybeRefreshSnapshot("delete");
 	}

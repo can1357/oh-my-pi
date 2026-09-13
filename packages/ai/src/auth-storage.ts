@@ -640,11 +640,13 @@ export interface AuthCredentialStore {
 	 */
 	deleteAuthCredentialRemote?(id: number, disabledCause: string): Promise<boolean>;
 	/**
-	 * Optional async write hook for clearing every credential for a provider
-	 * (logout). When present, `AuthStorage.remove` routes through this instead
-	 * of the sync `deleteAuthCredentialsForProvider`.
+	 * Optional async write hook for deliberate whole-provider logout, clearing
+	 * prior disabled history as well as active credentials. When present,
+	 * `AuthStorage.remove` routes through this instead of the sync
+	 * `deleteAuthCredentialsForProvider`. Reject on persistence failure and
+	 * update the in-memory snapshot only after success.
 	 */
-	deleteAuthCredentialsRemote?(provider: string, disabledCause: string): Promise<void>;
+	deleteAuthCredentialsRemote?(provider: string): Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2970,11 +2972,11 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Remove credential for a provider.
+	 * Deliberately remove all credentials and prior disabled history for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
 		if (this.#store.deleteAuthCredentialsRemote) {
-			await this.#store.deleteAuthCredentialsRemote(provider, "deleted by user");
+			await this.#store.deleteAuthCredentialsRemote(provider);
 		} else {
 			this.#store.deleteAuthCredentialsForProvider(provider, "deleted by user");
 		}
@@ -7390,7 +7392,7 @@ export class AuthStorage {
 	 * Disable the credential with the given id. Used by the auth-broker server
 	 * to honour `POST /v1/credential/:id/disable`. Returns `false` when no such
 	 * row exists. A {@link CredentialDisabledEvent} is emitted only for an
-	 * automatic cause: a remote client's own `remove()` arrives here as
+	 * automatic cause: a remote client's own `removeCredential()` arrives here as
 	 * `deleted by user`, and the event contract excludes user-initiated
 	 * removals just as the local path does.
 	 */

@@ -1626,22 +1626,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result.changes > 0;
 	}
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
-		try {
-			const cause = normalizeDisabledCause(disabledCause);
-			if (!isDeliberateRemovalCause(cause)) {
-				this.#deleteByProviderStmt.run(cause, provider);
-				return;
-			}
-			const logout = this.#db.transaction(() => {
-				// Whole-provider logout owns all prior history, including unidentified
-				// tombstones and providers with no remaining active credentials.
-				this.#db.run("DELETE FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL", [provider]);
-				this.#deleteByProviderStmt.run(cause, provider);
-			});
-			logout.immediate();
-		} catch {
-			// Ignore delete failures
+		const cause = normalizeDisabledCause(disabledCause);
+		if (!isDeliberateRemovalCause(cause)) {
+			this.#deleteByProviderStmt.run(cause, provider);
+			return;
 		}
+		const logout = this.#db.transaction(() => {
+			// Whole-provider logout owns all prior history, including unidentified
+			// tombstones and providers with no remaining active credentials.
+			this.#db.run("DELETE FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL", [provider]);
+			this.#deleteByProviderStmt.run(cause, provider);
+		});
+		logout.immediate();
 	}
 
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null {

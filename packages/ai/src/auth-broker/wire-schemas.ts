@@ -37,6 +37,8 @@ import type {
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
 	HealthzResponse,
+	ProviderLogoutRequest,
+	ProviderLogoutResponse,
 	RefresherSchedule,
 	SnapshotEntry,
 	SnapshotResponse,
@@ -349,6 +351,17 @@ export const credentialDisableRequestSchema: FluentType<{ cause?: string }> = ty
 });
 
 export const credentialDisableResponseSchema: FluentType<CredentialDisableResponse> = type({
+	"+": "reject",
+	ok: "boolean",
+});
+
+/** Whole-provider logout must name one provider; it never takes an automatic disable cause. */
+export const providerLogoutRequestSchema: FluentType<ProviderLogoutRequest> = type({
+	"+": "reject",
+	provider: type("string").atLeastLength(1),
+});
+
+export const providerLogoutResponseSchema: FluentType<ProviderLogoutResponse> = type({
 	"+": "reject",
 	ok: "boolean",
 });
