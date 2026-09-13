@@ -127,7 +127,7 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { LocalProtocolHandler, type LocalProtocolOptions, stripXdUrlPrefix } from "./internal-urls";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -142,6 +142,7 @@ import {
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
+import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
@@ -184,6 +185,7 @@ import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./se
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
+import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -3017,11 +3019,43 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// name. Resolve that name from the canonical map and apply the same
 		// execution-only ACP decorator used by `write xd://<tool>`; docs and
 		// renderer lookup continue to use the undecorated canonical instance.
-		const resolveDeviceTool = (name: string): AgentTool | undefined => {
+		//
+		// `advertised` is the agent loop's per-request tool snapshot, the very set
+		// exact-name dispatch just searched. It is NOT read from `agent.state`:
+		// an MCP `tools/list_changed` reassigns the agent's tools mid-stream, so
+		// live state can hold a roster the model never saw for this request, and
+		// recovering a name against it would dispatch a tool that was never
+		// advertised while exact dispatch still answered from the snapshot.
+		// Callers with no request snapshot (the Cursor exec bridge) pass none and
+		// get device resolution only.
+		const resolveDeviceTool = (name: string, advertised: readonly AgentTool[] = []): AgentTool | undefined => {
+			const bareName = stripXdUrlPrefix(name);
 			const state = toolSession.xdev;
-			if (!state) return undefined;
-			return resolveMountedXdevExecutable(state, name);
+			// An exact mounted name is the name itself, not a guess.
+			const exactDevice = state ? resolveMountedXdevExecutable(state, bareName) : undefined;
+			if (exactDevice) return exactDevice;
+			// One lookup spanning BOTH presentation sets this request can reach, so
+			// the uniqueness rule applies across their union: an alias answered by
+			// a mounted device AND by a different advertised tool is ambiguous, not
+			// a race the mounted set happens to win.
+			//
+			// `xd://` state exists only when `tools.xdev` is on and the session is
+			// unrestricted (`createTools`), so the advertised arm is what recovers
+			// an MCP alias when there is no state at all. That arm reads a set
+			// already execution-wrapped by `#applyActiveToolsByName`, so a
+			// deselected, `defaultInactive`, hidden, or Code Mode-demoted tool
+			// stays unreachable and no permission wrapper is bypassed. Only `mcp__`
+			// names yield candidates, so no first-party tool is reachable this way.
+			return resolveMCPToolAlias(
+				bareName,
+				candidate =>
+					(state ? resolveMountedXdevExecutable(state, candidate) : undefined) ??
+					advertised.find(tool => tool.name === candidate),
+			);
 		};
+		// Mounted devices are absent from the advertised tool set, so a miss on a
+		// device name has nothing to suggest unless the loop is told they exist.
+		const suggestDeviceToolNames = (): Iterable<string> => toolSession.xdev?.mountedNames ?? [];
 		// Cursor's resource frames ask what THIS client's servers advertise; only
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
@@ -3541,6 +3575,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const kimiApiFormatSetting = settings.get("providers.kimiApiFormat");
 		const kimiApiFormat = kimiApiFormatSetting === "auto" ? undefined : kimiApiFormatSetting;
+		// Live-bound speculation config: the Agent captures this object once at
+		// construction but reads `enabled` per turn (and `maxInFlight` per drain)
+		// through getters, so mid-session settings UI toggles take effect without
+		// a session recreate. The single shared host keeps its evidence across
+		// toggles; per-turn coordinator close never touches it.
+		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
+
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -3621,10 +3662,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			},
 			resolveFallbackTool: resolveDeviceTool,
+			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: !!intentField,
 			pruneToolDescriptions: inlineToolDescriptors,
 			dialect: resolveDialect(settings.get("tools.format"), model),
 			abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
+			speculativeToolExecution,
 			getToolChoice: () => session?.nextToolChoiceDirective(),
 			onToolChoiceUnavailable: () => session?.toolChoiceQueue.reject("unavailable"),
 			telemetry: options.telemetry,
@@ -3734,6 +3777,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorSharedMaxNotesPerUpdate: discoveredAdvisors.sharedMaxNotesPerUpdate,
 			advisorConfigs: discoveredAdvisors.advisors,
+			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
@@ -4187,7 +4231,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
-					resolveFallbackTool: resolveDeviceTool,
+					// No fallback resolver. The capture agent advertises only
+					// `learn`/`manage_skill`, both of which stay top-level and never
+					// mount as devices, so it has nothing legitimate to recover — while
+					// the primary session's resolver is bound to the primary agent's
+					// tools and would have let a capture response reach a main-session
+					// MCP tool, side effects included. A hallucinated call from here
+					// correctly stays `not found`, and suggesting session devices it
+					// cannot call would only mislead it.
 					intentTracing: !!intentField,
 					pruneToolDescriptions: inlineToolDescriptors,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),

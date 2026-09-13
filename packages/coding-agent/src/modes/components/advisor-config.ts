@@ -42,6 +42,7 @@ import type { PerAdvisorStat } from "../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import { formatCompactQuota } from "../controllers/command-controller";
 import { getSelectListTheme, theme } from "../theme/theme";
+import { sanitizeDisplayWarnings } from "../../tools/render-utils";
 import { HookEditorComponent } from "./hook-editor";
 import { buildBrowserItems, ModelBrowser, sortModelItems } from "./model-browser";
 import {
@@ -66,6 +67,11 @@ export interface AdvisorConfigCallbacks {
 	requestRender: () => void;
 	/** Surface a transient status/warning line to the user. */
 	notify: (message: string) => void;
+	/**
+	 * Surface a sticky warning (e.g. malformed entries in the file just made
+	 * active by a scope switch). Falls back to `notify` when omitted.
+	 */
+	warn?: (message: string) => void;
 	/** Live advisor usage stats; lets the preview show tokens/cost per advisor. */
 	getAdvisorStats?: () => PerAdvisorStat[];
 	getUsageReports?: () => Promise<UsageReport[] | null>;
@@ -263,15 +269,27 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#previewContent(bodyWidth: number): string[] {
+		// The fullscreen overlay hides the host's chat-mounted warning toasts, so
+		// the active file's load problems are pinned at the top of the preview
+		// until a successful save rewrites the file without them.
+		const warnings = this.#doc.warnings?.length
+			? [
+					theme.fg("warning", "⚠ Config problems — dropped while loading:"),
+					...sanitizeDisplayWarnings(this.#doc.warnings).flatMap(warning =>
+						wrap(warning, bodyWidth).map(line => theme.fg("warning", line)),
+					),
+					"",
+				].map(line => truncateToWidth(line, bodyWidth))
+			: [];
 		const list = this.#active;
 		const value = list instanceof SelectList ? (list.getSelectedItem()?.value ?? "") : "";
 		const match = /^advisor:(\d+)$/.exec(value);
 		if (match) {
 			const advisor = this.#doc.advisors[Number(match[1])];
-			if (advisor) return this.#advisorPreview(advisor, bodyWidth);
+			if (advisor) return [...warnings, ...this.#advisorPreview(advisor, bodyWidth)];
 		}
 		if (value === "shared") {
-			const lines = [theme.bold("Shared instructions"), ""];
+			const lines = [...warnings, theme.bold("Shared instructions"), ""];
 			const text = this.#doc.instructions?.trim();
 			lines.push(...(text ? wrap(text, bodyWidth) : [theme.fg("muted", "(none)")]));
 			return lines.map(line => truncateToWidth(line, bodyWidth));
@@ -286,7 +304,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 						: value === "close"
 							? "Close the editor. Unsaved changes are discarded."
 							: "";
-		return wrap(help, bodyWidth).map(line => truncateToWidth(theme.fg("muted", line), bodyWidth));
+		return [...warnings, ...wrap(help, bodyWidth).map(line => truncateToWidth(theme.fg("muted", line), bodyWidth))];
 	}
 
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
@@ -415,15 +433,27 @@ export class AdvisorConfigOverlayComponent implements Component {
 				return;
 			}
 			const next = this.#otherScope();
-			this.#doc = await this.#cb.loadDoc(next);
-			this.#ensureRosterVisible();
+			const doc = await this.#cb.loadDoc(next);
+			this.#doc = doc;
 			this.#scope = next;
+			// Surface malformed entries in the file just made active. The host shows
+			// the initial scope's warnings when the overlay opens, so only switches
+			// report here — no double-showing the opening file.
+			if (doc.warnings?.length) {
+				const message = `WATCHDOG.yml: ${sanitizeDisplayWarnings(doc.warnings).join("; ")}`;
+				if (this.#cb.warn) this.#cb.warn(message);
+				else this.#cb.notify(message);
+			}
+			this.#ensureRosterVisible();
 			this.#showList();
 			return;
 		}
 		if (value === "save") {
 			const doc = this.#hasSyntheticDefaultAdvisor(this.#doc) ? { ...this.#doc, advisors: [] } : this.#doc;
 			await this.#cb.save(this.#scope, doc);
+			// The saved file contains only the normalized entries, so the load-time
+			// warnings no longer apply to it. (On failure the throw skips this.)
+			this.#doc.warnings = undefined;
 			this.#dirty = false;
 			this.#showList();
 			return;
