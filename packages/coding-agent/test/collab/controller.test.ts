@@ -37,6 +37,10 @@ interface ControllerContextState {
 	sessionChangeCallbacks: Set<() => void>;
 	/** Resolves each time a host clears its status-line segment (tore down). */
 	tornDown: (() => void)[];
+	/** Guest prompts a host forwarded into the session. */
+	prompts: string[];
+	/** Resolves each time a guest prompt is forwarded. */
+	prompted: (() => void)[];
 }
 
 /**
@@ -56,6 +60,8 @@ function makeControllerContext(over: Partial<Pick<ControllerContextState, "autoS
 		firstStatus: Promise.withResolvers<string>(),
 		sessionChangeCallbacks: new Set(),
 		tornDown: [],
+		prompts: [],
+		prompted: [],
 	};
 	const settingValues = (): Record<string, string> => ({
 		"collab.autoStart": state.autoStart,
@@ -86,7 +92,11 @@ function makeControllerContext(over: Partial<Pick<ControllerContextState, "autoS
 			thinkingLevel: undefined,
 			subscribe: () => () => {},
 			emitNotice: () => {},
-			promptCustomMessage: () => Promise.resolve(),
+			promptCustomMessage: (message: { content: unknown }) => {
+				state.prompts.push(String(message.content));
+				state.prompted.shift()?.();
+				return Promise.resolve();
+			},
 			abort: () => Promise.resolve(),
 			registerSessionChangeCallback: (cb: () => void) => {
 				state.sessionChangeCallbacks.add(cb);
@@ -368,6 +378,46 @@ describe("CollabController", () => {
 		expect(second.generation).toBe(2);
 		expect(ctx.collabHost).toBe(second);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 2 }]);
+	});
+
+	it("lets guests join and answer dialogs during startup but refuses prompts until startupComplete()", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await settled(publishSpy, 1);
+		const host = ctx.collabHost;
+		if (!host) throw new Error("auto-started room missing");
+
+		const errors: string[] = [];
+		const refused = Promise.withResolvers<void>();
+		const asked = Promise.withResolvers<number>();
+		const writer = await joinAsWriter(host, frame => {
+			if (frame.t === "error") {
+				errors.push(frame.message);
+				refused.resolve();
+			}
+			if (frame.t === "ui-request") asked.resolve(frame.request.reqId);
+		});
+
+		// Startup hooks are still running: a prompt must not start an agent
+		// turn beside them, and the writer is told why …
+		writer.send({ t: "prompt", text: "during startup" });
+		await refused.promise;
+		expect(errors).toEqual(["prompting is unavailable until the host finishes starting up"]);
+		expect(state.prompts).toEqual([]);
+		// … while a question raised by those very hooks can still be answered remotely.
+		const answer = host.requestGuestUi({ kind: "select", title: "Startup hook", options: ["Yes", "No"] });
+		if (!answer) throw new Error("host refused the startup dialog");
+		writer.send({ t: "ui-response", reqId: await asked.promise, value: "Yes" });
+		expect(await answer).toEqual({ kind: "answered", value: "Yes" });
+
+		// Startup finished: the same writer's prompt now reaches the session.
+		controller.startupComplete();
+		const forwarded = Promise.withResolvers<void>();
+		state.prompted.push(forwarded.resolve);
+		writer.send({ t: "prompt", text: "after startup" });
+		await forwarded.promise;
+		expect(state.prompts).toEqual(["after startup"]);
 	});
 
 	describe("while the first room is still connecting", () => {

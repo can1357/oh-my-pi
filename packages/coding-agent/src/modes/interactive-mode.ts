@@ -1526,6 +1526,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Host the session before extension hooks run: a dialog raised from a
 		// `session_start` hook is then retained for the first writer that joins.
 		// The relay connection proceeds in the background and never blocks init.
+		// Guests can join and answer dialogs from now on, but — like the local
+		// composer, whose submit gate is lifted at the end of init — they cannot
+		// prompt, interrupt, or command agents until startup has finished.
 		this.collabController.autoStart();
 
 		// Initialize hooks with TUI-based UI context
@@ -1675,6 +1678,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		// The same gate for guests: a writer in an auto-started room may drive
+		// the session only now that startup hooks and reconciliation are done.
+		this.collabController.startupComplete();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working

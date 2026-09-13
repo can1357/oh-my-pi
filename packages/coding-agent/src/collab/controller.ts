@@ -35,6 +35,8 @@ export class CollabController {
 	#ops: Promise<void> = Promise.resolve();
 	/** Installed when the first room starts; a process that never hosts never subscribes. */
 	#unsubscribeSessionChange: (() => void) | undefined;
+	/** Guests may drive the session only once interactive startup has finished. */
+	#startupComplete = false;
 	#shutdown = false;
 
 	constructor(ctx: InteractiveModeContext) {
@@ -63,6 +65,8 @@ export class CollabController {
 	 * installed synchronously so dialogs raised before the relay connects are
 	 * retained for the first writer; the connection itself proceeds in the
 	 * background and a failure is reported without disturbing the session.
+	 * Until {@link startupComplete} is called, guests can join and answer
+	 * dialogs but cannot prompt, interrupt, or command agents.
 	 */
 	autoStart(): void {
 		// Observe session changes from now on even when auto-start is currently
@@ -73,6 +77,14 @@ export class CollabController {
 		if (access === "off" || this.#shutdown || this.host) return;
 		const started = this.#launchReporting(access);
 		this.#ops = this.#ops.then(() => started);
+	}
+
+	/**
+	 * Interactive startup (extension hooks, mode reconciliation) has finished:
+	 * from now on guests in any room of this process may drive the session.
+	 */
+	startupComplete(): void {
+		this.#startupComplete = true;
 	}
 
 	#observeSessionChanges(): void {
@@ -136,7 +148,12 @@ export class CollabController {
 		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
 		this.#observeSessionChanges();
 		const previous = this.#host;
-		const host = new CollabHost(this.#ctx, { instanceId: this.instanceId, generation: ++this.#generation, access });
+		const host = new CollabHost(this.#ctx, {
+			instanceId: this.instanceId,
+			generation: ++this.#generation,
+			access,
+			guestActionsReady: () => this.#startupComplete,
+		});
 		this.#host = host;
 		this.#ctx.collabHost = host;
 		try {

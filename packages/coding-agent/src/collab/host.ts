@@ -138,6 +138,14 @@ export interface CollabHostOptions {
 	instanceId?: string;
 	generation?: number;
 	access?: CollabAccess;
+	/**
+	 * Whether guests may drive the session yet: prompts, interrupts, and agent
+	 * commands are refused with an error frame while this returns false. Joins,
+	 * transcript fetches, and dialog answers are always accepted, so a writer
+	 * can still answer a question raised while the session is starting up.
+	 * Defaults to always ready.
+	 */
+	guestActionsReady?: () => boolean;
 }
 
 /**
@@ -164,6 +172,7 @@ export class CollabHost {
 	#startedAt = 0;
 	readonly #instanceId: string;
 	readonly #generation: number;
+	readonly #guestActionsReady: () => boolean;
 	readonly #access: CollabAccess;
 	#relayConnected = false;
 	#registryPublication: CollabHostPublication | null = null;
@@ -194,6 +203,7 @@ export class CollabHost {
 		this.#instanceId = options.instanceId ?? randomBytes(8).toString("hex");
 		this.#generation = options.generation ?? 1;
 		this.#access = options.access ?? "control";
+		this.#guestActionsReady = options.guestActionsReady ?? (() => true);
 		// The room mirrors the session that is active when it is created; the
 		// frame guard and the registry snapshot compare against this from then on.
 		this.#sessionId = ctx.sessionManager.getSessionId();
@@ -591,12 +601,15 @@ export class CollabHost {
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
 				break;
 			case "prompt":
+				if (this.#rejectWhileStarting("prompting", fromPeer)) break;
 				this.#handlePrompt(frame.text, frame.images, fromPeer);
 				break;
 			case "abort":
+				if (this.#rejectWhileStarting("interrupting", fromPeer)) break;
 				this.#handleAbort(fromPeer);
 				break;
 			case "agent-cmd":
+				if (this.#rejectWhileStarting("agent control", fromPeer)) break;
 				this.#handleAgentCmd(frame.cmd, frame.agentId, frame.text, fromPeer);
 				break;
 			case "ui-response":
@@ -621,6 +634,20 @@ export class CollabHost {
 	/** Reject a mutating frame from a read-only peer with a targeted error. */
 	#rejectReadOnly(action: string, fromPeer: number): void {
 		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+	}
+
+	/**
+	 * Guests must not drive the session while it is still starting up (an
+	 * auto-started room is live before the session's startup hooks finish):
+	 * refuse with a targeted error instead of running an agent turn beside them.
+	 */
+	#rejectWhileStarting(action: string, fromPeer: number): boolean {
+		if (this.#guestActionsReady()) return false;
+		this.#socket?.send(
+			{ t: "error", message: `${action} is unavailable until the host finishes starting up` },
+			fromPeer,
+		);
+		return true;
 	}
 
 	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
