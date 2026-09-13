@@ -214,6 +214,47 @@ const taskBudgetBeta = "task-budgets-2026-03-13";
 const effortBeta = "effort-2025-11-24";
 const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
 
+/**
+ * The two betas that only make sense alongside a `cache_control` breakpoint.
+ * A breakpoint-free replay must advertise neither: an endpoint that refused the
+ * field would refuse the replay too, and an endpoint that merely ignores it is
+ * left with a header that contradicts the body.
+ */
+const promptCacheBetas: Record<string, true> = {
+	[extendedCacheTtlBeta]: true,
+	[promptCachingScopeBeta]: true,
+};
+
+/**
+ * Remove the prompt-cache betas from every `anthropic-beta` entry in a header
+ * record. Header names are case-insensitive and the value is a comma-separated
+ * list, so each matching key keeps its own casing and its remaining tokens;
+ * an entry left with no token is deleted rather than sent empty. The input is
+ * returned untouched when it advertises no cache beta.
+ *
+ * `model.headers` and `options.headers` are caller-controlled channels that
+ * reach the wire through `buildAnthropicHeaders` (as `modelHeaders`, which an
+ * override-enabled endpoint lets replace our own beta header outright), the
+ * GitHub Copilot default headers, and the per-request beta override built for
+ * injected clients — each of which must go through here once breakpoints drop.
+ */
+function stripPromptCacheBetas(headers: Record<string, string>): Record<string, string> {
+	let stripped: Record<string, string> | undefined;
+	for (const key in headers) {
+		if (key.toLowerCase() !== "anthropic-beta") continue;
+		const betas = normalizeExtraBetas(headers[key]);
+		const kept = betas.filter(beta => promptCacheBetas[beta] !== true);
+		if (kept.length === betas.length) continue;
+		stripped ??= { ...headers };
+		if (kept.length === 0) {
+			delete stripped[key];
+		} else {
+			stripped[key] = kept.join(",");
+		}
+	}
+	return stripped ?? headers;
+}
+
 function resolveAnthropicControlBetas(
 	model: Model<"anthropic-messages">,
 	prefixMismatchBehavior: "drop_block" | "error" | undefined,
@@ -2375,6 +2416,13 @@ const streamAnthropicOnce = (
 			const controlBetas = resolveAnthropicControlBetas(model, prefixMismatchBehavior);
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
+			// Base for the per-request beta override an injected client needs.
+			// `mergeAnthropicBetaHeader` seeds from the caller's own
+			// `anthropic-beta` value, so once breakpoints are dropped an unstripped
+			// base would re-attach the very cache beta the replay abandoned. Read
+			// through a closure because `dropCacheControl` flips mid-turn.
+			const callerBetaBaseHeaders = (): Record<string, string> =>
+				dropCacheControl ? stripPromptCacheBetas(mergedCallerHeaders) : mergedCallerHeaders;
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
 			// no nested effort field means the fallback scan cannot re-add its beta.
 			let fallbacks = options?.fallbacks;
@@ -2404,7 +2452,7 @@ const streamAnthropicOnce = (
 				}
 				let extraBetas = normalizeExtraBetas(options?.betas);
 				if (dropCacheControl) {
-					extraBetas = extraBetas.filter(beta => beta !== extendedCacheTtlBeta && beta !== promptCachingScopeBeta);
+					extraBetas = extraBetas.filter(beta => promptCacheBetas[beta] !== true);
 				}
 				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
@@ -2599,7 +2647,7 @@ const streamAnthropicOnce = (
 					options?.client !== undefined &&
 					!isVertexRawPredictUrl(refreshBetaRouteUrl) &&
 					carriesCompactionEdit(refreshParams)
-						? mergeAnthropicBetaHeader(mergedCallerHeaders, COMPACTION_BETA)
+						? mergeAnthropicBetaHeader(callerBetaBaseHeaders(), COMPACTION_BETA)
 						: undefined;
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
@@ -2748,19 +2796,19 @@ const streamAnthropicOnce = (
 				if (options?.client !== undefined && !isVertexRawPredictUrl(injectedBetaRouteUrl)) {
 					for (const beta of controlBetas) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							beta,
 						);
 					}
 					if ((params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							effortBeta,
 						);
 					}
 					if (carriesCompactionEdit(params)) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							COMPACTION_BETA,
 						);
 					}
@@ -3731,7 +3779,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
-		const defaultHeaders = mergeHeaders(
+		const mergedCopilotHeaders = mergeHeaders(
 			{
 				Accept: stream ? "text/event-stream" : "application/json",
 				"Content-Type": "application/json",
@@ -3744,6 +3792,10 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			dynamicHeaders,
 			headers,
 		);
+		// Unlike the generic builder below, this branch has no enforced-key
+		// filter: a caller-supplied `anthropic-beta` lands in the default
+		// headers verbatim, cache betas included.
+		const defaultHeaders = dropCacheControl ? stripPromptCacheBetas(mergedCopilotHeaders) : mergedCopilotHeaders;
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,
 			protocol: "anthropic",
@@ -3777,13 +3829,18 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		betaFeatures.push(interleavedThinkingBeta);
 	}
 
-	const requestModelHeaders = mergeHeaders(
+	const mergedRequestHeaders = mergeHeaders(
 		model.headers,
 		foundryCustomHeaders,
 		getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)),
 		headers,
 		dynamicHeaders,
 	);
+	// `anthropic-beta` is an enforced key, so most endpoints drop a caller's
+	// value outright — but `allowAnthropicHeaderOverrides` lets it replace our
+	// built beta header wholesale, which would put a cache beta back on a
+	// breakpoint-free request.
+	const requestModelHeaders = dropCacheControl ? stripPromptCacheBetas(mergedRequestHeaders) : mergedRequestHeaders;
 	const defaultHeaders = buildAnthropicHeaders({
 		apiKey,
 		baseUrl,
