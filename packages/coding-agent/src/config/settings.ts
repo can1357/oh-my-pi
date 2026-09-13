@@ -811,6 +811,9 @@ export class Settings {
 		if (this.#modifiedProjectModelRoles.size > 0) {
 			await this.#saveProjectNow();
 		}
+		// Direct profile writes ride the same chain; a flush must not return
+		// while one (or a save queued behind it) is still in flight.
+		await this.#saveChain;
 	}
 
 	async cloneForCwd(cwd: string): Promise<Settings> {
@@ -1339,6 +1342,22 @@ export class Settings {
 		if (this.getProjectModelRole(role)) return "project";
 		if (this.getGlobalModelRole(role)) return "global";
 		return "default";
+	}
+
+	/**
+	 * Effective model role value IGNORING the active profile's overlay, still
+	 * honoring runtime overrides, `--config` overlays, project, and global
+	 * layers. `undefined` when no lower layer supplies the role — the caller
+	 * owns the fallback (the ordinary default-model selection must NOT fall
+	 * back to the current session model, or deactivating a profile would
+	 * "restore" the profile's own model).
+	 */
+	getBaseModelRole(role: ModelRole | string): string | undefined {
+		const fromRuntime = this.#modelRolesFromLayer(this.#overrides)[role];
+		if (fromRuntime) return fromRuntime;
+		const fromOverlay = this.#modelRolesFromLayer(this.#configOverlay)[role];
+		if (fromOverlay) return fromOverlay;
+		return this.getProjectModelRole(role) ?? this.getGlobalModelRole(role) ?? undefined;
 	}
 
 	/**
@@ -2737,6 +2756,40 @@ export class Settings {
 		}
 	}
 
+	/**
+	 * Run a direct profile write on the shared save chain.
+	 *
+	 * A `set()` landing WHILE the write runs queues a debounced save that must
+	 * not interleave: the write's layer reload would otherwise be followed by
+	 * a save persisting the reloaded (pre-change) values. Chaining both on
+	 * {@link #saveChain} guarantees the order write → reload → re-apply →
+	 * later saves, so the follow-up save persists the re-applied values.
+	 */
+	async #runProfileDirectWrite<T>(
+		scope: "global" | "project",
+		write: (captureLayer: () => void) => Promise<T>,
+	): Promise<T> {
+		return this.#enqueueSaveChain(async () => {
+			let globalAtWriteEnd: Record<string, unknown> | undefined;
+			const captureLayer = (): void => {
+				// Snapshot BEFORE the in-write layer reload: a set() that landed
+				// while the write held the YAML lock only exists here.
+				globalAtWriteEnd = structuredClone(this.#global);
+			};
+			const result = await write(captureLayer);
+			// Re-apply mutations queued while the write was in flight; paths
+			// already flushed are gone from `#modified` and need nothing.
+			if (globalAtWriteEnd) {
+				for (const modPath of this.#modified) {
+					const segments = modPath.split(".");
+					setByPath(this.#global, segments, getByPath(globalAtWriteEnd, segments));
+				}
+				this.#rebuildMerged();
+			}
+			return result;
+		});
+	}
+
 	#queueSave(): void {
 		if (!this.#persist || !this.#configPath) return;
 
@@ -2759,7 +2812,28 @@ export class Settings {
 		}, 100);
 	}
 
+	/**
+	 * Serializes every persisted-layer mutation (debounced saves, direct
+	 * profile writes) so their on-disk write → in-memory reload → pending
+	 * mutation re-apply sequences never interleave. A save or write that fires
+	 * while another holds the chain runs strictly after it.
+	 */
+	#saveChain: Promise<unknown> = Promise.resolve();
+
+	#enqueueSaveChain<T>(step: () => Promise<T>): Promise<T> {
+		const chained = this.#saveChain.then(step, step);
+		this.#saveChain = chained.catch(() => {});
+		return chained;
+	}
+
 	async #saveNow(): Promise<void> {
+		// Serialize against direct profile writes: a save that fires while a
+		// profile write holds the YAML lock must run AFTER that write's layer
+		// reload + re-apply, or it persists the reloaded (pre-change) values.
+		return this.#enqueueSaveChain(() => this.#saveNowInternal());
+	}
+
+	async #saveNowInternal(): Promise<void> {
 		if (this.#savesCancelled || !this.#persist || !this.#configPath) return;
 		if (this.#modified.size === 0 && this.#modifiedGlobalModelRoles.size === 0) return;
 
@@ -3216,6 +3290,15 @@ export class Settings {
 	): Promise<ProfileDefinition> {
 		validateProfileName(name);
 		validateProfileDefinition(definition);
+		if (!this.#persist) {
+			// Isolated/read-only instances must never touch real config files:
+			// mutate only the in-memory layer through the normal set() path.
+			const current = getByPath(this.#global, ["profiles"]);
+			const merged: Record<string, unknown> = isRecord(current) ? { ...current } : {};
+			merged[name] = deepMergeProfileDefinition(merged[name], definition);
+			this.set("profiles", merged as SettingValue<"profiles">);
+			return structuredClone(this.getProfile(name) ?? definition);
+		}
 		// Flush debounced saves first: the direct write below re-reads the file
 		// and then REPLACES the in-memory layer from disk, which would discard
 		// any ordinary setting still sitting in the 100 ms debounce window
@@ -3238,48 +3321,58 @@ export class Settings {
 			// Merge against FRESH file content under the write lock: a stale
 			// in-memory `profiles` record must never overwrite profiles another
 			// process wrote after this instance loaded.
-			await this.#withYamlWriteLock(configPath, async writePath => {
-				const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
-				const loaded = loadedSettings ?? {};
-				const currentProfiles = getByPath(loaded, ["profiles"]);
-				const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
-					? structuredClone(currentProfiles)
-					: {};
-				mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
-				setByPath(loaded, ["profiles"], mergedProfiles);
-				await this.#writeYamlAtomically(writePath, loaded);
+			await this.#runProfileDirectWrite("global", async captureLayer => {
+				// Merge against FRESH file content under the write lock: a stale
+				// in-memory `profiles` record must never overwrite profiles another
+				// process wrote after this instance loaded.
+				await this.#withYamlWriteLock(configPath, async writePath => {
+					const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
+					const loaded = loadedSettings ?? {};
+					const currentProfiles = getByPath(loaded, ["profiles"]);
+					const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
+						? structuredClone(currentProfiles)
+						: {};
+					mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
+					setByPath(loaded, ["profiles"], mergedProfiles);
+					await this.#writeYamlAtomically(writePath, loaded);
+				});
+				invalidateCapabilityFsCache(configPath);
+				this.#persistedMutationGeneration++;
+				captureLayer();
+				this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
+				this.#rebuildMerged();
+				this.#fireProfileSignalsIfNeeded(before);
 			});
-			invalidateCapabilityFsCache(configPath);
-			this.#persistedMutationGeneration++;
-			this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
-			this.#rebuildMerged();
-			this.#fireProfileSignalsIfNeeded(before);
 		} else {
 			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
-			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
-				const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(
-					projectConfigPath,
-					writePath,
-				);
-				const projectSettings =
-					loadedSettings ??
-					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
-				const currentProfiles = getByPath(projectSettings, ["profiles"]);
-				const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
-					? structuredClone(currentProfiles)
-					: {};
-				mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
-				setByPath(projectSettings, ["profiles"], mergedProfiles);
-				await this.#writeYamlAtomically(writePath, projectSettings);
+			await this.#runProfileDirectWrite("project", async captureLayer => {
+				await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+					const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(
+						projectConfigPath,
+						writePath,
+					);
+					const projectSettings =
+						loadedSettings ??
+						(this.#quarantinedYamlTargets.has(projectConfigPath)
+							? structuredClone(this.#projectFileSettings)
+							: {});
+					const currentProfiles = getByPath(projectSettings, ["profiles"]);
+					const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
+						? structuredClone(currentProfiles)
+						: {};
+					mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
+					setByPath(projectSettings, ["profiles"], mergedProfiles);
+					await this.#writeYamlAtomically(writePath, projectSettings);
+				});
+				invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
+				// Reload the project layer through the real path so the merged view
+				// and caches observe the new definition; signals fire only if the
+				captureLayer();
+				this.#project = await this.#loadProjectSettings();
+				this.#rebuildMerged();
+				this.#fireProfileSignalsIfNeeded(before);
 			});
-			invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
-			// Reload the project layer through the real path so the merged view
-			// and caches observe the new definition; signals fire only if the
-			// effective profile state changed (project mutations bypass `set`).
-			this.#project = await this.#loadProjectSettings();
-			this.#rebuildMerged();
-			this.#fireProfileSignalsIfNeeded(before);
 		}
 		return structuredClone(this.getProfile(name) ?? definition);
 	}
@@ -3293,6 +3386,18 @@ export class Settings {
 	 */
 	async removeProfile(scope: "global" | "project", name: string): Promise<void> {
 		validateProfileName(name);
+		if (!this.#persist) {
+			// Isolated/read-only instances mutate only the in-memory layer.
+			const current = getByPath(this.#global, ["profiles"]);
+			if (!isRecord(current) || !isRecord(current[name])) {
+				throw new Error(`Profile "${name}" does not exist in global config.`);
+			}
+			const merged: Record<string, unknown> = { ...current };
+			delete merged[name];
+			if (getByPath(this.#global, ["activeProfile"]) === name) this.set("activeProfile", "");
+			this.set("profiles", merged as SettingValue<"profiles">);
+			return;
+		}
 		// Flush debounced saves first: the direct write below re-reads the file
 		// and then REPLACES the in-memory layer from disk, which would discard
 		// any ordinary setting still sitting in the 100 ms debounce window.
@@ -3320,54 +3425,64 @@ export class Settings {
 			// sibling profile another process added after this instance loaded
 			// survives; only the requested profile (and a same-scope selection
 			// pointing at it) is touched.
-			await this.#withYamlWriteLock(configPath, async writePath => {
-				const { settings: loaded } = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
-				if (!loaded) {
-					throw new Error(`Profile "${name}" does not exist in global config.`);
-				}
-				const currentProfiles = getByPath(loaded, ["profiles"]);
-				if (!isRecord(currentProfiles) || !isRecord(currentProfiles[name])) {
-					throw new Error(`Profile "${name}" does not exist in global config.`);
-				}
-				const mergedProfiles = structuredClone(currentProfiles);
-				delete mergedProfiles[name];
-				setByPath(loaded, ["profiles"], mergedProfiles);
-				if (getByPath(loaded, ["activeProfile"]) === name) {
-					setByPath(loaded, ["activeProfile"], "");
-				}
-				await this.#writeYamlAtomically(writePath, loaded);
+			await this.#runProfileDirectWrite("global", async captureLayer => {
+				// Delete against FRESH file content under the write lock so a
+				// sibling profile another process added after this instance loaded
+				// survives; only the requested profile (and a same-scope selection
+				// pointing at it) is touched.
+				await this.#withYamlWriteLock(configPath, async writePath => {
+					const { settings: loaded } = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
+					if (!loaded) {
+						throw new Error(`Profile "${name}" does not exist in global config.`);
+					}
+					const currentProfiles = getByPath(loaded, ["profiles"]);
+					if (!isRecord(currentProfiles) || !isRecord(currentProfiles[name])) {
+						throw new Error(`Profile "${name}" does not exist in global config.`);
+					}
+					const mergedProfiles = structuredClone(currentProfiles);
+					delete mergedProfiles[name];
+					setByPath(loaded, ["profiles"], mergedProfiles);
+					if (getByPath(loaded, ["activeProfile"]) === name) {
+						setByPath(loaded, ["activeProfile"], "");
+					}
+					await this.#writeYamlAtomically(writePath, loaded);
+				});
+				invalidateCapabilityFsCache(configPath);
+				this.#persistedMutationGeneration++;
+				captureLayer();
+				this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
+				this.#rebuildMerged();
+				this.#fireProfileSignalsIfNeeded(before);
 			});
-			invalidateCapabilityFsCache(configPath);
-			this.#persistedMutationGeneration++;
-			this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
-			this.#rebuildMerged();
-			this.#fireProfileSignalsIfNeeded(before);
 		} else {
 			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
-			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
-				const { settings: loaded } = await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath);
-				if (!loaded || !isRecord(getByPath(loaded, ["profiles"]))) {
-					throw new Error(`Profile "${name}" does not exist in project config.`);
-				}
-				const projectProfiles = structuredClone(getByPath(loaded, ["profiles"]) as Record<string, unknown>);
-				if (!isRecord(projectProfiles[name])) {
-					throw new Error(`Profile "${name}" does not exist in project config.`);
-				}
-				delete projectProfiles[name];
-				setByPath(loaded, ["profiles"], projectProfiles);
-				// Drop a same-scope active selection pointing at the deleted profile
-				// by REMOVING the key: persisting an explicit empty value would
-				// mask a surviving same-name selection from a lower scope, so the
-				// profile would stay disabled instead of falling back to it.
-				if (getByPath(loaded, ["activeProfile"]) === name) {
-					delete loaded.activeProfile;
-				}
-				await this.#writeYamlAtomically(writePath, loaded);
+			await this.#runProfileDirectWrite("project", async captureLayer => {
+				await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+					const { settings: loaded } = await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath);
+					if (!loaded || !isRecord(getByPath(loaded, ["profiles"]))) {
+						throw new Error(`Profile "${name}" does not exist in project config.`);
+					}
+					const projectProfiles = structuredClone(getByPath(loaded, ["profiles"]) as Record<string, unknown>);
+					if (!isRecord(projectProfiles[name])) {
+						throw new Error(`Profile "${name}" does not exist in project config.`);
+					}
+					delete projectProfiles[name];
+					setByPath(loaded, ["profiles"], projectProfiles);
+					// Drop a same-scope active selection pointing at the deleted profile
+					// by REMOVING the key: persisting an explicit empty value would
+					// mask a surviving same-name selection from a lower scope, so the
+					// profile would stay disabled instead of falling back to it.
+					if (getByPath(loaded, ["activeProfile"]) === name) {
+						delete loaded.activeProfile;
+					}
+					await this.#writeYamlAtomically(writePath, loaded);
+				});
+				invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
+				captureLayer();
+				this.#project = await this.#loadProjectSettings();
+				this.#rebuildMerged();
+				this.#fireProfileSignalsIfNeeded(before);
 			});
-			invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
-			this.#project = await this.#loadProjectSettings();
-			this.#rebuildMerged();
-			this.#fireProfileSignalsIfNeeded(before);
 		}
 	}
 
@@ -3391,28 +3506,32 @@ export class Settings {
 		}
 		const prevActive = this.getActiveProfile();
 		if (scope === "project") {
+			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
 			// Flush debounced saves first: the direct write below re-reads the
 			// file and then reloads the project layer from disk, which would
 			// discard any project setting still in the 100 ms debounce window.
-			await this.flush();
-			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
-			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
-			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
-				const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(
-					projectConfigPath,
-					writePath,
-				);
-				const loaded =
-					loadedSettings ??
-					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
-				setByPath(loaded, ["activeProfile"], name);
-				await this.#writeYamlAtomically(writePath, loaded);
+			await this.#runProfileDirectWrite("project", async captureLayer => {
+				await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+					const { settings: loadedSettings } = await this.#loadYamlIfPresentForWriteLocked(
+						projectConfigPath,
+						writePath,
+					);
+					const loaded =
+						loadedSettings ??
+						(this.#quarantinedYamlTargets.has(projectConfigPath)
+							? structuredClone(this.#projectFileSettings)
+							: {});
+					setByPath(loaded, ["activeProfile"], name);
+					await this.#writeYamlAtomically(writePath, loaded);
+				});
+				invalidateCapabilityFsCache(projectConfigPath);
+				this.#persistedMutationGeneration++;
+				captureLayer();
+				this.#project = await this.#loadProjectSettings();
+				this.#rebuildMerged();
+				this.#fireEffectiveSettingChanged("activeProfile", this.getActiveProfile(), prevActive);
 			});
-			invalidateCapabilityFsCache(projectConfigPath);
-			this.#persistedMutationGeneration++;
-			this.#project = await this.#loadProjectSettings();
-			this.#rebuildMerged();
-			this.#fireEffectiveSettingChanged("activeProfile", this.getActiveProfile(), prevActive);
 			return;
 		}
 		this.set("activeProfile", name);

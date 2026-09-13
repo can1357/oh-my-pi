@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { acquireFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { onActiveProfileChanged, onModelRolesChanged, resetSettingsForTest, Settings } from "../src/config/settings";
 import { sanitizeStatusText } from "../src/modes/shared";
@@ -365,6 +366,30 @@ describe("round-2 review regressions", () => {
 		await s.reloadForCwd(project2);
 		expect(s.getActiveProfile()).toBe("a");
 		expect(s.getModelRole("default")).toBe("provider/a-proj2");
+		await teardown();
+	});
+
+	test("10: set() landing during a blocked profile write is not lost", async () => {
+		const s = await freshCase();
+		const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+		// Hijack the YAML write lock: the profile write must block on it while
+		// an ordinary set() queues a debounced save. The direct write reloads
+		// the in-memory layer from disk afterwards; without re-applying the
+		// queued mutation, that later save would persist the pre-change value
+		// and the setting change would be silently lost.
+		const hold = await acquireFileLock(await fs.promises.realpath(projectConfigPath));
+		let setLanded = false;
+		const profileWrite = s.setProfile("project", "a", { description: "updated under lock" }).then(() => {
+			setLanded = true;
+		});
+		await Bun.sleep(5); // let the profile write reach its lock acquisition
+		expect(setLanded).toBe(false); // still blocked
+		s.set("statusLine.sessionAccent", false);
+		hold.release();
+		await profileWrite;
+		await s.flush();
+		expect(s.get("statusLine.sessionAccent")).toBe(false);
+		expect((readGlobalDisk().statusLine as Record<string, unknown>).sessionAccent).toBe(false);
 		await teardown();
 	});
 });
