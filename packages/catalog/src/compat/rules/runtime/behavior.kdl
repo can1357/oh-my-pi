@@ -116,6 +116,8 @@ behavior {
 	// Control-plane resource ids are not accepted by the inference API.
 	exclude-models provider="fireworks" prefix="accounts/fireworks/"
 	exclude-models provider="firepass" prefix="accounts/fireworks/"
+	// deepseek-v4-flash-vision-exp retired 2026-09-10, aliased to V4.1 Flash.
+	exclude-models provider="deepseek" exact="deepseek-v4-flash-vision-exp"
 	// Text-chat transports cannot serve Xiaomi's audio-only models.
 	exclude-models provider="xiaomi" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-ams" substring="-tts" substring="-asr"

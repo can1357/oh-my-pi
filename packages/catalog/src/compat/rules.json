@@ -431,6 +431,11 @@
 						"priority": 0
 					},
 					{
+						"id": "flash",
+						"glob": "*deepseek-flash*",
+						"priority": 0
+					},
+					{
 						"id": "pro",
 						"glob": "*deepseek*v4*pro*",
 						"priority": 0
@@ -9773,7 +9778,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:52",
+				"source": "providers/deepseek.kdl:54",
 				"providers": [
 					"deepseek"
 				],
@@ -9803,21 +9808,37 @@
 								"startMinute": 360,
 								"endMinute": 600
 							}
-						},
-						"effectiveRates": {
-							"flashPricing": {
-								"effectiveFrom": "2026-09-14T04:00:00Z",
-								"input": 0.3,
-								"output": 1.2,
-								"cacheRead": 0.006,
-								"cacheWrite": 0
-							}
 						}
 					}
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:89",
+				"source": "providers/deepseek.kdl:81",
+				"providers": [
+					"deepseek"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/deepseek.kdl:90",
 				"providers": [
 					"deepseek"
 				],
@@ -16702,6 +16723,14 @@
 				"match": {
 					"prefix": [
 						"accounts/fireworks/"
+					]
+				}
+			},
+			{
+				"provider": "deepseek",
+				"match": {
+					"exact": [
+						"deepseek-v4-flash-vision-exp"
 					]
 				}
 			},

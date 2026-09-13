@@ -48,7 +48,9 @@ provider "deepseek" {
 			max-tokens 384000
 		}
 	}
-	// residue: the dated price transition applies to the documented exact Pro SKU only.
+	// residue: the Pro card applies to the documented exact Pro SKU only. The
+	// 2026-09-14 Pro-to-Flash transition was withdrawn upstream (change log
+	// 2026-09-10: V4 Pro continues "with the billing method remaining unchanged").
 	models "deepseek-v4-pro" {
 		cost-patch {
 			input 1.32
@@ -70,22 +72,21 @@ provider "deepseek" {
 					end-minute 600
 				}
 			}
-			effective-rates {
-				flash-pricing {
-					effective-from "2026-09-14T04:00:00Z"
-					input 0.30
-					output 1.20
-					cache-read 0.006
-					cache-write 0
-				}
-			}
 		}
+	}
+	// DeepSeek-V4.1-Flash is natively multimodal and also serves the retired
+	// `deepseek-v4-flash` alias (change log 2026-09-10). Live `/models` discovery
+	// seeds `input: ["text"]` and the wire guard requires the declared modality,
+	// so the modality is declared alongside the class-wide strip opt-out.
+	models "deepseek-flash" "deepseek-v4-flash" {
+		input-modalities "text" "image"
+		strip-image-input #false
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	// The bare `deepseek-flash` alias serves DeepSeek-V4.1-Flash, so it shares
 	// the V4.1 wire contract: max_tokens + reasoning_content, mandatory replay
 	// (synthetic placeholders rejected upstream), no tool choice, and the
-	// low/high/max effort ladder the bare alias cannot inherit by family.
+	// low/high/max effort ladder.
 	models "deepseek-flash" "deepseek-v4-flash" "deepseek-v4.1-flash-expires-on-0910" {
 		// Stale source capability data: discovery reports the bare alias as
 		// non-reasoning, so opt into the cascade upgrade for the exact ladder.
@@ -96,8 +97,8 @@ provider "deepseek" {
 		requires-reasoning-content-for-tool-calls #true
 		allows-synthetic-reasoning-content-for-tool-calls #false
 		supports-tool-choice #false
-		// The bare alias carries no taxonomy family, so it cannot inherit the
-		// flash ladder; the exact rule owns it instead.
+		// Pinned on the exact rule so the expiring endpoint id, which no family
+		// glob isolates, gets the same ladder as the canonical ids.
 		thinking-efforts "low" "high" "max"
 	}
 }

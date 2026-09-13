@@ -97,7 +97,8 @@ describe("time-based token pricing", () => {
 		expect(first.cost.total + second.cost.total).toBeCloseTo(2.259, 12);
 	});
 
-	it("switches Pro to Flash prices exactly at the dated cutoff, then resumes Flash peak rates", () => {
+	it("keeps Pro at the Pro card across the withdrawn 2026-09-14 transition", () => {
+		// Change log 2026-09-10: V4 Pro continues after September 14 with billing unchanged.
 		const model = buildModel(spec("deepseek-v4-pro"));
 		const cutoff = Date.parse("2026-09-14T04:00:00Z");
 		const before = calculateCost(model, usage(), cutoff - 1);
@@ -107,8 +108,10 @@ describe("time-based token pricing", () => {
 		expect(before.output).toBeCloseTo(3.96, 12);
 		expect(before.cacheRead).toBeCloseTo(0.044, 12);
 		expect(before.total).toBeCloseTo(5.324, 12);
-		expect(after.total).toBeCloseTo(0.753, 12);
-		expect(nextPeak.total).toBeCloseTo(1.506, 12);
+		// 04:00Z closes the morning peak window: the off-peak half of the Pro card, not the Flash card.
+		expect(after.total).toBeCloseTo(2.662, 12);
+		expect(nextPeak.total).toBeCloseTo(5.324, 12);
+		expect(model.cost.timeBased?.effectiveRates).toBeUndefined();
 	});
 
 	it("applies first-party policies to documented aliases but not reseller or expiring products", () => {

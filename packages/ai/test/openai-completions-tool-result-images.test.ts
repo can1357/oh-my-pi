@@ -461,7 +461,8 @@ describe("openai-completions convertMessages", () => {
 		// convertMessages must never forward `image_url` parts.
 		const deepseekModelIds = [
 			{ id: "deepseek-v4-pro", provider: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
-			{ id: "deepseek-v4-flash", provider: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
+			// `deepseek-v4-flash` is absent on purpose: since 2026-09-10 it is routed to
+			// the multimodal V4.1 Flash and covered by the preserve test below.
 			{ id: "deepseek-chat", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-reasoner", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
@@ -569,32 +570,35 @@ describe("openai-completions convertMessages", () => {
 			},
 		]);
 	});
-	it("preserves image_url for the multimodal DeepSeek vision SKU", () => {
-		// deepseek-v4-flash-vision-exp is genuinely multimodal: the blanket
-		// DeepSeek text-only guard must not strip its image parts.
-		const model = getBundledModel("deepseek", "deepseek-v4-flash-vision-exp") as Model<"openai-completions">;
-		const context: Context = {
-			messages: [
+	it("preserves image_url for the multimodal DeepSeek V4.1 Flash SKUs", () => {
+		// deepseek-flash (DeepSeek V4.1 Flash) is genuinely multimodal, and the
+		// retired deepseek-v4-flash alias is routed to it: the blanket DeepSeek
+		// text-only guard must not strip their image parts.
+		for (const id of ["deepseek-flash", "deepseek-v4-flash"]) {
+			const model = getBundledModel("deepseek", id) as Model<"openai-completions">;
+			const context: Context = {
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Describe this image" },
+							{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+						],
+						timestamp: Date.now(),
+					},
+				],
+			};
+
+			const messages = convertMessages(model, context, compat);
+
+			expect(messages).toHaveLength(1);
+			expect(messages[0].content).toEqual([
+				{ type: "text", text: "Describe this image" },
 				{
-					role: "user",
-					content: [
-						{ type: "text", text: "Describe this image" },
-						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
-					],
-					timestamp: Date.now(),
+					type: "image_url",
+					image_url: { url: "data:image/png;base64,ZmFrZQ==" },
 				},
-			],
-		};
-
-		const messages = convertMessages(model, context, compat);
-
-		expect(messages).toHaveLength(1);
-		expect(messages[0].content).toEqual([
-			{ type: "text", text: "Describe this image" },
-			{
-				type: "image_url",
-				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
-			},
-		]);
+			]);
+		}
 	});
 });

@@ -34,6 +34,7 @@
 
 - Fixed Command Code models outside the verified effort registry offering unsupported reasoning effort controls, and bundled the live Command Code catalog so fresh installs resolve the default model without waiting for discovery ([#11595](https://github.com/can1357/oh-my-pi/pull/11595) by [@H4vC](https://github.com/H4vC)).
 - Fixed the bundled `deepseek-flash` row shipping without context limits: it now carries its documented 1M context / 384K output so offline context accounting enforces the real window.
+- Fixed DeepSeek V4.1 Flash (`deepseek-flash`) classification so the bare canonical id joins the `flash` family and flows through the models.dev descriptor instead of surviving only as a previous-snapshot row; declared its native image input (also on the retired `deepseek-v4-flash` alias, which upstream now routes to V4.1 Flash); retired `deepseek-v4-flash-vision-exp` from the roster, live discovery, and stale model caches; and dropped the withdrawn 2026-09-14 V4 Pro-to-Flash price transition ([#11508](https://github.com/can1357/oh-my-pi/issues/11508), [#11509](https://github.com/can1357/oh-my-pi/pull/11509)).
 
 ## [18.1.16] - 2026-09-09
 
