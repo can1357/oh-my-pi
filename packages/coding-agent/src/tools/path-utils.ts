@@ -404,13 +404,11 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 
 /**
  * Async sibling of {@link splitPathAndSel} that prefers a literal filesystem
- * path over selector interpretation. Filenames whose tail matches the selector
- * grammar (e.g. `test:1-2`, `log:raw`) are legal on POSIX; without this the
- * strict splitter peels the tail and both `read` and `grep` refuse to open the
- * real file (issue #4618). The literal wins on a confirmed `lstat`, and also
- * on `"unknown"` (`EACCES` on a parent, transient I/O), so an unreachable
- * literal is never silently reinterpreted as `path + selector`. Only a
- * definitive `ENOENT`/`ENOTDIR` falls back to the strict split.
+ * path over selector interpretation. Selector-shaped tails may be POSIX
+ * filenames or NTFS alternate data streams, so a confirmed `lstat` always
+ * preserves the literal path. Ambiguous probe errors preserve the literal on
+ * POSIX, where colon filenames are valid, but fall back to the strict split on
+ * Windows, where only a confirmed alternate data stream can be literal.
  */
 export async function splitPathAndSelPreferringLiteral(
 	rawPath: string,
@@ -419,7 +417,7 @@ export async function splitPathAndSelPreferringLiteral(
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = await probeLiteralPathExists(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
+	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
 }
 
 /**
@@ -440,16 +438,14 @@ export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exis
 }
 
 /**
- * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. Identical
- * literal-path precedence — a real file named `report:1-20` keeps its colon —
- * for callers that cannot await, such as the ACP event mapper's location
- * builder.
+ * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. It applies
+ * the same platform-specific handling for inconclusive literal-path probes.
  */
 export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: string): { path: string; sel?: string } {
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = probeLiteralPathExistsSync(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
+	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
 }
 
 /**
