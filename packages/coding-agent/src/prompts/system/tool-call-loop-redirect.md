@@ -1,8 +1,8 @@
 <system-interrupt reason="tool_call_loop_detected">
-You called `{{tool_name}}` {{count}} consecutive times with identical arguments:
+A repeating tool-call pattern reached {{count}} repetitions. Latest call: `{{tool_name}}` with arguments:
 `{{arguments_summary}}`
 
 Last result (truncated): `{{result_summary}}`
 
-NEVER call `{{tool_name}}` with those arguments again this turn. Use different arguments, choose another tool, or summarize findings and yield if complete.
+Choose a step that adds new evidence, or report the verified result if the work is complete. Repeat a call when its underlying state has changed, not merely with different argument wording.
 </system-interrupt>

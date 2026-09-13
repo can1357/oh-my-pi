@@ -377,4 +377,105 @@ tool.read({ path: selected });
 		expect(control.barrier).toBeUndefined();
 		expect(control.operations).toHaveLength(1);
 	});
+	it("rejects tool reads when a retained cell replaced the bridge dispatcher", async () => {
+		const intact = {
+			String: true,
+			JSON: true,
+			"JSON.stringify": true,
+			"Array.prototype.join": true,
+			"Object.prototype.toString": true,
+			__omp_call_tool__: true,
+		};
+		const control = await projectJavaScriptShadowPlan('await tool.read({ path: "note.txt" })', {
+			snapshot: {},
+			initialGlobals: intact,
+		});
+		expect(control.barrier).toBeUndefined();
+		expect(control.operations).toHaveLength(1);
+		// The prelude tool proxy resolves `__omp_call_tool__` per call, so a
+		// poisoned installation must refuse admission even though the
+		// syntactic `tool.read` match still looks intact.
+		const spoofed = await projectJavaScriptShadowPlan('await tool.read({ path: "note.txt" })', {
+			snapshot: {},
+			initialGlobals: { ...intact, __omp_call_tool__: false },
+		});
+		expect(spoofed.operations).toEqual([]);
+		expect(spoofed.barrier).toBeDefined();
+	});
+	it("rejects implicit coercion when retained cells replaced join or toString", async () => {
+		const intact = {
+			String: true,
+			JSON: true,
+			"JSON.stringify": true,
+			"Array.prototype.join": true,
+			"Object.prototype.toString": true,
+			__omp_call_tool__: true,
+		};
+		// Pristine realm: array templates, snapshot templates, and plus-concat
+		// all project from identical host/authoritative conversions.
+		for (const code of [
+			'await tool.read({ path: `${["secret.txt"]}` })',
+			"await tool.read({ path: `${name}.txt` })",
+			'await tool.read({ path: ["secret"] + ".txt" })',
+		]) {
+			const plan = await projectJavaScriptShadowPlan(code, {
+				snapshot: { name: "secret" },
+				initialGlobals: intact,
+			});
+			expect(plan.barrier).toBeUndefined();
+			expect(plan.operations).toHaveLength(1);
+		}
+		// A replaced join changes what array coercions produce.
+		for (const code of [
+			'await tool.read({ path: `${["secret.txt"]}` })',
+			'await tool.read({ path: ["secret"] + ".txt" })',
+		]) {
+			const plan = await projectJavaScriptShadowPlan(code, {
+				snapshot: {},
+				initialGlobals: { ...intact, "Array.prototype.join": false },
+			});
+			expect(plan.operations).toEqual([]);
+			expect(plan.barrier).toBeDefined();
+		}
+		// Opaque snapshot values may reach `toString` (directly, or through
+		// array elements), so they refuse without its flag too.
+		const spoofed = await projectJavaScriptShadowPlan("await tool.read({ path: `${name}.txt` })", {
+			snapshot: { name: "secret" },
+			initialGlobals: { ...intact, "Object.prototype.toString": false },
+		});
+		expect(spoofed.operations).toEqual([]);
+		expect(spoofed.barrier).toBeDefined();
+	});
+	it("rejects transform inputs that coerce through replaced intrinsics", async () => {
+		const intact = {
+			String: true,
+			JSON: true,
+			"JSON.stringify": true,
+			"Array.prototype.join": true,
+			"Object.prototype.toString": true,
+			__omp_call_tool__: true,
+		};
+		// Pristine realm: explicit transforms over any input project.
+		for (const code of [
+			'await tool.read({ path: String(["secret.txt"]) })',
+			"await tool.read({ path: [{ x: 1 }].join() })",
+		]) {
+			const plan = await projectJavaScriptShadowPlan(code, { snapshot: {}, initialGlobals: intact });
+			expect(plan.barrier).toBeUndefined();
+			expect(plan.operations).toHaveLength(1);
+		}
+		// `String(array)` dispatches join; object elements and separators
+		// reach toString.
+		for (const [code, overridden] of [
+			['await tool.read({ path: String(["secret.txt"]) })', "Array.prototype.join"],
+			["await tool.read({ path: [{ x: 1 }].join() })", "Object.prototype.toString"],
+		] as Array<[string, keyof typeof intact]>) {
+			const plan = await projectJavaScriptShadowPlan(code, {
+				snapshot: {},
+				initialGlobals: { ...intact, [overridden]: false },
+			});
+			expect(plan.operations).toEqual([]);
+			expect(plan.barrier).toBeDefined();
+		}
+	});
 });

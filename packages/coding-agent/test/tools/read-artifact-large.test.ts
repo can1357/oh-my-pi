@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	registerArtifactsDir,
@@ -138,6 +139,47 @@ describe("read tool large artifact handling", () => {
 			expect(output).not.toContain("artifact://");
 		}
 		expect(bridgeReads).toEqual(selectors.map(() => path.join(testDir, "bounded.ts")));
+	});
+
+	it.each([false, true])("preserves a maximum source window with renderer overhead (ACP=%s)", async acp => {
+		const source = Array.from({ length: DEFAULT_MAX_LINES * 2 }, (_, n) => `const m${n}=0;`).join("\n");
+		await Bun.write(path.join(testDir, "maximum.ts"), source);
+		const session = makeSession(testDir);
+		session.settings = Settings.isolated({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactTailLines": 5,
+		});
+		if (acp) {
+			session.getClientBridge = () => ({
+				capabilities: { readTextFile: true },
+				readTextFile: async () => source,
+			});
+		}
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const context = {
+			settings: session.settings,
+			sessionManager: SessionManager.inMemory(testDir),
+		} as unknown as AgentToolContext;
+		for (const selector of [`:1-${DEFAULT_MAX_LINES}`, `:raw:1-${DEFAULT_MAX_LINES}`]) {
+			const result = await wrapped.execute(
+				"maximum-window",
+				{ path: `maximum.ts${selector}` },
+				undefined,
+				undefined,
+				context,
+			);
+			const output = getTextOutput(result);
+			expect(output.match(/const m\d+=/g)?.length).toBe(DEFAULT_MAX_LINES);
+			expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+		}
+		const oversized = await wrapped.execute(
+			"oversized-window",
+			{ path: `maximum.ts:1-${DEFAULT_MAX_LINES},${DEFAULT_MAX_LINES + 1}-${DEFAULT_MAX_LINES * 2}` },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(oversized.details?.meta?.truncation?.artifactId).toBeDefined();
 	});
 
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
