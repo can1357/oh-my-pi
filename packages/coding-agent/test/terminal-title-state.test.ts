@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -178,12 +178,12 @@ describe("agent state file", () => {
 	let originalEnv: Record<string, string | undefined> = {};
 	let agentRoot: string | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 		// Its own agent directory, so this never writes into the caller's real terminal-sessions
 		// directory and two suites cannot race for one filename. Through the environment rather
 		// than setAgentDir(), because that is what the resolver reads back.
-		agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-state-file-test-"));
+		agentRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-state-file-test-"));
 		process.env.TMUX_PANE = PANE;
 		process.env.PI_CODING_AGENT_DIR = path.join(agentRoot, "agent");
 		restoreEnvValue("OMP_PROFILE", undefined);
@@ -202,7 +202,7 @@ describe("agent state file", () => {
 		for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
 		__resetDirsFromEnvForTests();
 
-		if (agentRoot) fs.rmSync(agentRoot, { recursive: true, force: true });
+		if (agentRoot) await fs.rm(agentRoot, { recursive: true, force: true });
 		agentRoot = undefined;
 	});
 
@@ -210,7 +210,7 @@ describe("agent state file", () => {
 		setAgentStateFileEnabled(false);
 		setTerminalTitleState("attention");
 		await agentStateFileSettled();
-		expect(fs.existsSync(stateFile())).toBe(false);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 
 	it("records the state the title shows, and removes the file when switched off", async () => {
@@ -218,17 +218,17 @@ describe("agent state file", () => {
 
 		setTerminalTitleState("working");
 		await agentStateFileSettled();
-		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("working");
+		expect((await Bun.file(stateFile()).json()).state).toBe("working");
 
 		// The one that matters: nothing else can distinguish this from a long think.
 		setTerminalTitleState("attention");
 		await agentStateFileSettled();
-		const written = JSON.parse(fs.readFileSync(stateFile(), "utf8"));
+		const written = await Bun.file(stateFile()).json();
 		expect(written.state).toBe("attention");
 		expect(written.pid).toBe(process.pid);
 
 		setAgentStateFileEnabled(false);
-		expect(fs.existsSync(stateFile())).toBe(false);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 
 	it("registers its removal for an exit that never reaches dispose, and only for a real one", async () => {
@@ -244,13 +244,13 @@ describe("agent state file", () => {
 		setAgentStateFileEnabled(true);
 		setTerminalTitleState("attention");
 		await agentStateFileSettled();
-		expect(fs.existsSync(stateFile())).toBe(true);
+		expect(await Bun.file(stateFile()).exists()).toBe(true);
 
 		const registration = register.mock.calls.find(call => call[0] === "agent-state-file");
 		expect(registration?.[2]).toEqual({ exitOnly: true });
 
 		await registration?.[1](postmortem.Reason.SIGTERM);
-		expect(fs.existsSync(stateFile())).toBe(false);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 
 	it("does not publish an update that a removal overtook mid-flight", async () => {
@@ -261,29 +261,65 @@ describe("agent state file", () => {
 		// The stand-in mimics exactly that: the removal happens first, and the rename lands
 		// anyway. A mock that let the rename fail would pass without the guard and prove nothing.
 		setAgentStateFileEnabled(true);
-		const rename = spyOn(fs.promises, "rename");
+		const rename = spyOn(fs, "rename");
 		rename.mockImplementationOnce(async (from, to) => {
-			const body = fs.readFileSync(from as string, "utf8");
+			const body = await Bun.file(from as string).text();
 			setAgentStateFileEnabled(false);
-			fs.writeFileSync(to as string, body);
+			await Bun.write(to as string, body);
 		});
 
 		setTerminalTitleState("attention");
 		await agentStateFileSettled();
 
 		expect(rename).toHaveBeenCalledTimes(1);
-		expect(fs.existsSync(stateFile())).toBe(false);
-		expect(fs.existsSync(`${stateFile()}.${process.pid}.tmp`)).toBe(false);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
+		expect(await Bun.file(`${stateFile()}.${process.pid}.tmp`).exists()).toBe(false);
+	});
+
+	it("does not leave a rolled-back state file behind when a removal lands during a Windows replacement", async () => {
+		// On Windows, replacing an existing file moves it to a backup first. A removal landing in that
+		// window deletes the pending file, the replacement fails, and the helper rolls the backup back
+		// into place - restoring a state for a process that is being torn down.
+		//
+		// Linux never takes that path, so the stand-in drives it: the first rename fails with EPERM,
+		// the removal runs just before the pending file is moved, and the real renames do the rest.
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("working");
+		await agentStateFileSettled();
+		expect(await Bun.file(stateFile()).exists()).toBe(true);
+
+		const realRename = fs.rename;
+		const rename = spyOn(fs, "rename");
+		rename
+			.mockImplementationOnce(async () => {
+				throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+			})
+			.mockImplementationOnce((from, to) => realRename(from, to))
+			.mockImplementationOnce(async (from, to) => {
+				setAgentStateFileEnabled(false);
+				return realRename(from, to);
+			});
+
+		setTerminalTitleState("attention");
+		await agentStateFileSettled();
+
+		// Failed replace, target to backup, pending to target (gone), backup rolled back.
+		expect(rename).toHaveBeenCalledTimes(4);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
+		const leftovers = (await fs.readdir(path.dirname(stateFile()))).filter(name =>
+			name.startsWith(path.basename(stateFile())),
+		);
+		expect(leftovers).toEqual([]);
 	});
 
 	it("leaves no file behind when the runtime is disposed", async () => {
 		setAgentStateFileEnabled(true);
 		setTerminalTitleState("attention");
 		await agentStateFileSettled();
-		expect(fs.existsSync(stateFile())).toBe(true);
+		expect(await Bun.file(stateFile()).exists()).toBe(true);
 
 		// A state file outliving its process would report "waiting on you" for ever.
 		disposeTerminalTitleState();
-		expect(fs.existsSync(stateFile())).toBe(false);
+		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 });

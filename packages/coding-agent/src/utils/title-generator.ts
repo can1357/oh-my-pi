@@ -19,6 +19,7 @@ import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
+import { replaceFileAtomically } from "./atomic-file";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: true });
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -645,10 +646,16 @@ function writeAgentStateFile(state: TerminalTitleState): void {
 				await fs.promises.rm(pending, { force: true });
 				return;
 			}
-			await fs.promises.rename(pending, file);
-			// The removal may have run while that rename was in flight, finding nothing to
-			// delete. Publishing then would leave a state file for a process that is gone.
-			if (overtaken()) await fs.promises.rm(file, { force: true });
+			// The shared helper rather than a bare rename: on Windows, replacing an existing file can
+			// fail with EPERM, and the catch below would swallow it and leave the old state published.
+			try {
+				await replaceFileAtomically(pending, file);
+			} finally {
+				// A removal may have run while the replacement was in flight. On success it found nothing
+				// to delete; on failure the helper rolled the old file back into place. Either way the
+				// file now describes a process that is gone.
+				if (overtaken()) await fs.promises.rm(file, { force: true });
+			}
 		})
 		.catch(err => {
 			logger.debug("Agent state file write failed", { err });

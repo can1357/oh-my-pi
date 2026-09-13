@@ -1883,7 +1883,7 @@ describe("selector setting side effects", () => {
 		// nothing until a restart and turning it off keeps writing and leaves the file behind.
 		const ENV_KEYS = ["TMUX_PANE", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 		const originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
-		const agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-state-file-setting-"));
+		const agentRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-state-file-setting-"));
 		process.env.TMUX_PANE = "%omp-state-file-setting-test";
 		process.env.PI_CODING_AGENT_DIR = path.join(agentRoot, "agent");
 		restoreEnvValue("OMP_PROFILE", undefined);
@@ -1898,18 +1898,18 @@ describe("selector setting side effects", () => {
 
 			controller.handleSettingChange("tui.stateFile", true);
 			await agentStateFileSettled();
-			expect(fs.existsSync(stateFile())).toBe(true);
-			expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
+			expect(await Bun.file(stateFile()).exists()).toBe(true);
+			expect((await Bun.file(stateFile()).json()).state).toBe("attention");
 
 			controller.handleSettingChange("tui.stateFile", false);
 			await agentStateFileSettled();
-			expect(fs.existsSync(stateFile())).toBe(false);
+			expect(await Bun.file(stateFile()).exists()).toBe(false);
 		} finally {
 			setAgentStateFileEnabled(false);
 			await agentStateFileSettled();
 			for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
 			__resetDirsFromEnvForTests();
-			fs.rmSync(agentRoot, { recursive: true, force: true });
+			await fs.promises.rm(agentRoot, { recursive: true, force: true });
 		}
 	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `tui.stateFile` also writes the agent run state - working, idle, or waiting on you - to `<terminal>.state.json` in the terminal-sessions directory, so a supervisor or status bar that is not the terminal can read it instead of guessing from whether output is still moving ([#11830](https://github.com/can1357/oh-my-pi/pull/11830) by [@michael-schnell](https://github.com/michael-schnell)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
@@ -22,7 +26,6 @@
 - `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
 - Sloppy-mode edits now drop a copied `[N more lines in ...]` read notice the same way they already drop the other read-metadata rows, so a pasted projection can no longer leak into the matched pattern or the written text ([#11797](https://github.com/can1357/oh-my-pi/pull/11797) by [@vasyza](https://github.com/vasyza)).
 - `/usage` now honors a provider's configured `baseUrl` when checking credentials before any model has been discovered, so a proxy-scoped API key is no longer sent to the provider's canonical host ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
-- `tui.stateFile` also writes the agent run state - working, idle, or waiting on you - to `<terminal>.state.json` in the terminal-sessions directory, so a supervisor or status bar that is not the terminal can read it instead of guessing from whether output is still moving ([#11830](https://github.com/can1357/oh-my-pi/pull/11830) by [@michael-schnell](https://github.com/michael-schnell)).
 
 ### Fixed
 
