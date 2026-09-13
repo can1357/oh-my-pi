@@ -1624,7 +1624,9 @@ export class SessionTools {
 				this.#builtInToolNames.add(wrapped.name);
 				nextActive.push(wrapped.name);
 			}
-			await this.#applyActiveToolsByName([...new Set(nextActive)]);
+			await this.#applyActiveToolsByName(
+				[...new Set(nextActive)].filter(name => !(this.#isDeviceOnlyWrite?.() === true && name === "write")),
+			);
 		});
 	}
 
@@ -1649,7 +1651,9 @@ export class SessionTools {
 
 	#setThinkToolActive(enabled: boolean): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
-			const active = this.getEnabledToolNames();
+			const active = this.getEnabledToolNames().filter(
+				name => !(this.#isDeviceOnlyWrite?.() === true && name === "write"),
+			);
 			if (!enabled) {
 				if (active.includes("think")) {
 					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
@@ -1885,7 +1889,9 @@ export class SessionTools {
 			]),
 		];
 		try {
-			await this.#applyActiveToolsByName(nextActive);
+			await this.#applyActiveToolsByName(
+				nextActive.filter(name => !(this.#isDeviceOnlyWrite?.() === true && name === "write")),
+			);
 			if (this.#host.isDisposed()) {
 				restorePreviousMcpTools();
 			} else {
@@ -1950,7 +1956,9 @@ export class SessionTools {
 			.map(tool => tool.name);
 		try {
 			await this.#applyActiveToolsByName(
-				Array.from(new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames])),
+				Array.from(
+					new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames]),
+				).filter(name => !(this.#isDeviceOnlyWrite?.() === true && name === "write")),
 			);
 		} catch (error) {
 			for (const name of this.#rpcHostToolNames) this.#toolRegistry.delete(name);

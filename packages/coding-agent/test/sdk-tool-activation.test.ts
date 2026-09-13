@@ -2651,8 +2651,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			const originalSetPresentation = session.setActiveToolPresentation.bind(session);
 			vi.spyOn(session, "setActiveToolPresentation")
-				.mockImplementationOnce((_toolNames, _mountedToolNames, _forcePromptRefresh, signal) =>
-					untilAborted(signal, Promise.withResolvers<void>().promise),
+				.mockImplementationOnce((_toolNames, _mountedToolNames, options, signal) =>
+					untilAborted(
+						typeof options === "object" && options !== null ? (options.signal ?? signal) : signal,
+						Promise.withResolvers<void>().promise,
+					),
 				)
 				.mockImplementation(originalSetPresentation);
 			const runner = session.extensionRunner;
@@ -2861,8 +2864,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const recoveredActivation = Promise.withResolvers<void>();
 			const originalSetPresentation = session.setActiveToolPresentation.bind(session);
 			vi.spyOn(session, "setActiveToolPresentation")
-				.mockImplementationOnce((_toolNames, _mountedToolNames, _forcePromptRefresh, signal) =>
-					untilAborted(signal, Promise.withResolvers<void>().promise),
+				.mockImplementationOnce((_toolNames, _mountedToolNames, options, signal) =>
+					untilAborted(
+						typeof options === "object" && options !== null ? (options.signal ?? signal) : signal,
+						Promise.withResolvers<void>().promise,
+					),
 				)
 				.mockImplementation(async (toolNames, mountedToolNames, forcePromptRefresh, signal) => {
 					await originalSetPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
@@ -4019,6 +4025,51 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				content: "promoted",
 			});
 			expect(await Bun.file(promotedTarget).text()).toBe("promoted");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps device-only write across RPC, memory, and MCP refreshes after presentation narrow", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+		});
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			// Narrow from full write to a device-backed set: write becomes transport-injected device-only.
+			await session.setActiveToolsByName(["read", "custom_ambient"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+
+			// Each internal reconciliation replays the enabled set; none may promote the synthetic write.
+			await session.refreshRpcHostTools([]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.applyMemoryBackend();
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.refreshMCPTools([]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+
+			const blockedTarget = path.join(tempDir, "refresh-narrow-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("refresh-narrow", { path: blockedTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
 		} finally {
 			await session.dispose();
 		}
