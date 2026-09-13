@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { runSearchQuery, webSearchSchema } from "@oh-my-pi/pi-coding-agent/web/search";
 import {
 	resolveProviderCandidates,
 	resolveProviderChain,
@@ -116,5 +118,31 @@ describe("resolveProviderChain", () => {
 		const providers = await resolveProviderChain(authStorage);
 
 		expect(providers.map(provider => provider.id)).toEqual(["jina"]);
+	});
+});
+
+describe("webSearchSchema provider validation", () => {
+	it("accepts valid provider ids and auto", () => {
+		expect(webSearchSchema({ query: "test", provider: "auto" })).not.toBeInstanceOf(type.errors);
+		expect(webSearchSchema({ query: "test", provider: "exa" })).not.toBeInstanceOf(type.errors);
+		expect(webSearchSchema({ query: "test", provider: "tavily" })).not.toBeInstanceOf(type.errors);
+		expect(webSearchSchema({ query: "test" })).not.toBeInstanceOf(type.errors);
+	});
+
+	it("rejects unknown provider ids", () => {
+		const result = webSearchSchema({ query: "test", provider: "unknown-engine" });
+		expect(result).toBeInstanceOf(type.errors);
+	});
+});
+
+describe("runSearchQuery with explicit provider", () => {
+	it("returns an error immediately when an explicit provider is excluded by configuration", async () => {
+		setExcludedSearchProviders(["google"]);
+
+		const result = await runSearchQuery({ query: "test", provider: "google" }, { authStorage });
+
+		expect(result.content[0]?.text).toContain("Google web search is excluded by configuration.");
+		expect(result.details?.error).toContain("Google web search is excluded by configuration.");
+		expect(result.details?.response.provider).toBe("google");
 	});
 });
