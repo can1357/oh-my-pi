@@ -10,6 +10,10 @@
 
 - Codex Spark, all MiniMax models, and GLM-5.3-Flash now default to replace edits instead of hashline; explicit edit-mode overrides remain honored.
 
+### Fixed
+
+- Reduced repeated file-diagnostics latency with explicit TypeScript reports, Tailwind project applicability checks, and concurrent independent servers; explicit incomplete checks no longer report clean results ([#12142](https://github.com/can1357/oh-my-pi/pull/12142) by [@ukint-vs](https://github.com/ukint-vs)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes
