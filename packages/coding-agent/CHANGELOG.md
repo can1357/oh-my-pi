@@ -6,6 +6,10 @@
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
 
+### Fixed
+
+- Preserved `xd://` device mounting and device-only write restrictions when restoring active tools after temporary toolset restrictions or extension mode toggles ([#11543](https://github.com/can1357/oh-my-pi/pull/11543) by [@shivamklr](https://github.com/shivamklr)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

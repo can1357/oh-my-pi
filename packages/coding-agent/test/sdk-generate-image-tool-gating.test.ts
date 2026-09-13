@@ -161,6 +161,22 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("generate_image");
 	});
 
+	it("keeps generate_image unmounted in a default session when disabled", async () => {
+		const { session } = await createAgentSession({
+			...startupShortcuts(),
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "generate_image.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+		});
+		sessions.push(session);
+		expect(session.getActiveToolNames()).not.toContain("generate_image");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("generate_image");
+	});
+
 	it("mounts ambient tools across runtime selection with a device-only write", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["read"], [ambientTool]);
@@ -241,30 +257,57 @@ describe("generate_image tool gating", () => {
 		expect(mcpCalls).toBe(1);
 	});
 
-	it("keeps the device-only write across an empty MCP refresh", async () => {
-		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).toContain("write");
-		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
-
-		await session.refreshMCPTools([]);
-
-		expect(session.getActiveToolNames()).toContain("write");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
-	});
-
 	it("keeps the device-only write during enabled-set round trips", async () => {
 		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
 		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 
 		await session.setActiveToolsByName(session.getEnabledToolNames());
 		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 
 		await session.refreshMCPTools([]);
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
+	});
+
+	it("restores mounted xd tools after a temporary tool restriction", async () => {
+		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
+		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
+		const enabledBefore = session.getEnabledToolNames();
+
+		await session.setActiveToolsByName(["read"]);
+		expect(session.getXdevToolEntries()).toHaveLength(0);
+
+		await session.setActiveToolsByName(enabledBefore);
+		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
+	});
+
+	it("restores device-only write after an empty-whitelist restriction", async () => {
+		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
+		const enabledBefore = session.getEnabledToolNames();
+
+		await session.setActiveToolsByName([]);
+		expect(session.getActiveToolNames()).not.toContain("write");
+
+		await session.setActiveToolsByName(enabledBefore);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
+		const blockedTarget = path.join(registryDir, "empty-whitelist-blocked.txt");
+		await expect(
+			session.getToolByName("write")!.execute("empty-whitelist-after-restore", {
+				path: blockedTarget,
+				content: "blocked",
+			}),
+		).rejects.toThrow("Filesystem writes are not available");
+		expect(await Bun.file(blockedTarget).exists()).toBe(false);
 	});
 
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
@@ -273,18 +316,7 @@ describe("generate_image tool gating", () => {
 		await session.refreshMCPTools([]);
 
 		expect(session.getActiveToolNames()).toContain("write");
-	});
-
-	it("unmounts devices when write is removed at runtime", async () => {
-		const ambientTool = customTool("ambient_search");
-		const session = await sessionWithCustomTools(["read", "write"], [ambientTool]);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
-
-		await session.setActiveToolsByName(["read", ambientTool.name]);
-
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.isDeviceOnlyWrite()).toBe(false);
 	});
 
 	it("keeps ambient tools mounted after MCP disconnect with a device-only write", async () => {
@@ -296,6 +328,7 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 	});
 
 	it("keeps ambient custom tools top-level when an explicit session omitted read", async () => {

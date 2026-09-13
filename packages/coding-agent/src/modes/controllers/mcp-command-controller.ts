@@ -1359,10 +1359,13 @@ export class MCPCommandController {
 			if (isConnected && this.ctx.mcpManager) {
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
 				if (serverTools.length > 0) {
+					// Synthetic transport write is derived, never replayed as a grant (P1 #11543).
+					const deviceOnly = this.ctx.session.isDeviceOnlyWrite() === true;
 					const currentActive = this.ctx.session.getEnabledToolNames();
+					const replay = currentActive.filter(name => !(deviceOnly && name === "write"));
 					const toActivate = serverTools.map(t => t.name).filter(n => this.ctx.session.getToolByName(n));
 					if (toActivate.length > 0) {
-						await this.ctx.session.setActiveToolsByName([...new Set([...currentActive, ...toActivate])]);
+						await this.ctx.session.setActiveToolsByName([...new Set([...replay, ...toActivate])]);
 					}
 				}
 			}
