@@ -360,37 +360,107 @@ describe("Anthropic cache_control rejection fallback", () => {
 		expect(countBreakpoints(capture.bodies[2])).toBe(0);
 	});
 
-	it("leaves the caller's session map empty however many opaque clients learn a rejection", async () => {
+	it("keeps one opaque injected client's rejection out of a second session's state", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const first = new Map<string, ProviderSessionState>();
+		const second = new Map<string, ProviderSessionState>();
+		const fetchImpl = createBreakpointRejectingFetch(capture);
+		// One transport built once and handed to two agents is the ordinary SDK
+		// embedding shape: the client is shared, the session state is not. Holding
+		// the state against the client alone would let the second agent inherit
+		// everything the first learned, with no way for its own map to say so.
+		const shared = createOpaqueClient("https://opaque-shared.example/v1", fetchImpl);
+
+		await streamAnthropic(MODEL, CONTEXT, { client: shared, providerSessionState: first }).result();
+		const other = await streamAnthropic(MODEL, CONTEXT, { client: shared, providerSessionState: second }).result();
+
+		expect(other.stopReason).toBe("stop");
+		// Two attempts per session, not one for the second: it had to take the
+		// refusal itself rather than start out suppressed by an unrelated session.
+		expect(capture.bodies).toHaveLength(4);
+		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+		expect(countBreakpoints(capture.bodies[3])).toBe(0);
+	});
+
+	it("keeps a shared opaque injected client sticky in the session that learned the rejection", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const first = new Map<string, ProviderSessionState>();
+		const second = new Map<string, ProviderSessionState>();
+		const fetchImpl = createBreakpointRejectingFetch(capture);
+		const shared = createOpaqueClient("https://opaque-shared.example/v1", fetchImpl);
+
+		await streamAnthropic(MODEL, CONTEXT, { client: shared, providerSessionState: first }).result();
+		await streamAnthropic(MODEL, CONTEXT, { client: shared, providerSessionState: second }).result();
+		// Back to the first session: separating the two sessions must not have cost
+		// either of them its own learning, which a per-request state would.
+		const again = await streamAnthropic(MODEL, CONTEXT, { client: shared, providerSessionState: first }).result();
+
+		expect(again.stopReason).toBe("stop");
+		// Five attempts: two per session to learn, then one — already breakpoint
+		// free — for the first session's second turn.
+		expect(capture.bodies).toHaveLength(5);
+		expect(countBreakpoints(capture.bodies[4])).toBe(0);
+		// Neither session paid for that with more than the single anchor entry,
+		// and neither could read the other's through it.
+		expect(first.size).toBe(1);
+		expect(second.size).toBe(1);
+	});
+
+	it("keeps the caller's session map at one entry however many opaque clients learn a rejection", async () => {
 		const capture: Capture = { bodies: [], betaHeaders: [] };
 		const states = new Map<string, ProviderSessionState>();
 		const fetchImpl = createBreakpointRejectingFetch(capture);
 
 		// Three wrappers in a row is what an SDK that rebuilds its client per
-		// request produces. An opaque client is isolated by the map its state
-		// lives in, so none of them may register anything in the caller's — a
-		// per-client entry there would outlive the client that owns it and only
-		// be released when the whole session closes.
-		for (const baseURL of ["https://opaque-a.example/v1", "https://opaque-b.example/v1"]) {
+		// request produces. Each is isolated by the store the anchor hands it, so
+		// the caller's map holds that one anchor and never an entry per client —
+		// one of those would outlive the client that owns it and only be released
+		// when the whole session closes.
+		for (const baseURL of [
+			"https://opaque-a.example/v1",
+			"https://opaque-b.example/v1",
+			"https://opaque-c.example/v1",
+		]) {
 			const message = await streamAnthropic(MODEL, CONTEXT, {
 				client: createOpaqueClient(baseURL, fetchImpl),
 				providerSessionState: states,
 			}).result();
 			expect(message.stopReason).toBe("stop");
+			expect(states.size).toBe(1);
 		}
-		const third = await streamAnthropic(MODEL, CONTEXT, {
-			client: createOpaqueClient("https://opaque-c.example/v1", fetchImpl),
-			providerSessionState: states,
-		}).result();
 
-		expect(third.stopReason).toBe("stop");
 		// Two requests per client: every one of them took the rejection and
-		// learned from it, so the empty map is isolation without retention
-		// rather than state that was never created.
+		// learned from it, so the flat count is isolation without per-client
+		// retention rather than state that was never created.
 		expect(capture.bodies).toHaveLength(6);
-		expect(states.size).toBe(0);
 	});
 
-	it("leaves no caller-map entry for an opaque injected client that learns nothing", async () => {
+	it("lets the session-close sweep reset a still-live opaque injected client", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createBreakpointRejectingFetch(capture);
+		const client = createOpaqueClient("https://opaque-proxy.example/v1", fetchImpl);
+
+		await streamAnthropic(MODEL, CONTEXT, { client, providerSessionState: states }).result();
+		// What `/new` does to a live session: close every provider state the map
+		// holds. The client object outlives that, so the sweep is the only thing
+		// that can return it to an unsuppressed first attempt.
+		for (const state of states.values()) state.close();
+
+		const after = await streamAnthropic(MODEL, CONTEXT, { client, providerSessionState: states }).result();
+
+		expect(after.stopReason).toBe("stop");
+		// Four attempts, not three: the turn after the sweep took the rejection
+		// again rather than starting out breakpoint-free.
+		expect(capture.bodies).toHaveLength(4);
+		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+		expect(countBreakpoints(capture.bodies[3])).toBe(0);
+		// And the swept anchor was reusable, not stranded closed: the relearning
+		// above went back through it rather than into a second entry.
+		expect(states.size).toBe(1);
+	});
+
+	it("mints no endpoint-keyed entry for an opaque injected client", async () => {
 		const capture: Capture = { bodies: [], betaHeaders: [] };
 		const states = new Map<string, ProviderSessionState>();
 		const fetchImpl = createFetch(capture, ["ok", "ok"]);
@@ -401,11 +471,32 @@ describe("Anthropic cache_control rejection fallback", () => {
 		}).result();
 
 		expect(proxied.stopReason).toBe("stop");
-		expect(states.size).toBe(0);
-		// The same map still takes an entry for an endpoint it can name, so the
-		// assertion above reads a live map rather than one nothing writes to.
-		await runTurn(fetchImpl, states);
+		// The anchor, and nothing claiming an endpoint. A synthetic
+		// `anthropic-messages:` key would be swept by
+		// `clearAnthropicFastModeFallback` as a per-endpoint state, and would let
+		// an unknowable proxy answer for whatever endpoint it forged.
 		expect(states.size).toBe(1);
+		expect([...states.keys()].filter(key => key.startsWith("anthropic-messages"))).toEqual([]);
+		// The same map still takes an endpoint entry for a request it can name,
+		// so the assertions above read a live map rather than one nothing writes to.
+		await runTurn(fetchImpl, states);
+		expect(states.size).toBe(2);
+		expect([...states.keys()].filter(key => key.startsWith("anthropic-messages:"))).toHaveLength(1);
+	});
+
+	it("holds nothing for an opaque injected client when the caller passes no session map", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const fetchImpl = createBreakpointRejectingFetch(capture);
+		const client = createOpaqueClient("https://opaque-proxy.example/v1", fetchImpl);
+
+		await streamAnthropic(MODEL, CONTEXT, { client }).result();
+		const second = await streamAnthropic(MODEL, CONTEXT, { client }).result();
+
+		expect(second.stopReason).toBe("stop");
+		// Four attempts: a caller with no map opted out of session state, and an
+		// injected client does not opt them back in through a store of its own.
+		expect(capture.bodies).toHaveLength(4);
+		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
 	});
 
 	it("keeps the rejection scoped to the rejecting endpoint and model", async () => {
