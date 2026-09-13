@@ -17,7 +17,9 @@ import {
 import { stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	ANTIGRAVITY_PRIMARY_ENDPOINT,
+	DEFAULT_ANTIGRAVITY_IMAGE_MODEL,
 	fetchAntigravityDiscoveryModels,
+	fetchAntigravityImageModel,
 } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -1545,6 +1547,64 @@ describe("antigravity discovery collapsing", () => {
 		expect(discoveryUrl).toBeDefined();
 		expect(discoveryUrl).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
+	});
+
+	it("discovers the advertised image model and endpoint", async () => {
+		const imagePayload = {
+			...payload,
+			imageGenerationModelIds: ["gemini-3.1-flash-image"],
+		};
+		const imageFetcher = Object.assign(
+			() => Promise.resolve(new Response(JSON.stringify(imagePayload), { status: 200 })),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const target = await fetchAntigravityImageModel({
+			token: "t",
+			fetcher: imageFetcher,
+		});
+
+		expect(target).toEqual({
+			model: "gemini-3.1-flash-image",
+			endpoint: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		});
+	});
+
+	it("prefers the default image model when multiple image models are advertised", async () => {
+		const imagePayload = {
+			...payload,
+			imageGenerationModelIds: ["gemini-3.1-flash-image", DEFAULT_ANTIGRAVITY_IMAGE_MODEL],
+		};
+		const imageFetcher = Object.assign(
+			() => Promise.resolve(new Response(JSON.stringify(imagePayload), { status: 200 })),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const target = await fetchAntigravityImageModel({
+			token: "t",
+			fetcher: imageFetcher,
+		});
+
+		expect(target).toEqual({
+			model: DEFAULT_ANTIGRAVITY_IMAGE_MODEL,
+			endpoint: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		});
+	});
+
+	it("reports the answering endpoint with a null model when it advertises no image roster", async () => {
+		const imageFetcher = Object.assign(
+			() => Promise.resolve(new Response(JSON.stringify(payload), { status: 200 })),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const target = await fetchAntigravityImageModel({
+			token: "t",
+			fetcher: imageFetcher,
+		});
+
+		// Distinct from null, which means no endpoint answered at all: a caller
+		// failing over needs to tell "answered, has nothing" from "unreachable".
+		expect(target).toEqual({ model: null, endpoint: ANTIGRAVITY_PRIMARY_ENDPOINT });
 	});
 });
 

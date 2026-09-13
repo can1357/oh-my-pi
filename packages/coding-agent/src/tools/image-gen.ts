@@ -13,6 +13,11 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import {
+	type AntigravityImageModel,
+	DEFAULT_ANTIGRAVITY_IMAGE_MODEL,
+	fetchAntigravityImageModel,
+} from "@oh-my-pi/pi-catalog/discovery/antigravity";
+import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	getCodexAccountId,
@@ -42,7 +47,6 @@ import { resolveReadPath } from "./path-utils";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
-const DEFAULT_ANTIGRAVITY_MODEL = "gemini-3-pro-image";
 const DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image";
 const DEFAULT_DEEPINFRA_IMAGE_MODEL = "black-forest-labs/FLUX-2-pro";
 const DEEPINFRA_IMAGES_URL = "https://api.deepinfra.com/v1/openai/images/generations";
@@ -595,7 +599,7 @@ async function findAntigravityCredentials(
 	sessionId?: string,
 ): Promise<ImageApiKey | null> {
 	const apiKey = await modelRegistry.getApiKeyForProvider("google-antigravity", sessionId, {
-		modelId: DEFAULT_ANTIGRAVITY_MODEL,
+		modelId: DEFAULT_ANTIGRAVITY_IMAGE_MODEL,
 	});
 	if (!apiKey) return null;
 
@@ -607,6 +611,195 @@ async function findAntigravityCredentials(
 		apiKey: parsed.accessToken,
 		projectId: parsed.projectId,
 	};
+}
+function resolveAntigravityEndpoints(): string[] {
+	try {
+		const mode = settings.get("providers.antigravityEndpoint");
+		if (mode === "production") return [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
+		if (mode === "sandbox") return [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+	} catch {
+		// Settings unavailable; fall through to the auto-failover pair.
+	}
+	return [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+}
+
+const ANTIGRAVITY_DISCOVERY_TIMEOUT_MS = 10_000;
+
+/**
+ * Antigravity generation plan for one credential: endpoints in preference
+ * order plus the model each endpoint advertises.
+ *
+ * The model is per endpoint, not per account. A roster is served by the
+ * endpoint that advertised it, so reusing production's model id against
+ * sandbox can be rejected by a perfectly healthy sandbox and defeat the
+ * failover it exists for.
+ */
+type AntigravityEndpointDiscovery =
+	| { status: "unattempted" }
+	| { status: "model"; model: string }
+	| { status: "empty" }
+	| { status: "failed" };
+
+interface AntigravityImageTarget {
+	endpoints: string[];
+	/** Discovery state per endpoint, distinguishing unattempted, successful, empty, and failed. */
+	discoveryByEndpoint: Map<string, AntigravityEndpointDiscovery>;
+	/** Used for an endpoint that advertises nothing reachable. */
+	fallbackModel: string;
+}
+
+/**
+ * One discovery probe against one endpoint. `deadline` lets a caller bound a
+ * whole walk rather than each hop, so a stalled route cannot multiply the
+ * budget; a real caller abort still propagates instead of being read as
+ * discovery unavailability.
+ */
+async function discoverAntigravityImageModel(
+	bearer: string,
+	endpoint: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+	deadline?: AbortSignal,
+): Promise<AntigravityImageModel | null> {
+	if (signal?.aborted) signal.throwIfAborted();
+	try {
+		const timeoutSignal = deadline ?? AbortSignal.timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT_MS);
+		const discoverySignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		// Already spent: issuing a request under a dead signal buys nothing and
+		// leaves a fetch that may never settle.
+		if (discoverySignal.aborted) {
+			if (signal?.aborted) signal.throwIfAborted();
+			return null;
+		}
+		return await fetchAntigravityImageModel({
+			token: bearer,
+			endpoint,
+			userAgent: getAntigravityUserAgent(),
+			signal: discoverySignal,
+			fetcher: fetchImpl,
+		});
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		// Timed out or failed; treat as discovery unavailable at this endpoint.
+		return null;
+	} finally {
+		if (signal?.aborted) signal.throwIfAborted();
+	}
+}
+
+/**
+ * Resolves the Antigravity generation plan for the account behind `bearer`,
+ * memoized per bearer. `withAuth` can rotate to a sibling account mid-request;
+ * each account carries its own image roster, so the plan MUST be resolved for
+ * the credential actually in hand, not the initial one.
+ *
+ * The walk is explicit rather than delegated, and one deadline covers all of
+ * it. Only endpoints that definitively answered with an empty roster or a model
+ * are pinned: an endpoint where discovery failed, timed out, or was never asked
+ * stays unresolved so a later failover can discover its roster instead of
+ * generating with a model it may not serve.
+ */
+async function resolveAntigravityImageTarget(
+	bearer: string,
+	cache: Map<string, AntigravityImageTarget>,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<AntigravityImageTarget> {
+	if (signal?.aborted) signal.throwIfAborted();
+	const cached = cache.get(bearer);
+	if (cached) return cached;
+
+	const endpoints = resolveAntigravityEndpoints();
+	const discoveryByEndpoint = new Map<string, AntigravityEndpointDiscovery>();
+	for (const endpoint of endpoints) {
+		discoveryByEndpoint.set(endpoint, { status: "unattempted" });
+	}
+	const deadline = AbortSignal.timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT_MS);
+	let ordered = endpoints;
+	for (const endpoint of endpoints) {
+		// Deadline already spent, so this endpoint is never asked anything. It
+		// stays unattempted so a later failover can discover its own roster rather
+		// than generating with a model another endpoint advertised.
+		if (deadline.aborted) break;
+		const discovered = await discoverAntigravityImageModel(bearer, endpoint, fetchImpl, signal, deadline);
+		// An endpoint that answered and reported no image model records an empty
+		// roster so it pins the fallback model without re-probing. A failed or
+		// timed-out discovery records failure so the first generation attempt
+		// uses the fallback directly while a later failover rediscovers it.
+		if (!discovered) {
+			discoveryByEndpoint.set(endpoint, { status: "failed" });
+			continue;
+		}
+		if (discovered.model === null) {
+			discoveryByEndpoint.set(endpoint, { status: "empty" });
+			continue;
+		}
+		discoveryByEndpoint.set(endpoint, { status: "model", model: discovered.model });
+		ordered = [discovered.endpoint, ...endpoints.filter(other => other !== discovered.endpoint)];
+		break;
+	}
+	const target: AntigravityImageTarget = {
+		endpoints: ordered,
+		discoveryByEndpoint,
+		fallbackModel: DEFAULT_ANTIGRAVITY_IMAGE_MODEL,
+	};
+	cache.set(bearer, target);
+	return target;
+}
+
+async function probeEndpointModel(
+	target: AntigravityImageTarget,
+	endpoint: string,
+	bearer: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string> {
+	const discovered = await discoverAntigravityImageModel(bearer, endpoint, fetchImpl, signal);
+	if (!discovered) {
+		target.discoveryByEndpoint.set(endpoint, { status: "failed" });
+		return target.fallbackModel;
+	}
+	if (discovered.model === null) {
+		target.discoveryByEndpoint.set(endpoint, { status: "empty" });
+		return target.fallbackModel;
+	}
+	target.discoveryByEndpoint.set(endpoint, { status: "model", model: discovered.model });
+	return discovered.model;
+}
+
+/**
+ * The model to generate with at `endpoint`.
+ *
+ * An endpoint is in one of four states:
+ * - unattempted: discovered on first use.
+ * - model: already answered with an advertised model; reused directly.
+ * - empty: definitively answered with no image roster; uses fallback model without re-probing.
+ * - failed: discovery timed out or failed. On the first generation attempt,
+ *   uses fallback model without re-probing or adding a second deadline;
+ *   on a later failover return, rediscovers the endpoint in case it recovered.
+ */
+async function resolveAntigravityModelAt(
+	target: AntigravityImageTarget,
+	endpoint: string,
+	bearer: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+	isFailover = false,
+): Promise<string> {
+	const state = target.discoveryByEndpoint.get(endpoint) ?? { status: "unattempted" };
+	switch (state.status) {
+		case "model":
+			return state.model;
+		case "empty":
+			return target.fallbackModel;
+		case "failed":
+			if (!isFailover) {
+				return target.fallbackModel;
+			}
+			return probeEndpointModel(target, endpoint, bearer, fetchImpl, signal);
+		case "unattempted":
+			return probeEndpointModel(target, endpoint, bearer, fetchImpl, signal);
+	}
 }
 
 async function findXAIImageCredentials(modelRegistry?: ModelRegistry): Promise<ImageApiKey | null> {
@@ -1263,7 +1456,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						provider === "openai" || provider === "openai-codex"
 							? (apiKey.model?.id ?? "gpt")
 							: provider === "antigravity"
-								? DEFAULT_ANTIGRAVITY_MODEL
+								? DEFAULT_ANTIGRAVITY_IMAGE_MODEL
 								: provider === "openrouter"
 									? DEFAULT_OPENROUTER_MODEL
 									: provider === "xai"
@@ -1345,9 +1538,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						}
 
 						const prompt = assemblePrompt(params);
+						const imageTargetCache = new Map<string, AntigravityImageTarget>();
+						let usedModel = DEFAULT_ANTIGRAVITY_IMAGE_MODEL;
 						const antigravityKey: ApiKey = ctx.modelRegistry.resolver("google-antigravity", {
 							sessionId,
-							modelId: DEFAULT_ANTIGRAVITY_MODEL,
+							modelId: DEFAULT_ANTIGRAVITY_IMAGE_MODEL,
 						});
 
 						const response = await withAuth(
@@ -1359,27 +1554,13 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								const rotated = parseAntigravityCredentials(key);
 								const bearer = rotated?.accessToken ?? key;
 								const projectId = rotated?.projectId ?? apiKey.projectId!;
-								const requestBody = buildAntigravityRequest(
-									prompt,
-									model,
-									projectId,
-									params.aspect_ratio,
-									params.image_size,
-									resolvedImages,
+								const target = await resolveAntigravityImageTarget(
+									bearer,
+									imageTargetCache,
+									fetchImpl,
+									requestSignal,
 								);
-
-								let endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-								try {
-									const mode = settings.get("providers.antigravityEndpoint");
-									if (mode === "production") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
-									} else if (mode === "sandbox") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-									}
-								} catch {
-									// Ignored
-								}
-
+								const endpoints = target.endpoints;
 								let resp: Response | undefined;
 								let lastError: Error | undefined;
 
@@ -1387,6 +1568,26 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									const endpoint = endpoints[i];
 									const isLastEndpoint = i === endpoints.length - 1;
 									try {
+										// Resolved here rather than once above: each endpoint
+										// serves the roster it advertised, so a failover has to
+										// carry that endpoint's model.
+										const model = await resolveAntigravityModelAt(
+											target,
+											endpoint,
+											bearer,
+											fetchImpl,
+											requestSignal,
+											i > 0,
+										);
+										usedModel = model;
+										const requestBody = buildAntigravityRequest(
+											prompt,
+											model,
+											projectId,
+											params.aspect_ratio,
+											params.image_size,
+											resolvedImages,
+										);
 										resp = await fetchImpl(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
 											method: "POST",
 											headers: {
@@ -1450,7 +1651,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								content: [{ type: "text", text: `No image data returned.${messageText}` }],
 								details: {
 									provider,
-									model,
+									model: usedModel,
 									imageCount: 0,
 									imagePaths: [],
 									images: [],
@@ -1463,10 +1664,15 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const imagePaths = await saveImagesToTemp(parsed.images);
 
 						return {
-							content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, responseText) }],
+							content: [
+								{
+									type: "text",
+									text: buildResponseSummary(provider, usedModel, imagePaths, responseText),
+								},
+							],
 							details: {
 								provider,
-								model,
+								model: usedModel,
 								imageCount: parsed.images.length,
 								imagePaths,
 								images: parsed.images,
