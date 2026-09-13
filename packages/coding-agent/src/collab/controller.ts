@@ -38,6 +38,7 @@ export class CollabController {
 	/** Guests may drive the session only once interactive startup has finished. */
 	#startupComplete = false;
 	#shutdown = false;
+	#shutdownWake: PromiseWithResolvers<void> | undefined;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -118,6 +119,7 @@ export class CollabController {
 	/** Stop hosting for good; no further rooms are started for this process. */
 	async shutdown(reason: string): Promise<void> {
 		this.#shutdown = true;
+		this.#shutdownWake?.resolve();
 		this.#unsubscribeSessionChange?.();
 		this.#unsubscribeSessionChange = undefined;
 		// Stop before draining the chain: a room still connecting is aborted at
@@ -138,12 +140,21 @@ export class CollabController {
 	}
 
 	/**
-	 * Construct the next-generation room synchronously — the body up to the
-	 * first await runs before this returns, so `ctx.collabHost` is installed
-	 * by the time the caller continues — then connect it once the previous
-	 * room is fully gone.
+	 * Install the next room synchronously at ordinary startup so early dialogs
+	 * can be retained. During a session transition, wait for its final identity
+	 * and state first. Connect only after the previous room is fully gone.
 	 */
 	async #launch(access: CollabAccess, relay?: string): Promise<CollabHost> {
+		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+		// Identity cleanup callbacks can precede awaited hooks and message replacement.
+		// Pin and expose only the session left after commit or rollback.
+		if (this.#ctx.session.isSessionTransitioning) {
+			const shutdown = (this.#shutdownWake ??= Promise.withResolvers<void>()).promise;
+			await Promise.race([this.#ctx.session.waitForSessionTransition(), shutdown]);
+		}
+		// Manual upgrades may reach this after awaiting the old room's stop.
+		// Shutdown is terminal even if it overtook that await.
+		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
 		this.#observeSessionChanges();
@@ -152,14 +163,13 @@ export class CollabController {
 			instanceId: this.instanceId,
 			generation: ++this.#generation,
 			access,
-			guestActionsReady: () => this.#startupComplete,
+			guestActionsReady: () => this.#startupComplete && !this.#ctx.session.isSessionTransitioning,
 		});
 		this.#host = host;
 		this.#ctx.collabHost = host;
 		try {
-			// Both rooms publish under this process's instance id. A previous room
-			// that ended on its own (fatal relay close) may still be withdrawing
-			// its publication; wait for that before this room binds the endpoint.
+			// A previous room may still be withdrawing subscriptions and registry
+			// state after a fatal close. Finish that before installing new taps.
 			await previous?.stop("replaced");
 			await host.start(relayUrl, webUrl);
 		} catch (err) {

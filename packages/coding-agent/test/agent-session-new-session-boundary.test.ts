@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent, AppendOnlyContextManager } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -12,6 +12,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { assistantMsg } from "./utilities";
 
 const cleanup: Array<() => Promise<void>> = [];
 let sharedDir: TempDir;
@@ -158,6 +159,246 @@ describe("AgentSession.newSession boundary", () => {
 			expect(JSON.stringify(reopened.getEntries())).not.toContain("previous conversation answer");
 		} finally {
 			await reopened.close();
+		}
+	});
+
+	for (const transition of ["new", "fork", "branch", "btw"] as const) {
+		it(`keeps ${transition} unavailable through before/after hooks and exposes only the final context`, async () => {
+			const beforeReached = Promise.withResolvers<void>();
+			const beforeRelease = Promise.withResolvers<void>();
+			const afterReached = Promise.withResolvers<void>();
+			const afterRelease = Promise.withResolvers<void>();
+			const { session, sessionManager, agent } = await createHarness({
+				extension: {
+					name: `gate-${transition}-readiness`,
+					register: pi => {
+						const before = async () => {
+							beforeReached.resolve();
+							await beforeRelease.promise;
+						};
+						const after = async () => {
+							afterReached.resolve();
+							await afterRelease.promise;
+						};
+						pi.on("session_before_switch", before);
+						pi.on("session_before_branch", before);
+						pi.on("session_switch", after);
+						pi.on("session_branch", after);
+					},
+				},
+			});
+			sessionManager.appendMessage({ role: "user", content: "ancestor", timestamp: 1 });
+			const entryId = sessionManager.appendMessage({ role: "user", content: "branch point", timestamp: 2 });
+			agent.replaceMessages(sessionManager.buildSessionContext().messages);
+			await sessionManager.flush();
+			const previousId = sessionManager.getSessionId();
+			const operation =
+				transition === "new"
+					? session.newSession()
+					: transition === "fork"
+						? session.fork()
+						: transition === "branch"
+							? session.branch(entryId)
+							: session.branchFromBtw("side question", assistantMsg("side answer"), entryId, previousId);
+			try {
+				await beforeReached.promise;
+				expect(session.isSessionTransitioning).toBe(true);
+				let ready = false;
+				const waiting = session.waitForSessionTransition().then(() => {
+					ready = true;
+					return { id: sessionManager.getSessionId(), messages: [...session.messages] };
+				});
+				beforeRelease.resolve();
+				await afterReached.promise;
+				expect(sessionManager.getSessionId()).not.toBe(previousId);
+				expect(session.isSessionTransitioning).toBe(true);
+				expect(ready).toBe(false);
+				afterRelease.resolve();
+				await operation;
+				const observed = await waiting;
+				expect(session.isSessionTransitioning).toBe(false);
+				expect(observed.id).toBe(sessionManager.getSessionId());
+				const expectedTexts =
+					transition === "new"
+						? []
+						: transition === "branch"
+							? ["ancestor"]
+							: transition === "fork"
+								? ["ancestor", "branch point"]
+								: ["ancestor", "branch point", "side question", "side answer"];
+				expect(
+					observed.messages.map(message => {
+						const content = "content" in message ? message.content : undefined;
+						return typeof content === "string"
+							? content
+							: content
+									?.filter(part => part.type === "text")
+									.map(part => part.text)
+									.join("");
+					}),
+				).toEqual(expectedTexts);
+			} finally {
+				beforeRelease.resolve();
+				afterRelease.resolve();
+				await operation;
+			}
+		});
+	}
+
+	it("waits through full switch rollback before exposing the restored session", async () => {
+		const { session, sessionManager, agent } = await createHarness();
+		const target = await createHarness();
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		agent.replaceMessages(sessionManager.buildSessionContext().messages);
+		const originalId = sessionManager.getSessionId();
+		target.sessionManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await target.sessionManager.ensureOnDisk();
+		await target.sessionManager.flush();
+		const targetFile = target.sessionManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected persisted target session");
+		const adopted = Promise.withResolvers<void>();
+		const failAdoption = Promise.withResolvers<void>();
+		const rollbackReached = Promise.withResolvers<void>();
+		const rollbackRelease = Promise.withResolvers<void>();
+		session.setSessionSwitchReconciler(async () => {
+			rollbackReached.resolve();
+			await rollbackRelease.promise;
+		});
+		let firstCwdChange = true;
+		const failure = new Error("settings adoption failed");
+		const operation = session.switchSession(targetFile, {
+			onCwdChange: async () => {
+				if (!firstCwdChange) return true;
+				firstCwdChange = false;
+				adopted.resolve();
+				await failAdoption.promise;
+				throw failure;
+			},
+		});
+		try {
+			await adopted.promise;
+			expect(sessionManager.getSessionId()).toBe(target.sessionManager.getSessionId());
+			expect(session.isSessionTransitioning).toBe(true);
+			let ready = false;
+			const waiting = session.waitForSessionTransition().then(() => {
+				ready = true;
+			});
+			failAdoption.resolve();
+			await rollbackReached.promise;
+			expect(sessionManager.getSessionId()).toBe(originalId);
+			expect(session.isSessionTransitioning).toBe(true);
+			expect(ready).toBe(false);
+			rollbackRelease.resolve();
+			await expect(operation).rejects.toBe(failure);
+			await waiting;
+			expect(session.isSessionTransitioning).toBe(false);
+			expect(session.messages).toEqual([{ role: "user", content: "source", timestamp: 1 }]);
+		} finally {
+			failAdoption.resolve();
+			rollbackRelease.resolve();
+			await operation.catch(() => {});
+		}
+	});
+
+	it("keeps the outer transition pending after an awaited reset finishes inside its hook", async () => {
+		const resetFinished = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		const { session } = await createHarness({
+			extension: {
+				name: "nested-reset-readiness",
+				register: pi => {
+					pi.on("session_switch", async () => {
+						await session.resetSessionContext();
+						resetFinished.resolve();
+						await releaseHook.promise;
+					});
+				},
+			},
+		});
+		const operation = session.newSession();
+		try {
+			await resetFinished.promise;
+			expect(session.isSessionTransitioning).toBe(true);
+			let ready = false;
+			const waiting = session.waitForSessionTransition().then(() => {
+				ready = true;
+			});
+			await Promise.resolve();
+			expect(ready).toBe(false);
+			releaseHook.resolve();
+			await operation;
+			await waiting;
+			expect(session.isSessionTransitioning).toBe(false);
+		} finally {
+			releaseHook.resolve();
+			await operation;
+		}
+	});
+
+	it("keeps an in-place reset unavailable until system-prompt refresh finishes", async () => {
+		const { session, sessionManager, agent } = await createHarness();
+		sessionManager.appendMessage({ role: "user", content: "discard", timestamp: 1 });
+		agent.replaceMessages(sessionManager.buildSessionContext().messages);
+		const originalId = sessionManager.getSessionId();
+		const refreshReached = Promise.withResolvers<void>();
+		const refreshRelease = Promise.withResolvers<void>();
+		const refresh = spyOn(session, "refreshBaseSystemPrompt").mockImplementation(async () => {
+			refreshReached.resolve();
+			await refreshRelease.promise;
+		});
+		const operation = session.resetSessionContext();
+		try {
+			await refreshReached.promise;
+			expect(session.isSessionTransitioning).toBe(true);
+			let ready = false;
+			const waiting = session.waitForSessionTransition().then(() => {
+				ready = true;
+			});
+			await Promise.resolve();
+			expect(ready).toBe(false);
+			refreshRelease.resolve();
+			expect(await operation).toEqual({ droppedCount: 1 });
+			await waiting;
+			expect(session.isSessionTransitioning).toBe(false);
+			expect(sessionManager.getSessionId()).toBe(originalId);
+			expect(session.messages).toEqual([]);
+		} finally {
+			refreshRelease.resolve();
+			await operation;
+			refresh.mockRestore();
+		}
+	});
+
+	it("releases readiness after a tree hook cancels without moving the leaf", async () => {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { session, sessionManager } = await createHarness({
+			extension: {
+				name: "cancel-tree-readiness",
+				register: pi => {
+					pi.on("session_before_tree", async () => {
+						reached.resolve();
+						await release.promise;
+						return { cancel: true };
+					});
+				},
+			},
+		});
+		const root = sessionManager.appendMessage({ role: "user", content: "ancestor", timestamp: 1 });
+		const leaf = sessionManager.appendMessage({ role: "user", content: "leaf", timestamp: 2 });
+		const operation = session.navigateTree(root);
+		try {
+			await reached.promise;
+			expect(session.isSessionTransitioning).toBe(true);
+			const waiting = session.waitForSessionTransition();
+			release.resolve();
+			expect(await operation).toMatchObject({ cancelled: true });
+			await waiting;
+			expect(session.isSessionTransitioning).toBe(false);
+			expect(sessionManager.getLeafId()).toBe(leaf);
+		} finally {
+			release.resolve();
+			await operation;
 		}
 	});
 

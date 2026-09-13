@@ -566,6 +566,7 @@ export class CollabHost {
 	 */
 	#registrySnapshot(): CollabHostSnapshot {
 		if (!this.#guestTrafficAllowed()) throw new Error("collab room unavailable");
+		if (this.#ctx.session.isSessionTransitioning) throw new Error("session transition in progress");
 		const model = this.#ctx.session.model;
 		return {
 			instanceId: this.#instanceId,
@@ -646,11 +647,18 @@ export class CollabHost {
 	 */
 	#rejectWhileStarting(action: string, fromPeer: number): boolean {
 		if (this.#guestActionsReady()) return false;
-		this.#send({ t: "error", message: `${action} is unavailable until the host finishes starting up` }, fromPeer);
+		const ready = this.#ctx.session.isSessionTransitioning
+			? "the session transition completes"
+			: "the host finishes starting up";
+		this.#send({ t: "error", message: `${action} is unavailable until ${ready}` }, fromPeer);
 		return true;
 	}
 
 	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+		if (this.#ctx.session.isSessionTransitioning) {
+			this.#send({ t: "error", message: "Session transition in progress; join again when it completes" }, fromPeer);
+			return;
+		}
 		if (proto !== COLLAB_PROTO) {
 			this.#send(
 				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
@@ -904,7 +912,7 @@ export class CollabHost {
 				AgentLifecycleManager.global()
 					.ensureLive(agentId)
 					.then(session => {
-						if (!this.#guestTrafficAllowed()) return;
+						if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
 						return session.prompt(trimmed, { streamingBehavior: "steer" });
 					})
 					.catch(fail);
@@ -917,7 +925,7 @@ export class CollabHost {
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
-					if (!this.#guestTrafficAllowed()) return;
+					if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
 					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
 				};
 				kill().catch(fail);

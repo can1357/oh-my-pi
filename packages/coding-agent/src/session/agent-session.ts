@@ -792,13 +792,21 @@ export class AgentSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
-	/** Resolves when the currently in-flight `switchSession()` transition settles (success or
-	 *  rollback). newSession() never rolls #sessionGeneration back so it leaves this unset. An
-	 *  aside-queueing call that hits a #sessionGeneration mismatch awaits this (via
-	 *  #sessionGenerationChanged) before giving up, so a record for the still-live session isn't
-	 *  discarded moments before a rolled-back switchSession() restores the exact generation it
-	 *  was captured against. */
+	/** Shared by readiness observers and aside-generation checks. Settles only after the
+	 *  outermost session/transcript transition finishes, including hooks and rollback. */
 	#sessionTransitionSettled: Promise<void> | undefined;
+	#resolveSessionTransition: (() => void) | undefined;
+	#sessionTransitionDepth = 0;
+	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
+	readonly #sessionTransitionScope: Disposable = {
+		[Symbol.dispose]: () => {
+			if (--this.#sessionTransitionDepth !== 0) return;
+			const resolve = this.#resolveSessionTransition;
+			this.#sessionTransitionSettled = undefined;
+			this.#resolveSessionTransition = undefined;
+			resolve?.();
+		},
+	};
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
@@ -4344,6 +4352,25 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
+	/** True while a session identity or transcript transition is still applying or rolling back. */
+	get isSessionTransitioning(): boolean {
+		return this.#sessionTransitionDepth > 0;
+	}
+
+	/** Wait until all active session/transcript transitions have settled, including rollback. */
+	async waitForSessionTransition(): Promise<void> {
+		while (this.#sessionTransitionSettled) await this.#sessionTransitionSettled;
+	}
+
+	#beginSessionTransition(): Disposable {
+		if (this.#sessionTransitionDepth++ === 0) {
+			const settled = Promise.withResolvers<void>();
+			this.#sessionTransitionSettled = settled.promise;
+			this.#resolveSessionTransition = settled.resolve;
+		}
+		return this.#sessionTransitionScope;
+	}
+
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
@@ -4902,6 +4929,7 @@ export class AgentSession {
 	 * streaming or a foreground bash/python execution is in flight.
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
+		using _transition = this.#beginSessionTransition();
 		// Refuse while a response streams OR a foreground user bash/python
 		// execution is in flight: those complete via recordBashResult()/
 		// recordPythonResult(), which append directly to agent.state when not
@@ -7855,6 +7883,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -7984,6 +8013,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(): Promise<boolean> {
+		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
@@ -9021,6 +9051,7 @@ export class AgentSession {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
+		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -9097,9 +9128,6 @@ export class AgentSession {
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
-		const transitionSettled = Promise.withResolvers<void>();
-		const previousSessionTransitionSettled = this.#sessionTransitionSettled;
-		this.#sessionTransitionSettled = transitionSettled.promise;
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;
@@ -9281,8 +9309,6 @@ export class AgentSession {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
-			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -9297,8 +9323,6 @@ export class AgentSession {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
-			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
 			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
@@ -9382,6 +9406,7 @@ export class AgentSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -9486,6 +9511,7 @@ export class AgentSession {
 		leafId: string,
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
@@ -9671,6 +9697,7 @@ export class AgentSession {
 		 */
 		askReanswerCommitted?: boolean;
 	}> {
+		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
 

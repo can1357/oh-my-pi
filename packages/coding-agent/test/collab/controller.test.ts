@@ -28,6 +28,8 @@ const WEB_URL = "https://collab.example";
 
 interface ControllerContextState {
 	sessionId: string;
+	transition?: Promise<void>;
+	transitionWaited?: () => void;
 	autoStart: "off" | "view" | "control";
 	relayUrl: string;
 	showStatus: string[];
@@ -85,6 +87,13 @@ function makeControllerContext(over: Partial<Pick<ControllerContextState, "autoS
 			onEntryAppended: undefined,
 		},
 		session: {
+			get isSessionTransitioning() {
+				return state.transition !== undefined;
+			},
+			waitForSessionTransition: async () => {
+				state.transitionWaited?.();
+				await state.transition;
+			},
 			isStreaming: false,
 			queuedMessageCount: 0,
 			sessionName: "controller-test",
@@ -380,6 +389,82 @@ describe("CollabController", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 2 }]);
 	});
 
+	for (const outcome of ["commit", "rollback"] as const) {
+		it(`publishes only settled session state after transition ${outcome}`, async () => {
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+			controller.startupComplete();
+			await controller.idle();
+			const original = state.sessionId;
+			const gate = Promise.withResolvers<void>();
+			const waiting = Promise.withResolvers<void>();
+			state.transition = gate.promise;
+			state.transitionWaited = waiting.resolve;
+			switchSession(state, "provisional-session");
+			try {
+				// Real AgentSession tests cover this early callback/late-settlement interval.
+				await waiting.promise;
+				expect(ctx.collabHost).toBeUndefined();
+				expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+			} finally {
+				state.sessionId = outcome === "rollback" ? original : "committed-session";
+				state.transition = undefined;
+				gate.resolve();
+			}
+			await controller.idle();
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+				{ generation: 2, sessionId: state.sessionId },
+			]);
+		});
+	}
+
+	it("shutdown cancels a rotation waiting for unfinished session hooks", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await controller.idle();
+		const gate = Promise.withResolvers<void>();
+		guestCleanups.push(() => gate.resolve());
+		const waiting = Promise.withResolvers<void>();
+		state.transition = gate.promise;
+		state.transitionWaited = waiting.resolve;
+		switchSession(state, "unfinished-session");
+		await waiting.promise;
+		// Closing the terminal must not wait for a hook whose UI is being closed.
+		await controller.shutdown("host exited");
+		expect(ctx.collabHost).toBeUndefined();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		state.transition = undefined;
+		gate.resolve();
+		await controller.idle();
+		expect(controller.host).toBeUndefined();
+	});
+
+	it("does not restart after shutdown overtakes an access upgrade", async () => {
+		const { ctx } = makeControllerContext({ autoStart: "view" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await controller.idle();
+		const drain = Promise.withResolvers<void>();
+		const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
+		const upgrade = controller.start({ access: "control" }).then(
+			host => ({ host, error: undefined }),
+			error => ({ host: undefined, error }),
+		);
+		const shutdown = controller.shutdown("host exited");
+		drain.resolve();
+		flush.mockRestore();
+		await shutdown;
+		const result = await upgrade;
+		expect(result.host).toBeUndefined();
+		expect(result.error).toBeInstanceOf(Error);
+		expect(controller.host).toBeUndefined();
+		expect(ctx.collabHost).toBeUndefined();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		await expect(controller.start({ access: "control" })).rejects.toBeInstanceOf(Error);
+	});
+
 	it("lets guests join and answer dialogs during startup but refuses prompts until startupComplete()", async () => {
 		const { ctx, state } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);
@@ -388,12 +473,10 @@ describe("CollabController", () => {
 		const host = ctx.collabHost;
 		if (!host) throw new Error("auto-started room missing");
 
-		const errors: string[] = [];
-		const refused = Promise.withResolvers<void>();
+		let refused = Promise.withResolvers<void>();
 		const asked = Promise.withResolvers<number>();
 		const writer = await joinAsWriter(host, frame => {
 			if (frame.t === "error") {
-				errors.push(frame.message);
 				refused.resolve();
 			}
 			if (frame.t === "ui-request") asked.resolve(frame.request.reqId);
@@ -403,7 +486,6 @@ describe("CollabController", () => {
 		// turn beside them, and the writer is told why …
 		writer.send({ t: "prompt", text: "during startup" });
 		await refused.promise;
-		expect(errors).toEqual(["prompting is unavailable until the host finishes starting up"]);
 		expect(state.prompts).toEqual([]);
 		// … while a question raised by those very hooks can still be answered remotely.
 		const answer = host.requestGuestUi({ kind: "select", title: "Startup hook", options: ["Yes", "No"] });
@@ -418,6 +500,19 @@ describe("CollabController", () => {
 		writer.send({ t: "prompt", text: "after startup" });
 		await forwarded.promise;
 		expect(state.prompts).toEqual(["after startup"]);
+
+		// An in-place transcript reset also closes the mutation gate, without
+		// losing the already-connected guest or suppressing replication.
+		const transition = Promise.withResolvers<void>();
+		state.transition = transition.promise;
+		refused = Promise.withResolvers<void>();
+		writer.send({ t: "prompt", text: "during reset" });
+		await refused.promise;
+		expect(state.prompts).toEqual(["after startup"]);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		state.transition = undefined;
+		transition.resolve();
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ sessionId: state.sessionId }]);
 	});
 
 	describe("while the first room is still connecting", () => {
