@@ -20,8 +20,12 @@
   - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
   - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
   - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
+  - `packages/ai/src/utils/prompt-cache-debug.ts` — opt-in bounded derived cache journal and formatter
   - `packages/coding-agent/src/debug/terminal-info.ts` — terminal state collection/formatting
   - `packages/coding-agent/src/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
+
+
+For the interactive cache view and report sidecar, set `PI_PROMPT_CACHE_DEBUG=1` before starting `omp`. The diagnostic is derived from final provider request bodies and stores only bounded digests, counts, classifications, and metadata; it is separate from unsafe `PI_REQ_DEBUG` capture.
 
 ## Inputs
 
@@ -81,7 +85,7 @@
 - `custom_request`: `command`
 
 ### Interactive selector values
-`packages/coding-agent/src/debug/index.ts` also exposes a fixed UI-only selector with values `open-artifacts`, `performance`, `work`, `dump`, `memory`, `logs`, `system`, `terminal`, `protocols`, `raw-sse`, `remote-debugger`, `transcript`, `clear-cache`. These are not model-callable through `debugSchema`; they are local TUI menu routes.
+`packages/coding-agent/src/debug/index.ts` also exposes a fixed UI-only selector with values `open-artifacts`, `performance`, `work`, `dump`, `memory`, `logs`, `system`, `terminal`, `protocols`, `cache`, `raw-sse`, `remote-debugger`, `transcript`, `clear-cache`. These are not model-callable through `debugSchema`; they are local TUI menu routes.
 
 ## Outputs
 The agent tool returns a standard `toolResult()` payload from `packages/coding-agent/src/tools/debug.ts`:
@@ -118,6 +122,7 @@ Side-channel artifacts outside the model tool result:
 - `createReportBundle()` writes `omp-report-<timestamp>.tar.gz` under the reports dir and returns the filesystem path to the UI handler.
 - `#handleWorkReport()` writes `/tmp/work-profile-<Date.now()>.svg` before opening it.
 - `RawSseViewerComponent` and `DebugLogViewerComponent` can copy captured text to the clipboard.
+- When `PI_PROMPT_CACHE_DEBUG=1`, the bundle also contains `prompt-cache-debug.jsonl` and `prompt-cache-debug.meta.json`; both are bounded derived data and include drop counters, not prompt text or credentials.
 
 ## Flow
 
@@ -144,6 +149,7 @@ Side-channel artifacts outside the model tool result:
    - `memory`: force GC, call `Bun.generateHeapSnapshot("v8")`, then bundle
    - `logs`: build a `DebugLogSource` and mount `DebugLogViewerComponent`
    - `raw-sse`: resolve a `RawSseDebugBuffer` from the session and mount `RawSseViewerComponent`
+   - `cache`: render reset count, largest rewrite estimate, stable-prefix digest, cache-touch age, classification, and relevant request sequences; without the opt-in env var it reports that diagnostics are disabled.
    - `remote-debugger`: reuse or start a loopback JavaScriptCore `RemoteInspectorServer` socket and display its host/port; the Bun API is process-wide and has no stop operation
    - `system`: call `collectSystemInfo()` and render `formatSystemInfo()` into the chat pane
    - `terminal`: `collectTerminalState()` + `formatTerminalState()` rendered into the chat pane

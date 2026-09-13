@@ -7,6 +7,7 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { PROMPT_CACHE_DEBUG_FILE, type PromptCacheDebugSnapshot } from "@oh-my-pi/pi-ai";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
@@ -50,6 +51,8 @@ export interface ReportBundleOptions {
 	workProfile?: WorkProfile;
 	/** Raw provider SSE diagnostics captured by the session buffer */
 	rawSseText?: string;
+	/** Bounded derived prompt-cache diagnostics and drop metadata */
+	promptCacheDebug?: PromptCacheDebugSnapshot;
 }
 
 export interface ReportBundleResult {
@@ -73,6 +76,8 @@ export interface DebugLogSource {
  * - logs.txt: Recent log entries
  * - system.json: OS, arch, CPU, memory, versions
  * - env.json: Sanitized environment variables
+ * - prompt-cache-debug.jsonl: Bounded derived cache diagnostic records (when enabled)
+ * - prompt-cache-debug.meta.json: Diagnostic bounds and dropped-record metadata (when enabled)
  * - config.json: Resolved settings
  * - profile.cpuprofile: CPU profile (performance report only)
  * - raw-sse.txt: Recent raw provider SSE diagnostics (when captured)
@@ -116,6 +121,27 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		files.push("logs.txt");
 	}
 
+	// Bounded, derived prompt-cache diagnostics. The snapshot contains only
+	// digests, counts, classifications, and provider request metadata.
+	if (options.promptCacheDebug) {
+		const snapshot = options.promptCacheDebug;
+		data[PROMPT_CACHE_DEBUG_FILE] =
+			snapshot.records.length === 0 ? "" : `${snapshot.records.map(record => JSON.stringify(record)).join("\n")}\n`;
+		files.push(PROMPT_CACHE_DEBUG_FILE);
+		data["prompt-cache-debug.meta.json"] = JSON.stringify(
+			{
+				enabled: snapshot.enabled,
+				recordCount: snapshot.records.length,
+				droppedRecords: snapshot.droppedRecords,
+				droppedBytes: snapshot.droppedBytes,
+				maxRecords: snapshot.maxRecords,
+				maxBytes: snapshot.maxBytes,
+			},
+			null,
+			2,
+		);
+		files.push("prompt-cache-debug.meta.json");
+	}
 	// Recent raw provider SSE diagnostics
 	if (options.rawSseText && options.rawSseText.trim().length > 0) {
 		data["raw-sse.txt"] = options.rawSseText;

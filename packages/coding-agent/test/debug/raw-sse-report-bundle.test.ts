@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, PromptCacheDebugSnapshot } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-coding-agent/debug/raw-sse-buffer";
 import { createReportBundle } from "@oh-my-pi/pi-coding-agent/debug/report-bundle";
@@ -73,5 +73,37 @@ describe("raw SSE report bundle", () => {
 		const archive = new Bun.Archive(await Bun.file(result.path).bytes());
 		const files = await archive.files();
 		expect(await files.get("raw-sse.txt")?.text()).toBe(rawSseText);
+	});
+
+	it("includes the bounded derived cache journal and drop metadata", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cache-report-"));
+		const xdgStateHome = path.join(cleanupRoot, "state");
+		await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
+		process.env.XDG_STATE_HOME = xdgStateHome;
+		setAgentDir(fallbackAgentDir);
+
+		const promptCacheDebug: PromptCacheDebugSnapshot = {
+			enabled: true,
+			records: [],
+			droppedRecords: 3,
+			droppedBytes: 512,
+			maxRecords: 8,
+			maxBytes: 4096,
+		};
+		const result = await createReportBundle({ sessionFile: undefined, promptCacheDebug });
+
+		expect(result.files).toContain("prompt-cache-debug.jsonl");
+		expect(result.files).toContain("prompt-cache-debug.meta.json");
+		const archive = new Bun.Archive(await Bun.file(result.path).bytes());
+		const files = await archive.files();
+		expect(await files.get("prompt-cache-debug.jsonl")?.text()).toBe("");
+		expect(JSON.parse((await files.get("prompt-cache-debug.meta.json")?.text()) ?? "{}")).toEqual({
+			enabled: true,
+			recordCount: 0,
+			droppedRecords: 3,
+			droppedBytes: 512,
+			maxRecords: 8,
+			maxBytes: 4096,
+		});
 	});
 });
