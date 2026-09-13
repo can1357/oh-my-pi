@@ -74,18 +74,23 @@ export function formatDisabledCredentialReplayNotice(summary: DisabledCredential
 
 /**
  * Notices for accounts that were signed out automatically and have not been
- * signed in again, replayed once when a session starts. Best-effort and
- * bounded in time and size: a broker that predates the tombstone endpoint,
- * is unreachable, or does not answer within {@link REPLAY_LOOKUP_BUDGET_MS}
- * yields no notices instead of delaying or breaking startup, and at most
+ * signed in again, replayed once when a session starts. `announced` names the
+ * credentials a live `notice` already reached the caller's listener with, so
+ * a teardown racing the replay is told once. Best-effort and bounded in time
+ * and size: a broker that predates the tombstone endpoint, is unreachable, or
+ * does not answer within {@link REPLAY_LOOKUP_BUDGET_MS} yields no notices
+ * instead of delaying or breaking startup, and at most
  * {@link PREVIEW_LIMITS.COLLAPSED_ITEMS} accounts are named.
  */
-export async function collectDisabledCredentialNotices(authStorage: AuthStorage, nowMs: number): Promise<string[]> {
+export async function collectDisabledCredentialNotices(
+	authStorage: AuthStorage,
+	nowMs: number,
+	announced?: ReadonlySet<number>,
+): Promise<string[]> {
 	try {
-		const disabled = await authStorage.listActionableDisabledCredentials(
-			undefined,
-			AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS),
-		);
+		const disabled = (
+			await authStorage.listActionableDisabledCredentials(undefined, AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS))
+		).filter(summary => !announced?.has(summary.id));
 		// Newest sign-out first, then bounded like other collapsed lists: the
 		// account that just dropped out must be named, not the oldest leftovers;
 		// `omp usage` has the full set.

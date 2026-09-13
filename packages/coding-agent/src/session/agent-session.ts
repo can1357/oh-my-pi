@@ -54,6 +54,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	CredentialDisabledEvent,
 	ImageContent,
 	Message,
 	Model,
@@ -101,7 +102,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
-import { collectDisabledCredentialNotices } from "../config/credential-notices";
+import { collectDisabledCredentialNotices, formatCredentialDisabledNotice } from "../config/credential-notices";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
@@ -618,6 +619,8 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
+	/** Credentials announced live through `auth` notices, in order; see {@link AgentSession.disabledCredentialNoticeMark}. */
+	readonly #announcedDisabledCredentialIds: number[] = [];
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
@@ -10811,17 +10814,46 @@ export class AgentSession {
 	}
 
 	/**
+	 * Announce a credential the auth layer tore down while this session is
+	 * live: a `warning` notice with source `auth` for subscribers, logged so a
+	 * later {@link AgentSession.getDisabledCredentialNotices} replay can leave
+	 * out what a listener already saw.
+	 */
+	announceCredentialDisabled(event: CredentialDisabledEvent): void {
+		this.#announcedDisabledCredentialIds.push(event.credentialId);
+		this.emitNotice("warning", formatCredentialDisabledNotice(event), "auth");
+	}
+
+	/**
+	 * Position in the live announcement log. Read it immediately before
+	 * subscribing (same synchronous step) and hand it to
+	 * {@link AgentSession.getDisabledCredentialNotices}: every announcement
+	 * from that position on reached the new listener.
+	 */
+	get disabledCredentialNoticeMark(): number {
+		return this.#announcedDisabledCredentialIds.length;
+	}
+
+	/**
 	 * Notices for accounts the auth layer signed out on its own that have not
 	 * signed in again. Pull-after-subscribe like
 	 * {@link AgentSession.getAdvisorConfigWarnings}: a teardown before this
 	 * session had a listener — background model discovery while the session was
 	 * being created, an earlier session, a sibling process — reached nobody's
 	 * `notice` stream and survives only as a tombstone. Teardowns after
-	 * subscribing arrive live as `notice` events with source `auth`. Bounded and
-	 * best-effort: an unreachable broker yields no notices, never an error.
+	 * subscribing arrive live as `notice` events with source `auth`; pass the
+	 * {@link AgentSession.disabledCredentialNoticeMark} taken before
+	 * subscribing as `announcedAfter` so a teardown racing the replay is told
+	 * once. Bounded and best-effort: an unreachable broker yields no notices,
+	 * never an error.
 	 */
-	getDisabledCredentialNotices(nowMs = Date.now()): Promise<string[]> {
-		return collectDisabledCredentialNotices(this.#modelRegistry.authStorage, nowMs);
+	getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
+		const announced = new Set(
+			this.#announcedDisabledCredentialIds.slice(
+				options?.announcedAfter ?? this.#announcedDisabledCredentialIds.length,
+			),
+		);
+		return collectDisabledCredentialNotices(this.#modelRegistry.authStorage, options?.nowMs ?? Date.now(), announced);
 	}
 
 	/**

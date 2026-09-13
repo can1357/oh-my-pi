@@ -610,9 +610,7 @@ async function runInteractiveMode(
 	// Same pull-after-subscribe shape: an account torn down while no session was
 	// watching (background refresh, a sibling process) is only recorded as a
 	// tombstone, so announce it here until the user signs in again.
-	for (const notice of await session.getDisabledCredentialNotices()) {
-		mode.showWarning(notice);
-	}
+	await mode.announceDisabledCredentials();
 
 	for (const notify of notifs) {
 		if (!notify) {
@@ -2055,16 +2053,15 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
-			// Headless runs have no /login surface, but a silently signed-out account is
-			// exactly what makes a scripted run fail on a model it used yesterday — and
-			// when it was the last usable credential, the `No models available` exit
-			// below is the only thing the user would otherwise see.
-			if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui") {
-				for (const notice of await session.getDisabledCredentialNotices()) {
-					process.stderr.write(`${notice}\n`);
-				}
-			}
 			if (!isInteractive && !session.model) {
+				// A silently signed-out account is exactly what empties a scripted
+				// run's pool, and this exit is the only thing the user would
+				// otherwise see; a run that proceeds announces it after subscribing.
+				if (mode !== "rpc" && mode !== "rpc-ui") {
+					for (const notice of await session.getDisabledCredentialNotices()) {
+						process.stderr.write(`${notice}\n`);
+					}
+				}
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}

@@ -61,6 +61,10 @@ describe("credential sign-out notices", () => {
 		expect(notices[0]).toContain("anthropic signed-out@example.com was signed out");
 		expect(notices[0]).toContain("grant revoked");
 		expect(notices[0]).toContain("/login anthropic");
+		// A teardown a live notice already announced to the caller is not repeated.
+		const [tombstone] = await authStorage.listDisabledCredentials("anthropic");
+		if (!tombstone) throw new Error("tombstone missing");
+		expect(await collectDisabledCredentialNotices(authStorage, Date.now(), new Set([tombstone.id]))).toEqual([]);
 
 		await authStorage.set("anthropic", [oauthCredential(Date.now() + 3_600_000)]);
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
@@ -194,6 +198,16 @@ describe("credential sign-out notices", () => {
 				getEntries: () => [],
 			},
 			extensionRunner: undefined,
+			disabledCredentialNoticeMark: 3,
+			// The startup replay runs only once a listener is in place, and is
+			// told which live announcements that listener has already seen.
+			getDisabledCredentialNotices: async (options?: { announcedAfter?: number }) => {
+				if (!notify) throw new Error("replayed before subscribing");
+				expect(options?.announcedAfter).toBe(3);
+				return [
+					"anthropic b@example.com was signed out 5s ago: invalid_grant. Sign in again with /login anthropic.",
+				];
+			},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				notify = listener;
 				return () => {};
@@ -215,7 +229,10 @@ describe("credential sign-out notices", () => {
 		} as unknown as AgentSession;
 
 		expect(await runPrintMode(session, { mode: "text", initialMessage: "hello" })).toBe(0);
-		expect(stderrOutput.join("")).toBe("Working...\nauth: Signed out of anthropic a@example.com\n");
+		expect(stderrOutput.join("")).toBe(
+			"anthropic b@example.com was signed out 5s ago: invalid_grant. Sign in again with /login anthropic.\n" +
+				"Working...\nauth: Signed out of anthropic a@example.com\n",
+		);
 	});
 
 	it("announces the sign-out before `omp -p` gives up on an empty pool", async () => {

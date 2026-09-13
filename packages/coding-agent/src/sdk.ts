@@ -63,7 +63,6 @@ import {
 import { bucketRules } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
-import { formatCredentialDisabledNotice } from "./config/credential-notices";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
@@ -1379,7 +1378,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// pulled once after subscribing, as the CLI modes do.
 	let credentialDisabledNoticeTarget: AgentSession | undefined;
 	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
-		credentialDisabledNoticeTarget?.emitNotice("warning", formatCredentialDisabledNotice(event), "auth");
+		credentialDisabledNoticeTarget?.announceCredentialDisabled(event);
 		if (credentialDisabledTarget) {
 			// Discard return: any handler error is routed through runner.onError listeners.
 			void credentialDisabledTarget.emitCredentialDisabled(event);

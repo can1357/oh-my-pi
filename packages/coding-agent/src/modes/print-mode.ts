@@ -153,7 +153,10 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		);
 	}
 
-	// Always subscribe to enable session persistence via _handleAgentEvent
+	// Always subscribe to enable session persistence via _handleAgentEvent.
+	// Subscribe before the sign-out replay below: a teardown between the two
+	// would otherwise reach neither the snapshot nor a listener.
+	const disabledCredentialNoticeMark = session.disabledCredentialNoticeMark;
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json") {
@@ -168,6 +171,11 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			process.stderr.write(`${sanitizeText(message)}\n`);
 		}
 	});
+	// Headless runs have no /login surface, but a silently signed-out account is
+	// exactly what makes a scripted run fail on a model it used yesterday.
+	for (const notice of await session.getDisabledCredentialNotices({ announcedAfter: disabledCredentialNoticeMark })) {
+		process.stderr.write(`${notice}\n`);
+	}
 
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {

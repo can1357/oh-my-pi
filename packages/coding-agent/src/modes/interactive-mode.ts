@@ -911,6 +911,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #todoCommandController: TodoCommandController;
 	readonly #liveCommandController: LiveCommandController;
 	readonly #eventController: EventController;
+	#disabledCredentialNoticeMark = 0;
 	get eventController(): EventController {
 		return this.#eventController;
 	}
@@ -6580,6 +6581,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#subscribeToAgent(): void {
+		// Same synchronous step as the subscription, so the mark and the listener
+		// agree on which live announcements were seen.
+		this.#disabledCredentialNoticeMark = this.session.disabledCredentialNoticeMark;
 		this.#eventController.subscribeToAgent();
+	}
+
+	/**
+	 * Show the accounts the auth layer signed out on its own that have not
+	 * signed in again, minus any the live `auth` notice stream already showed
+	 * since this mode subscribed. Pulled once the transcript is stable.
+	 */
+	async announceDisabledCredentials(): Promise<void> {
+		for (const notice of await this.session.getDisabledCredentialNotices({
+			announcedAfter: this.#disabledCredentialNoticeMark,
+		})) {
+			this.showWarning(notice);
+		}
 	}
 }
