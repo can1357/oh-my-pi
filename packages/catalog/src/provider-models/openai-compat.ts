@@ -5726,6 +5726,19 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		...(referenceCompat?.omitReasoningEffort !== undefined
 			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 			: {}),
+		// The deployment is authoritative about its own groups. When its
+		// `model_info.supports_vision` says the group reads images, the derived
+		// opt-out has to outrank the class-wide text-only guard
+		// (`classes/deepseek.kdl`), which keys on the model id alone and would
+		// otherwise replace the attachment with `[image omitted: model does not
+		// support vision]` for a group the endpoint reads. LiteLLM cannot take a
+		// reviewed model list the way OpenRouter or OpenCode Go can — its aliases
+		// are chosen per deployment — so the declaration decides.
+		// `applyCompatOverrides` runs after the cascade, so this beats the class
+		// default; `supports_vision: false` or absent metadata leaves the guard
+		// in place. `mergeLiteLLMCompat` keeps it when another endpoint wins the
+		// compat merge (issue #11982).
+		...(supportsVision === true ? { stripImageInput: false } : {}),
 	};
 	return {
 		id,
@@ -5749,6 +5762,43 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	};
 }
 
+/**
+ * Field-wise compat union for the management endpoints describing one group.
+ *
+ * The endpoints are complementary, not ranked: `/model_group/info` reports the
+ * gateway's view while `/model/info` and its `/v1` twin report the operator's
+ * own `model_info`, and any of them may answer partially. Picking one side
+ * wholesale dropped every axis the other had reported — a later endpoint that
+ * merely listed `supported_openai_params` erased what an earlier one declared.
+ * Merge per axis instead: a later endpoint overrides the axes it reports and
+ * leaves the rest alone, so an absent axis means "no news", never "retract".
+ */
+function mergeLiteLLMCompat<TApi extends Api>(
+	existing: ModelSpec<TApi>["compat"],
+	next: ModelSpec<TApi>["compat"],
+	evidence: { existingReportedParams: boolean; nextReportedParams: boolean },
+): ModelSpec<TApi>["compat"] {
+	if (!existing) return next;
+	if (!next) return existing;
+	const merged: Record<string, unknown> = { ...(existing as Record<string, unknown>) };
+	for (const axis in next as Record<string, unknown>) {
+		const value = (next as Record<string, unknown>)[axis];
+		if (value !== undefined) merged[axis] = value;
+	}
+	// `supportsReasoningEffort` is the one axis with two sources: the endpoint's
+	// own `supported_openai_params` list, and the models.dev reference it falls
+	// back to when no list was reported. Only the list is evidence, so an
+	// inferred value must not override the other endpoint's verdict — a fallback
+	// `true` would send `reasoning_effort` to a group whose own metadata omitted
+	// it (#11985 review).
+	if (!evidence.nextReportedParams) {
+		const reported = (existing as Record<string, unknown>).supportsReasoningEffort;
+		if (reported === undefined) delete merged.supportsReasoningEffort;
+		else merged.supportsReasoningEffort = reported;
+	}
+	return merged as unknown as ModelSpec<TApi>["compat"];
+}
+
 function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	existing: LiteLLMRichEndpointModel<TApi>,
 	next: LiteLLMRichEndpointModel<TApi>,
@@ -5769,7 +5819,10 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
-		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
+		compat: mergeLiteLLMCompat(existing.model.compat, next.model.compat, {
+			existingReportedParams: existing.hasSupportedOpenAIParams,
+			nextReportedParams: next.hasSupportedOpenAIParams,
+		}),
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
@@ -5950,8 +6003,11 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
-		// bundled model's provider-specific transport (e.g. Fireworks
+		// rich-v9 keys the deployment's `supports_vision` declaration into the
+		// cached compat and unions compat across management endpoints instead of
+		// letting a later one retract what an earlier one reported (issue
+		// #11982). rich-v8 invalidated rows whose `compatConfig` retained a
+		// colliding bundled model's provider-specific transport (e.g. Fireworks
 		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
 		// bundled reference fallback, moved OpenAI models to Responses, continued
 		// past incomplete vision/API metadata and endpoints omitting cache

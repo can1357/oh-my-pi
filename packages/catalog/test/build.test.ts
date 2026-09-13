@@ -450,6 +450,51 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
+	it("keeps image input for the natively multimodal DeepSeek V4.1 Flash lineage", () => {
+		// DeepSeek V4.1 Flash is image-text-to-text, but its id carries no
+		// `vision` token, so the class-wide strip rule dropped every attachment
+		// the model reads on hosts without their own carve-out.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(false);
+		// Hosts that were carved out individually must keep working without them.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "openrouter",
+					id: "deepseek/deepseek-v4.1-flash",
+					baseUrl: "https://openrouter.ai/api/v1",
+					input: ["text", "image"],
+				}),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Text-only DeepSeek SKUs keep the wire guard.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(true);
+		// The lineage glob covers dated SKUs, not just the bare id.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// A V4.1 id that also carries a `vision` token matches both exceptions at
+		// equal rank; the explicit priority keeps that resolvable instead of
+		// throwing AmbiguousOverlapError.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-vision-exp", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Non-Flash V4.1 lineages are not established as multimodal and keep the guard.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4.1-pro", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(true);
+	});
+
 	it("downgrades forced tool choice only for DeepSeek reasoning models on OpenCode gateways", () => {
 		const deepseekReasoning = {
 			id: "deepseek-v4-flash",
