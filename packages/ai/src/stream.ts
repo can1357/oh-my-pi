@@ -193,6 +193,8 @@ let providerInFlightHeartbeatWriterOverride:
 	| undefined;
 let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>) | undefined;
 let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
+let providerInFlightLockCreatedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockIdentifiedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -365,12 +367,21 @@ async function acquireProviderInFlightLock(provider: string, signal?: AbortSigna
 		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 		try {
 			await fs.mkdir(lockDir);
-			const lockIdentity = await readProviderInFlightLockIdentity(lockDir);
+			await providerInFlightLockCreatedObserverOverride?.(lockDir);
+			let lockIdentity: ProviderInFlightLockIdentity;
+			try {
+				lockIdentity = await readProviderInFlightLockIdentity(lockDir);
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				throw error;
+			}
 			const token = crypto.randomUUID();
 			try {
+				await providerInFlightLockIdentifiedObserverOverride?.(lockDir);
 				await writeProviderInFlightInfo(lockDir, token);
 			} catch (error) {
 				await releaseProviderInFlightLockDirIfSame(lockDir, lockIdentity);
+				if (isEnoent(error)) continue;
 				throw error;
 			}
 			return async () => {
@@ -622,6 +633,12 @@ export const __providerInFlightForTesting = {
 	},
 	setWaitObserver(observer: ((provider: string) => void) | undefined): void {
 		providerInFlightWaitObserverOverride = observer;
+	},
+	setLockCreatedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockCreatedObserverOverride = observer;
+	},
+	setLockIdentifiedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockIdentifiedObserverOverride = observer;
 	},
 	providerDir(provider: string): string {
 		return providerInFlightDir(provider);
