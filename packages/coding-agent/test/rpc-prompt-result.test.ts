@@ -378,6 +378,7 @@ describe("reportPromptResult", () => {
 					},
 					onError: () => {},
 					emit: async () => {},
+					trackPendingSend: () => {},
 				},
 				discoverStartupSkillPaths: async () => {},
 				...testCase.session,
@@ -465,6 +466,7 @@ describe("initializeExtensions markAgentInvokingMessage", () => {
 				},
 				onError: () => {},
 				emit: async () => {},
+				trackPendingSend: () => {},
 			},
 			discoverStartupSkillPaths: async () => {},
 			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
@@ -515,6 +517,7 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 				},
 				onError: () => {},
 				emit: async () => {},
+				trackPendingSend: () => {},
 			},
 			discoverStartupSkillPaths: async () => {},
 			// Mirrors AgentSession.sendCustomMessage's contract: `false` iff no turn started,
