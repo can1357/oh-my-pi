@@ -20,7 +20,14 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { isMCPToolName, isToolScopedIn, normalizeToolNames, withoutSiblingTools } from "../tools/builtin-names";
+import { mcpServerResourcesAllowed } from "../cursor";
+import {
+	isMCPToolName,
+	isToolScopedIn,
+	mcpDisallowTargetsServer,
+	normalizeToolNames,
+	withoutSiblingTools,
+} from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -880,6 +887,24 @@ export class SessionTools {
 	 * protocol tools stay permitted, mirroring the shared
 	 * {@link isToolScopedIn} predicate from builtin-names.
 	 */
+	/**
+	 * Per-server resource gate for `read mcp://…`, which resolves through the
+	 * process-global protocol router and therefore cannot consult a session
+	 * itself. Uses the same shared decision as the Cursor adapter: a server that
+	 * owns at least one scoped-in tool is readable, and a resource-only server
+	 * survives unless the scope targets it by name.
+	 */
+	isMCPServerResourceAllowed(serverName: string): boolean {
+		const ownsAnyTool = (toolName: string): boolean =>
+			(this.#toolRegistry.get(toolName) as { mcpServerName?: unknown } | undefined)?.mcpServerName === serverName;
+		return mcpServerResourcesAllowed(
+			[this.#toolRegistry.values()],
+			name => ownsAnyTool(name) && this.#isToolScopedIn(name),
+			server => !this.#enforceToolAllowlist && !mcpDisallowTargetsServer(this.#disallowedToolPatterns, server),
+			serverName,
+		);
+	}
+
 	#isToolScopedIn(name: string): boolean {
 		// Metadata-aware disallow: pass the registered tool's raw `mcpServerName`
 		// so `mcp__<server>_*` still matches length-capped minted names (a plain

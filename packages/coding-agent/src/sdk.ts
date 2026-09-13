@@ -1839,6 +1839,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return sessionManager.getCwd();
 			},
 			isToolActive: name => activeToolNames.has(name),
+			// `read mcp://…` resolves through the process-global protocol router,
+			// which has no session, so the scope gate has to be reachable from the
+			// session the read tool is bound to.
+			isMCPServerResourceAllowed: serverName => serverResourcesAllowed(serverName),
 			setActiveToolNames,
 			toolRegistry,
 			hasUI: options.hasUI ?? false,

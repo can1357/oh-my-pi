@@ -25,13 +25,14 @@ function createMockManager(opts: {
 	} as unknown as MCPManager;
 }
 
-function createToolSession(): ToolSession {
+function createToolSession(isMCPServerResourceAllowed?: (serverName: string) => boolean): ToolSession {
 	return {
 		cwd: os.tmpdir(),
 		hasUI: false,
 		settings: Settings.isolated(),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		isMCPServerResourceAllowed,
 	};
 }
 
@@ -484,6 +485,65 @@ describe("McpProtocolHandler", () => {
 		const router = InternalUrlRouter.instance();
 
 		await expect(router.resolve("mcp://test://anything")).rejects.toThrow("(none)");
+	});
+
+	it("refuses a read of a scoped-out MCP server's resource, even though the router would resolve it", async () => {
+		// `mcp://` resolves through the process-global router, which has no session,
+		// so a scoped subagent (`tools: [read]`, or a deny of the server) could
+		// otherwise read any connected server's resources by URI while the scope
+		// excluded that server everywhere else.
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("allowed-server", {
+			resources: [{ uri: "test://ok", name: "ok" }],
+			templates: [],
+		});
+		resources.set("denied-server", {
+			resources: [{ uri: "test://secret", name: "secret" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["allowed-server", "denied-server"],
+			resources,
+			readResult: { contents: [{ uri: "test://secret", text: "classified", mimeType: "text/plain" }] },
+		});
+		MCPManager.setInstance(manager);
+		InternalUrlRouter.instance();
+
+		// The router itself still resolves it: the gate is the session's, not the router's.
+		expect((await InternalUrlRouter.instance().resolve("mcp://test://secret")).content).toContain("classified");
+
+		const scoped = new ReadTool(createToolSession(server => server !== "denied-server"));
+		await expect(scoped.execute("read-scoped-out-resource", { path: "mcp://test://secret" })).rejects.toThrow(
+			/No MCP server has resource/,
+		);
+
+		// The permitted server still reads, so the gate is not blanket.
+		const allowed = await new ReadTool(createToolSession(server => server === "allowed-server")).execute(
+			"read-scoped-in-resource",
+			{ path: "mcp://test://ok" },
+		);
+		expect(allowed.isError ?? false).toBe(false);
+	});
+
+	it("reads an MCP resource when the session has no scope gate", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("open-server", {
+			resources: [{ uri: "test://open", name: "open" }],
+			templates: [],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["open-server"],
+				resources,
+				readResult: { contents: [{ uri: "test://open", text: "public", mimeType: "text/plain" }] },
+			}),
+		);
+		InternalUrlRouter.instance();
+
+		const result = await new ReadTool(createToolSession()).execute("read-unscoped-resource", {
+			path: "mcp://test://open",
+		});
+		expect(result.isError ?? false).toBe(false);
 	});
 
 	it("uses unknown for binary content without mimeType", async () => {
