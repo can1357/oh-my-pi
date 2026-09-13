@@ -95,6 +95,10 @@ export const sayHelp = {
 
 export const searchHelp = { description: "Test web search providers" } satisfies CommandMetadata;
 
+export const sessionStatsHelp = {
+	description: "Print the token and cost totals of a persisted session as JSON",
+} satisfies CommandMetadata;
+
 export const shareHelp = {
 	description: "Share a saved session via an encrypted link (same as /share)",
 } satisfies CommandMetadata;
