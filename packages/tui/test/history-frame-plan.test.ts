@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type Component,
+	CURSOR_MARKER,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
 	TUI,
@@ -188,6 +189,24 @@ class TmuxPreservedClearTerminal extends VirtualTerminal {
 		super.write(translated);
 	}
 }
+/**
+ * Models ConPTY materializing a pending wrap before the cursor move that follows
+ * an exact-width bottom-row repaint, as observed in issue #9783's PTY capture.
+ */
+class ConptyPendingWrapTerminal extends VirtualTerminal {
+	override write(data: string): void {
+		const bottom = `\x1b[${this.rows};1H`;
+		const rowStart = data.indexOf(bottom);
+		const remainder = rowStart < 0 ? "" : data.slice(rowStart + bottom.length);
+		const cursorOffset = remainder.search(/\x1b\[\d+;\d+H/);
+		const cursorMove = cursorOffset < 0 ? -1 : rowStart + bottom.length + cursorOffset;
+		if (cursorMove < 0 || data.slice(rowStart + bottom.length, cursorMove).includes("\r")) {
+			super.write(data);
+			return;
+		}
+		super.write(`${data.slice(0, cursorMove)}\r\n${data.slice(cursorMove)}`);
+	}
+}
 
 describe("terminal frame plans", () => {
 	it("appends finalized history once and leaves the requested mutable viewport intact", () => {
@@ -202,6 +221,24 @@ describe("terminal frame plans", () => {
 		expect(provider.acknowledged).toEqual([1]);
 		expect(terminal.getBufferPosition().baseY).toBe(1);
 		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["history two", "editor", "status"]);
+		tui.stop();
+	});
+	it("keeps an exact-width live row out of scrollback when ConPTY materializes pending wrap", () => {
+		const terminal = new ConptyPendingWrapTerminal(20, 4);
+		const provider = new Provider({
+			history: { id: 1, rows: ["history one", "history two"] },
+			viewport: [`editor${CURSOR_MARKER}`, "status one".padEnd(20, ".")],
+		});
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		for (let frame = 2; frame <= 8; frame++) {
+			provider.plan = { viewport: [`editor${CURSOR_MARKER}`, `status ${frame}`.padEnd(20, ".")] };
+			tui.requestRender(true);
+		}
+
+		expect(terminal.getBufferPosition().baseY).toBe(0);
+		expect(plainBuffer(terminal)).toEqual(["history one", "history two", "editor", "status 8............"]);
 		tui.stop();
 	});
 	it("keeps live viewport rows out of tmux-style preserved-clear scrollback on a scrolling append", () => {

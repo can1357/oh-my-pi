@@ -2735,7 +2735,7 @@ export class TUI extends Container {
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;
 			for (let index = 0; index < preparedHistory.length; index++) {
-				if (screenRow > startTop) buffer += "\r\n";
+				if (screenRow > startTop) buffer += "\n";
 				buffer += this.#lineRewriteSequence(
 					preparedHistory[index] ?? "",
 					width,
@@ -2747,7 +2747,7 @@ export class TUI extends Container {
 				screenRow++;
 			}
 			for (let index = 0; index < rows; index++) {
-				if (screenRow > startTop) buffer += "\r\n";
+				if (screenRow > startTop) buffer += "\n";
 				buffer += this.#lineRewriteSequence(
 					prepared[index] ?? "",
 					width,
@@ -3144,6 +3144,12 @@ export class TUI extends Container {
 		committedTo = -1,
 		spacerGlyphWidth = -1,
 	): string {
+		// End every rewrite at column zero. ConPTY can materialize a pending
+		// wrap before a following cursor-addressing sequence even while DECAWM is
+		// disabled; on the bottom row that becomes an untracked scroll and leaks
+		// live chrome into native history (#9783). The row loops append only LF
+		// because this CR supplies the other half of their explicit CRLF.
+		let rewrite: string;
 		// Reserved lower half of a scaled OSC 66 heading. The glyph re-emitted on
 		// the row above owns columns `[0, spacerGlyphWidth)` here, so preserve
 		// them (any erase there clears the glyph — issue #8318) but still clear
@@ -3151,26 +3157,27 @@ export class TUI extends Container {
 		// spacer, and the glyph write never covers those columns. Leading reset
 		// keeps the erase on the default background (BCE).
 		if (spacerGlyphWidth >= 0) {
-			if (spacerGlyphWidth >= width) return "";
-			return `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
+			rewrite = spacerGlyphWidth >= width ? "" : `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
+		} else if (TERMINAL.isImageLine(line)) {
+			rewrite = ERASE_LINE + this.#imageLineSequence(line, screenRow, frameRow, committedTo);
+		} else {
+			const terminalLine = this.#terminalLine(line);
+			const asciiWidth = this.#ansiAsciiLineWidth(line, width);
+			if (asciiWidth !== undefined) {
+				// Exact width model: skip the erase only when the row truly fills
+				// the line (an EL there would eat the last cell via pending-wrap).
+				rewrite = asciiWidth >= width ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
+			} else {
+				// Non-ASCII rows: the native measure can over-count combining-heavy
+				// scripts, so a row it calls "full" may render short and leave stale
+				// cells from the previous occupant — which would then scroll into
+				// history baked into the committed row. Erase the line first instead
+				// (rewrites always start at column 1, so EL-to-end clears the whole
+				// row); the leading reset keeps BCE on the default background.
+				rewrite = SEGMENT_RESET + ERASE_TO_END_OF_LINE + terminalLine;
+			}
 		}
-		if (TERMINAL.isImageLine(line)) {
-			return ERASE_LINE + this.#imageLineSequence(line, screenRow, frameRow, committedTo);
-		}
-		const terminalLine = this.#terminalLine(line);
-		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
-		if (asciiWidth !== undefined) {
-			// Exact width model: skip the erase only when the row truly fills
-			// the line (an EL there would eat the last cell via pending-wrap).
-			return asciiWidth >= width ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
-		}
-		// Non-ASCII rows: the native measure can over-count combining-heavy
-		// scripts, so a row it calls "full" may render short and leave stale
-		// cells from the previous occupant — which would then scroll into
-		// history baked into the committed row. Erase the line first instead
-		// (rewrites always start at column 1, so EL-to-end clears the whole
-		// row); the leading reset keeps BCE on the default background.
-		return SEGMENT_RESET + ERASE_TO_END_OF_LINE + terminalLine;
+		return `${rewrite}\r`;
 	}
 
 	#targetHardwareCursorState(
@@ -3273,7 +3280,7 @@ export class TUI extends Container {
 		}
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
 		for (let r = 0; r < height; r++) {
-			if (r > 0) buffer += "\r\n";
+			if (r > 0) buffer += "\n";
 			buffer += this.#lineRewriteSequence(fitted[r], width, r, -1, -1, this.#osc66SpacerGlyphWidth(fitted, r));
 		}
 		buffer += this.#paintEndSequence;

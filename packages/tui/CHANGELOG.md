@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopped exact-width live rows from entering native scrollback during ConPTY repaints ([#9783](https://github.com/can1357/oh-my-pi/issues/9783)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
