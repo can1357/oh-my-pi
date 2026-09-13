@@ -5,9 +5,13 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type ArchiveLimits, extractArchive } from "./ar";
+import { withFileLock } from "./file-lock";
 
 const CHROME_FOR_TESTING_BASE_URL = "https://storage.googleapis.com/chrome-for-testing-public";
 const CHROME_METADATA_BASE_URL = "https://googlechromelabs.github.io/chrome-for-testing";
+// Installation is outside browser/Eval operation deadlines, but a stalled CDN
+// must still release the cached install promise and permit a later attempt.
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Archive ceilings for the managed browser download. The default archive
@@ -251,29 +255,39 @@ export async function install(options: InstallOptions): Promise<InstalledBrowser
 		return { browser: options.browser, buildId: options.buildId, platform, path: installPath, executablePath };
 	}
 
-	await fsp.mkdir(options.cacheDir, { recursive: true });
-	const nonce = `${process.pid}-${crypto.randomUUID()}`;
-	const archivePath = path.join(options.cacheDir, `.browser-${nonce}.zip`);
-	const stagingPath = path.join(options.cacheDir, `.browser-${nonce}`);
-	try {
-		await downloadArchive(
-			getDownloadUrl(options.browser, platform, options.buildId, options.baseUrl),
-			archivePath,
-			options.downloadProgressCallback,
-		);
-		await extractArchive(archivePath, stagingPath, { limits: BROWSER_ARCHIVE_LIMITS });
-		await fsp.mkdir(path.dirname(installPath), { recursive: true });
-		await fsp.rm(installPath, { recursive: true, force: true });
-		await fsp.rename(stagingPath, installPath);
-	} finally {
-		await Promise.all([
-			fsp.rm(archivePath, { force: true }).catch(() => {}),
-			fsp.rm(stagingPath, { recursive: true, force: true }).catch(() => {}),
-		]);
-	}
-	if (!(await pathExists(executablePath)))
-		throw new Error(`Browser archive did not contain its expected executable: ${executablePath}`);
-	return { browser: options.browser, buildId: options.buildId, platform, path: installPath, executablePath };
+	await fsp.mkdir(path.dirname(installPath), { recursive: true });
+	return withFileLock(
+		`${installPath}.install`,
+		async () => {
+			// The in-process launch promise cannot serialize separate OMP sessions.
+			// Recheck under the OS lock: never replace a winner's running Chrome.
+			if (!(await pathExists(executablePath))) {
+				const nonce = `${process.pid}-${crypto.randomUUID()}`;
+				const archivePath = path.join(options.cacheDir, `.browser-${nonce}.zip`);
+				const stagingPath = path.join(options.cacheDir, `.browser-${nonce}`);
+				try {
+					await downloadArchive(
+						getDownloadUrl(options.browser, platform, options.buildId, options.baseUrl),
+						archivePath,
+						options.downloadProgressCallback,
+					);
+					await extractArchive(archivePath, stagingPath, { limits: BROWSER_ARCHIVE_LIMITS });
+					if (!(await pathExists(path.join(stagingPath, path.relative(installPath, executablePath))))) {
+						throw new Error(`Browser archive did not contain its expected executable: ${executablePath}`);
+					}
+					await fsp.rm(installPath, { recursive: true, force: true });
+					await fsp.rename(stagingPath, installPath);
+				} finally {
+					await Promise.all([
+						fsp.rm(archivePath, { force: true }).catch(() => {}),
+						fsp.rm(stagingPath, { recursive: true, force: true }).catch(() => {}),
+					]);
+				}
+			}
+			return { browser: options.browser, buildId: options.buildId, platform, path: installPath, executablePath };
+		},
+		{ retries: Math.ceil(DOWNLOAD_TIMEOUT_MS / 100) + 1, retryDelayMs: 100 },
+	);
 }
 
 function chromeChannelName(tag: string): string | undefined {
@@ -292,7 +306,7 @@ function chromeChannelName(tag: string): string | undefined {
 }
 
 async function fetchMetadata<T>(filename: string): Promise<T> {
-	const response = await fetch(`${CHROME_METADATA_BASE_URL}/${filename}`);
+	const response = await fetch(`${CHROME_METADATA_BASE_URL}/${filename}`, { signal: AbortSignal.timeout(30_000) });
 	if (!response.ok)
 		throw new Error(`Failed to fetch Chrome-for-Testing metadata (${response.status} ${response.statusText})`);
 	return (await response.json()) as T;
@@ -345,7 +359,7 @@ async function downloadArchive(
 	destination: string,
 	onProgress: ((progress: BrowserDownloadProgress) => void) | undefined,
 ): Promise<void> {
-	const response = await fetch(url);
+	const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
 	if (!response.ok || !response.body) {
 		throw new Error(`Browser download failed (${response.status} ${response.statusText}) from ${url}`);
 	}

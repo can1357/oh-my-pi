@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
+- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
+- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
+- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
+- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
+- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
 - Fixed browser-relay tabs becoming detached, duplicated, or undrivable after relay outages and extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed recovered tabs losing their active sessions or remaining attached after the last client disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
