@@ -2130,13 +2130,13 @@ export const SETTINGS_SCHEMA = {
 	"history.scope": {
 		type: "enum",
 		values: HISTORY_SCOPE_KINDS,
-		default: "session",
+		default: "global",
 		ui: {
 			tab: "interaction",
 			group: "Input",
 			label: "Prompt History Scope",
 			description:
-				"Which prompts the Up arrow recalls: this session (default), the current folder, this repository (worktrees included), or all projects",
+				"Which prompts the Up arrow recalls: all projects (default), this session, the current folder, or this repository (worktrees included)",
 		},
 	},
 
