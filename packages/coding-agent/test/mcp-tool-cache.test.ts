@@ -21,10 +21,12 @@
  * eager server a slower startup, but a *lazy* server with no cache
  * registers no tools at all and stays dormant until a manual
  * `/mcp reconnect`. `timeout` is numeric, not boolean, so its legacy
- * candidate is built from the *current* config's value rather than
- * enumerated (see `hashLegacyConfigs` in `tool-cache.ts`): the migration
- * test below holds `timeout` unchanged across the upgrade, the case that
- * scheme covers.
+ * candidates enumerate the field's own documented sentinels (its default,
+ * `0`, and omission) alongside the *current* config's value, rather than an
+ * open value space (see `hashLegacyConfigs`/`timeoutCandidates` in
+ * `tool-cache.ts`): the migration tests below cover both an unchanged value
+ * and a legacy cache written at the documented default that changes value
+ * across the upgrade (PR #9793 review, round 2).
  */
 import { describe, expect, it } from "bun:test";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
@@ -206,6 +208,21 @@ describe("MCPToolCache", () => {
 		await cache.set("srv", lazyConfig, [TOOL_DEF]);
 
 		const cached = await cache.get("srv", { ...lazyConfig, timeout: 60_000 });
+
+		expect(cached).toEqual([TOOL_DEF]);
+	});
+
+	it("regression: PR #9793 review (round 2) — a round-3 cache written at the documented timeout default survives both the upgrade and a value change", async () => {
+		const { storage, store } = fakeStorageWithStore();
+		const cache = new MCPToolCache(storage);
+		// Round 3 hashed the documented default (30_000ms) because the config
+		// never set `timeout` explicitly; upgrading and setting an explicit,
+		// different value in the same step must still hit — the default is a
+		// documented sentinel, not an unknowable historical number.
+		const preUpgradeConfig = config({ lazy: true, timeout: 30_000 });
+		await seedLegacyCacheEntry(store, "srv", preUpgradeConfig, ["lazy", "enabled"], [TOOL_DEF]);
+
+		const cached = await cache.get("srv", { ...preUpgradeConfig, timeout: 60_000 });
 
 		expect(cached).toEqual([TOOL_DEF]);
 	});

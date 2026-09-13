@@ -5,6 +5,7 @@
  */
 import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../session/agent-storage";
+import { DEFAULT_MCP_TIMEOUT_MS } from "./timeout";
 import type { MCPServerConfig, MCPToolDefinition } from "./types";
 
 const CACHE_VERSION = 1;
@@ -97,6 +98,22 @@ function policyVariants(keys: readonly (keyof MCPServerConfig)[]): Record<string
 	return variants;
 }
 
+/**
+ * Timeout values enumerated for legacy migration, alongside the *current*
+ * config's own value (the common "value unchanged since caching" case):
+ * the field's own documented sentinels — its default (a config that never
+ * set `timeout` resolves to this) and `0` ("disable") — plus omission
+ * (never set at all). These are the field's whole documented value space,
+ * not a guess at arbitrary history: an explicit timeout outside this small
+ * set that also changed value across the same upgrade can't be recovered
+ * without the literal historical number, which no digest keeps — that
+ * residual case costs one self-healing miss, same as any other
+ * unrecognized identity change already does for a lazy server.
+ */
+function timeoutCandidates(current: number | undefined): Array<number | undefined> {
+	return [...new Set([undefined, 0, DEFAULT_MCP_TIMEOUT_MS, current])];
+}
+
 /** Hashes of `config` under every retired identity-exclusion set, for cache-miss migration. */
 async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
@@ -105,19 +122,13 @@ async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
 		// Policy keys the legacy scheme still hashed (did not yet exclude).
 		const hashedPolicyKeys = CURRENT_IDENTITY_EXCLUDED_KEYS.filter(key => !excluded.includes(key));
 		const enumeratedKeys = hashedPolicyKeys.filter(key => ENUMERATED_LEGACY_POLICY_KEYS.includes(key));
-		// Non-enumerated policy keys (currently just `timeout`) reuse the
-		// *current* config's actual value: this recovers a cache written just
-		// before this exclusion shipped whose value hasn't changed since,
-		// at the cost of one miss if both happened together — an open value
-		// space can't be enumerated the way a two-valued boolean can.
-		const passthroughValues: Record<string, unknown> = {};
-		for (const key of hashedPolicyKeys) {
-			if (!ENUMERATED_LEGACY_POLICY_KEYS.includes(key) && config[key] !== undefined) {
-				passthroughValues[key] = config[key];
+		const timeoutValues = hashedPolicyKeys.includes("timeout") ? timeoutCandidates(config.timeout) : [undefined];
+		for (const timeoutValue of timeoutValues) {
+			const base: Record<string, unknown> =
+				timeoutValue === undefined ? identity : { ...identity, timeout: timeoutValue };
+			for (const variant of policyVariants(enumeratedKeys)) {
+				hashes.add(await hashIdentity({ ...base, ...variant }));
 			}
-		}
-		for (const variant of policyVariants(enumeratedKeys)) {
-			hashes.add(await hashIdentity({ ...identity, ...passthroughValues, ...variant }));
 		}
 	}
 	return [...hashes];
