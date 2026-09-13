@@ -527,12 +527,13 @@ impl GitRepo {
 		// which the cached handle's open-time config snapshot cannot see.
 		let repo = self.gix_fresh()?;
 		let config = repo.config_snapshot();
-		let get = |key: &str| {
-			config
-				.string(key)
-				.and_then(|v| nonempty(v.to_str_lossy().trim()))
-		};
-		let Some(remote) = get(&format!("branch.{branch}.remote")) else {
+		// git keeps parsed config values verbatim (quoted whitespace
+		// included): a padded remote or merge name matches nothing, so don't
+		// trim. An empty value means no upstream.
+		let Some(remote) = config
+			.string(format!("branch.{branch}.remote").as_str())
+			.and_then(|v| nonempty(v.to_str_lossy().as_ref()))
+		else {
 			return Ok(None);
 		};
 		// `branch.<name>.merge` may hold several values (octopus pull); git's
@@ -545,7 +546,7 @@ impl GitRepo {
 			.and_then(|values| {
 				values
 					.first()
-					.and_then(|v| nonempty(v.to_str_lossy().trim()))
+					.and_then(|v| nonempty(v.to_str_lossy().as_ref()))
 			})
 		else {
 			return Ok(None);
@@ -1808,6 +1809,24 @@ mod tests {
 		git(root, &["config", "branch.feat.remote", "origin"])?;
 		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/one");
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Quoted whitespace is verbatim for git: a padded merge name matches
+		// no fetch refspec, and a padded remote name resolves to no upstream.
+		git(root, &["config", "--replace-all", "branch.feat.merge", " refs/heads/one "])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["config", "--replace-all", "branch.feat.merge", "refs/heads/one"])?;
+		git(root, &["config", "branch.feat.remote", " origin "])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		// Under a `.` remote git keeps the padded merge name verbatim; it
+		// resolves to nothing rather than the trimmed ref.
+		git(root, &["config", "branch.feat.remote", "."])?;
+		git(root, &["config", "--replace-all", "branch.feat.merge", " refs/heads/one "])?;
+		assert_eq!(upstream(root)?.as_str(), " refs/heads/one \n");
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["config", "branch.feat.remote", "origin"])?;
+		git(root, &["config", "--replace-all", "branch.feat.merge", "refs/heads/one"])?;
 
 		// An empty first value is authoritative for git: no upstream, even
 		// though a usable ref follows it.
