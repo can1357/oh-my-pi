@@ -264,6 +264,22 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(modelChanges).toEqual([`${fallback.provider}/${fallback.id}`]);
 	});
 
+	it("honors transport-owned terminal failure before retry, fallback, or abort recovery", async () => {
+		const recovery = new TurnRecovery(
+			createHost(model, modelRegistry, { fallbackChains: { default: ["anthropic/*", "openai/*"] } }),
+		);
+		const failed = makeMessage([], model);
+		failed.errorId = AIError.create(AIError.Flag.NoRetry, AIError.Flag.Transient);
+		expect(recovery.isRetryableError(failed)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(failed)).toBe(false);
+		expect(await recovery.handleRetryableError(failed, { hardErrorFallback: true })).toBe(false);
+		failed.stopReason = "aborted";
+		failed.errorMessage = "Request was aborted";
+		failed.errorId = AIError.create(AIError.Flag.NoRetry, AIError.Flag.Abort);
+		expect(recovery.isRetryableReasonlessAbort(failed)).toBe(false);
+		expect(recovery.classifyResolvedInterruptedToolTurn(failed)).toBeUndefined();
+	});
+
 	it("treats a failed turn with partial non-whitespace text as NOT retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }], model);

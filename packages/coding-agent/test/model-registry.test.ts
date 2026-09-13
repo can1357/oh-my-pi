@@ -495,6 +495,36 @@ describe("ModelRegistry", () => {
 			expect(getModelsForProvider(registry, "anthropic")[0].baseUrl).toBe("https://second-proxy.example.com/v1");
 		});
 
+		test("JSON provider-wire config survives offline refresh with the gateway bearer", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					baseUrl: "http://127.0.0.1:4000",
+					apiKey: "gateway-bearer",
+					transport: "provider-wire",
+				},
+				"openai-codex": {
+					baseUrl: "http://127.0.0.1:4000",
+					apiKey: "gateway-bearer",
+					transport: "provider-wire",
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			for (const phase of ["loaded", "refreshed"]) {
+				if (phase === "refreshed") await registry.refresh("offline");
+				expect(registry.find("anthropic", "claude-sonnet-4-5")).toMatchObject({
+					api: "anthropic-messages",
+					baseUrl: "http://127.0.0.1:4000",
+					transport: "provider-wire",
+				});
+				expect(registry.find("openai-codex", "gpt-5.4")).toMatchObject({
+					api: "openai-codex-responses",
+					baseUrl: "http://127.0.0.1:4000",
+					transport: "provider-wire",
+				});
+				expect(await registry.getApiKey(registry.find("anthropic", "claude-sonnet-4-5")!)).toBe("gateway-bearer");
+			}
+		});
+
 		test("refresh keeps transport override on built-in provider (#2555 openrouter gateway)", async () => {
 			// Reporter ran `omp` with the auth-gateway broker proxying OpenRouter.
 			// Default model worked; switching via `/model` produced

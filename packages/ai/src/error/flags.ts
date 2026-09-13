@@ -19,6 +19,8 @@ import {
 
 export const Flag = {
 	Class: 0x1000,
+	/** The attempt must not be repeated by automatic retry or model fallback. */
+	NoRetry: 0x0000_0800,
 	ThinkingLoop: 0x0001_0000,
 	Transient: 0x0002_0000,
 	Timeout: 0x0004_0000,
@@ -48,6 +50,7 @@ export const Flag = {
 export type Flag = (typeof Flag)[keyof typeof Flag];
 
 const KIND_MASK =
+	Flag.NoRetry |
 	Flag.ThinkingLoop |
 	Flag.Transient |
 	Flag.Timeout |
@@ -292,6 +295,7 @@ export function isOAuthExpiry(errorMessage: string): boolean {
 }
 
 const ERROR_KIND_LABELS: readonly [Flag, string][] = [
+	[Flag.NoRetry, "no-retry"],
 	[Flag.ThinkingLoop, "thinking-loop"],
 	[Flag.Transient, "transient"],
 	[Flag.Timeout, "timeout"],
@@ -329,6 +333,7 @@ export function is(id: number | undefined, flag: Flag): boolean {
 }
 
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
+	if (is(id, Flag.NoRetry)) return false;
 	if (is(id, Flag.ContentBlocked)) return false;
 	if (is(id, Flag.PayloadRejected)) return false;
 	if (opts?.replayUnsafe) return false;

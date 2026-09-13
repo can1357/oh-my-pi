@@ -140,6 +140,8 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	codexMode?: boolean;
+	/** Explicit ChatGPT OAuth mode when a credential-holding relay injects the account identity. */
+	isOAuth?: boolean;
 	toolChoice?: ToolChoice;
 	preferWebsockets?: boolean;
 	serviceTier?: ServiceTier;
@@ -303,12 +305,15 @@ export function setCodexAttestationProvider(provider: CodexAttestationProvider |
 
 /**
  * Resolve the `x-oai-attestation` header value for one upstream request.
- * Gated on ChatGPT-OAuth credentials (a Codex JWT carries `chatgpt_account_id`;
- * codex-rs gates on `auth.is_chatgpt_auth()`). A throwing hook degrades to no
- * header rather than failing the request.
+ * Gated on ChatGPT OAuth mode, inferred from the account-bearing JWT for
+ * direct requests or supplied explicitly by a credential-holding relay.
+ * A throwing hook degrades to no header rather than failing the request.
  */
-export async function getCodexAttestationHeader(accountId: string | undefined): Promise<string | undefined> {
-	if (!accountId || !codexAttestationProvider) return undefined;
+export async function getCodexAttestationHeader(
+	accountId: string | undefined,
+	isOAuth = !!accountId,
+): Promise<string | undefined> {
+	if (!isOAuth || !codexAttestationProvider) return undefined;
 	try {
 		return await codexAttestationProvider();
 	} catch {
@@ -1837,7 +1842,7 @@ async function openCodexWebSocketTransport(
 		requestContext.turnState,
 		requestContext.responsesLite,
 		requestContext.requestMetadata,
-		await getCodexAttestationHeader(requestContext.accountId),
+		await getCodexAttestationHeader(requestContext.accountId, options?.isOAuth),
 		requestContext.transformedBody,
 	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
@@ -1941,9 +1946,11 @@ async function openCodexSseTransport(
 				requestContext.requestMetadata,
 				requestSetup.requestSignal,
 				requestSetup.firstEventTimeoutMs,
-				options?.codexSseMaxAttempts,
+				model.transport === "provider-wire" ? 1 : options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
+				options?.isOAuth,
+				model.transport !== "provider-wire",
 			),
 		);
 	};
@@ -2583,6 +2590,9 @@ class CodexStreamProcessor {
 	}
 
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		// A received SSE stream proves the request started. The wire transport
+		// must not replay even a pre-content parse/timeout/provider failure.
+		if (this.model.transport === "provider-wire") return false;
 		if (await this.#tryRecoverWhitespaceToolCallLoop(error)) {
 			return true;
 		}
@@ -3087,7 +3097,14 @@ export async function prewarmOpenAICodexResponses(
 	model: Model<"openai-codex-responses">,
 	options?: Pick<
 		OpenAICodexResponsesOptions,
-		"apiKey" | "headers" | "sessionId" | "signal" | "preferWebsockets" | "providerSessionState" | "responsesLite"
+		| "apiKey"
+		| "headers"
+		| "sessionId"
+		| "signal"
+		| "preferWebsockets"
+		| "providerSessionState"
+		| "responsesLite"
+		| "isOAuth"
 	>,
 ): Promise<void> {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -3114,7 +3131,7 @@ export async function prewarmOpenAICodexResponses(
 	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
-	const attestation = await getCodexAttestationHeader(accountId);
+	const attestation = await getCodexAttestationHeader(accountId, options?.isOAuth);
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,
@@ -3217,6 +3234,7 @@ function shouldUseCodexWebSocket(
 	state: CodexWebSocketSessionState | undefined,
 	preferWebsockets?: boolean,
 ): boolean {
+	if (model.transport === "provider-wire") return false;
 	// Explicitly disabled by the model or session state.
 	if (model.preferWebsockets === false) return false;
 	// Explicitly disabled by the session state.
@@ -4303,6 +4321,8 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	isOAuth?: boolean,
+	allowEncodingFallback = true,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4315,7 +4335,7 @@ async function openCodexSseEventStream(
 		turnState,
 		responsesLite,
 		requestMetadata,
-		await getCodexAttestationHeader(accountId),
+		await getCodexAttestationHeader(accountId, isOAuth),
 		body,
 	);
 	// `wrapCodexSseStream` arms the iterator-level idle watchdog only after this
@@ -4365,7 +4385,11 @@ async function openCodexSseEventStream(
 	let response: Response;
 	try {
 		response = await send(compressedBody ?? bodyJson);
-		if (compressedBody !== undefined && (response.status === 400 || response.status === 415)) {
+		if (
+			allowEncodingFallback &&
+			compressedBody !== undefined &&
+			(response.status === 400 || response.status === 415)
+		) {
 			const rejectedStatus = response.status;
 			await response.body?.cancel();
 			headers.delete("content-encoding");

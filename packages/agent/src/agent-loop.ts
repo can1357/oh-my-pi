@@ -2269,6 +2269,7 @@ function recoverTransientErrorToolTurn(
 	availableTools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">>,
 ): AssistantMessage {
 	if (message.stopReason !== "error") return message;
+	if (AIError.is(message.errorId, AIError.Flag.NoRetry)) return message;
 	const toolCalls = message.content.filter(block => block.type === "toolCall");
 	if (toolCalls.length === 0) return message;
 	const stopDetailType = message.stopDetails?.type;

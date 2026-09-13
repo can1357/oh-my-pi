@@ -1206,6 +1206,7 @@ export class TurnRecovery {
 	 * their own marker, not the generic sentinel, so they never match here.
 	 */
 	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
+		if (AIError.is(message.errorId, AIError.Flag.NoRetry)) return false;
 		if (
 			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
 			message.content.length !== 0 ||
@@ -1232,6 +1233,7 @@ export class TurnRecovery {
 	 * Context overflow is NOT retryable (handled by compaction instead).
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
+		if (AIError.is(message.errorId, AIError.Flag.NoRetry)) return false;
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();
@@ -1328,6 +1330,7 @@ export class TurnRecovery {
 	 * unexecuted call must be reissued.
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
+		if (AIError.is(message.errorId, AIError.Flag.NoRetry)) return undefined;
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
 			message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
@@ -1967,6 +1970,7 @@ export class TurnRecovery {
 	 * `pinFallback`), and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
+		if (AIError.is(message.errorId, AIError.Flag.NoRetry)) return false;
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();
@@ -2109,6 +2113,7 @@ export class TurnRecovery {
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
+		if (AIError.is(message.errorId, AIError.Flag.NoRetry)) return false;
 		const retrySettings = this.#host.settings.getGroup("retry");
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches

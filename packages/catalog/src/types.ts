@@ -1194,8 +1194,12 @@ export interface Model<TApi extends Api = Api> {
 	 * credentials. The model's other metadata (pricing, context window,
 	 * thinking config, …) still resolves locally; only the streaming
 	 * dispatch is redirected.
+	 *
+	 * `"provider-wire"` instead runs the local Anthropic/Codex request builder
+	 * and SSE decoder, sending provider bytes to `/v1/provider-wire/:provider`.
+	 * Only the gateway holds provider credentials; `apiKey` is its bearer.
 	 */
-	transport?: "pi-native";
+	transport?: "pi-native" | "provider-wire";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
 	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */

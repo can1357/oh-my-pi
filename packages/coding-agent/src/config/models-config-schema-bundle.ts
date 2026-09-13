@@ -325,13 +325,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 */
 		"requestMetadata?": { "[string]": "string" },
 		/**
-		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
-		 * every model under this provider via the auth-gateway's
-		 * `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The
-		 * provider's `baseUrl` must point at a compatible `omp auth-gateway`
-		 * and `apiKey` must carry the gateway bearer.
+		 * Gateway transport for every model under this provider. `"pi-native"`
+		 * delegates provider codecs to `/v1/pi/stream`; `"provider-wire"` runs
+		 * Anthropic/Codex codecs locally over `/v1/provider-wire/:provider`.
+		 * `baseUrl` points at the gateway and `apiKey` carries its bearer,
+		 * never the provider credential.
 		 */
-		"transport?": '"pi-native"',
+		"transport?": '"pi-native" | "provider-wire"',
 	}).narrow((value, ctx) => {
 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
 			return ctx.mustBe("baseUrl a non-empty string");

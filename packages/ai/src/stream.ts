@@ -36,6 +36,7 @@ import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
+import { streamProviderWire } from "./providers/provider-wire-client";
 // Heavy provider stream functions are imported lazily via register-builtins,
 // which wraps each provider module in a dynamic import. This keeps the
 // AWS SDK, google-auth-library, @google/genai, and
@@ -106,6 +107,11 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
  * that effective endpoint — exempt only when it resolves to the official host.
  */
 function isLeakedThinkingHealExempt(model: Model<Api>): boolean {
+	// The byte-pass transport has fixed official destinations and local native
+	// decoders, even though the configured baseUrl names a gateway.
+	if (model.transport === "provider-wire") {
+		return model.provider === "anthropic" || model.provider === "openai-codex";
+	}
 	switch (model.provider) {
 		case "anthropic": {
 			// Mirror resolveAnthropicBaseUrl's effective endpoint: Foundry redirects
@@ -897,6 +903,10 @@ function streamDispatch<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	// Explicit gateway transport wins over extension and provider routing.
+	if (model.transport === "provider-wire") {
+		return streamProviderWire(model, context, options);
+	}
 	const requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1039,6 +1049,7 @@ const THINKING_LOOP_RETRY_MAX_DELAY_MS = 8_000;
 function isRetryableThinkingLoop(message: AssistantMessage): boolean {
 	return (
 		message.stopReason === "error" &&
+		!AIError.is(message.errorId, AIError.Flag.NoRetry) &&
 		message.content.length === 0 &&
 		AIError.is(message.errorId, AIError.Flag.ThinkingLoop)
 	);
@@ -1085,6 +1096,7 @@ export async function complete<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): Promise<AssistantMessage> {
+	if (model.transport === "provider-wire") return stream(model, context, options).result();
 	return resolveWithThinkingLoopRetries(options?.signal, () => stream(model, context, options));
 }
 
@@ -1241,7 +1253,7 @@ function supportsAnthropicCacheRefresh<TApi extends Api>(model: Model<TApi>): bo
 	return (
 		model.api === "anthropic-messages" &&
 		model.provider === "anthropic" &&
-		model.transport !== "pi-native" &&
+		model.transport === undefined &&
 		isLeakedThinkingHealExempt(model)
 	);
 }
@@ -1442,7 +1454,8 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const sessionOptions = withInferenceSessionId(options);
+	// Wire routing resolves sessionId > promptCacheKey > a fresh identity itself.
+	const sessionOptions = model.transport === "provider-wire" ? (options ?? {}) : withInferenceSessionId(options);
 	if (!model.requiresGlyphTokenization) {
 		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
 	}
@@ -1485,6 +1498,15 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	// Resolve a gateway bearer once, outside the provider credential-rotation
+	// wrapper. Only the wire fetch may replay a serialized refused request.
+	if (model.transport === "provider-wire") {
+		return withThinkingLoopGuard(model, options, opts =>
+			withProviderInFlightLimit(model, opts, () =>
+				streamProviderWire(model, context, mapOptionsForApi(model, opts), opts?.apiKey),
+			),
+		);
+	}
 	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
@@ -1739,6 +1761,11 @@ export async function completeSimple<TApi extends Api>(
 	},
 ): Promise<AssistantMessage> {
 	const { onAttempt, ...streamOptions } = options ?? {};
+	if (model.transport === "provider-wire") {
+		const message = await streamSimple(model, context, streamOptions).result();
+		onAttempt?.(message);
+		return message;
+	}
 	const sessionOptions = withInferenceSessionId(streamOptions);
 	return resolveWithThinkingLoopRetries(
 		options?.signal,
