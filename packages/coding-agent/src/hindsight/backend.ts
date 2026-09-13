@@ -17,6 +17,7 @@ import { createHindsightClient } from "./client";
 import { isHindsightConfigured, loadHindsightConfig } from "./config";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
 import { HindsightSessionState } from "./state";
+import { countRetainableUserTurns } from "./transcript";
 
 const STATIC_INSTRUCTIONS = [
 	"# Memory",
@@ -80,7 +81,13 @@ export const hindsightBackend: MemoryBackend = {
 			return;
 		}
 
-		await installPrimaryState(session, settings, new Set());
+		await installPrimaryState(
+			session,
+			settings,
+			new Set(),
+			session.hindsightCloseRetainBaselineTurns ?? options.hindsightCloseRetainBaselineTurns,
+			session.hindsightLoadedMessageCount ?? options.hindsightLoadedMessageCount,
+		);
 	},
 
 	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
@@ -127,7 +134,6 @@ export const hindsightBackend: MemoryBackend = {
 		const state = session?.getHindsightSessionState();
 		const primary = state?.aliasOf ? undefined : state;
 		if (!primary) return;
-		await primary.flushRetainQueue();
 		await primary.forceRetainCurrentSession();
 	},
 
@@ -187,9 +193,9 @@ function schedulePrimaryStateRebuild(session: AgentSession): void {
 
 /**
  * Build (or rebuild) the primary `HindsightSessionState` for `session` from
- * the current settings and install it. Disposes any previous primary state
- * after flushing its retain queue so in-flight tool-initiated retains land in
- * the bank that was selected when they were enqueued, not in the new bank.
+ * the current settings and install it. Drains any previous primary state's
+ * pending session tail and tool-retain queue so a below-cadence turn is not
+ * discarded when bank routing changes.
  *
  * The created state takes ownership of the `onHindsightScopeChanged`
  * subscription so subsequent `hindsight.bankId` / `bankIdPrefix` / `scoping`
@@ -199,8 +205,10 @@ async function installPrimaryState(
 	session: AgentSession,
 	settings: Settings,
 	banksSet: Set<string>,
+	closeRetainBaselineTurns?: number,
+	loadedMessageCount?: number,
 ): Promise<HindsightSessionState | undefined> {
-	const sessionId = session.sessionId;
+	const sessionId = session.hindsightDocumentId || session.sessionManager.getSessionId() || session.sessionId;
 	if (!sessionId) return undefined;
 
 	const config = loadHindsightConfig(settings);
@@ -209,21 +217,22 @@ async function installPrimaryState(
 	const client = createHindsightClient(config);
 	const scope = computeBankScope(config, session.sessionManager.getCwd());
 
-	// Cleanup any stale state for this session (defensive — prevents leaks
-	// when a session is reused without going through dispose). Flush the
-	// previous state's retain queue BEFORE clearing it, otherwise
-	// `HindsightRetainQueue.#doFlush` sees `session.getHindsightSessionState()
-	// !== state` and drops the batch. Re-read after the await so a concurrent
-	// owner cannot leave the actual current state undisposed.
+	// Drain the previous state's pending transcript and retain queue BEFORE
+	// replacing it. A below-cadence turn would otherwise be marked loaded
+	// history on the replacement and never retained to either bank.
+	// `HindsightRetainQueue.#doFlush` also drops the batch if the session
+	// owner changes mid-flush, so finish that work first. Re-read after the
+	// await so a concurrent owner cannot leave the actual current state
+	// undisposed.
 	let previous = session.getHindsightSessionState();
 	if (previous) {
-		await previous.flushRetainQueue();
+		await previous.drainOnClose();
 	}
 	const latest = session.getHindsightSessionState();
 	if (latest && latest !== previous) {
 		previous?.dispose();
 		previous = latest;
-		await previous.flushRetainQueue();
+		await previous.drainOnClose();
 	}
 
 	const state = new HindsightSessionState({
@@ -236,6 +245,8 @@ async function installPrimaryState(
 		config,
 		session,
 		banksSet,
+		closeRetainBaselineTurns: closeRetainBaselineTurns ?? countRetainableUserTurns(session.sessionManager),
+		loadedMessageCount,
 		lastRetainedTurn: 0,
 		hasRecalledForFirstTurn: false,
 	});
@@ -269,9 +280,9 @@ async function installPrimaryState(
 
 /**
  * `onHindsightScopeChanged` handler: re-evaluate the bank scope from current
- * settings and rebuild the primary state when it has actually drifted. No-op
- * when the scope is unchanged or the session is no longer hosting a primary
- * state (e.g. it was wiped to `undefined`, or this is a subagent alias).
+ * settings and rebuild the primary state when it has actually drifted. When
+ * only non-routing config changed (e.g. retainUpdateMode), refresh the live
+ * state's config snapshot without resetting retain/recall tracking.
  */
 async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<void> {
 	const current = session.getHindsightSessionState();
@@ -280,16 +291,24 @@ async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<
 	const settings = session.settings;
 	const config = loadHindsightConfig(settings);
 	if (!isHindsightConfigured(config)) {
-		// Hindsight effectively unwired mid-session. Flush before clearing so
-		// queued retains don't get dropped by `HindsightRetainQueue.#doFlush`.
-		await current.flushRetainQueue();
+		// Hindsight effectively unwired mid-session. Drain the pending
+		// transcript and queue before clearing so a below-cadence tail is
+		// not dropped by dispose.
+		await current.drainOnClose();
 		const previous = session.setHindsightSessionState(undefined);
 		previous?.dispose();
 		return;
 	}
 
 	const next = computeBankScope(config, session.sessionManager.getCwd());
-	if (bankScopesEqual(next, current)) return;
+	if (bankScopesEqual(next, current)) {
+		// Bank routing is unchanged, but other live settings such as
+		// retainUpdateMode still need to replace the config snapshot. Mutate
+		// in place so subagent aliases that captured `parent.config` by
+		// reference observe the same update.
+		Object.assign(current.config, config);
+		return;
+	}
 
 	// Preserve the banksSet so we don't re-PUT banks we've already confirmed.
 	await installPrimaryState(session, settings, current.banksSet);

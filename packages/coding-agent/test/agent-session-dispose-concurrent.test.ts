@@ -7,6 +7,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import * as hindsightTranscript from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
 import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -157,12 +158,15 @@ describe("AgentSession concurrent disposal", () => {
 
 		const current = createSession(owned);
 		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
-		vi.spyOn(hindsight, "flushRetainQueue").mockImplementation(async () => {
+		vi.spyOn(hindsight, "waitForSessionRetainIdle").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
 			order.push("hindsight:start");
 			await hindsightGate.promise;
 			order.push("hindsight:end");
 		});
-		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {
+			order.push("hindsight:dispose");
+		});
 		current.setHindsightSessionState(hindsight);
 
 		const mnemopi: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
@@ -183,8 +187,8 @@ describe("AgentSession concurrent disposal", () => {
 		try {
 			await asyncStarted.promise;
 			await Promise.resolve();
-			expect(order).toContain("hindsight:start");
 			expect(order).toContain("mnemopi:start");
+			expect(order).not.toContain("hindsight:start");
 			expect(order).not.toContain("async:end");
 			expect(order).not.toContain("hindsight:end");
 			expect(order).not.toContain("mnemopi:end");
@@ -201,6 +205,228 @@ describe("AgentSession concurrent disposal", () => {
 		expect(closeAt).toBeGreaterThan(order.indexOf("async:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("hindsight:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("mnemopi:end"));
+		expect(order.indexOf("hindsight:dispose")).toBeGreaterThan(order.indexOf("hindsight:end"));
+	});
+
+	it("waits for a close retain through the configured retain timeout", async () => {
+		vi.useFakeTimers();
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const current = createSession();
+		const started = Promise.withResolvers<void>();
+		const retainDone = Promise.withResolvers<void>();
+		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
+		hindsight.config = { retainTimeoutMs: 8_000 } as HindsightSessionState["config"];
+		let drained = false;
+		vi.spyOn(hindsight, "waitForSessionRetainIdle").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
+			started.resolve();
+			await retainDone.promise;
+			drained = true;
+		});
+		vi.spyOn(hindsight, "flushRetainQueue").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		current.setHindsightSessionState(hindsight);
+
+		const dispose = current.dispose();
+		await started.promise;
+		vi.advanceTimersByTime(5_000);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+
+		retainDone.resolve();
+		await flushMicrotasks();
+		await dispose;
+		session = undefined;
+
+		expect(drained).toBe(true);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+	});
+
+	it("gives the close retain a full timeout after an in-flight cadence retain", async () => {
+		vi.useFakeTimers();
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const current = createSession();
+		const idleStarted = Promise.withResolvers<void>();
+		const idleDone = Promise.withResolvers<void>();
+		const drainStarted = Promise.withResolvers<void>();
+		const drainDone = Promise.withResolvers<void>();
+		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
+		hindsight.config = { retainTimeoutMs: 8_000 } as HindsightSessionState["config"];
+		let drained = false;
+		vi.spyOn(hindsight, "waitForSessionRetainIdle").mockImplementation(async () => {
+			idleStarted.resolve();
+			await idleDone.promise;
+		});
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
+			drainStarted.resolve();
+			await drainDone.promise;
+			drained = true;
+		});
+		vi.spyOn(hindsight, "flushRetainQueue").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		current.setHindsightSessionState(hindsight);
+
+		const dispose = current.dispose();
+		await idleStarted.promise;
+		vi.advanceTimersByTime(6_000);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalled();
+
+		idleDone.resolve();
+		await flushMicrotasks();
+		await drainStarted.promise;
+		vi.advanceTimersByTime(6_000);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+
+		drainDone.resolve();
+		await flushMicrotasks();
+		await dispose;
+		session = undefined;
+
+		expect(drained).toBe(true);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still in flight at dispose deadline", expect.anything());
+	});
+
+	it("gives close drain a bank-setup budget before the retain timeout", async () => {
+		vi.useFakeTimers();
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const current = createSession();
+		const started = Promise.withResolvers<void>();
+		const retainDone = Promise.withResolvers<void>();
+		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
+		hindsight.config = {
+			retainTimeoutMs: 8_000,
+			requestTimeoutMs: 3_000,
+		} as HindsightSessionState["config"];
+		let drained = false;
+		vi.spyOn(hindsight, "waitForSessionRetainIdle").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
+			started.resolve();
+			await retainDone.promise;
+			drained = true;
+		});
+		vi.spyOn(hindsight, "flushRetainQueue").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		current.setHindsightSessionState(hindsight);
+
+		const dispose = current.dispose();
+		await started.promise;
+		vi.advanceTimersByTime(8_000);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+
+		vi.advanceTimersByTime(2_999);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+
+		retainDone.resolve();
+		await flushMicrotasks();
+		await dispose;
+		session = undefined;
+
+		expect(drained).toBe(true);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+	});
+
+	it("gives close drain a second retain budget after the tool-retain batch", async () => {
+		vi.useFakeTimers();
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const current = createSession();
+		const started = Promise.withResolvers<void>();
+		const retainDone = Promise.withResolvers<void>();
+		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
+		hindsight.config = {
+			retainTimeoutMs: 8_000,
+			requestTimeoutMs: 3_000,
+		} as HindsightSessionState["config"];
+		let drained = false;
+		vi.spyOn(hindsight, "waitForSessionRetainIdle").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
+			started.resolve();
+			await retainDone.promise;
+			drained = true;
+		});
+		vi.spyOn(hindsight, "flushRetainQueue").mockResolvedValue(undefined);
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		current.setHindsightSessionState(hindsight);
+
+		const dispose = current.dispose();
+		await started.promise;
+		vi.advanceTimersByTime(11_000);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+
+		vi.advanceTimersByTime(7_999);
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+
+		retainDone.resolve();
+		await flushMicrotasks();
+		await dispose;
+		session = undefined;
+
+		expect(drained).toBe(true);
+		expect(warn).not.toHaveBeenCalledWith("Hindsight retain still draining at dispose deadline", expect.anything());
+	});
+
+	it("does not materialize retainable turns when Hindsight is off", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled model");
+		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+		const extract = vi.spyOn(hindsightTranscript, "extractMessages");
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		sessionManager.appendMessage({
+			role: "user",
+			content: "this historical turn has enough text",
+			timestamp: Date.now(),
+		});
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["test"], tools: [] },
+				streamFn: mock.stream,
+			}),
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+		});
+		expect(extract).not.toHaveBeenCalled();
+		expect(session.loadedUserTurnCount).toBe(0);
+		expect(session.hindsightCloseRetainBaselineTurns).toBeUndefined();
+		expect(session.hindsightLoadedMessageCount).toBeUndefined();
+		await session.dispose();
+		session = undefined;
+
+		const enabledManager = SessionManager.inMemory(tempDir.path());
+		enabledManager.appendMessage({
+			role: "user",
+			content: "this historical turn has enough text",
+			timestamp: Date.now(),
+		});
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["test"], tools: [] },
+				streamFn: mock.stream,
+			}),
+			sessionManager: enabledManager,
+			settings: Settings.isolated({ "memory.backend": "hindsight" }),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+		});
+		expect(extract).toHaveBeenCalledTimes(1);
+		expect(extract).toHaveBeenCalledWith(enabledManager);
+		expect(session.loadedUserTurnCount).toBe(1);
+		await session.dispose();
+		session = undefined;
 	});
 
 	it("bounds post-prompt work that ignores abort", async () => {
