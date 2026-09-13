@@ -700,7 +700,12 @@ export class SessionMaintenance {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
-		const reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
+		let reservedArtifact: { id?: string; path?: string } = {};
+		try {
+			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
+		} catch {
+			if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+		}
 		assertCurrent();
 		let artifactId = reservedArtifact.id;
 		const calculateReplacementState = (id: string | undefined) => {

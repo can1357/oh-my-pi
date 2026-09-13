@@ -131,6 +131,25 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			appendRecentProtectedTail();
+			const allocateArtifactPath = vi
+				.spyOn(sessionManager, "allocateArtifactPath")
+				.mockRejectedValue(new Error("artifact directory unavailable"));
+			const saveArtifact = vi.spyOn(sessionManager, "saveArtifact").mockResolvedValue(undefined);
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.artifactId).toBeUndefined();
+			const [toolResult] = branchToolResults();
+			expect(toolResult.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
+			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("artifact://") }]);
+			saveArtifact.mockRestore();
+			allocateArtifactPath.mockRestore();
+		});
+
 		it("preserves mixed tool-result images while eliding only recoverable text", async () => {
 			const largeText = "mixed tool output ".repeat(2_000);
 			const image: ImageContent = {
