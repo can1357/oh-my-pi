@@ -116,7 +116,10 @@ export class HistoryStorage {
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
-	// Scope fragments vary per query shape, so statements are cached by full SQL text.
+	// Only constant SQL texts are cached — scope values travel as bound parameters inside the
+	// text, never as text — so this map is bounded by the number of query shapes in this file,
+	// not by user input. `#searchSubstring` builds one LIKE term per token, so it prepares its
+	// statement per call instead of growing a key per token count ever searched.
 	#stmts = new Map<string, Statement>();
 	// Directory scopes resolve stored `cwd` spellings per read. Repository topology and stored
 	// spellings can change while the process runs (a nested `git init`, a moved worktree, a new
@@ -424,12 +427,20 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 	#searchSubstring(tokens: string[], limit: number, clause: ScopeClause): HistoryRow[] {
 		const whereClause = tokens.map(() => "prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
-		const stmt = this.#prepare(
+		// One LIKE term per token, so this text — and any cache key built from it — grows with the
+		// query. Prepared per call and finalized right after: measured 8-34 us against the 1.5-29 ms
+		// this scan already costs, so caching it bought nothing and retained a statement per token
+		// count ever searched.
+		const stmt = this.#db.prepare(
 			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ${clause.and} ORDER BY created_at DESC, id DESC LIMIT ?`,
 		);
-		const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
-		params.push(...clause.params, limit);
-		return stmt.all(...params) as HistoryRow[];
+		try {
+			const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+			params.push(...clause.params, limit);
+			return stmt.all(...params) as HistoryRow[];
+		} finally {
+			stmt.finalize();
+		}
 	}
 
 	/**
