@@ -477,17 +477,27 @@ impl GitRepo {
 	/// call: replacements change reachability without moving HEAD, the
 	/// upstream ref, or the shallow file.
 	fn replace_refs(&self) -> Result<Option<Vec<u8>>> {
+		// `GIT_REPLACE_REF_BASE` relocates the whole replacement namespace
+		// (it replaces `refs/replace/`, not adds to it); git accepts the base
+		// with or without a trailing slash.
+		let base = std::env::var("GIT_REPLACE_REF_BASE")
+			.ok()
+			.and_then(|v| nonempty(v.as_str()))
+			.map_or_else(
+				|| "refs/replace/".to_owned(),
+				|v| if v.ends_with('/') { v } else { format!("{v}/") },
+			);
 		if self.is_reftable() {
 			// Replace refs live inside the table; only the CLI can see them.
 			return Ok(cli_try(self.root(), &[
 				"for-each-ref",
 				"--format=%(refname)=%(objectname)",
-				"refs/replace/",
+				&base,
 			])?
 			.map(String::into_bytes));
 		}
 		let mut names = Vec::new();
-		if let Ok(entries) = std::fs::read_dir(self.info().common_dir.join("refs/replace")) {
+		if let Ok(entries) = std::fs::read_dir(self.info().common_dir.join(&base)) {
 			for entry in entries.flatten() {
 				if entry.file_type().is_ok_and(|t| t.is_file())
 					&& let Ok(name) = entry.file_name().into_string()
@@ -506,7 +516,7 @@ impl GitRepo {
 				.filter(|line| !line.is_empty() && !line.starts_with(['#', '^']))
 			{
 				if let Some((_, name)) = line.split_once(' ')
-					&& let Some(short) = name.strip_prefix("refs/replace/")
+					&& let Some(short) = name.strip_prefix(&base)
 				{
 					names.push(short.to_owned());
 				}
@@ -519,7 +529,7 @@ impl GitRepo {
 		names.dedup();
 		let mut lines = Vec::with_capacity(names.len());
 		for name in names {
-			if let Some(target) = self.read_ref(&format!("refs/replace/{name}"))? {
+			if let Some(target) = self.read_ref(&format!("{base}{name}"))? {
 				lines.push(format!("{name}={target}"));
 			}
 		}
@@ -2023,6 +2033,18 @@ mod tests {
 		git(root, &["config", "core.useReplaceRefs", "false"])?;
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
 		git(root, &["config", "core.useReplaceRefs", "true"])?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
+
+		// A custom replacement namespace relocates the whole feature: the
+		// default refs/replace/ entry is ignored while the custom one counts.
+		let head = git(root, &["rev-parse", "HEAD"])?;
+		git(root, &["update-ref", &format!("refs/custom/{}", head.trim()), side.trim()])?;
+		// SAFETY: single-threaded test binary section; no other test reads
+		// this variable, and it is restored before returning.
+		unsafe { std::env::set_var("GIT_REPLACE_REF_BASE", "refs/custom") };
+		assert_eq!(repo.ahead_behind()?, Some((1, 1)));
+		// SAFETY: same as above; restores the process default.
+		unsafe { std::env::remove_var("GIT_REPLACE_REF_BASE") };
 		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
 		Ok(())
 	}
