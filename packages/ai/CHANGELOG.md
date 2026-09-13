@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Anthropic requests now report why they rewrote the cached prompt prefix. `AssistantMessage.cacheBreakReason` names a changed system prompt (with the signed character delta), a changed tool array (with the tool when one can be blamed), a rewritten history, or a switch between 5m and 1h retention ([#11813](https://github.com/can1357/oh-my-pi/pull/11813) by [@camjac251](https://github.com/camjac251)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

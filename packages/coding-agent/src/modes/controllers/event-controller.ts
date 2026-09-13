@@ -1510,7 +1510,11 @@ export class EventController {
 			const usage = event.message.usage;
 			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
 				if (settings.get("display.cacheMissMarker")) {
-					const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
+					const invalidation = detectCacheInvalidation(
+						this.ctx.lastAssistantUsage,
+						usage,
+						event.message.cacheBreakReason,
+					);
 					if (invalidation) this.ctx.streamingComponent.setCacheInvalidation(invalidation);
 				}
 				this.ctx.lastAssistantUsage = usage;

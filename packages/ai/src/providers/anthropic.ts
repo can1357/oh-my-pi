@@ -27,6 +27,7 @@ import type {
 	AnthropicServerToolContent,
 	Api,
 	AssistantMessage,
+	CacheBreakReason,
 	CacheRetention,
 	Context,
 	FetchImpl,
@@ -440,6 +441,46 @@ type AnthropicControlState = {
 	baseEffort: AnthropicOutputEffort | undefined;
 	baseEffortWire: AnthropicOutputEffort | undefined;
 	currentEffort: AnthropicOutputEffort | undefined;
+	/**
+	 * Diagnostics only: the cause recorded by whichever baseline reset ran while
+	 * building the current request, consumed once per request by
+	 * {@link detectAnthropicCacheBreak}. Never affects request shaping.
+	 */
+	pendingCacheBreakReason: CacheBreakReason | undefined;
+};
+
+/**
+ * Diagnostics only: the prefix shape a conversation last sent, so the next
+ * request can name what it changed. Keyed by conversation (the session id)
+ * rather than by control state, because the control-state key already
+ * includes the system text and the conversation root and so can observe
+ * neither a system-prompt edit nor a compaction that replaced the root.
+ */
+type AnthropicCachePrefixSnapshot = {
+	/**
+	 * Wire messages {@link historyChain} covers. A trailing `Continue.` pad is
+	 * excluded because the next turn replaces it by definition.
+	 */
+	messageCount: number;
+	/**
+	 * Hash chain folded over the projected wire messages in order. The next
+	 * request re-folds its own history and compares this against the chain's
+	 * value at {@link messageCount}: equal means it merely appended.
+	 */
+	historyChain: bigint;
+	systemFingerprint: string;
+	systemTextLength: number;
+	toolsFingerprint: string;
+	toolsPresent: boolean;
+	/**
+	 * Whether {@link toolsFingerprint} describes the array the stable-tools
+	 * plane produced, rather than one a payload hook rewrote afterwards. The
+	 * plane's exemption from the fingerprint comparison only holds while both
+	 * sides of it came from the plane.
+	 */
+	toolsPlanned: boolean;
+	/** Resolved retention; absent when the request carried no `cache_control` at all. */
+	cacheTtl?: "5m" | "1h";
 };
 
 type AnthropicProviderSessionState = ProviderSessionState & {
@@ -457,6 +498,8 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	prefixDroppedThinkingBlocks: Set<string>;
 	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
 	controlStates: Map<string, AnthropicControlState>;
+	/** Diagnostics only: last-seen prefix shape per conversation, used to name the cause of a cache break. Never affects request shaping. */
+	cachePrefixDiagnostics: Map<string, AnthropicCachePrefixSnapshot>;
 };
 
 function createAnthropicControlState(): AnthropicControlState {
@@ -469,6 +512,7 @@ function createAnthropicControlState(): AnthropicControlState {
 		baseEffort: undefined,
 		baseEffortWire: undefined,
 		currentEffort: undefined,
+		pendingCacheBreakReason: undefined,
 	};
 }
 
@@ -479,12 +523,14 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		replayUnsignedThinkingDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		controlStates: new Map(),
+		cachePrefixDiagnostics: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.controlStates.clear();
+			state.cachePrefixDiagnostics.clear();
 		},
 	};
 	return state;
@@ -513,6 +559,7 @@ function getAnthropicProviderSessionState(
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
 		existing.controlStates ??= new Map();
+		existing.cachePrefixDiagnostics ??= new Map();
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -2322,6 +2369,19 @@ const streamAnthropicOnce = (
 				});
 			}
 
+			// The cache identity this request routes on, resolved once: an explicit
+			// `sessionId`, else the session embedded in a Claude-Code-shaped
+			// `metadata.user_id`, else the declared `promptCacheKey`. `createClient`
+			// takes it for transport affinity and the Claude Code session header and
+			// `buildParams` keys cache-break diagnostics on the same value, so
+			// routing and attribution always describe one conversation. Letting the
+			// diagnostics key resolve its own identity is what made a caller with a
+			// `promptCacheKey` but no `sessionId` fall back to the conversation root,
+			// which a compaction or branch rewrite replaces — the very event the
+			// report exists to name.
+			const cacheIdentity =
+				options?.sessionId ?? extractClaudeMetadataSessionId(options?.metadata?.user_id) ?? options?.promptCacheKey;
+
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
@@ -2446,18 +2506,20 @@ const streamAnthropicOnce = (
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
-					sessionId:
-						options?.sessionId ??
-						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
-						options?.promptCacheKey,
+					sessionId: cacheIdentity,
 					disableStrictTools,
 				});
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
+			// Diagnostics: the prefix snapshot of the pass that actually gets sent.
+			// Committed only after the stream completes, so a turn that fails before
+			// a response leaves the previous snapshot in place for its retry.
+			let commitCacheBreakSnapshot: () => void = () => {};
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
-				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
+				const built = buildParams(model, preparedContext, isOAuthToken, options, {
+					cacheIdentity,
 					compactionSupported,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
@@ -2470,17 +2532,44 @@ const streamAnthropicOnce = (
 					fallbacks,
 					effectiveBaseUrl: baseUrl,
 				});
+				let nextParams = built.params;
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);
 				}
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
 				}
+				// Fingerprint the array the stable-tools plane produced before the
+				// hook can touch it, and eagerly, because a hook that mutates in
+				// place edits the very objects this would otherwise read later —
+				// the capture is the hash, never the array.
+				//
+				// Normalized the same way the wire is: `toWellFormedDeep` below runs
+				// after the hook, so a lone surrogate anywhere in a description or
+				// schema (an extension, an MCP server) would make the plane's own
+				// output disagree with what was sent on every single turn, and the
+				// exemption that keeps an ordinary add/remove silent would be dead.
+				// Only the `tools` subtree is walked here, so the post-hook pass
+				// stays the only full-payload walk per request.
+				const plannedToolsFingerprint = built.toolPlaneEnabled
+					? anthropicToolsPrefixFingerprint(toWellFormedDeep(nextParams.tools) as typeof nextParams.tools)
+					: undefined;
 				const replacementPayload = await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
+				const cacheBreak = detectAnthropicCacheBreak(
+					providerSessionState,
+					built.conversation,
+					nextParams,
+					built.controlReason,
+					plannedToolsFingerprint,
+				);
+				commitCacheBreakSnapshot = cacheBreak.commit;
+				// Degradation retries compare against the same uncommitted snapshot,
+				// but a consumed control reset may only name its cause on the first pass.
+				if (cacheBreak.reason !== undefined) output.cacheBreakReason = cacheBreak.reason;
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -2560,6 +2649,7 @@ const streamAnthropicOnce = (
 					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 				calculateCost(model, output.usage, output.timestamp);
 				output.duration = performance.now() - startTime;
+				commitCacheBreakSnapshot();
 				stream.push({ type: "start", partial: output });
 				stream.push({ type: "done", reason: "stop", message: output });
 				stream.end();
@@ -3434,6 +3524,7 @@ const streamAnthropicOnce = (
 				}
 			}
 			output.duration = performance.now() - startTime;
+			commitCacheBreakSnapshot();
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && model.provider === "anthropic" && options?.serviceTier === "priority") {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "priority"];
@@ -3863,24 +3954,33 @@ function applyCacheControlToMessage(message: MessageParam, cacheControl: Anthrop
 	return false;
 }
 
+/**
+ * Wire messages that will still be there next turn. `convertAnthropicMessages`
+ * appends a neutral `Continue.` pad after a trailing assistant because
+ * Anthropic rejects assistant-prefill endings, and the next normal turn
+ * replaces it with the real user turn — so neither a rolling cache breakpoint
+ * nor {@link anthropicHistoryChain} may be anchored on it.
+ */
+function anthropicStableMessageCount(messages: readonly MessageParam[]): number {
+	const trailingIndex = messages.length - 1;
+	const trailingMessage = messages[trailingIndex];
+	const hasTrailingAssistantPad =
+		trailingMessage?.role === "user" &&
+		trailingMessage.content === "Continue." &&
+		!isConversationalUser(trailingMessage) &&
+		messages[trailingIndex - 1]?.role === "assistant";
+	return hasTrailingAssistantPad ? trailingIndex : messages.length;
+}
+
 function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?: AnthropicCacheControl): void {
 	if (!cacheControl) return;
 
 	const headBreakpoints = countHeadBreakpoints(params);
 	const messageBudget = Math.max(0, ANTHROPIC_MAX_BREAKPOINTS - headBreakpoints);
 	if (messageBudget <= 0 || params.messages.length === 0) return;
-	// `convertAnthropicMessages` appends a neutral `Continue.` pad after a trailing
-	// assistant because Anthropic rejects assistant-prefill endings. It is absent
-	// from the next normal turn, so anchor the rolling window on the preceding
-	// real assistant instead.
-	const trailingIndex = params.messages.length - 1;
-	const trailingMessage = params.messages[trailingIndex];
-	const hasTrailingAssistantPad =
-		trailingMessage?.role === "user" &&
-		trailingMessage.content === "Continue." &&
-		!isConversationalUser(trailingMessage) &&
-		params.messages[trailingIndex - 1]?.role === "assistant";
-	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
+	// Anchor the rolling window on the last message the next turn will still
+	// carry, so a breakpoint never lands on the transient assistant pad.
+	const messageEnd = anthropicStableMessageCount(params.messages) - 1;
 
 	// Decimation counts conversational turns, so it reads the provenance marker
 	// `convertAnthropicMessages` records rather than the wire role. A wire `user`
@@ -4041,7 +4141,17 @@ function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): st
 
 const MAX_ANTHROPIC_CONTROL_STATES = 16;
 
-function resetAnthropicControlState(state: AnthropicControlState): void {
+/**
+ * Discard the baseline so the next request re-declares it. `cacheBreakReason`
+ * is diagnostics: a reset site that genuinely rewrites the cached prefix names
+ * itself here. The first namer of a request wins (resolution order is
+ * documented on {@link detectAnthropicCacheBreak}), and the field is
+ * deliberately not cleared — several resets can run while building one request
+ * (a history rewrite is immediately followed by the system re-baseline), and
+ * the request's own detection pass consumes it exactly once.
+ */
+function resetAnthropicControlState(state: AnthropicControlState, cacheBreakReason?: CacheBreakReason): void {
+	if (cacheBreakReason !== undefined) state.pendingCacheBreakReason ??= cacheBreakReason;
 	state.declaredTools = undefined;
 	state.activeToolNames.clear();
 	state.stableSystemBlocks = undefined;
@@ -4052,39 +4162,146 @@ function resetAnthropicControlState(state: AnthropicControlState): void {
 	state.currentEffort = undefined;
 }
 
+/**
+ * Canonical hash image of a wire message: the bytes that identify it across
+ * turns, with everything that moves while the conversation stands still taken
+ * out. Never sent — it only feeds fingerprints.
+ *
+ * Three things move on their own. Replayed thinking blocks, which an assistant
+ * turn carries or not depending on signing and demotion. `cache_control`,
+ * whose breakpoints {@link applyPromptCaching} walks down the history every
+ * turn — the same reason {@link anthropicToolPrefixKey} drops it from tools.
+ * And string content, which {@link applyCacheControlToMessage} promotes to a
+ * single text block when a breakpoint lands on it, so the two spellings of one
+ * message must hash alike.
+ */
 function anthropicControlMessageProjection(message: MessageParam): MessageParam {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+	const { content } = message;
+	if (typeof content === "string") return { ...message, content: [{ type: "text", text: content }] };
+	const dropThinking = message.role === "assistant";
+	const projected: ContentBlockParam[] = [];
+	let changed = false;
+	for (const block of content) {
+		if (dropThinking && (block.type === "thinking" || block.type === "redacted_thinking")) {
+			changed = true;
+			continue;
+		}
+		if ("cache_control" in block) {
+			// `undefined` is omitted by JSON.stringify, and this projection is
+			// only ever stringified, so it does not have to drop the key.
+			projected.push({ ...block, cache_control: undefined });
+			changed = true;
+			continue;
+		}
+		projected.push(block);
+	}
+	return changed ? { ...message, content: projected } : message;
+}
+
+/** One request's view of the wire history, from a single pass over it. */
+type AnthropicHistoryChain = {
+	/** Messages the chain covers, excluding a trailing `Continue.` pad. */
+	messageCount: number;
+	/** Chain over all of them, to store for the next request to compare against. */
+	chain: bigint;
+	/** Chain after the first `markAt`; absent when this history is shorter than that. */
+	mark: bigint | undefined;
+};
+
+/**
+ * Fold the projected wire messages into a running hash chain, in one pass and
+ * without keeping a per-message hash array anywhere.
+ *
+ * History grows every turn by design, so whole-history fingerprints cannot be
+ * compared — an ordinary append would read as a rewrite on every turn. A chain
+ * can be: `mark` is this request's chain over its own first `markAt` messages,
+ * so comparing it against the value the previous request stored answers "is
+ * the previous history a prefix of this one" exactly. Equal is an append;
+ * anything else, including a history too short to reach `markAt`, is a rewrite.
+ *
+ * Turn-scoped (`clear_at: "next_user_message"`) messages stay in the chain, so
+ * a caller that stops sending one reads as a rewrite. That is the truthful
+ * answer — the message sits mid-history, and dropping it moves every byte
+ * after it — and it cannot make the report noisy. omp never emits one: the
+ * sole producer of the `clearAt` payload is the Anthropic-compatible server in
+ * `anthropic-messages-server.ts`, copying `clear_at` off an inbound request,
+ * and neither the coding agent nor the agent runtime sets it. Even there,
+ * `convertAnthropicMessages` only puts `clear_at` on the wire behind
+ * `supportsMidConversationSystem`, `supportsTurnScopedSystem`, and its
+ * placement rules. Projecting them out instead would trade that for the one
+ * failure this detection exists to remove: a genuinely cold turn with no cause
+ * to report.
+ */
+function anthropicHistoryChain(messages: readonly MessageParam[], markAt: number): AnthropicHistoryChain {
+	const messageCount = anthropicStableMessageCount(messages);
+	let chain = 0n;
+	let mark = markAt === 0 ? chain : undefined;
+	for (let index = 0; index < messageCount; index++) {
+		chain = Bun.hash.wyhash(JSON.stringify(anthropicControlMessageProjection(messages[index])), chain);
+		if (index + 1 === markAt) mark = chain;
+	}
+	return { messageCount, chain, mark };
+}
+
+/**
+ * Conversation identity for one request. The two keys differ on purpose.
+ *
+ * `controlKey` is the control-state key: cache identity + system texts +
+ * conversation root, so editing the system prompt or replacing the root yields
+ * a fresh baseline rather than mutating the existing one.
+ *
+ * `conversationKey` is the diagnostics key and must survive exactly the events
+ * diagnostics exist to name: it drops the system texts so a system-prompt edit
+ * is observable, and it drops the conversation root so a compaction or branch
+ * summary — which replaces the first wire message — still finds the snapshot
+ * it rewrote.
+ *
+ * `identity` is the cache identity the request itself routes on, resolved by
+ * `streamAnthropic` from `sessionId`, a Claude-Code-shaped `metadata.user_id`,
+ * or `promptCacheKey` and handed to `createClient` unchanged. It is stable
+ * across both keys, so it is the whole diagnostics key whenever the caller
+ * declares one — including through `promptCacheKey` alone, which is a declared
+ * cache identity and therefore scopes diagnostics exactly like a session id.
+ * Two conversations sharing one identity share one snapshot and read as
+ * rewrites of each other; that is the same accepted, self-healing imprecision
+ * a shared session id has always carried, and the only alternative — mixing
+ * the root back in — is what breaks attribution across a compaction. Only a
+ * request with no identity at all falls back to the root message, and then a
+ * root replacement simply reads as a new conversation.
+ */
+type AnthropicConversationIdentity = {
+	conversationKey: string;
+	controlKey: string;
+};
+
+function anthropicConversationIdentity(
+	identity: string | undefined,
+	system: readonly AnthropicSystemBlock[] | undefined,
+	messages: readonly MessageParam[],
+): AnthropicConversationIdentity {
+	const root = messages[0];
+	const rootProjection = root ? anthropicControlMessageProjection(root) : null;
+	const session = identity ?? "";
+	const conversationScope = identity !== undefined ? [identity] : [null, rootProjection];
 	return {
-		...message,
-		content: message.content.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking"),
+		conversationKey: String(Bun.hash(JSON.stringify(conversationScope))),
+		controlKey: String(Bun.hash(JSON.stringify([session, system?.map(block => block.text) ?? null, rootProjection]))),
 	};
 }
 
 function getAnthropicControlState(
 	state: AnthropicProviderSessionState | undefined,
-	sessionId: string | undefined,
-	system: readonly AnthropicSystemBlock[] | undefined,
-	messages: readonly MessageParam[],
+	controlKey: string,
 ): AnthropicControlState | undefined {
 	if (!state) return undefined;
-	const root = messages[0];
-	const fingerprint = String(
-		Bun.hash(
-			JSON.stringify([
-				sessionId ?? "",
-				system?.map(block => block.text) ?? null,
-				root ? anthropicControlMessageProjection(root) : null,
-			]),
-		),
-	);
-	const existing = state.controlStates.get(fingerprint);
+	const existing = state.controlStates.get(controlKey);
 	if (existing) {
-		state.controlStates.delete(fingerprint);
-		state.controlStates.set(fingerprint, existing);
+		state.controlStates.delete(controlKey);
+		state.controlStates.set(controlKey, existing);
 		return existing;
 	}
 	const created = createAnthropicControlState();
-	state.controlStates.set(fingerprint, created);
+	state.controlStates.set(controlKey, created);
 	if (state.controlStates.size > MAX_ANTHROPIC_CONTROL_STATES) {
 		const oldest = state.controlStates.keys().next().value;
 		if (oldest !== undefined) state.controlStates.delete(oldest);
@@ -4111,7 +4328,9 @@ function syncAnthropicControlState(state: AnthropicControlState, messages: reado
 			transition.messageCount > messages.length ||
 			transition.anchor !== anthropicControlAnchor(messages, transition.messageCount)
 		) {
-			resetAnthropicControlState(state);
+			// The recorded transition no longer lines up: the history under it was
+			// rewritten, which rewrites the cached prefix too.
+			resetAnthropicControlState(state, { kind: "history_rewrite" });
 			return;
 		}
 	}
@@ -4183,12 +4402,19 @@ function recordAnthropicControlTransition(
  * appended with `defer_loading: true` (not part of the checked prefix until
  * referenced) and offered with `tool_addition`. A changed definition for an
  * already-declared name cannot be expressed as a control and re-baselines.
+ *
+ * `current` holds wire names, so the tool blamed for a re-baseline is decoded
+ * back to its internal name before it is recorded: the reason is persisted on
+ * the `AssistantMessage` and shown to the user, who configured `bash`, not the
+ * `_bash` the OAuth/`escapeBuiltinToolNames` transport prefix produces.
  */
 function planStableAnthropicTools(
 	current: AnthropicWireTool[] | undefined,
 	messages: readonly MessageParam[],
 	state: AnthropicControlState | undefined,
 	enabled: boolean,
+	isOAuthToken: boolean,
+	escapeBuiltinToolNames: boolean,
 ): AnthropicWireTool[] | undefined {
 	if (!state || !enabled || !current) return current;
 	if (!state.declaredTools) {
@@ -4201,7 +4427,12 @@ function planStableAnthropicTools(
 	for (const tool of current) {
 		const declared = declaredByName.get(tool.name);
 		if (declared && anthropicToolDefinitionKey(declared) !== anthropicToolDefinitionKey(tool)) {
-			resetAnthropicControlState(state);
+			// A redefined tool cannot be expressed as a control, so the declared
+			// `tools` array — part of the cached prefix — is rewritten.
+			resetAnthropicControlState(state, {
+				kind: "tools",
+				tool: decodeAnthropicToolName(tool.name, isOAuthToken, escapeBuiltinToolNames),
+			});
 			state.declaredTools = cloneAnthropicTools(current);
 			state.activeToolNames = new Set(current.map(candidate => candidate.name));
 			return cloneAnthropicTools(state.declaredTools);
@@ -4297,7 +4528,211 @@ function materializeAnthropicControlTransitions(
 	return result;
 }
 
+/**
+ * Full cache-relevant wire definition of a tool. Every byte of the declared
+ * array is prefix, including `description`, which {@link
+ * anthropicToolDefinitionKey} deliberately ignores because the stable-tools
+ * plane cannot express a description change as a control. `cache_control` is
+ * excluded so a breakpoint move alone never reads as a definition change.
+ */
+function anthropicToolPrefixKey(tool: AnthropicWireTool): string {
+	const stable = { ...tool };
+	delete stable.cache_control;
+	return JSON.stringify(stable);
+}
+
+/**
+ * Fingerprint of a whole `tools` array as the cached prefix sees it. Taken once
+ * over the array the provider assembled and once over the array it sent, so a
+ * payload hook that rewrote the array in between is visible as a difference
+ * between the two. Both sides must be lone-surrogate-normalized first, because
+ * only the sent array passes through {@link toWellFormedDeep}; comparing a raw
+ * array against a normalized one differs on every turn.
+ */
+function anthropicToolsPrefixFingerprint(tools: readonly AnthropicWireTool[] | undefined): string {
+	return String(Bun.hash(JSON.stringify(tools?.map(anthropicToolPrefixKey) ?? [])));
+}
+
+/** Read retention from the sent prefix, falling back to a message breakpoint for headless requests. */
+function getAnthropicPayloadCacheControl(params: MessageCreateParamsStreaming): AnthropicCacheControl | undefined {
+	for (const tool of params.tools ?? []) {
+		if (tool.cache_control) return tool.cache_control;
+	}
+	if (Array.isArray(params.system)) {
+		for (const block of params.system) {
+			if (block.cache_control) return block.cache_control;
+		}
+	}
+	for (let index = params.messages.length - 1; index >= 0; index--) {
+		const content = params.messages[index].content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if ("cache_control" in block && isRecord(block.cache_control) && block.cache_control.type === "ephemeral") {
+				return block.cache_control as AnthropicCacheControl;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Outcome of one cache-break detection pass. `reason` is reported at once;
+ * `commit` stores this request's prefix snapshot as the conversation's last
+ * sent shape and is deferred until the request is accepted, so a request that
+ * never reached Anthropic leaves the previous snapshot intact and an outer
+ * retry of the same turn can still name what it changed.
+ */
+type AnthropicCacheBreakDetection = {
+	reason: CacheBreakReason | undefined;
+	commit: () => void;
+};
+
+const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefined, commit: () => {} };
+
+/**
+ * Name what this request changed about the cached prompt prefix, for reporting
+ * only — nothing here influences the request. Compares the wire history, the
+ * system fingerprint, the tool definitions, and the cache retention against the
+ * conversation's last snapshot, folds in the cause a baseline reset recorded
+ * while the request was being shaped, and hands back the snapshot to store once
+ * the request succeeds.
+ *
+ * Resolution order when several apply: `history_rewrite` (the whole tail moved,
+ * so everything after it is cold anyway), then `system_prompt` (earliest block
+ * in the prefix), then `tools`, then `retention` (the prefix text is unchanged
+ * but its cache entry is not reusable).
+ *
+ * `history_rewrite` covers any wire history the previous one is not a prefix
+ * of: a replaced root, an edited or removed middle message, a rewind, a branch
+ * switch, a compaction — whether or not a control transition was ever recorded.
+ * {@link syncAnthropicControlState} still catches the subset that has one,
+ * earlier and together with the baseline reset that belongs to it; the general
+ * case is the hash chain on the snapshot. {@link anthropicHistoryChain} replays
+ * the chain over this request's own messages and reads its value at the
+ * previous message count, so an append matches and anything else does not.
+ * That pass measures 0.9 ms median / 2 ms worst case over a 1,838-message,
+ * 3 MB wire history — the shape of a real 770k-token session — against a
+ * request that already serializes the same payload and then spends seconds on
+ * the wire, so cost is not a reason to narrow what this detects.
+ *
+ * The chain starts at index 0, so it subsumes the conversation-root
+ * fingerprint this used to store alongside it: a replaced root changes the
+ * chain at index 0 and therefore at every later index too. The root
+ * fingerprint survives only inside {@link anthropicConversationIdentity},
+ * where it keys a conversation whose caller declared no cache identity rather
+ * than describing its shape.
+ *
+ * The tools array is read two different ways depending on where it came from.
+ * Where `supportsMidConversationToolChanges` holds, {@link
+ * planStableAnthropicTools} carries ordinary add/remove as control blocks and
+ * hands back an array it deliberately keeps stable, so blaming a difference in
+ * its own output would be a false positive: a re-baseline names the tool
+ * itself, and an array changing between present and absent is a prefix change
+ * on its own. Where the axis is off (Bedrock, Vertex, gateways, models without
+ * the capability) there is no stable-tools plane, so any difference in the
+ * array — an add, a remove, a description edit — rewrites the prefix, and the
+ * fingerprint comparison below catches it without being able to blame a single
+ * tool.
+ *
+ * `plannedToolsFingerprint` is that plane's own output, taken just before the
+ * payload hook runs and absent where the plane is off, so the exemption follows
+ * the array rather than the deployment. A hook that reorders or rewrites a
+ * still-present array sends a prefix the plane never planned, and the
+ * fingerprint speaks for it — then speaks again on the turn that stops hooking,
+ * because the array changes back. Both sides of the comparison must have come
+ * from the plane for it to stay silent, which is what `toolsPlanned` records.
+ *
+ * Returns no reason when this conversation has no snapshot yet: the first
+ * request of a conversation writes the prefix cold by definition and must never
+ * be blamed on a change. A changed system prompt is detected here rather than in
+ * {@link planStableAnthropicSystem}, whose re-baseline branch also fires for
+ * every freshly created control state.
+ *
+ * Side requests normally use distinct `:side:` cache identities and are
+ * isolated by `conversationKey`. A request sharing the main identity with a
+ * different prefix (for example an in-session summarizer without that suffix)
+ * can cause one misattributed reason on the next main turn. That turn
+ * overwrites the snapshot, so attribution self-heals. This is acceptable
+ * because the consumer only surfaces a reason on a turn that actually went
+ * cold, and such a turn is usually not cold.
+ */
+function detectAnthropicCacheBreak(
+	state: AnthropicProviderSessionState | undefined,
+	conversation: AnthropicConversationIdentity,
+	params: MessageCreateParamsStreaming,
+	controlReason: CacheBreakReason | undefined,
+	plannedToolsFingerprint: string | undefined,
+): AnthropicCacheBreakDetection {
+	if (!state) return NO_CACHE_BREAK_DETECTION;
+	const { system, tools } = params;
+	const texts = typeof system === "string" ? [system] : (system?.map(block => block.text) ?? []);
+	const systemFingerprint = String(Bun.hash(JSON.stringify(texts)));
+	let systemTextLength = 0;
+	for (const text of texts) systemTextLength += text.length;
+	const toolsFingerprint = anthropicToolsPrefixFingerprint(tools);
+	// Equal means the plane produced what was sent; unequal means a payload hook
+	// rewrote the array afterwards, and absent means there is no plane at all.
+	const toolsPlanned = plannedToolsFingerprint === toolsFingerprint;
+	// An absent `ttl` is the API's 5-minute default; `cacheControl` itself is
+	// absent when caching is off, and then there is no retention to record —
+	// switching caching on later is not a retention change.
+	const cacheControl = getAnthropicPayloadCacheControl(params);
+	const cacheTtl = cacheControl ? (cacheControl.ttl === "1h" ? "1h" : "5m") : undefined;
+	const { conversationKey } = conversation;
+	const previous = state.cachePrefixDiagnostics.get(conversationKey);
+	const history = anthropicHistoryChain(params.messages, previous?.messageCount ?? 0);
+	const snapshot: AnthropicCachePrefixSnapshot = {
+		messageCount: history.messageCount,
+		historyChain: history.chain,
+		systemFingerprint,
+		systemTextLength,
+		toolsFingerprint,
+		toolsPresent: tools !== undefined,
+		toolsPlanned,
+		...(cacheTtl ? { cacheTtl } : {}),
+	};
+	const commit = (): void => {
+		state.cachePrefixDiagnostics.delete(conversationKey);
+		state.cachePrefixDiagnostics.set(conversationKey, snapshot);
+		if (state.cachePrefixDiagnostics.size > MAX_ANTHROPIC_CONTROL_STATES) {
+			const oldest = state.cachePrefixDiagnostics.keys().next().value;
+			if (oldest !== undefined) state.cachePrefixDiagnostics.delete(oldest);
+		}
+	};
+	if (!previous) return { reason: undefined, commit };
+	if (controlReason?.kind === "history_rewrite") return { reason: controlReason, commit };
+	// `history.mark` is this request's chain over its own first
+	// `previous.messageCount` messages, and is absent when it no longer has
+	// that many. Equal means the previous history is a prefix of this one,
+	// which is an ordinary append and changes nothing already cached.
+	if (history.mark !== previous.historyChain) return { reason: { kind: "history_rewrite" }, commit };
+	if (previous.systemFingerprint !== systemFingerprint) {
+		return {
+			reason: { kind: "system_prompt", charDelta: systemTextLength - previous.systemTextLength },
+			commit,
+		};
+	}
+	if (controlReason) return { reason: controlReason, commit };
+	if (
+		previous.toolsPresent !== snapshot.toolsPresent ||
+		((!toolsPlanned || !previous.toolsPlanned) && previous.toolsFingerprint !== toolsFingerprint)
+	) {
+		return { reason: { kind: "tools" }, commit };
+	}
+	if (cacheTtl && previous.cacheTtl && previous.cacheTtl !== cacheTtl) {
+		return { reason: { kind: "retention", from: previous.cacheTtl, to: cacheTtl }, commit };
+	}
+	return { reason: undefined, commit };
+}
+
 type AnthropicParamBuildOptions = {
+	/**
+	 * The cache identity `streamAnthropic` resolved for this request and handed
+	 * to {@link createClient}. Required rather than re-derived here so cache
+	 * routing and cache-break attribution cannot drift apart; `undefined` means
+	 * the caller declared none at all.
+	 */
+	cacheIdentity: string | undefined;
 	disableStrictTools: boolean;
 	useUmansGatewayWebSearch: boolean;
 	forceDemoteUnsignedThinking: boolean;
@@ -4322,14 +4757,23 @@ type AnthropicParamBuildOptions = {
 	effectiveBaseUrl?: string;
 };
 
+type AnthropicBuiltParams = {
+	params: MessageCreateParamsStreaming;
+	/** Diagnostics inputs captured during shaping; inspect the payload only after its hook. */
+	conversation: AnthropicConversationIdentity;
+	controlReason: CacheBreakReason | undefined;
+	toolPlaneEnabled: boolean;
+};
+
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
 	isOAuthToken: boolean,
 	options: AnthropicOptions | undefined,
 	buildOptions: AnthropicParamBuildOptions,
-): MessageCreateParamsStreaming {
+): AnthropicBuiltParams {
 	const {
+		cacheIdentity,
 		disableStrictTools,
 		useUmansGatewayWebSearch,
 		forceDemoteUnsignedThinking,
@@ -4486,10 +4930,22 @@ function buildParams(
 		dropAllThinking,
 		droppedThinkingBlocks,
 	});
-	const controlState = getAnthropicControlState(providerSessionState, options?.sessionId, systemBlocks, wireMessages);
+	const conversation = anthropicConversationIdentity(cacheIdentity, systemBlocks, wireMessages);
+	const controlState = getAnthropicControlState(providerSessionState, conversation.controlKey);
 	if (controlState) syncAnthropicControlState(controlState, wireMessages);
 	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
-	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
+	tools = planStableAnthropicTools(
+		tools,
+		wireMessages,
+		controlState,
+		model.compat.supportsMidConversationToolChanges,
+		isOAuthToken,
+		model.compat.escapeBuiltinToolNames,
+	);
+	// Consume baseline reset diagnostics now; the caller compares the final
+	// payload after its hook and commits the snapshot only on success.
+	const controlReason = controlState?.pendingCacheBreakReason;
+	if (controlState) controlState.pendingCacheBreakReason = undefined;
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
 	applyHeadCaching(systemBlocks, tools, cacheControl);
@@ -4609,7 +5065,7 @@ function buildParams(
 	ensureMaxTokensForThinking(params, maxOutputTokens);
 	applyPromptCaching(params, cacheControl);
 
-	return params;
+	return { params, conversation, controlReason, toolPlaneEnabled: model.compat.supportsMidConversationToolChanges };
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";

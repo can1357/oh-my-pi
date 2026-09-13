@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The cache miss marker now names what broke the prefix on Anthropic turns, for example `cache miss · 52K tokens · system prompt changed (+40 chars)`. Enable it with `display.cacheMissMarker` ([#11813](https://github.com/can1357/oh-my-pi/pull/11813) by [@camjac251](https://github.com/camjac251)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
