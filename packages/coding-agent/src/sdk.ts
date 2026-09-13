@@ -1759,7 +1759,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
 	const enforceToolAllowlist = options.enforceToolAllowlist === true;
-	const disallowedPatterns = options.disallowedTools
+	// Reassigned once the registry exists, to canonicalize exact MCP entries
+	// written in the Claude Code spelling (see below).
+	let disallowedPatterns = options.disallowedTools
 		? normalizeToolNames(expandDisallowedTools(options.disallowedTools))
 		: [];
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
@@ -3573,18 +3575,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// declaration names, and so an explicit `disable`/disallow of the same
 		// spelling is judged against the same key. Unambiguous matches only, and
 		// every non-MCP or unresolvable entry is left untouched.
-		if (explicitlyRequestedToolNames && toolRegistry.size > 0) {
-			const resolved = new Set<string>();
-			let changed = false;
-			for (const name of explicitlyRequestedToolNames) {
+		//
+		// The disallow list is canonicalized against the same registry: an exact
+		// deny written in the Claude Code spelling must remove the tool it names,
+		// or the filter compares it with the minted key, fails to match, and
+		// leaves the denied tool executable.
+		if (toolRegistry.size > 0) {
+			const canonicalizeMcpSpelling = (name: string): string => {
+				// Wildcards are matched against minted names and raw server metadata,
+				// never resolved as a whole-name alias; `exec` expands downstream.
+				if (name.endsWith("*") || name === "exec") return name;
 				const canonical = resolveMCPToolAlias(name, candidate =>
 					toolRegistry.has(candidate) ? { name: candidate } : undefined,
 				);
-				const next = canonical?.name ?? name;
-				if (next !== name) changed = true;
-				if (!resolved.has(next)) resolved.add(next);
+				return canonical?.name ?? name;
+			};
+			if (explicitlyRequestedToolNames) {
+				const resolved = new Set<string>();
+				let changed = false;
+				for (const name of explicitlyRequestedToolNames) {
+					const next = canonicalizeMcpSpelling(name);
+					if (next !== name) changed = true;
+					if (!resolved.has(next)) resolved.add(next);
+				}
+				if (changed) explicitlyRequestedToolNames = [...resolved];
 			}
-			if (changed) explicitlyRequestedToolNames = [...resolved];
+			const canonicalDisallowed = new Set<string>();
+			let disallowChanged = false;
+			for (const pattern of disallowedPatterns) {
+				const next = canonicalizeMcpSpelling(pattern);
+				if (next !== pattern) disallowChanged = true;
+				canonicalDisallowed.add(next);
+			}
+			if (disallowChanged) disallowedPatterns = [...canonicalDisallowed];
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));

@@ -2226,6 +2226,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("disallows an exact MCP tool named in the Claude Code spelling", async () => {
+		// A ported Claude Code agent spells the tool `mcp__seedpatch-client__bank`,
+		// which is the supported wire spelling; the registered key is the minted
+		// `mcp__seedpatch_client_bank`. Comparing the raw deny against the minted
+		// key fails to match, so the denied tool stayed executable.
+		const tempDir = makeTempDir();
+		const registered = createMCPToolName("seedpatch-client", "bank");
+		const mcpProxy: CustomTool = {
+			name: registered,
+			label: "Seedpatch Bank",
+			description: "MCP proxy tool from seedpatch-client",
+			parameters: type({}),
+			mcpServerName: "seedpatch-client",
+			mcpToolName: "bank",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy],
+			toolNames: ["read", "yield"],
+			disallowedTools: ["mcp__seedpatch-client__bank"],
+		});
+
+		try {
+			const enabled = [...session.getEnabledToolNames(), ...session.getMountedXdevToolNames()];
+			expect(enabled).not.toContain(registered);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("disallows a length-capped MCP tool by mcpServerName ownership", async () => {
 		// Regression for the 64-char minted-name cap: a server whose minted name is
 		// truncated + hash-suffixed no longer prefix-matches `mcp__<server>_*`, so

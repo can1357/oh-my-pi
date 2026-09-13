@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -52,13 +54,21 @@ interface RevivedSessionHandle {
 	setLastAssistantText: (text: string) => void;
 }
 
-function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
+function createRevivedSession(
+	activeToolNames: string[][],
+	extensionRunner?: unknown,
+	registeredToolNames: readonly string[] = [],
+): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	let lastAssistantText: string | undefined;
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		...createSessionDefaults(),
 		getMountedXdevToolNames: () => [],
+		// The revival clamp canonicalizes declared MCP spellings against the live
+		// registry, so the stub answers the same lookup the real session does.
+		getToolByName: (name: string) =>
+			registeredToolNames.includes(name) ? ({ name } as unknown as AgentTool) : undefined,
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
@@ -680,6 +690,59 @@ describe("persisted subagent revival", () => {
 });
 
 describe("persisted allowlist revival", () => {
+	it("canonicalizes a persisted Claude-style MCP allowlist entry during revival", async () => {
+		// A ported Claude Code agent declares `mcp__seedpatch-client__bank`; session
+		// creation resolves it to the minted key, but `declaredTools` persists the
+		// original spelling. Clamping to the raw persisted name drops the very tool
+		// the declaration named, so the revived agent comes back without it.
+		const cwd = makeTempDir("@pi-alias-revive-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const registered = createMCPToolName("seedpatch-client", "bank");
+		manager.appendSessionInit({
+			systemPrompt: "persisted prompt",
+			task: "persisted task",
+			tools: ["read", registered, "yield"],
+			declaredTools: ["read", "mcp__seedpatch-client__bank", "yield"],
+			enforceToolAllowlist: true,
+		});
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			content: [{ type: "text", text: "persisted" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await manager.close();
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+
+		const activeToolNames: string[][] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return {
+				session: createRevivedSession(activeToolNames, undefined, [registered]).session,
+			} as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(activeToolNames.at(-1)).toContain(registered);
+		for (const names of activeToolNames) expect(names).not.toContain("mcp__seedpatch-client__bank");
+	});
+
 	it("revives an enforced allowlist from the declared tool list, not the enabled snapshot", async () => {
 		const cwd = makeTempDir("@pi-declared-revive-");
 		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));

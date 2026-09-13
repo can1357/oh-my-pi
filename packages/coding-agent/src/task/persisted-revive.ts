@@ -5,6 +5,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
+import { resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -210,7 +211,22 @@ export function createPersistedSubagentReviverFactory(
 			// cannot reproduce (`tools: [checkpoint]` was widened to include
 			// `rewind` during construction), so clamping to the raw declaration
 			// would strand the revived agent mid-investigation.
-			const revivedScope = withSiblingTools(init.declaredTools ?? revivedToolNames);
+			//
+			// MCP entries are canonicalized against the live registry first. The
+			// declaration may name a tool the Claude Code way
+			// (`mcp__srv-x__tool`), while `declaredTools` persists that original
+			// spelling: session creation resolves it to the minted key, and
+			// clamping to the raw persisted name would then drop the very tool the
+			// agent declared. An unresolvable spelling is left untouched.
+			const declaredScope = (init.declaredTools ?? revivedToolNames).map(name => {
+				if (name.endsWith("*")) return name;
+				return (
+					resolveMCPToolAlias(name, candidate =>
+						session.getToolByName(candidate) ? { name: candidate } : undefined,
+					)?.name ?? name
+				);
+			});
+			const revivedScope = withSiblingTools(declaredScope);
 			await session.setActiveToolsByName([...revivedScope, ...session.getMountedXdevToolNames()]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
