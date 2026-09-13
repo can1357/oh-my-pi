@@ -213,6 +213,8 @@ export interface DisabledCredentialSummary {
 /** Account identity of a live credential, matched against tombstones by {@link isActionableCredentialDisable}. */
 export interface CredentialAccountIdentity {
 	provider: string;
+	/** Only an OAuth credential can recover an OAuth tombstone; an API key for the same provider proves nothing. */
+	type?: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
 	orgId?: string;
@@ -240,7 +242,7 @@ export function isActionableCredentialDisable(
 	const summaryAccountId = summary.accountId?.toLowerCase();
 	const summaryOrgId = summary.orgId?.toLowerCase();
 	if (!summaryEmail && !summaryAccountId && !summaryOrgId) {
-		return !activeAccounts.some(account => account.provider === summary.provider);
+		return !activeAccounts.some(account => account.provider === summary.provider && account.type !== "api_key");
 	}
 	return !activeAccounts.some(account => {
 		if (account.provider !== summary.provider) return false;
@@ -7224,6 +7226,7 @@ export class AuthStorage {
 				if (entry.credential.type !== "oauth") continue;
 				activeAccounts.push({
 					provider: entryProvider,
+					type: "oauth",
 					email: entry.credential.email,
 					accountId: entry.credential.accountId,
 					orgId: entry.credential.orgId,

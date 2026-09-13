@@ -77,8 +77,11 @@ export async function collectDisabledCredentialNotices(authStorage: AuthStorage,
 			undefined,
 			AbortSignal.timeout(REPLAY_LOOKUP_BUDGET_MS),
 		);
-		// Bounded like other collapsed lists: `omp usage` has the full set.
+		// Newest sign-out first, then bounded like other collapsed lists: the
+		// account that just dropped out must be named, not the oldest leftovers;
+		// `omp usage` has the full set.
 		const notices = disabled
+			.toSorted((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
 			.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
 			.map(summary => formatDisabledCredentialReplayNotice(summary, nowMs));
 		const hidden = disabled.length - notices.length;

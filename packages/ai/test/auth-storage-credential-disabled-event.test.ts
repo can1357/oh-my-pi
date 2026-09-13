@@ -566,6 +566,28 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([7]);
 		});
 
+		test("retires an identity-less tombstone on re-login so a later logout cannot resurrect it", async () => {
+			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-identityless-"));
+			const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
+			try {
+				// No email, account, or organization — nothing a later identity match could reconcile.
+				const bare = { type: "oauth" as const, access: "opaque-1", refresh: "r-1", expires: Date.now() + 60_000 };
+				await authStorage.set("unit-idless", [bare]);
+				const id = authStorage.exportSnapshot().credentials[0]!.id;
+				expect(authStorage.disableCredentialById(id, "oauth refresh failed: invalid_grant")).toBe(true);
+				expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([id]);
+
+				await authStorage.set("unit-idless", [{ ...bare, access: "opaque-2", refresh: "r-2" }]);
+				expect(await authStorage.listDisabledCredentials("unit-idless")).toEqual([]);
+
+				await authStorage.remove("unit-idless");
+				expect(await authStorage.listActionableDisabledCredentials()).toEqual([]);
+			} finally {
+				authStorage.close();
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			}
+		});
+
 		test("sees a disable performed by a sibling process instead of trusting its own loaded snapshot", async () => {
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-siblings-"));
 			const dbPath = path.join(tempDir, "agent.db");

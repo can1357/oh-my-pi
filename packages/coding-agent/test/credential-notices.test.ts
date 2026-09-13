@@ -77,12 +77,11 @@ describe("credential sign-out notices", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
 		// A broker that never answers: the listing only settles when the caller's
 		// signal fires, which is what bounds startup.
-		vi.spyOn(authStorage, "listActionableDisabledCredentials").mockImplementation(
-			(_provider, signal) =>
-				new Promise((_resolve, reject) => {
-					signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-				}),
-		);
+		vi.spyOn(authStorage, "listActionableDisabledCredentials").mockImplementation((_provider, signal) => {
+			const { promise, reject } = Promise.withResolvers<never>();
+			signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+			return promise;
+		});
 
 		const startedAt = Date.now();
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
@@ -91,6 +90,8 @@ describe("credential sign-out notices", () => {
 
 	it("names at most a screenful of signed-out accounts at startup and counts the rest", async () => {
 		authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
+		const nowMs = Date.now();
+		// SQLite lists tombstones by ascending id; the newest sign-out is the last row.
 		vi.spyOn(authStorage, "listActionableDisabledCredentials").mockResolvedValue(
 			Array.from({ length: 11 }, (_, index) => ({
 				id: index + 1,
@@ -98,12 +99,14 @@ describe("credential sign-out notices", () => {
 				type: "oauth" as const,
 				email: `user${index + 1}@example.com`,
 				cause: "oauth refresh failed: invalid_grant",
+				disabledAtMs: nowMs - (11 - index) * 60_000,
 			})),
 		);
 
-		const notices = await collectDisabledCredentialNotices(authStorage, Date.now());
+		const notices = await collectDisabledCredentialNotices(authStorage, nowMs);
 		expect(notices).toHaveLength(9);
-		expect(notices[7]).toContain("user8@example.com");
+		expect(notices[0]).toContain("user11@example.com");
+		expect(notices[7]).toContain("user4@example.com");
 		expect(notices[8]).toBe("… 3 more signed-out accounts; see omp usage.");
 	});
 

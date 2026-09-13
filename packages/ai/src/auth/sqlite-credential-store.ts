@@ -1360,7 +1360,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Hard-deletes disabled rows for a provider when an active replacement exists.
 	 * OAuth credentials match by identity key; API keys match by provider and type.
-	 * Disabled rows without an active same-type replacement remain recoverable.
+	 * An OAuth tombstone that carries no identity at all can never be matched
+	 * more precisely, so any active OAuth credential of the provider retires it
+	 * (the same rule `isActionableCredentialDisable` applies when deciding
+	 * whether it still needs the user). Disabled rows without an active
+	 * same-type replacement remain recoverable.
 	 */
 	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[]): void {
 		try {
@@ -1376,7 +1380,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				const identityKey = resolveCredentialIdentityKey(provider, row.credential);
 				if (identityKey) activeIdentityKeys.add(identityKey);
 			}
-			if (!hasActiveApiKey && activeIdentityKeys.size === 0) return;
+			if (!hasActiveApiKey && activeOAuthCredentials.length === 0) return;
 
 			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 			for (const row of disabledRows) {
@@ -1386,6 +1390,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				}
 				const identityKey = resolveRowCredentialIdentityKey(provider, row);
 				if (identityKey && activeIdentityKeys.has(identityKey)) {
+					this.#hardDeleteStmt.run(row.id);
+					continue;
+				}
+				if (identityKey === null && row.credential_type === "oauth" && activeOAuthCredentials.length > 0) {
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
