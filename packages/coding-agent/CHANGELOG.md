@@ -7,8 +7,9 @@
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
 ### Fixed
 
-- Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — when it happens, and again at startup until that account signs in — instead of silently degrading to a sibling account; SDK consumers get the same startup replay from `session.getDisabledCredentialNotices()` ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — when it happens, and again at startup until that account signs in — instead of silently degrading to a sibling account; SDK consumers get the same startup replay from `session.getDisabledCredentialNotices()`. Recovery uses canonical token claims and fresh account state; `omp usage` preserves disabled history when refresh fails, and notice/usage identity labels redact credential-shaped text ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - Copilot terminal auth errors no longer log out the entire provider after the failed request has settled. Credential-attributed auth retry remains responsible for invalidation, preserving a concurrent re-login and unrelated accounts ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- MCP and extension diagnostics redact credential-shaped request parameters, status/response text, and propagated error messages before display truncation; URL redaction follows native whitespace normalization ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.19] - 2026-09-12
 

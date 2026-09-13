@@ -1,5 +1,6 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, logger, redactSecrets } from "@oh-my-pi/pi-utils";
+import { serializeMCPDiagnosticData } from "../mcp/errors";
 import type { CustomTool, CustomToolResult } from "../extensibility/custom-tools/types";
 import { type CallMcpOptions, callMCP } from "../mcp/json-rpc";
 import type { ExaSearchResponse, MCPCallResponse, MCPTool, MCPToolsResponse, MCPToolWrapperConfig } from "./types";
@@ -80,8 +81,10 @@ export async function fetchExaTools(apiKey: string | null, toolNames: string[]):
 	const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
 
 	if (response.error) {
-		logger.error("MCP tools/list error", { toolNames, error: response.error });
-		throw new Error(`MCP error: ${response.error.message}`);
+		logger.error("MCP tools/list error", {
+			diagnostic: serializeMCPDiagnosticData({ toolNames, error: response.error }),
+		});
+		throw new Error(`MCP error: ${redactSecrets(response.error.message)}`);
 	}
 
 	return response.result?.tools ?? [];
@@ -93,8 +96,10 @@ export async function fetchWebsetsTools(apiKey: string): Promise<MCPTool[]> {
 	const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
 
 	if (response.error) {
-		logger.error("Websets MCP tools/list error", { error: response.error });
-		throw new Error(`MCP error: ${response.error.message}`);
+		logger.error("Websets MCP tools/list error", {
+			diagnostic: serializeMCPDiagnosticData({ error: response.error }),
+		});
+		throw new Error(`MCP error: ${redactSecrets(response.error.message)}`);
 	}
 
 	return response.result?.tools ?? [];
@@ -122,8 +127,10 @@ export async function callExaTool(
 	)) as MCPCallResponse;
 
 	if (response.error) {
-		logger.error("MCP tools/call error", { toolName, args, error: response.error });
-		throw new Error(`MCP error: ${response.error.message}`);
+		logger.error("MCP tools/call error", {
+			diagnostic: serializeMCPDiagnosticData({ toolName, args, error: response.error }),
+		});
+		throw new Error(`MCP error: ${redactSecrets(response.error.message)}`);
 	}
 
 	return normalizeMcpToolPayload(response.result);
@@ -142,8 +149,10 @@ export async function callWebsetsTool(
 	})) as MCPCallResponse;
 
 	if (response.error) {
-		logger.error("Websets MCP tools/call error", { toolName, args, error: response.error });
-		throw new Error(`MCP error: ${response.error.message}`);
+		logger.error("Websets MCP tools/call error", {
+			diagnostic: serializeMCPDiagnosticData({ toolName, args, error: response.error }),
+		});
+		throw new Error(`MCP error: ${redactSecrets(response.error.message)}`);
 	}
 
 	return normalizeMcpToolPayload(response.result);

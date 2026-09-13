@@ -8,6 +8,7 @@ import * as oauthUtils from "@oh-my-pi/pi-ai/oauth";
 import {
 	collectDisabledCredentialNotices,
 	formatCredentialDisabledNotice,
+	type RetainedCredentialDisable,
 } from "@oh-my-pi/pi-coding-agent/config/credential-notices";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -119,6 +120,55 @@ describe("credential sign-out notices", () => {
 
 		await authStorage.set("anthropic", [oauthCredential(Date.now() + 3_600_000)]);
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
+	});
+
+	it("recovers a retained teardown after a JWT-only login prunes its tombstone", async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		const retained = new Map<number, RetainedCredentialDisable>();
+		authStorage.onCredentialDisabled(event => {
+			retained.set(event.credentialId, { event, disabledAtMs: Date.now() });
+		});
+		await authStorage.set("openai-codex", oauthCredential(Date.now() + 60_000));
+		const id = authStorage.exportSnapshot().credentials[0]!.id;
+		expect(authStorage.disableCredentialById(id, "invalid_grant")).toBe(true);
+		expect(await collectDisabledCredentialNotices(authStorage, Date.now(), undefined, retained)).toHaveLength(1);
+		const claims = Buffer.from(JSON.stringify({ email: "signed-out@example.com", sub: "acct-1" })).toString(
+			"base64url",
+		);
+		await authStorage.set("openai-codex", {
+			type: "oauth",
+			access: `eyJhbGciOiJub25lIn0.${claims}.signature`,
+			refresh: "new-refresh",
+			expires: Date.now() + 60_000,
+		});
+		expect(await authStorage.listDisabledCredentials()).toEqual([]);
+		expect(await collectDisabledCredentialNotices(authStorage, Date.now(), undefined, retained)).toEqual([]);
+		expect(retained.size).toBe(0);
+	});
+
+	it("redacts credential-shaped provider and identity labels in real live and replay notices", async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		const live: string[] = [];
+		authStorage.onCredentialDisabled(event => {
+			live.push(formatCredentialDisabledNotice(event));
+		});
+		const provider = "extension-bearer=PROVIDERSECRET";
+		await authStorage.set(provider, {
+			...oauthCredential(Date.now() + 60_000),
+			email: "bearer=IDENTITYSECRET",
+			orgName: "client_secret=ORGSECRET",
+		});
+		const id = authStorage.exportSnapshot().credentials[0]!.id;
+		expect(authStorage.disableCredentialById(id, "invalid_grant")).toBe(true);
+		const replay = await collectDisabledCredentialNotices(authStorage, Date.now());
+		expect(live).toHaveLength(1);
+		expect(replay).toHaveLength(1);
+		for (const notice of [...live, ...replay]) {
+			expect(notice).toContain("invalid_grant");
+			expect(notice).toContain("/login");
+			for (const secret of ["PROVIDERSECRET", "IDENTITYSECRET", "ORGSECRET"]) expect(notice).not.toContain(secret);
+			expect(notice).not.toContain(`/login ${provider}`);
+		}
 	});
 
 	it("never lets a failed tombstone listing break startup", async () => {

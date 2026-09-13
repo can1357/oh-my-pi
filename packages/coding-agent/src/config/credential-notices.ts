@@ -22,7 +22,7 @@ import {
 	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, pluralize, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, pluralize, redactSecrets } from "@oh-my-pi/pi-utils";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
@@ -37,7 +37,7 @@ export const REPLAY_LOOKUP_BUDGET_MS = 2_000;
 function accountLabel(
 	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "projectId" | "orgId" | "orgName">,
 ): string {
-	return truncateToWidth(credentialAccountLabel(identity), TRUNCATE_LENGTHS.TITLE);
+	return truncateToWidth(credentialAccountLabel(identity, redactSecrets), TRUNCATE_LENGTHS.TITLE);
 }
 
 /** Disable cause bounded like other previews; `summarizeDisableCause` already picks the human-sized clause. */
@@ -47,7 +47,7 @@ function causeSummary(cause: string): string {
 
 /** Provider ids come from the registry or an extension; bound them like titles too. */
 function providerLabel(provider: string): string {
-	return truncateToWidth(redactUrlSecrets(provider), TRUNCATE_LENGTHS.TITLE);
+	return truncateToWidth(redactSecrets(provider), TRUNCATE_LENGTHS.TITLE);
 }
 
 /**
@@ -78,7 +78,7 @@ function subjectAndRemedy(
 		const serverUrl = mcpOAuthServerUrlFromCredentialId(provider);
 		return {
 			subject: serverUrl
-				? `MCP server ${truncateToWidth(redactUrlSecrets(serverUrl), TRUNCATE_LENGTHS.TITLE)}`
+				? `MCP server ${truncateToWidth(redactSecrets(serverUrl), TRUNCATE_LENGTHS.TITLE)}`
 				: "an MCP server",
 			remedy: "Reauthorize it with /mcp reauth <name>.",
 		};
@@ -142,18 +142,12 @@ export async function collectDisabledCredentialNotices(
 	if (retained && needsFallback) {
 		// Empty tombstone listings skip revalidation. A sibling login can still
 		// recover retained events; failed refresh cannot prove recovery from cache.
-		const activeAccounts: CredentialAccountIdentity[] = [];
+		let activeAccounts: CredentialAccountIdentity[] = [];
 		const remainingMs = Math.ceil(deadline - performance.now());
 		if (remainingMs > 0) {
 			try {
 				await authStorage.revalidateCredentials(AbortSignal.timeout(remainingMs));
-				for (const [provider, value] of Object.entries(authStorage.getAll())) {
-					for (const credential of Array.isArray(value) ? value : [value]) {
-						if (credential.type !== "oauth") continue;
-						const { type, email, accountId, projectId, orgId } = credential;
-						activeAccounts.push({ provider, type, email, accountId, projectId, orgId });
-					}
-				}
+				activeAccounts = authStorage.listCredentialAccountIdentities();
 			} catch {
 				// Retain warnings rather than infer recovery from an unreachable store.
 			}

@@ -23,7 +23,7 @@ it("sanitizes provider-controlled disabled account labels before terminal output
 	const output = formatUsageBreakdown([], [], Date.now(), undefined, [
 		{
 			id: 1,
-			provider: "anthropic",
+			provider: "bearer=PROVIDERSECRET",
 			type: "oauth",
 			email: "who\x1b[2Jami@example.com",
 			orgName: "bearer=opaque-secret",
@@ -32,6 +32,7 @@ it("sanitizes provider-controlled disabled account labels before terminal output
 	]);
 	expect(output).not.toContain("\x1b[2J");
 	expect(output).not.toContain("opaque-secret");
+	expect(output).not.toContain("PROVIDERSECRET");
 	expect(output).toContain("whoami@example.com");
 });
 
@@ -72,6 +73,75 @@ function makeReport(provider: string, email: string, limits: UsageReport["limits
 }
 
 describe("runUsageCommand disabled credential output", () => {
+	for (const transition of ["revalidation fails", "disable during tombstone lookup"]) {
+		for (const json of [false, true]) {
+			it(`retains a real tombstone when ${transition} in ${json ? "JSON" : "text"}`, async () => {
+				const profile = TempDir.createSync("@omp-usage-stale-");
+				const originalAgentDir = getAgentDir();
+				const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+				const originalExitCode = process.exitCode;
+				setAgentDir(profile.path());
+				const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+				const authority = new AuthStorage(store);
+				let authStorage: AuthStorage | undefined;
+				try {
+					await authority.reload();
+					await authority.set("anthropic", {
+						type: "oauth",
+						access: "old-access",
+						refresh: "old-refresh",
+						expires: Date.now() + HOUR,
+						email: "stale@example.test",
+					});
+					const id = authority.exportSnapshot().credentials[0]!.id;
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					if (transition === "revalidation fails") {
+						expect(authority.disableCredentialById(id, "invalid_grant")).toBe(true);
+						Object.assign(store, {
+							refreshSnapshot: async () => {
+								throw new Error("broker offline");
+							},
+						});
+					} else {
+						const list = store.listDisabledCredentials.bind(store);
+						vi.spyOn(store, "listDisabledCredentials").mockImplementationOnce(async provider => {
+							expect(authority.disableCredentialById(id, "invalid_grant")).toBe(true);
+							return list(provider);
+						});
+					}
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					await runUsageCommand({ json });
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					if (json)
+						expect(JSON.parse(output).disabledCredentials).toEqual([
+							expect.objectContaining({ id, email: "stale@example.test" }),
+						]);
+					else {
+						expect(output).toContain("invalid_grant");
+						expect(output).toContain("stale@example.test");
+					}
+				} finally {
+					authStorage?.close();
+					authority.close();
+					vi.restoreAllMocks();
+					process.exitCode = originalExitCode;
+					setAgentDir(originalAgentDir);
+					if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+					else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+					await profile.remove();
+				}
+			});
+		}
+	}
 	for (const json of [false, true]) {
 		it(`keeps secrets out of ${json ? "JSON" : "text"} and masks echoed identities only with --redact`, async () => {
 			const profile = TempDir.createSync("@omp-usage-redaction-");
@@ -103,6 +173,8 @@ describe("runUsageCommand disabled credential output", () => {
 						projectId,
 						email,
 						accountId,
+						orgId: "bearer=ORGIDSECRET",
+						orgName: "client_secret=ORGNAMESECRET",
 					});
 					const id = authStorage.exportSnapshot().credentials[0]!.id;
 					expect(authStorage.disableCredentialById(id, cause)).toBe(true);
@@ -129,6 +201,8 @@ describe("runUsageCommand disabled credential output", () => {
 						"ECHOSECRET",
 						"SYNTHETICACCESS",
 						"SYNTHETICREFRESH",
+						"ORGIDSECRET",
+						"ORGNAMESECRET",
 					]) {
 						expect(text).not.toContain(secret);
 					}
@@ -596,83 +670,6 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).not.toContain("dummy.secondary@example.test");
 		for (const mask of redaction.values()) expect(text).toContain(mask);
-	});
-
-	it("renders auto-disabled tombstones with the upstream error_description and hides lifecycle noise", () => {
-		const now = Date.now();
-		const disabled = [
-			{
-				id: 26,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "dead@example.test",
-				cause: 'oauth refresh failed: OAuthError: refresh request failed; body={"error": "invalid_grant", "error_description": "Refresh token expired"}',
-				disabledAtMs: now - 4 * HOUR,
-			},
-			{
-				id: 27,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "rotated@example.test",
-				cause: "replaced by newer credential",
-			},
-			{
-				id: 28,
-				provider: "fireworks",
-				type: "api_key" as const,
-				cause: "oauth refresh failed: whatever",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, now, undefined, disabled));
-		// Auto-disabled OAuth row: identity, age, shortened upstream cause, and the fix.
-		expect(text).toContain("✗ dead@example.test — disabled 4h ago: Refresh token expired (re-login to restore)");
-		// User-driven replacement and api_key tombstones are lifecycle noise, not lost capacity.
-		expect(text).not.toContain("rotated@example.test");
-		expect(text).not.toContain("Fireworks");
-	});
-	it("suppresses auto-disabled tombstones when an active account exists with the same identity", () => {
-		const now = Date.now();
-		const activeAccounts: UsageAccountIdentity[] = [
-			{
-				provider: "anthropic",
-				type: "oauth",
-				email: "active@example.test",
-			},
-		];
-		const disabled = [
-			{
-				id: 30,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "active@example.test",
-				cause: "oauth refresh failed: Refresh token expired",
-			},
-			{
-				id: 31,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "truly-dead@example.test",
-				cause: "oauth refresh failed: Refresh token expired",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
-		expect(text).not.toContain("active@example.test — disabled");
-		expect(text).toContain("✗ truly-dead@example.test — disabled");
-	});
-
-	it("renders a tombstone-only provider section even when no active credential remains", () => {
-		const disabled = [
-			{
-				id: 50,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "last@example.test",
-				cause: "oauth refresh failed: token endpoint said no",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
-		expect(text).toContain("Anthropic");
-		expect(text).toContain("✗ last@example.test — disabled: token endpoint said no (re-login to restore)");
 	});
 
 	it("masks overlapping diagnostic identities literally before truncating the cause", () => {

@@ -218,7 +218,7 @@ export interface DisabledCredentialSummary {
 	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
-	/** Verbatim disable cause captured when the row was torn down. */
+	/** Disable cause; AuthStorage projects credential-redacted text for display/transport. */
 	cause: string;
 	/** Epoch ms the row was disabled (SQLite `updated_at`), when known. */
 	disabledAtMs?: number;
@@ -1623,10 +1623,7 @@ export class AuthStorage {
 			try {
 				listener(this.#generation);
 			} catch (error) {
-				logger.debug("AuthStorage generation listener failed", {
-					reason,
-					error: String(error),
-				});
+				logger.debug("AuthStorage generation listener failed", { reason, error: redactSecrets(String(error)) });
 			}
 		}
 	}
@@ -2622,7 +2619,12 @@ export class AuthStorage {
 		// body can echo what was submitted, so both are redacted first.
 		logger.warn("Auth credential disabled", {
 			...event,
-			provider: redactUrlSecrets(event.provider),
+			email: event.email === undefined ? undefined : redactSecrets(event.email),
+			accountId: event.accountId === undefined ? undefined : redactSecrets(event.accountId),
+			projectId: event.projectId === undefined ? undefined : redactSecrets(event.projectId),
+			orgId: event.orgId === undefined ? undefined : redactSecrets(event.orgId),
+			orgName: event.orgName === undefined ? undefined : redactSecrets(event.orgName),
+			provider: redactSecrets(redactUrlSecrets(event.provider)),
 			disabledCause: redactSecrets(event.disabledCause),
 		});
 		if (this.#credentialDisabledListeners.size === 0) {
@@ -2649,7 +2651,7 @@ export class AuthStorage {
 	): void {
 		const logListenerError = (error: unknown): void => {
 			logger.warn("onCredentialDisabled listener threw", {
-				provider: redactUrlSecrets(event.provider),
+				provider: redactSecrets(redactUrlSecrets(event.provider)),
 				error: redactSecrets(String(error)),
 			});
 		};
@@ -3684,8 +3686,8 @@ export class AuthStorage {
 				});
 			}
 			logger.debug("AuthStorage usage fetch failed", {
-				provider: request.provider,
-				error: String(error),
+				provider: redactSecrets(redactUrlSecrets(request.provider)),
+				error: redactSecrets(String(error)),
 			});
 			return null;
 		}
@@ -5421,9 +5423,9 @@ export class AuthStorage {
 					const errorMsg = String(error);
 					const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
 					logger.debug("OAuth preflight refresh failed", {
-						provider,
+						provider: redactSecrets(redactUrlSecrets(provider)),
 						index: candidate.selection.index,
-						error: errorMsg,
+						error: redactSecrets(errorMsg),
 						isDefinitiveFailure,
 					});
 					if (isDefinitiveFailure) {
@@ -5575,7 +5577,7 @@ export class AuthStorage {
 			const latestCredential = latestRow?.credential;
 			if (latestCredential?.type === "oauth" && latestCredential.refresh !== attemptedCredential.refresh) {
 				logger.debug("OAuth refresh race detected; another process rotated token first", {
-					provider,
+					provider: redactSecrets(redactUrlSecrets(provider)),
 					index,
 					credentialId,
 				});
@@ -5602,7 +5604,10 @@ export class AuthStorage {
 						`oauth refresh failed: ${errorMsg}`,
 					);
 		if (!disabled) {
-			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", { provider, index });
+			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", {
+				provider: redactSecrets(redactUrlSecrets(provider)),
+				index,
+			});
 			await this.reload();
 			return "cas-lost";
 		}
@@ -5962,9 +5967,9 @@ export class AuthStorage {
 			const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
 
 			logger.warn("OAuth token refresh failed", {
-				provider,
+				provider: redactSecrets(redactUrlSecrets(provider)),
 				index: selection.index,
-				error: errorMsg,
+				error: redactSecrets(errorMsg),
 				isDefinitiveFailure,
 			});
 
@@ -7199,7 +7204,9 @@ export class AuthStorage {
 	 */
 	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
 		if (!this.#store.listDisabledCredentials) return [];
-		return this.#store.listDisabledCredentials(provider, signal);
+		const disabled = await this.#store.listDisabledCredentials(provider, signal);
+		// Keep identity raw for account matching; forensic causes remain in the store.
+		return disabled.map(summary => ({ ...summary, cause: redactSecrets(summary.cause) }));
 	}
 
 	/**
@@ -7222,16 +7229,24 @@ export class AuthStorage {
 		provider?: string,
 		signal?: AbortSignal,
 	): Promise<DisabledCredentialSummary[]> {
-		const disabled = await this.listDisabledCredentials(provider, signal);
+		const disabled = (await this.#store.listDisabledCredentials?.(provider, signal)) ?? [];
 		if (disabled.length === 0) return [];
+		let activeAccounts: CredentialAccountIdentity[] = [];
 		try {
 			await this.revalidateCredentials(signal);
+			activeAccounts = this.listCredentialAccountIdentities(provider);
 		} catch (error) {
 			logger.debug("Credential snapshot revalidation failed before tombstone replay; reporting without recovery", {
 				error: redactSecrets(String(error)),
 			});
-			return disabled.filter(summary => isActionableCredentialDisable(summary, []));
 		}
+		return disabled
+			.filter(summary => isActionableCredentialDisable(summary, activeAccounts))
+			.map(summary => ({ ...summary, cause: redactSecrets(summary.cause) }));
+	}
+
+	/** Loaded OAuth identities, including primary token claims but never token bytes. Revalidate before inferring recovery. */
+	listCredentialAccountIdentities(provider?: string): CredentialAccountIdentity[] {
 		const activeAccounts: CredentialAccountIdentity[] = [];
 		for (const [entryProvider, entries] of this.#data) {
 			if (provider !== undefined && entryProvider !== provider) continue;
@@ -7245,7 +7260,7 @@ export class AuthStorage {
 				activeAccounts.push(account);
 			}
 		}
-		return disabled.filter(summary => isActionableCredentialDisable(summary, activeAccounts));
+		return activeAccounts;
 	}
 
 	/**

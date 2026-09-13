@@ -89,26 +89,12 @@ describe("redactUrlSecrets", () => {
 		);
 	});
 
-	it("keeps safe prose around URLs without treating ambiguous punctuation as safe", () => {
-		expect(redactUrlSecrets("request to https://host/token?flow=refresh returned invalid_grant")).toBe(
-			"request to https://host/token?flow=refresh returned invalid_grant",
-		);
-		const output = redactUrlSecrets("see https://host/x?apiKey=abc! then retry.");
-		expect(output.startsWith("see https://host/x?apiKey=")).toBe(true);
-		expect(output.endsWith(" then retry.")).toBe(true);
-		expect(output).not.toContain("abc");
-		expect(output).not.toContain("!");
-	});
-
 	it("removes complete punctuation-only and punctuation-suffixed secret values", () => {
 		const url = "https://host/mcp?token=!!!&apiKey=abc!#password=.,;:!?)";
 		const redacted = new URL(redactUrlSecrets(url));
 		expect(redacted.searchParams.get("token")).toBe("[redacted]");
 		expect(redacted.searchParams.get("apiKey")).toBe("[redacted]");
 		expect(new URLSearchParams(redacted.hash.slice(1)).get("password")).toBe("[redacted]");
-		expect(redactSecrets("request https://host/mcp?token=!!! failed")).toBe(
-			"request https://host/mcp?token=[redacted] failed",
-		);
 	});
 
 	it.each([
@@ -253,16 +239,46 @@ describe("redactSecrets", () => {
 		}
 	});
 
-	it("preserves safe URL neighbors in prose and JSON rather than treating them as secret assignment tails", () => {
+	it("withholds ambiguous prose URL tails but preserves parsed JSON neighbors", () => {
+		const leadingUrl = redactSecrets("https://host.test/path request failed: client_secret=leading-url-secret");
+		expect(leadingUrl).not.toContain("leading-url-secret");
+		expect(leadingUrl).toContain("[redacted]");
 		const url = "https://host/mcp?token=url-secret&ref=keep%20this#password=fragment-secret&mode=keep";
 		const safeUrl = "https://host/mcp?token=[redacted]&ref=keep%20this#password=[redacted]&mode=keep";
-		expect(redactSecrets("request {" + url + "} failed; client_secret=body-secret")).toBe(
-			"request {" + safeUrl + "} failed; client_secret=[redacted]",
-		);
+		expect(redactSecrets("request {" + url + "} failed; client_secret=body-secret")).toBe("request {[redacted]");
 		expect(JSON.parse(redactSecrets(JSON.stringify({ url, status: "keep" })))).toEqual({
 			url: safeUrl,
 			status: "keep",
 		});
+	});
+
+	it("matches native URL normalization at every position in schemes, names, and values", () => {
+		const url =
+			"https://user:diag-user-secret@host/mcp?token=diag-query-secret&ref=keep#client_secret=diag-fragment-secret";
+		for (const control of ["\t", "\r", "\n"]) {
+			for (let index = 1; index < url.length; index++) {
+				const input = url.slice(0, index) + control + url.slice(index);
+				expect(new URL(input).href).toBe(new URL(url).href);
+				for (const text of [input, "failed " + input, JSON.stringify({ url: input, status: "keep" })]) {
+					const output = redactSecrets(text);
+					for (const secret of ["diag-user-secret", "diag-query-secret", "diag-fragment-secret"]) {
+						expect(output.replace(/[\t\r\n]/g, "")).not.toContain(secret);
+					}
+				}
+			}
+		}
+		for (const delimiter of [" ", "'", '"', "<", ">"]) {
+			const output = JSON.parse(
+				redactSecrets(
+					JSON.stringify({
+						detail: "failed https://host/?token=head" + delimiter + "diag-tail-secret",
+						status: "keep",
+					}),
+				),
+			);
+			expect(output.detail).not.toContain("diag-tail-secret");
+			expect(output.status).toBe("keep");
+		}
 	});
 
 	it("consumes quoted secrets and punctuation-bearing unquoted values", () => {

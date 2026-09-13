@@ -105,7 +105,7 @@ function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unk
 	return result;
 }
 
-function serializeData(value: unknown): string | undefined {
+export function serializeMCPDiagnosticData(value: unknown): string | undefined {
 	if (value === undefined) return undefined;
 	try {
 		const serialized = JSON.stringify(sanitizeData(value, 0, new WeakSet()));
@@ -164,7 +164,7 @@ export function createMCPJsonRpcError(
 		message: `MCP error ${error.code}: ${error.message}`,
 		retryable: false,
 		code: error.code,
-		data: serializeData(error.data),
+		data: serializeMCPDiagnosticData(error.data),
 		traceId: safeTraceId(traceId) ?? findTraceId(error.data),
 	});
 }

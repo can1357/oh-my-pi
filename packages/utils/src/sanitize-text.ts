@@ -115,14 +115,14 @@ const SECRET_NAME_IN_PROSE =
 
 /** A JWT: three base64url segments. */
 const JWT_VALUE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
-/** A conservative URL span in prose; whitespace and quotes belong to the surrounding text. */
-const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+/** Native URL parsing removes TAB/CR/LF, including inside schemes and parameter names. */
+const URL_IN_TEXT = /\b[a-z](?:[a-z0-9+.-]|[\t\r\n])*:[\t\r\n]*\/[\t\r\n]*\/[^\x20\f\v"'<>]*/gi;
 /** A complete URL, optionally prefixed by a colon-delimited credential identifier. */
-const COMPLETE_URL_START = /^(\s*(?:[\w.-]+:)*)[a-z][a-z0-9+.-]*:\/\//i;
+const COMPLETE_URL_START = /^(\s*(?:[\w.-]+:)*)[a-z](?:[a-z0-9+.-]|[\t\r\n])*:[\t\r\n]*\/[\t\r\n]*\//i;
 const URL_USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
 /** Visit whole URLs/JSON before prose inside them; a labelled value takes precedence over its contents. */
 const SECRET_IN_TEXT = new RegExp(
-	String.raw`(${URL_IN_TEXT.source})|([\[{](?=\s*(?:["{\[}\]]|-?\d|true\b|false\b|null\b|$)))|([\w-]*${SECRET_NAME_IN_PROSE.source}["']?\s*[:=]\s*)|(\b(?:Bearer|Basic)\s+)|(${JWT_VALUE.source})|(")`,
+	String.raw`(${URL_IN_TEXT.source})|([\[{](?=\s*(?:["{\[}\]]|-?\d|true\b|false\b|null\b|$)))|(${SECRET_NAME_IN_PROSE.source}["']?\s*[:=]\s*)|(\b(?:Bearer|Basic)\s+)|(${JWT_VALUE.source})|(")`,
 	"gi",
 );
 
@@ -147,6 +147,13 @@ function redactPairs(pairs: string): string {
 }
 
 function redactUrl(url: string): string {
+	// Match the receiving parser before classifying names or finding values.
+	url = url.replace(/[\t\r\n]/g, "");
+	try {
+		url = new URL(url).href;
+	} catch {
+		// Invalid URLs still own their entire suffix; never expose a partial value.
+	}
 	const withoutUserinfo = url.replace(URL_USERINFO, "$1[redacted]@");
 	const fragmentStart = withoutUserinfo.indexOf("#");
 	const head = fragmentStart === -1 ? withoutUserinfo : withoutUserinfo.slice(0, fragmentStart);
@@ -163,23 +170,19 @@ function redactUrl(url: string): string {
  * uses native URL normalization first, matching the receiving fetch parser
  * even for literal spaces, tabs, and quotes. Safe parameter semantics survive;
  * their spelling may be normalized. Invalid URLs are redacted without parsing.
- * Other text uses conservative URL spans; use {@link redactSecrets} for prose
- * that starts with a URL. Ambiguous trailing punctuation is never detached
- * from a secret value, even when it might have been sentence punctuation.
+ * In prose, a URL that ends at a space/quote boundary is ambiguous: the whole
+ * suffix is withheld rather than exposing a native URL value tail. Parsed JSON
+ * in {@link redactSecrets} provides trustworthy boundaries for neighboring fields.
  */
 export function redactUrlSecrets(text: string): string {
 	const complete = COMPLETE_URL_START.exec(text);
 	if (complete) {
 		const prefix = complete[1];
-		let url = text.slice(prefix.length);
-		try {
-			url = new URL(url).href;
-		} catch {
-			// Keep the whole suffix even when malformed; truncating can expose a credential.
-		}
-		return prefix + redactUrl(url);
+		return prefix + redactUrl(text.slice(prefix.length));
 	}
-	return text.replace(URL_IN_TEXT, redactUrl);
+	const url = new RegExp(URL_IN_TEXT).exec(text);
+	if (!url) return text;
+	return text.slice(0, url.index) + (url.index + url[0].length === text.length ? redactUrl(url[0]) : "[redacted]");
 }
 
 /** The end of a quoted diagnostic value, including escaped quotes and incomplete final escapes. */
@@ -266,7 +269,10 @@ export function redactSecrets(text: string): string {
 			}
 		}
 		if (match[1]) {
-			output += redactUrl(match[1]).replace(JWT_VALUE, "[redacted]");
+			// Spaces and quotes can be literal native URL values, not prose boundaries.
+			// Only a complete suffix (or a parsed JSON string) gives a safe boundary.
+			output += end === text.length ? redactUrl(match[1]).replace(JWT_VALUE, "[redacted]") : "[redacted]";
+			end = text.length;
 		} else if (match[2]) {
 			end = jsonValueEnd(text, match.index);
 			output += redactJson(text.slice(match.index, end));

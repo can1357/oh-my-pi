@@ -780,7 +780,7 @@ export class ExtensionRunner {
 			for (const event of pending) {
 				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
 					logger.warn("credential_disabled handler threw during initialize flush", {
-						provider: redactUrlSecrets(event.provider),
+						provider: redactSecrets(redactUrlSecrets(event.provider)),
 						error: redactSecrets(error instanceof Error ? error.message : String(error)),
 					});
 				});

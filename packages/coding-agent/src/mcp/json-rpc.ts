@@ -4,7 +4,8 @@
  * Lightweight utilities for calling MCP servers directly via HTTP
  * without maintaining persistent connections.
  */
-import { logger, redactUrlSecrets } from "@oh-my-pi/pi-utils";
+import { logger, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
+import { serializeMCPDiagnosticData } from "./errors";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
@@ -82,8 +83,12 @@ export async function callMCP<T = unknown>(
 	});
 
 	if (!response.ok) {
-		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
-		logger.error(errorMsg, { url: redactUrlSecrets(url), method, params });
+		const errorMsg = `MCP request failed: ${response.status} ${redactSecrets(response.statusText)}`;
+		logger.error(errorMsg, {
+			url: redactUrlSecrets(url),
+			method: redactSecrets(method),
+			params: serializeMCPDiagnosticData(params),
+		});
 		throw new Error(errorMsg);
 	}
 
@@ -93,8 +98,8 @@ export async function callMCP<T = unknown>(
 	if (!result) {
 		logger.error("Failed to parse MCP response", {
 			url: redactUrlSecrets(url),
-			method,
-			responseText: text.slice(0, 500),
+			method: redactSecrets(method),
+			responseText: redactSecrets(text).slice(0, 500),
 		});
 		throw new Error("Failed to parse MCP response");
 	}
