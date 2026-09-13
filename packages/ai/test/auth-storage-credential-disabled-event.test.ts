@@ -525,6 +525,23 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				}),
 			]);
 		});
+
+		test("a broker-issued disable with a deliberate cause deletes the row but fires no event", async () => {
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await authStorage.set("anthropic", [expiredOAuth()]);
+			// A remote client's own `remove()` reaches the broker host as `deleted by user`.
+			expect(authStorage.disableCredentialById(1, "deleted by user")).toBe(true);
+
+			expect(authStorage.exportSnapshot().credentials).toEqual([]);
+			expect(events).toEqual([]);
+			expect(warnSpy.mock.calls.filter(([message]) => message === "Auth credential disabled")).toEqual([]);
+		});
 	});
 
 	describe("listActionableDisabledCredentials", () => {

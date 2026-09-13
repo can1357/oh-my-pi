@@ -96,51 +96,82 @@ export function escapeXmlAttribute(input: string): string {
 }
 
 /**
- * Names whose values are secrets wherever they appear — query parameters,
- * JSON fields, `name=value` pairs in an error body. Substring match, so
- * compound names (`client_secret`, `exaApiKey`, `refresh_token`,
- * `signingSecret`) qualify; the short words `auth` and `key` match only as
- * whole words so `OAuthError: invalid_grant` and `keyword` keep their values.
- * The one classification every redactor shares.
+ * Names whose values are secrets where names are structured — query,
+ * fragment, and userinfo parameters of a URL, JSON keys. Substring match, so
+ * `authCode`, `oauth_code`, `exaApiKey`, `client_secret`, and `refresh_token`
+ * all qualify; over-matching is the safe direction there. The one
+ * classification every redactor shares.
  */
-export const SECRET_NAME =
-	/(?:\bauth\b|authorization|bearer|cookie|secret|passw(?:or)?d|pwd|token|credential|api[-_]?key|private[-_]?key|access[-_]?key|\bkey\b|signature)/i;
+export const SECRET_NAME = /auth|cookie|secret|passw(?:or)?d|pwd|token|credential|key|signature/i;
 
-const SECRET_NAME_SOURCE = SECRET_NAME.source;
+/**
+ * In prose only a name that ends in a secret word right before `:` or `=`
+ * counts, so `OAuthError: invalid_grant`, `tokens: 500`, and
+ * `authorized: yes` keep their values while `refresh_token:`, `client_secret=`,
+ * `"apiKey":`, and `authCode=` lose theirs.
+ */
+const SECRET_NAME_IN_PROSE =
+	/(?:authorization|bearer|cookie|secret|passw(?:or)?d|pwd|token|credential|api[-_]?key|private[-_]?key|access[-_]?key|signature|\bauth(?:[-_]?(?:code|token|key))?)/i;
+
 /** `Bearer …` / `Basic …` authorization values. */
 const AUTHORIZATION_VALUE = /\b(Bearer|Basic)\s+[^\s,;"']+/gi;
-/** `name: value`, `name=value`, `"name":"value"` where the name is a secret name; an authorization scheme word is kept. */
+/** `name: value`, `name=value`, `"name":"value"` in prose; an authorization scheme word is kept. */
 const NAMED_SECRET_VALUE = new RegExp(
-	`([\\w-]*${SECRET_NAME_SOURCE}[\\w-]*["']?\\s*[:=]\\s*["']?)(?!(?:Bearer|Basic)\\b)[^\\s,;}"']+`,
+	`([\\w-]*${SECRET_NAME_IN_PROSE.source}["']?\\s*[:=]\\s*["']?)(?!(?:Bearer|Basic)\\b)[^\\s,;}"']+`,
 	"gi",
 );
 /** A JWT: three base64url segments. */
 const JWT_VALUE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+/** A URL wherever it sits in text; ends at whitespace or a quote/bracket. */
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+/** Sentence punctuation that follows a URL in prose is not part of it. */
+const URL_TRAILING_PUNCTUATION = /[.,;:!?)\]]+$/;
+const URL_USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
+
+/** `name=value&…` with every secret-named value replaced; other pairs verbatim, never re-encoded. */
+function redactPairs(pairs: string): string {
+	return pairs
+		.split("&")
+		.map(pair => {
+			const separator = pair.indexOf("=");
+			if (separator === -1) return pair;
+			const name = pair.slice(0, separator);
+			return SECRET_NAME.test(name) ? `${name}=[redacted]` : pair;
+		})
+		.join("&");
+}
+
+function redactUrl(url: string): string {
+	const withoutUserinfo = url.replace(URL_USERINFO, "$1[redacted]@");
+	const fragmentStart = withoutUserinfo.indexOf("#");
+	const head = fragmentStart === -1 ? withoutUserinfo : withoutUserinfo.slice(0, fragmentStart);
+	const fragment = fragmentStart === -1 ? undefined : withoutUserinfo.slice(fragmentStart + 1);
+	const queryStart = head.indexOf("?");
+	const base = queryStart === -1 ? head : head.slice(0, queryStart);
+	const query = queryStart === -1 ? undefined : head.slice(queryStart + 1);
+	return `${base}${query === undefined ? "" : `?${redactPairs(query)}`}${fragment === undefined ? "" : `#${redactPairs(fragment)}`}`;
+}
 
 /**
- * Redact credential-bearing query parameters in a URL, or in any identifier
- * that embeds one — a managed MCP credential id keeps its server URL's
- * complete query string — so the text can be logged or shown. Everything
- * outside the query is left verbatim; the placeholder stays readable rather
- * than percent-encoded.
+ * Redact the credential-bearing parts of every URL in `text` — userinfo,
+ * query and fragment parameters whose name is a {@link SECRET_NAME} — so the
+ * text can be logged or shown. Works on a bare URL, on an identifier that
+ * embeds one (a managed MCP credential id keeps its server URL's complete
+ * query string), and on prose around a URL: nothing outside a URL is touched,
+ * and inside one only the redacted values change — no re-encoding.
  */
 export function redactUrlSecrets(text: string): string {
-	const queryStart = text.indexOf("?");
-	if (queryStart === -1) return text;
-	const fragmentStart = text.indexOf("#", queryStart);
-	const params = new URLSearchParams(text.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart));
-	for (const name of params.keys()) {
-		if (SECRET_NAME.test(name)) params.set(name, "[redacted]");
-	}
-	const query = params.toString().replaceAll("%5Bredacted%5D", "[redacted]");
-	return `${text.slice(0, queryStart + 1)}${query}${fragmentStart === -1 ? "" : text.slice(fragmentStart)}`;
+	return text.replace(URL_IN_TEXT, match => {
+		const trailing = URL_TRAILING_PUNCTUATION.exec(match)?.[0] ?? "";
+		return `${redactUrl(trailing ? match.slice(0, -trailing.length) : match)}${trailing}`;
+	});
 }
 
 /**
  * Redact credential-shaped values in free text before it is logged or shown:
- * authorization values, query parameters and `name: value` / `name=value` /
- * `"name":"value"` pairs whose name is a {@link SECRET_NAME}, and JWTs. For an
- * error body or a credential-disable cause that may echo what was submitted.
+ * every URL's secrets, authorization values, `name: value` / `name=value` /
+ * `"name":"value"` pairs for a secret name, and JWTs. For an error body or a
+ * credential-disable cause that may echo what was submitted.
  */
 export function redactSecrets(text: string): string {
 	return redactUrlSecrets(text)

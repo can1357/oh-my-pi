@@ -54,22 +54,41 @@ describe("sanitizeText", () => {
 
 describe("redactUrlSecrets", () => {
 	it("redacts credential-bearing query params but keeps the rest verbatim", () => {
-		expect(redactUrlSecrets("https://mcp.exa.ai/mcp?exaApiKey=sk-secret-123&foo=bar#frag")).toBe(
-			"https://mcp.exa.ai/mcp?exaApiKey=[redacted]&foo=bar#frag",
+		expect(redactUrlSecrets("https://mcp.exa.ai/mcp?exaApiKey=sk-secret-123&foo=bar%20baz#frag")).toBe(
+			"https://mcp.exa.ai/mcp?exaApiKey=[redacted]&foo=bar%20baz#frag",
 		);
 		expect(redactUrlSecrets("https://mcp.exa.ai/mcp")).toBe("https://mcp.exa.ai/mcp");
 	});
 
-	it("redacts inside identifiers that embed a URL, which the URL parser rejects", () => {
+	it("redacts inside identifiers that embed a URL, and leaves text without one alone", () => {
 		expect(redactUrlSecrets("mcp_oauth:profile:default:https://host/mcp?ref=1&token=zzz")).toBe(
 			"mcp_oauth:profile:default:https://host/mcp?ref=1&token=[redacted]",
 		);
-		expect(redactUrlSecrets("not a url?apiKey=zzz")).toBe("not a url?apiKey=[redacted]");
+		expect(redactUrlSecrets("anthropic")).toBe("anthropic");
 	});
 
-	it("classifies password, credential, signature, and bare key/auth parameters as secrets", () => {
-		expect(redactUrlSecrets("https://h/mcp?password=p&credential=c&signature=s&key=k&auth=a&project_ref=keep")).toBe(
-			"https://h/mcp?password=[redacted]&credential=[redacted]&signature=[redacted]&key=[redacted]&auth=[redacted]&project_ref=keep",
+	it("classifies auth-prefixed, password, credential, signature, and bare key parameters as secrets", () => {
+		expect(
+			redactUrlSecrets(
+				"https://h/mcp?authCode=a&oauth_code=o&password=p&credential=c&signature=s&key=k&project_ref=keep",
+			),
+		).toBe(
+			"https://h/mcp?authCode=[redacted]&oauth_code=[redacted]&password=[redacted]&credential=[redacted]&signature=[redacted]&key=[redacted]&project_ref=keep",
+		);
+	});
+
+	it("redacts userinfo and fragment parameters", () => {
+		expect(redactUrlSecrets("https://user:hunter2@host/mcp#access_token=abc&state=keep")).toBe(
+			"https://[redacted]@host/mcp#access_token=[redacted]&state=keep",
+		);
+	});
+
+	it("touches only the URL inside prose and keeps trailing punctuation outside it", () => {
+		expect(redactUrlSecrets("request to https://host/token?flow=refresh returned invalid_grant")).toBe(
+			"request to https://host/token?flow=refresh returned invalid_grant",
+		);
+		expect(redactUrlSecrets("see https://host/x?apiKey=1, then retry.")).toBe(
+			"see https://host/x?apiKey=[redacted], then retry.",
 		);
 	});
 });
@@ -86,13 +105,17 @@ describe("redactSecrets", () => {
 	});
 
 	it("redacts authorization values, name=value pairs, and JWTs in free text", () => {
-		expect(redactSecrets("Authorization: Bearer abc.def; client_secret=s3cr3t; password: hunter2")).toBe(
-			"Authorization: Bearer [redacted]; client_secret=[redacted]; password: [redacted]",
+		expect(redactSecrets("Authorization: Bearer abc.def; client_secret=s3cr3t; password: hunter2; authCode=q")).toBe(
+			"Authorization: Bearer [redacted]; client_secret=[redacted]; password: [redacted]; authCode=[redacted]",
 		);
 		const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
 		expect(redactSecrets(`token ${jwt} expired`)).toBe("token [redacted] expired");
-		expect(redactSecrets("OAuthError: invalid_grant; refresh token expired")).toBe(
-			"OAuthError: invalid_grant; refresh token expired",
+		expect(redactSecrets("not a url?apiKey=zzz")).toBe("not a url?apiKey=[redacted]");
+	});
+
+	it("keeps prose whose names merely contain a secret word", () => {
+		expect(redactSecrets("OAuthError: invalid_grant; refresh token expired; tokens: 500; authorized: yes")).toBe(
+			"OAuthError: invalid_grant; refresh token expired; tokens: 500; authorized: yes",
 		);
 	});
 });

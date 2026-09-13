@@ -7398,9 +7398,12 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Disable the credential with the given id and emit a
-	 * {@link CredentialDisabledEvent}. Used by the auth-broker server to honour
-	 * `POST /v1/credential/:id/disable`. Returns `false` when no such row exists.
+	 * Disable the credential with the given id. Used by the auth-broker server
+	 * to honour `POST /v1/credential/:id/disable`. Returns `false` when no such
+	 * row exists. A {@link CredentialDisabledEvent} is emitted only for an
+	 * automatic cause: a remote client's own `remove()` arrives here as
+	 * `deleted by user`, and the event contract excludes user-initiated
+	 * removals just as the local path does.
 	 */
 	disableCredentialById(id: number, disabledCause: string): boolean {
 		for (const [provider, entries] of this.#data) {
@@ -7411,7 +7414,9 @@ export class AuthStorage {
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.#setStoredCredentials(provider, next);
 			this.#resetProviderAssignments(provider);
-			this.#emitCredentialDisabled(credentialDisabledEvent(provider, id, target.credential, disabledCause));
+			if (isAutomaticDisableCause(disabledCause)) {
+				this.#emitCredentialDisabled(credentialDisabledEvent(provider, id, target.credential, disabledCause));
+			}
 			return true;
 		}
 		return false;
