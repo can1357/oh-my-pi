@@ -572,6 +572,7 @@ export interface StatusLinePreviewSettings {
 	sessionAccent?: boolean;
 	transparent?: boolean;
 	compactThinkingLevel?: boolean;
+	segmentOptions?: Record<string, unknown>;
 }
 
 export interface SettingsCallbacks {
@@ -1399,6 +1400,9 @@ export class SettingsSelectorComponent implements Component {
 			separator: settings.get("statusLine.separator"),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
+			segmentOptions: settings.get("statusLine.segmentOptions"),
+			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			contextLine: settings.get("statusLine.contextLine"),
 		};
 		this.callbacks.onStatusLinePreview?.(statusLineSettings);
 	}

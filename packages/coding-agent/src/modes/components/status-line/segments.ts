@@ -3,7 +3,14 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
 import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import {
+	formatDuration,
+	formatNumber,
+	getActiveProfile,
+	getProjectDir,
+	pathIsWithin,
+	relativePathWithinRoot,
+} from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
@@ -94,6 +101,14 @@ function formatAdvisorSpend(amount: number, usingSubscription: boolean, uiTheme:
 		return `${icon} ${spend}`;
 	}
 	return `${spend} (adv)`;
+}
+
+export function formatCompactContextPercent(percent: number | null | undefined): string {
+	if (percent === null || percent === undefined) return "?";
+	if (percent === 0) return "0%";
+	if (percent > 0 && percent < 1) return `${percent.toFixed(1)}%`;
+	if (Number.isInteger(percent)) return `${percent}%`;
+	return `${percent.toFixed(1)}%`;
 }
 
 function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
@@ -440,6 +455,18 @@ const pathSegment: StatusLineSegment = {
 	},
 };
 
+const profileSegment: StatusLineSegment = {
+	id: "profile",
+	render(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return { content: "", visible: false };
+
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		const content = `p:${label}`;
+		return { content: theme.fg("accent", content), visible: true };
+	},
+};
+
 const gitSegment: StatusLineSegment = {
 	id: "git",
 	render(ctx) {
@@ -537,10 +564,27 @@ const tokenTotalSegment: StatusLineSegment = {
 		// Excludes cacheRead: that field re-reads the full cached context every
 		// turn, making the cumulative sum N×context_size. Orchestration cache read
 		// follows the same rule; orchestration input/output remain in the total so
-		// provider-side service work is preserved without labeling it prompt input.
+		// provider-side service work is preserved (surfaced under its own orch:
+		// label in the breakdown rather than folded into in:/out:).
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return { content: "", visible: false };
+
+		if (ctx.options.token_total?.breakdown === true) {
+			// Keep orchestration out of the in:/out: labels: SessionManager and
+			// /usage track it separately from prompt input/output, so folding it in
+			// would inflate the labeled traffic. Surface it under its own orch:
+			// label instead, preserving it in the visible total.
+			const inTotal = input + cacheWrite;
+			const outTotal = output;
+			const orchTotal = orchestrationInput + orchestrationOutput;
+			const parts: string[] = [];
+			if (inTotal > 0) parts.push(`in:${statusValue(ctx, formatNumber(inTotal))}`);
+			if (outTotal > 0) parts.push(`out:${statusValue(ctx, formatNumber(outTotal))}`);
+			if (orchTotal > 0) parts.push(`orch:${statusValue(ctx, formatNumber(orchTotal))}`);
+			if (parts.length === 0) return { content: "", visible: false };
+			return { content: theme.fg("statusLineSpend", parts.join(" ")), visible: true };
+		}
 
 		const content = withIcon(theme.icon.tokens, statusValue(ctx, formatNumber(total)));
 		return { content: theme.fg("statusLineSpend", content), visible: true };
@@ -631,11 +675,16 @@ const contextPctSegment: StatusLineSegment = {
 						: theme.fg(color, theme.icon.auto)
 			}`;
 		}
-		const text = theme.fg(
-			color,
-			ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : formatContextUsage(pct, window, ctx.contextTokens),
-		);
-		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const compact = ctx.options.context_pct?.compact === true;
+		const display = ctx.startupPlaceholder
+			? compact
+				? `ctx:${STARTUP_PLACEHOLDER}`
+				: STARTUP_PLACEHOLDER
+			: compact
+				? `ctx:${formatCompactContextPercent(pct)}`
+				: formatContextUsage(pct, window, ctx.contextTokens);
+		const text = theme.fg(color, display);
+		const content = compact ? `${text}${autoIcon}` : withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };
 	},
@@ -929,6 +978,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	status: statusSegment,
 	model: modelSegment,
 	mode: modeSegment,
+	profile: profileSegment,
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,

@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import type { VcsLinkedWorktree, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -37,7 +37,7 @@ import {
 } from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { getPreset } from "./presets";
-import { renderSegment, type SegmentContext } from "./segments";
+import { formatCompactContextPercent, renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
@@ -271,7 +271,16 @@ interface WorktreeContext {
  * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
  */
 function resolveWorktreeContext(cwd: string): WorktreeContext | null {
-	const worktree = vcs.git(cwd)?.linkedWorktree();
+	let worktree: VcsLinkedWorktree | null | undefined;
+	try {
+		worktree = vcs.git(cwd)?.linkedWorktree();
+	} catch {
+		// The linked-worktree decoration is optional chrome. If the current
+		// process is still running against an older pi-natives surface that lacks
+		// the newer VCS entrypoints, fail closed and keep the rest of the status
+		// line rendering instead of turning path/git segments into a hard crash.
+		return null;
+	}
 	if (!worktree) return null;
 	const base = path.basename(worktree.primaryRoot);
 	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
@@ -338,8 +347,15 @@ function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 
-function embeddedContextGaugeMinWidth(percent: number, contextWindow: number): number {
-	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
+function embeddedContextGaugeMinWidth(
+	percent: number,
+	contextWindow: number,
+	compact: boolean,
+	showWindow: boolean,
+): number {
+	const percentLabel = compact ? `ctx:${formatCompactContextPercent(percent)}` : formatEmbeddedContextPercent(percent);
+	if (!showWindow) return percentLabel.length;
+	return percentLabel.length + formatNumber(contextWindow).length + 4;
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -508,6 +524,7 @@ export class StatusLineComponent implements Component {
 
 	constructor(private session: AgentSession) {
 		this.#settings = {
+			gitEnabled: settings.get("git.enabled"),
 			preset: settings.get("statusLine.preset"),
 			leftSegments: settings.get("statusLine.leftSegments"),
 			rightSegments: settings.get("statusLine.rightSegments"),
@@ -522,7 +539,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	#gitEnabled(): boolean {
-		return settings.get("git.enabled");
+		return this.#settings.gitEnabled ?? true;
 	}
 	#hasGitBackedSegment(): boolean {
 		const effectiveSettings = this.#resolveSettings();
@@ -537,10 +554,23 @@ export class StatusLineComponent implements Component {
 			return this.#activeRepoCache;
 		}
 
-		const projectRepository = vcs.repo(projectDir);
+		let projectRepository: VcsRepo | null = null;
+		try {
+			projectRepository = vcs.repo(projectDir);
+		} catch {
+			// Repository chrome is optional. Older native addons and partial test
+			// stubs may not expose discovery yet, so keep non-VCS segments usable.
+		}
 		const activeRepo = projectRepository ? null : resolveActiveRepoContextSync(projectDir);
 		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
-		const repository = projectRepository ?? (activeRepo ? vcs.repo(effectiveGitCwd) : null);
+		let repository = projectRepository;
+		if (!repository && activeRepo) {
+			try {
+				repository = vcs.repo(effectiveGitCwd);
+			} catch {
+				repository = null;
+			}
+		}
 		// Only collapse the bare-cwd case: a single-direct-child-repo context
 		// (activeRepo set) renders `<parent> ↳ <child>`, which we leave intact.
 		const worktree = activeRepo ? null : resolveWorktreeContext(effectiveGitCwd);
@@ -559,7 +589,11 @@ export class StatusLineComponent implements Component {
 		if (cache.repository) return cache.repository;
 		const now = Date.now();
 		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
-		cache.repository = vcs.repo(cache.effectiveGitCwd);
+		try {
+			cache.repository = vcs.repo(cache.effectiveGitCwd);
+		} catch {
+			cache.repository = null;
+		}
 		cache.repositoryCheckedAt = now;
 		return cache.repository;
 	}
@@ -598,7 +632,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
-		this.#settings = settings;
+		this.#settings = { gitEnabled: this.#settings.gitEnabled, ...settings };
 		this.#effectiveSettings = undefined;
 		if (this.#onBranchChange) this.#setupGitWatcher();
 		this.#syncPricingTimer();
@@ -1179,9 +1213,7 @@ export class StatusLineComponent implements Component {
 				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
-					if (this.#onBranchChange) {
-						this.#onBranchChange();
-					}
+					this.#onBranchChange?.();
 				}
 			})();
 		}
@@ -1334,9 +1366,7 @@ export class StatusLineComponent implements Component {
 				setCachedPr(null);
 			} finally {
 				this.#prLookupInFlight = false;
-				if (!this.#disposed && this.#onBranchChange) {
-					this.#onBranchChange();
-				}
+				if (!this.#disposed) this.#onBranchChange?.();
 			}
 		})();
 
@@ -2089,6 +2119,13 @@ export class StatusLineComponent implements Component {
 			ctx.contextWindow > 0 &&
 			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
 			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
+		const embedCompactContext =
+			embedContext &&
+			ctx.options.context_pct?.compact === true &&
+			(leftSegIds.includes("context_pct") || rightSegIds.includes("context_pct"));
+		const showEmbeddedContextWindow =
+			embedContext &&
+			(!embedCompactContext || leftSegIds.includes("context_total") || rightSegIds.includes("context_total"));
 		if (embedContext) {
 			removeContextSegments(leftParts, leftSegIds);
 			removeContextSegments(rightParts, rightSegIds);
@@ -2142,20 +2179,36 @@ export class StatusLineComponent implements Component {
 		// handling, so the gauge must reserve enough room for both labels. Without
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
+		// Startup still knows the live usage values. Reserve those label widths
+		// while painting placeholders so the ordinary groups do not jump when the
+		// first live status line replaces `ctx:…` / `…`.
 		const embeddedContextWidth = embedContext
-			? ctx.startupPlaceholder
-				? "…%".length + "…".length + 4
-				: embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
+			? embeddedContextGaugeMinWidth(
+					ctx.contextPercent ?? 0,
+					ctx.contextWindow,
+					embedCompactContext,
+					showEmbeddedContextWindow,
+				)
 			: 0;
-		const minimumGapWidth = (): number => {
-			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
-			// If the labels cannot coexist with the last surviving segment, fall
-			// back to the original one-cell gauge instead of dropping the entire
-			// status line. At this width the labels cannot render either way.
-			if (left.length + right.length === 1 && leftWidth + rightWidth + embeddedContextWidth > topFillWidth) {
-				return 1;
-			}
-			return embeddedContextWidth;
+		const embeddedContextPercentWidth = embedContext
+			? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow, embedCompactContext, false)
+			: 0;
+		// A default (non-compact) gauge may fall back to its short percentage-only
+		// label when both context labels cannot coexist with the final ordinary
+		// segment. Do not drop that last segment merely to satisfy the larger
+		// two-label reservation; the remaining gap can still show the percentage.
+		const minimumGapWidth = () => {
+			const ordinaryWidth = leftWidth + rightWidth;
+			const ordinaryCount = left.length + right.length;
+			const embeddedPercentCannotFit = embeddedContextPercentWidth > topFillWidth;
+			const preserveLastOrdinarySegment =
+				ordinaryCount === 1 &&
+				ordinaryWidth + embeddedContextWidth > topFillWidth &&
+				(!embedCompactContext || embeddedContextWidth > topFillWidth) &&
+				(ordinaryWidth + embeddedContextPercentWidth <= topFillWidth || embeddedPercentCannotFit);
+			if (!preserveLastOrdinarySegment && embeddedContextWidth > 0) return embeddedContextWidth;
+			if (preserveLastOrdinarySegment) return embeddedPercentCannotFit ? 0 : 1;
+			return left.length > 0 && right.length > 0 ? 1 : 0;
 		};
 		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
@@ -2258,13 +2311,23 @@ export class StatusLineComponent implements Component {
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
+		if (!leftGroup && !rightGroup) {
+			if (!embedContext || topFillWidth === 0) return "";
+			return this.#buildContextGaugeFill(
+				topFillWidth,
+				ctx,
+				effectiveSettings,
+				embedContext,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			);
+		}
 
 		if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
 			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
 		}
 
-		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+		const gapWidth = Math.max(0, topFillWidth - leftWidth - rightWidth);
 		if (plain) {
 			// Standalone composers: no gauge line between the groups, just air.
 			return leftGroup + padding(gapWidth) + rightGroup;
@@ -2273,7 +2336,18 @@ export class StatusLineComponent implements Component {
 		// `session_name`, emptying the default preset's right group) the gauge
 		// runs to the border edge instead of disappearing, so embedded context
 		// labels don't fall back to a context chip until the session is titled.
-		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+		return (
+			leftGroup +
+			this.#buildContextGaugeFill(
+				gapWidth,
+				ctx,
+				effectiveSettings,
+				embedContext,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			) +
+			rightGroup
+		);
 	}
 
 	/**
@@ -2291,6 +2365,8 @@ export class StatusLineComponent implements Component {
 		ctx: SegmentContext,
 		effectiveSettings: EffectiveStatusLineSettings,
 		embedContext: boolean,
+		embedCompactContext: boolean,
+		showEmbeddedContextWindow: boolean,
 	): string {
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
@@ -2307,28 +2383,52 @@ export class StatusLineComponent implements Component {
 		let percentLabel = "";
 		let windowLabel = "";
 		let percentStart = -1;
+		let percentPlacementWidth = 0;
 		let windowStart = -1;
+		let renderWindowLabel = false;
 		let scaleWidth = gapWidth;
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
 		const percentOverflow = pct > 100;
 		if (embedContext) {
-			const candidatePercent = ctx.startupPlaceholder
-				? "…%"
+			// The live label widths drive every fit decision below. Startup paints
+			// shortened placeholders (`ctx:…` / `…`), but sizing the fit off those
+			// narrower strings would let a gap that only fits the placeholders show
+			// a window label at startup that the first live frame then drops (or the
+			// reverse). Reserve/decide on the live widths so the label set is stable
+			// across the placeholder→live transition, and paint the placeholder text.
+			const livePercent = embedCompactContext
+				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
 				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = ctx.startupPlaceholder ? "…" : formatNumber(ctx.contextWindow);
-			const minimumLabelWidth = candidatePercent.length + candidateWindow.length + 4;
+			const liveWindow = showEmbeddedContextWindow ? formatNumber(ctx.contextWindow) : "";
+			const candidatePercent = ctx.startupPlaceholder ? (embedCompactContext ? "ctx:…" : "…%") : livePercent;
+			const candidateWindow = showEmbeddedContextWindow ? (ctx.startupPlaceholder ? "…" : liveWindow) : "";
+			const minimumLabelWidth = showEmbeddedContextWindow
+				? livePercent.length + liveWindow.length + 4
+				: livePercent.length;
 			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
-				windowLabel = candidateWindow;
-				if (percentOverflow) {
-					percentStart = gapWidth - percentLabel.length;
-					windowStart = percentStart - 1 - windowLabel.length;
+				percentPlacementWidth = livePercent.length;
+				if (!showEmbeddedContextWindow) {
+					if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 				} else {
-					windowStart = gapWidth - windowLabel.length - 1;
+					renderWindowLabel = true;
+					windowLabel = candidateWindow;
+					if (percentOverflow) {
+						percentStart = gapWidth - percentPlacementWidth;
+						windowStart = percentStart - 1 - liveWindow.length;
+					} else {
+						windowStart = gapWidth - liveWindow.length - 1;
+					}
+					scaleWidth = windowStart;
 				}
-				scaleWidth = windowStart;
+			} else if (gapWidth >= livePercent.length) {
+				// The compact percentage is the primary readout. Keep it when an
+				// explicitly configured context total cannot share the narrow gauge.
+				percentLabel = candidatePercent;
+				percentPlacementWidth = livePercent.length;
+				if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 			}
 		}
 
@@ -2355,15 +2455,18 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (percentLabel && percentStart < 0) {
-			const maxStart = scaleWidth - percentLabel.length - 1;
-			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
+			const minStart = renderWindowLabel ? 1 : 0;
+			const maxStart = renderWindowLabel
+				? scaleWidth - percentPlacementWidth - 1
+				: scaleWidth - percentPlacementWidth;
+			const preferredStart = Math.min(maxStart, Math.max(minStart, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
-				const end = start + percentLabel.length;
+				const end = start + percentPlacementWidth;
 				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
 			};
 			for (let distance = 0; distance <= maxStart; distance++) {
 				const left = preferredStart - distance;
-				if (left >= 1 && !overlapsBoundary(left)) {
+				if (left >= minStart && !overlapsBoundary(left)) {
 					percentStart = left;
 					break;
 				}
@@ -2373,6 +2476,14 @@ export class StatusLineComponent implements Component {
 					percentStart = right;
 					break;
 				}
+			}
+			// Every candidate slot collides with a boundary marker (narrow gauge,
+			// marker sits in the only legal range). The context percentage is the
+			// primary readout, so keep it visible and let it overwrite the marker
+			// cell — the render loop already draws the percent label ahead of the
+			// speculation/threshold glyphs — rather than showing no percentage.
+			if (percentStart < 0 && maxStart >= minStart) {
+				percentStart = preferredStart;
 			}
 		}
 
@@ -2389,9 +2500,10 @@ export class StatusLineComponent implements Component {
 		for (let i = 0; i < gapWidth; i++) {
 			let color = i < usedCount ? usedColor : unusedColor;
 			let glyph = horizontal;
-			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) {
+			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentPlacementWidth) {
 				color = percentOverflow ? overflowColor : usedColor;
-				glyph = percentLabel.charAt(i - percentStart);
+				const labelGlyph = percentLabel.charAt(i - percentStart);
+				if (labelGlyph) glyph = labelGlyph;
 			} else if (i === thresholdIdx) {
 				color = thresholdColor;
 				glyph = thresholdGlyph;

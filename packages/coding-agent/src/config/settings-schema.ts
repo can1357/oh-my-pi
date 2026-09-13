@@ -243,6 +243,7 @@ export type StatusLineSegmentId =
 	| "status"
 	| "model"
 	| "mode"
+	| "profile"
 	| "path"
 	| "git"
 	| "pr"
@@ -6497,6 +6498,9 @@ export interface StatusLineSettings {
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
+	sessionAccent?: boolean;
+	transparent?: boolean;
+	compactThinkingLevel?: boolean;
 }
 
 export interface ThinkingBudgetsSettings {

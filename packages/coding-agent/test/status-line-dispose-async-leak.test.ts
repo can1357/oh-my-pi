@@ -13,7 +13,7 @@
  * `VcsGitRepo.defaultBranch` (the same entry point `#isDefaultBranch` awaits) and
  * asserting `#onBranchChange` never fires post-dispose.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
@@ -21,23 +21,23 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests } from "@oh-my-pi/pi-utils";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 import { StatusLineTestComponents } from "./helpers/status-line";
 
-const originalProjectDir = getProjectDir();
+const originalOmpProfile = process.env.OMP_PROFILE;
+const originalPiProfile = process.env.PI_PROFILE;
+let settingsState: SettingsTestState | undefined;
 
-beforeAll(async () => {
-	resetSettingsForTest();
+beforeEach(async () => {
+	settingsState = beginSettingsTest();
 	await Settings.init({ inMemory: true });
 	await initTheme();
-});
-
-afterAll(() => {
-	resetSettingsForTest();
-	setProjectDir(originalProjectDir);
-});
-
-beforeEach(() => {
 	headState = fakeRefHead;
 	defaultBranchMock = vi.fn(async () => null);
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
@@ -57,7 +57,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	vi.restoreAllMocks();
+	restoreSettingsTestState(settingsState);
+	settingsState = undefined;
+	// Profile is process-wide; restore the raw environment after settings-state
+	// cleanup so `setAgentDir()` inside the helper does not leave subsequent
+	// files running under the default profile (P1 review: restore active profile).
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	__resetDirsFromEnvForTests();
 });
 
 function makeSession() {
@@ -176,6 +183,50 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 
 		// Dispose before the resolved-promise microtask gets a chance to run.
 		component.dispose();
+
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onBranchChange).not.toHaveBeenCalled();
+	});
+
+	it("suppresses stale PR lookup callbacks after dispose()", async () => {
+		defaultBranchMock.mockResolvedValue("main");
+		headState = {
+			kind: "ref",
+			branch: "feature/status-line",
+			refName: "refs/heads/feature/status-line",
+			commit: undefined,
+		};
+		const ghLookup = Promise.withResolvers<{
+			exitCode: number;
+			stdout: string;
+			stderr: string;
+		}>();
+		const githubRunMock = vi.spyOn(github, "run").mockReturnValue(ghLookup.promise);
+		const ghResult = {
+			exitCode: 0,
+			stdout: JSON.stringify({
+				number: 9314,
+				url: "https://github.com/can1357/oh-my-pi/pull/9314",
+			}),
+			stderr: "",
+		};
+
+		const onBranchChange = vi.fn(() => {
+			throw new Error("disposed PR lookup invoked its stale callback");
+		});
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings({
+			...gitSegmentSettings,
+			leftSegments: ["git", "pr"],
+		});
+		component.watchBranch(onBranchChange);
+
+		component.getTopBorder(80);
+		expect(githubRunMock).toHaveBeenCalledTimes(1);
+		component.dispose();
+		ghLookup.resolve(ghResult);
 
 		await Promise.resolve();
 		await Promise.resolve();
