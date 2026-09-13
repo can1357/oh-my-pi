@@ -9,7 +9,7 @@
  * and telling guests goodbye — before a replacement room for the new session
  * is started, so a card that names generation N can never reach session N+1.
  */
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
 import type { InteractiveModeContext } from "../modes/types";
@@ -39,7 +39,8 @@ export class CollabController {
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
-		this.instanceId = randomUUID();
+		// 64 random bits: unique per process on one machine, short enough for `omp collab link <id>` and socket paths.
+		this.instanceId = randomBytes(8).toString("hex");
 	}
 
 	/** The live room, if any (a room that ended on its own is reported as absent). */

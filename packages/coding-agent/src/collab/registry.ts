@@ -106,6 +106,11 @@ export interface CollabPublishOptions extends CollabRegistryOptions {
 	 * replacement publication reuses the same entry.
 	 */
 	instanceId?: string;
+	/**
+	 * Base for the short socket directory used when the canonical socket path
+	 * would overflow `sun_path`. Defaults to `/tmp`; tests point it elsewhere.
+	 */
+	socketFallbackBase?: string;
 }
 
 export interface CollabListOptions extends CollabRegistryOptions {
@@ -336,6 +341,40 @@ async function ensurePrivateDir(dir: string): Promise<void> {
 	if (stat && (stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
 }
 
+/** `sun_path` capacity: 104 bytes on macOS, 108 elsewhere; the kernel rejects paths at or past it. */
+const SUN_PATH_LIMIT = process.platform === "darwin" ? 104 : 108;
+const DEFAULT_SOCKET_FALLBACK_BASE = "/tmp";
+
+/**
+ * Short owner-private socket directory for registries whose canonical path
+ * would overflow `sun_path`: the relocation the SSH control sockets use
+ * (#9070), keyed by uid and the canonical registry directory.
+ */
+function socketFallbackDir(dir: string, base: string): string {
+	const key = new Bun.CryptoHasher("sha256")
+		.update(String(process.getuid?.() ?? 0))
+		.update("\0")
+		.update(dir)
+		.digest("hex")
+		.slice(0, 20);
+	return path.join(base, `omp-collab-${key}`);
+}
+
+/**
+ * Where this publication's Unix socket lives. The canonical location is next
+ * to the metadata, but a deep config root (long home directory, nested
+ * `PI_CONFIG_DIR`) can push that past `sun_path`, and a host that cannot bind
+ * would silently stay absent from `omp collab list`. Listers never guess the
+ * relocated path; the metadata records the endpoint.
+ */
+async function resolveSocketEndpoint(dir: string, instanceId: string, fallbackBase: string): Promise<string> {
+	const canonical = path.join(dir, `${instanceId}.sock`);
+	if (Buffer.byteLength(canonical) < SUN_PATH_LIMIT) return canonical;
+	const shortDir = socketFallbackDir(dir, fallbackBase);
+	await ensurePrivateDir(shortDir);
+	return path.join(shortDir, `${instanceId}.sock`);
+}
+
 /**
  * Publish a live Collab host to the local registry.
  *
@@ -358,7 +397,9 @@ export async function publishCollabHost(
 	if (!INSTANCE_ID_PATTERN.test(instanceId)) throw new Error("invalid collab registry instance id");
 	const token = crypto.randomBytes(32).toString("hex");
 	const endpoint =
-		process.platform === "win32" ? `\\\\.\\pipe\\omp-collab-${instanceId}` : path.join(dir, `${instanceId}.sock`);
+		process.platform === "win32"
+			? `\\\\.\\pipe\\omp-collab-${instanceId}`
+			: await resolveSocketEndpoint(dir, instanceId, options?.socketFallbackBase ?? DEFAULT_SOCKET_FALLBACK_BASE);
 	const metaPath = path.join(dir, `${instanceId}.json`);
 
 	const liveSockets = new Set<net.Socket>();
@@ -514,9 +555,14 @@ async function pruneEntry(dir: string, name: string, meta: DiscoveryMetadata | n
 			if (!current || current.token !== meta.token || current.endpoint !== meta.endpoint) return;
 		}
 		await fs.promises.rm(path.join(dir, name), { force: true });
-		if (meta && process.platform !== "win32" && meta.endpoint.startsWith(dir + path.sep)) {
-			await fs.promises.rm(meta.endpoint, { force: true });
-		}
+		// Only unlink sockets this registry could have created: beside the
+		// metadata, or in its own relocated socket directory.
+		const ownsEndpoint =
+			meta !== null &&
+			process.platform !== "win32" &&
+			(meta.endpoint.startsWith(dir + path.sep) ||
+				meta.endpoint.startsWith(socketFallbackDir(dir, DEFAULT_SOCKET_FALLBACK_BASE) + path.sep));
+		if (ownsEndpoint) await fs.promises.rm(meta.endpoint, { force: true });
 	} catch {
 		// Best-effort cleanup only (a missing file means someone else already pruned it).
 	}

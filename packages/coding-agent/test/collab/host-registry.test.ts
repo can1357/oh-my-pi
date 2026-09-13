@@ -272,6 +272,24 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
+	it("refuses to mirror a dialog once the active session is no longer the room's session", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+
+		// `/resume` swaps the active session and runs the new session's hooks
+		// before the session-change callbacks fire. A dialog raised in that
+		// window belongs to the new session and must never reach this room.
+		state.sessionId = `sess-resumed-${Date.now()}`;
+		const request = host.requestGuestUi({ kind: "select", title: "Resumed hook", options: ["Yes", "No"] });
+
+		expect(request).toBeNull();
+		// Refusing also ends the stale room (the goodbye is flushed first).
+		await state.tornDown.promise;
+		expect(host.stopped).toBe(true);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
 	it("never welcomes a guest into a room whose session switched while idle", async () => {
 		const { ctx, state } = makeHostContext();
 		host = new CollabHost(ctx);

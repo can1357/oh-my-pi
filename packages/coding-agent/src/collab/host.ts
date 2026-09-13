@@ -248,9 +248,15 @@ export class CollabHost {
 	 * construction until teardown — including while the relay connection is
 	 * still being established — so a dialog raised by an extension's
 	 * `session_start` hook is retained for the first writer that joins.
+	 *
+	 * Refused, and the room ended, once the active session is no longer the
+	 * one this room mirrors: `/resume` runs the new session's `session_switch`
+	 * hooks before the session-change callbacks fire, so a dialog raised there
+	 * must stay local rather than reach the previous session's guests.
 	 */
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
 		if (this.#stopped || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
+		if (!this.#sessionStillCurrent()) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();

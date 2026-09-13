@@ -554,4 +554,38 @@ describe("collab registry", () => {
 			expect(await fs.readdir(target)).toEqual(["important.json"]);
 		},
 	);
+
+	it.skipIf(process.platform === "win32")(
+		"relocates the socket to a short owner-private directory when the canonical path overflows sun_path",
+		async () => {
+			// A deep config root pushes `<dir>/<instanceId>.sock` past the 104/108
+			// byte socket path limit; the host must still publish, and listers
+			// must find it through the endpoint recorded in the metadata.
+			const base = await tempDir();
+			const dir = path.join(base, "n".repeat(60), "m".repeat(60), "collab-hosts");
+			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+			const fallbackBase = await tempDir();
+			const f = makeFixture({ instanceId: "deep-config-root" });
+			const pub = await publishCollabHost(sourceFor(f), {
+				dir,
+				instanceId: f.snapshot.instanceId,
+				socketFallbackBase: fallbackBase,
+			});
+			openPublications.push(pub);
+
+			// Relocated under the (short, in production `/tmp`) fallback base, in a
+			// deterministic owner-only directory keyed by this registry directory.
+			expect(path.dirname(path.dirname(pub.endpoint))).toBe(fallbackBase);
+			expect(path.basename(path.dirname(pub.endpoint))).toMatch(/^omp-collab-[0-9a-f]{20}$/);
+			expect((await fs.stat(path.dirname(pub.endpoint))).mode & 0o777).toBe(0o700);
+			expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: "deep-config-root" }]);
+			expect(await resolveCollabHostLink("deep-config-root", "control", { dir })).toMatchObject({
+				url: f.controlUrl,
+			});
+
+			await pub.close();
+			expect(await fs.readdir(path.dirname(pub.endpoint))).toEqual([]);
+			expect(await listCollabHosts({ dir })).toEqual([]);
+		},
+	);
 });
