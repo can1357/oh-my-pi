@@ -11,11 +11,14 @@ import {
 	ToolExecutionComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "../../collab/helpers/in-memory-relay";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 // Contract under test: live tool previews that render a pending/running status
 // must keep the spinner glyph tied to the shared tool-frame ticker. This covers
@@ -663,6 +666,13 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// `eventController.takeDisplaceableComponents()` too, or its ticker
 	// registration survives the failed resync with no remaining reference to
 	// stop it.
+	// A later codex pass on this test flagged that stubbing
+	// `takeDisplaceableComponents()` to hand back a manually built block only
+	// proves `#finalizeSnapshot` calls whatever function sits at that name --
+	// not that the real tracker holds and clears the right component -- so
+	// this drives an actual `hub` wait (still running, so it stays
+	// displaceable) through a real `EventController`, the same tracker
+	// `job-poll-displacement.test.ts` exercises in isolation.
 	it("folds a displaceable poll/todo block into orphan cleanup when guest resync staging fails", async () => {
 		installInMemoryRelay();
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
@@ -670,24 +680,44 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			vi.useFakeTimers();
 
 			const chatContainer = new TranscriptContainer();
-			// The waiting card for a completed `hub` wait whose jobs are still
-			// running: `#handleToolExecutionEnd` already dropped it from
-			// `pendingTools` and tracks it as a displaceable poll instead, but it
-			// stays a live, animated child of the visible container.
-			const displaceableBlock = new ToolExecutionComponent(
-				"eval",
-				{ language: "py", code: "import time\ntime.sleep(10)" },
-				{},
-				undefined,
-				{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
-				process.cwd(),
+			await Settings.init({ inMemory: true });
+
+			// A real controller, not a stand-in: `#handleToolExecutionEnd` moves
+			// the resulting component out of `pendingTools` into its own
+			// displaceable tracker exactly as production code does, so a
+			// regression in that tracker's bookkeeping fails this test too.
+			const controllerCtx = createInteractiveModeContext({ chatContainer });
+			const controller = new EventController(controllerCtx);
+			const takeDisplaceableComponents = vi.spyOn(controller, "takeDisplaceableComponents");
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "hub-wait-1",
+				toolName: "hub",
+				args: { op: "wait", ids: ["j0"] },
+			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "hub-wait-1",
+				toolName: "hub",
+				isError: false,
+				result: {
+					content: [{ type: "text", text: "" }],
+					details: {
+						op: "wait",
+						jobs: [{ id: "j0", type: "task", status: "running", label: "job 0", durationMs: 1_000 }],
+					},
+				},
+			} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+
+			// The wait is still running, so the block left `pendingTools` for the
+			// controller's own displaceable tracker rather than a settled slot.
+			expect(controllerCtx.pendingTools.size).toBe(0);
+			const displaceableBlock = chatContainer.children.find(
+				(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 			);
-			chatContainer.addChild(displaceableBlock);
+			if (!displaceableBlock) throw new Error("expected the hub wait to render a live block");
 			expect(vi.getTimerCount()).toBeGreaterThan(0);
 
-			const takeDisplaceableComponents = vi.fn(() => [displaceableBlock]);
-
-			await Settings.init({ inMemory: true });
 			const ctx = {
 				settings: { get: () => "" },
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
@@ -727,7 +757,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				ui: { requestRender: () => {} },
 				chatContainer,
 				resetObserverRegistry: () => {},
-				eventController: { takeDisplaceableComponents },
+				eventController: controller,
 				renderInitialMessages: (options?: { clearTerminalHistory?: boolean }) =>
 					uiHelpers.renderInitialMessages(options),
 				renderSessionContext: (context: unknown, options: unknown) =>
@@ -808,8 +838,8 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				expect(joinError).toBeInstanceOf(Error);
 				expect((joinError as Error).message).toContain("staged rebuild boom");
 
-				// #finalizeSnapshot folded the displaceable tracker into its orphan
-				// accounting.
+				// #finalizeSnapshot folded the real displaceable tracker into its
+				// orphan accounting.
 				expect(takeDisplaceableComponents).toHaveBeenCalledTimes(1);
 				// The block was stopped in place, not disposed from the tree: its
 				// rendered row survives the failed resync untouched.
