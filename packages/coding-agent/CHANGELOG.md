@@ -8,6 +8,7 @@
 ### Fixed
 
 - Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — when it happens, and again at startup until that account signs in — instead of silently degrading to a sibling account; SDK consumers get the same startup replay from `session.getDisabledCredentialNotices()` ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Copilot terminal auth errors no longer log out the entire provider after the failed request has settled. Credential-attributed auth retry remains responsible for invalidation, preserving a concurrent re-login and unrelated accounts ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.19] - 2026-09-12
 
