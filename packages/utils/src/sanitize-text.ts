@@ -128,6 +128,15 @@ const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const URL_TRAILING_PUNCTUATION = /[.,;:!?)\]]+$/;
 const URL_USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
 
+/** A parameter name as the receiving parser reads it: percent-decoded, `+` as space; malformed escapes stay raw. */
+function decodedParameterName(name: string): string {
+	try {
+		return decodeURIComponent(name.replaceAll("+", " "));
+	} catch {
+		return name;
+	}
+}
+
 /** `name=value&…` with every secret-named value replaced; other pairs verbatim, never re-encoded. */
 function redactPairs(pairs: string): string {
 	return pairs
@@ -136,7 +145,9 @@ function redactPairs(pairs: string): string {
 			const separator = pair.indexOf("=");
 			if (separator === -1) return pair;
 			const name = pair.slice(0, separator);
-			return SECRET_NAME.test(name) ? `${name}=[redacted]` : pair;
+			// The receiving parser decodes `api%4Bey` to `apiKey`; classify what it
+			// reads while leaving the original spelling in the output.
+			return SECRET_NAME.test(decodedParameterName(name)) ? `${name}=[redacted]` : pair;
 		})
 		.join("&");
 }

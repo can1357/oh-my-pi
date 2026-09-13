@@ -77,6 +77,12 @@ describe("redactUrlSecrets", () => {
 		);
 	});
 
+	it("classifies a percent-encoded parameter name as the receiving parser decodes it, keeping the spelling", () => {
+		expect(redactUrlSecrets("https://h/mcp?api%4Bey=secret&to%6ben=secret&ref%3Fx=keep&bad%ZZ=keep")).toBe(
+			"https://h/mcp?api%4Bey=[redacted]&to%6ben=[redacted]&ref%3Fx=keep&bad%ZZ=keep",
+		);
+	});
+
 	it("redacts userinfo and fragment parameters", () => {
 		expect(redactUrlSecrets("https://user:hunter2@host/mcp#access_token=abc&state=keep")).toBe(
 			"https://[redacted]@host/mcp#access_token=[redacted]&state=keep",
