@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- `web_search` now accepts an optional `provider` value for per-query backend selection; `auto` keeps the configured provider chain ([#11926](https://github.com/can1357/oh-my-pi/pull/11926) by [@cyriusweng](https://github.com/cyriusweng)).
 ### Changed
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).

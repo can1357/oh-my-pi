@@ -5,4 +5,5 @@ Web search: current information beyond knowledge cutoff.
 - MUST link cited sources in final response.
 - NEVER use for programmatically accessible content or known URLs (GitHub repos/issues, known arXiv papers, Wikipedia pages, official docs) — `read` URL directly.
 - `query`: every provider supports Google-style `site:`/`-site:`, `after:`/`before:` (`YYYY-MM-DD`), `inurl:`, `intitle:`, `filetype:`, `"exact phrase"`, `-term`, `OR`. Map constraints to native filters when available; otherwise filter results leniently. If a constraint matches nothing, relax and report it; do not return zero results.
+- `provider`: optional search provider (default "auto"). Selects a specific backend for the query, or "auto" to use the configured provider chain.
 </instruction>
