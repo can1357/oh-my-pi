@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, pathIsWithin, relativePathWithinRoot, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
@@ -536,11 +536,356 @@ export function getConfig(cwd: string): LspConfig {
 // Server Selection
 // =============================================================================
 
+// =============================================================================
+// Per-server file gates
+// =============================================================================
+
+/**
+ * Directory segments that conventionally hold Ansible YAML. A YAML file under
+ * one of these is treated as Ansible without reading it. Container directories
+ * with mixed contents are deliberately absent: a role's `files/` and
+ * `templates/` subdirectories hold arbitrary payloads (OpenAPI specs, chart
+ * values), and `collections/ansible_collections` nests that same role layout,
+ * so only the structural subdirectories below (tasks, handlers, vars,
+ * defaults, meta) grant the signal, never the container root.
+ */
+const ANSIBLE_PATH_SEGMENTS: Record<string, true> = {
+	tasks: true,
+	handlers: true,
+	vars: true,
+	defaults: true,
+	meta: true,
+	inventories: true,
+	inventory: true,
+	playbooks: true,
+	playbook: true,
+	group_vars: true,
+	host_vars: true,
+	ansible: true,
+};
+
+/**
+ * Role sections in a `roles/<name>/<section>` span (CONTRACT.md §1b; Ansible
+ * roles docs, "Role directory structure": seven main standard directories).
+ * `<name>` is an opaque role name — a role literally named `files`,
+ * `templates`, or `vars` is legal — and `<section>` decides: the structural
+ * sections hold play content (tasks/handlers lists, vars/defaults variables,
+ * meta dependencies) while `files/` (copy-resource payloads) and
+ * `templates/` (.j2 templates) hold arbitrary non-Ansible bytes. Any other
+ * section word (`library`, `molecule`, …) is a non-YAML-ansible position and
+ * leaves the decision to the general scan and the content signals.
+ */
+const ANSIBLE_ROLE_STRUCTURAL_SECTIONS: Record<string, true> = {
+	tasks: true,
+	handlers: true,
+	vars: true,
+	defaults: true,
+	meta: true,
+};
+const ANSIBLE_ROLE_PAYLOAD_SECTIONS: Record<string, true> = {
+	files: true,
+	templates: true,
+};
+
+/** Basenames that are Ansible entry points regardless of directory. */
+const ANSIBLE_BASENAMES: Record<string, true> = {
+	"playbook.yml": true,
+	"playbook.yaml": true,
+	"site.yml": true,
+	"site.yaml": true,
+};
+/** Taskfile basenames reserved by Task (taskfile.dev). A Taskfile's top-level `tasks:` map is Task syntax, never Ansible. */
+const TASKFILE_BASENAMES: Record<string, true> = {
+	"taskfile.yml": true,
+	"taskfile.yaml": true,
+	"taskfile.dist.yml": true,
+	"taskfile.dist.yaml": true,
+};
+
+/** First bytes read when sniffing a YAML file for Ansible markers. */
+const ANSIBLE_SNIFF_BYTES = 8192;
+
+/** Ansible play/task keys. Indentation is capped at two spaces so play/task roots match while deeply nested keys in unrelated YAML (Spring, Helm values) do not. Residual markers are line-anchored like the first alternation so comments and prose cannot match: `become:` must start a YAML key line, `ansible.builtin.<module>:` must start a module invocation, and `action: ansible.builtin.<module>` covers the action-form module spelling (no trailing colon; arguments follow the name). */
+const ANSIBLE_CONTENT_SIGNAL =
+	/(^|\n) {0,2}(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\s*:|(^|\n)[ \t]*(-\s+)?become\s*:\s*(true|yes)\b|(^|\n)[ \t]*(-\s+)?ansible\.builtin\.[a-z0-9_]+\s*:|(^|\n)[ \t]*(-\s+)?action\s*:\s*ansible\.builtin\.[a-z0-9_]+\b/;
+
+/** Top-level Kubernetes manifest keys, tested independently so key order cannot matter. Both stay anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
+const KUBERNETES_API_SIGNAL = /^apiVersion\s*:\s*\S/m;
+const KUBERNETES_KIND_SIGNAL = /^kind\s*:\s*\S/m;
+/**
+ * Top-level GitHub Actions keys, anchored to column 0 like the Kubernetes and
+ * Compose vetoes. A playbook may embed a workflow document in a block scalar
+ * (`content: |`); the indented `on:`/`jobs:` lines inside that scalar must not
+ * veto the enclosing playbook.
+ */
+const WORKFLOW_SIGNAL = /^on\s*:/m;
+const WORKFLOW_JOBS_SIGNAL = /^jobs\s*:/m;
+/** Top-level Compose key, anchored to column 0 so nested `services:` keys inside playbooks cannot veto them. */
+const COMPOSE_SIGNAL = /^services\s*:/m;
+/**
+ * YAML block-scalar headers (YAML 1.2 §8.1 rule [162] `c-b-block-header`;
+ * CONTRACT-COMBO.md §1). Three block-node positions open a scalar region: a
+ * mapping value (`key: |`, `docs: >- # comment`, `docs: &anchor |`,
+ * `"quoted: key": |`, `'it''s': |`), a sequence entry (`- |`, `- >+`,
+ * `- |2`, `- &anchor |`), and a bare document-root scalar (`|`, `> # docs`).
+ * The header production — not indentation alone — opens the region, so this
+ * is structural detection, not a whitespace heuristic: indentation only
+ * delimits a region the header already proved. Indicators are spec-exact
+ * (one chomping `-`/`+` and one indent `1`-`9` in either order). In-tree YAML
+ * owner is `YAML` from `"bun"` (this file's `parseConfigContent`), whose API
+ * is parse/stringify only and drops scalar style on parse, and no
+ * CST-capable YAML package is imported anywhere in `packages/coding-agent`
+ * (CONTRACT-COMBO.md §1); the truncated 8192-byte sniff head additionally
+ * cannot feed a whole-document parser. Hence this line filter.
+ */
+const YAML_BLOCK_SCALAR_MAP_HEADER = /^([ ]*)(-\s+)?((?:"(?:[^"\n]|"")*"|'(?:[^'\n]|'')*'|[^#:\n][^:\n]*)):\s*(?:[&!][^\s:,<>\[\]{},"]+(?:\s+[&!][^\s:,<>\[\]{},"]+)?\s+)?([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
+const YAML_BLOCK_SCALAR_SEQ_HEADER = /^([ ]*)-\s+(?:[&!][^\s:,<>\[\]{},"]+(?:\s+[&!][^\s:,<>\[\]{},"]+)?\s+)?([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
+const YAML_BLOCK_SCALAR_ROOT_HEADER = /^([ ]*)([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
+
+function countLeadingSpaces(line: string): number {
+	let count = 0;
+	while (count < line.length && line.charCodeAt(count) === 32) count++;
+	return count;
+}
+
+/**
+ * Blank the bodies of YAML literal (`|`) and folded (`>`) block scalars,
+ * keeping newlines so `^`/`$`-anchored signals see identical line structure.
+ * Headers cover mapping values (plain, `"quoted: colon"`, and `'esc''aped'`
+ * keys, each with optional `&anchor`/`!tag` properties), bare sequence
+ * entries (`- |`, `- &anchor |`), and bare document-root scalars (`|`).
+ * An explicit indent digit fixes the body indent (key column + digit, where
+ * the key column sits past any sequence marker).
+ * Otherwise the first non-blank line after the header fixes it (spec §8.1:
+ * auto-detected from content), so a sibling key dedented past that indent
+ * (e.g. a 2-space module key after a 4-space scalar body) closes the scalar
+ * instead of being swallowed. A body line is a blank line or a line indented
+ * at/past the fixed indent; the first other line closes the scalar (content
+ * outdents to end it, and `---` at column 0 therefore also closes it). Only
+ * bodies are blanked: the header line itself stays, so structural keys are
+ * never removed.
+ */
+export function stripYamlBlockScalarBodies(head: string): string {
+	const lines = head.split("\n");
+	let bodyIndent = -1;
+	let pendingIndent = -1;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		if (bodyIndent >= 0) {
+			if (line.trim() === "" || countLeadingSpaces(line) >= bodyIndent) {
+				lines[index] = "";
+				continue;
+			}
+			bodyIndent = -1;
+		} else if (pendingIndent >= 0) {
+			if (line.trim() === "") {
+				lines[index] = "";
+				continue;
+			}
+			if (countLeadingSpaces(line) > pendingIndent) {
+				bodyIndent = countLeadingSpaces(line);
+				pendingIndent = -1;
+				lines[index] = "";
+				continue;
+			}
+			pendingIndent = -1;
+		}
+		const mapHeader = YAML_BLOCK_SCALAR_MAP_HEADER.exec(line);
+		if (mapHeader) {
+			// Key column, not leading indent: in `- name: |` the key sits
+			// past the sequence marker, so an explicit digit counts from
+			// there (`- name: |2` bodies run at key-column + 2) and the
+			// auto-detect reference does too.
+			const keyColumn = mapHeader[1].length + (mapHeader[2] ?? "").length;
+			const digit = /[1-9]/.exec(mapHeader[5] ?? "")?.[0];
+			if (digit !== undefined) bodyIndent = keyColumn + Number(digit);
+			else pendingIndent = keyColumn;
+			continue;
+		}
+		const seqHeader = YAML_BLOCK_SCALAR_SEQ_HEADER.exec(line);
+		if (seqHeader) {
+			const indent = seqHeader[1].length;
+			const digit = /[1-9]/.exec(seqHeader[3] ?? "")?.[0];
+			if (digit !== undefined) bodyIndent = indent + Number(digit);
+			else pendingIndent = indent;
+			continue;
+		}
+		const rootHeader = YAML_BLOCK_SCALAR_ROOT_HEADER.exec(line);
+		if (rootHeader) {
+			const indent = rootHeader[1].length;
+			const digit = /[1-9]/.exec(rootHeader[3] ?? "")?.[0];
+			if (digit !== undefined) bodyIndent = indent + Number(digit);
+			else pendingIndent = indent;
+		}
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Optional classifier inputs for Ansible file detection.
+ *
+ * - `content`: in-memory file text. The disk read is only a fallback, so
+ *   callers holding pending (not-yet-committed) text classify what will be
+ *   written instead of the stale or missing bytes on disk.
+ * - `projectRoot`: config root the path scan is scoped to. Only segments of
+ *   the project-relative path count, so an absolute prefix outside the
+ *   project (temporary directories, home folders) can never contribute an
+ *   Ansible segment. Files outside the root get no path signal.
+ */
+export interface AnsibleFileOptions {
+	content?: string;
+	projectRoot?: string;
+}
+
+function projectRelativeDirSegments(filePath: string, projectRoot?: string): string[] | null {
+	let relative = filePath;
+	if (projectRoot !== undefined) {
+		// Containment is computed from the original paths: folding case before
+		// `path.relative` aliases distinct siblings on case-sensitive
+		// filesystems (root `/tmp/Project` vs `/tmp/project/...`). Only the
+		// resulting segments are lowercased for the directory match.
+		const scoped = relativePathWithinRoot(projectRoot, filePath);
+		if (scoped === null) return null;
+		relative = scoped;
+	}
+	return path.dirname(relative.toLowerCase()).split(path.sep);
+}
+
+interface AnsiblePathClass {
+	/** File sits in a structural Ansible position (inventory subtree, role section, bare structural dir). */
+	ansiblePath: boolean;
+	/** File is a vars file: `apiVersion`/`kind` are ordinary variable names here, not a manifest. */
+	varsFile: boolean;
+}
+
+/**
+ * Classify the project-relative dirname segments positionally (CONTRACT.md
+ * §3). Words are meaningless outside their grammatical positions: the
+ * segment below `group_vars`/`host_vars` is an opaque group/host name
+ * (inventory docs: directories named after groups/hosts read in
+ * lexicographical order), and in a `roles/<name>/<section>` span the name
+ * is opaque while the section decides (roles docs: seven standard
+ * directories). Bare structural words elsewhere keep the head table's
+ * conventional meaning.
+ */
+function classifyAnsiblePathSegments(segments: string[]): AnsiblePathClass {
+	let path = false;
+	let vars = false;
+	let i = 0;
+	while (i < segments.length) {
+		const segment = segments[i];
+		if (segment === "group_vars" || segment === "host_vars") {
+			// Inventory subtree: the next segment is a group/host name and
+			// everything below is vars files for it (e.g.
+			// `group_vars/raleigh/db_settings`, `group_vars/files/main.yml`
+			// for a group named `files`). No deeper word can overrule this.
+			return { ansiblePath: true, varsFile: true };
+		}
+		if (segment === "roles" && i + 1 < segments.length) {
+			const section = segments[i + 2];
+			if (section !== undefined) {
+				if (ANSIBLE_ROLE_STRUCTURAL_SECTIONS[section]) {
+					// `roles/<name>/<section>`: the leaf section decides the
+					// file kind, defeating any section word in name position
+					// (`roles/vars/tasks/…` is a task list, not vars).
+					return { ansiblePath: true, varsFile: section === "vars" || section === "defaults" };
+				}
+				if (ANSIBLE_ROLE_PAYLOAD_SECTIONS[section]) {
+					// Payload subtree (copy/template resources): arbitrary
+					// bytes, defeating outer container words (e.g. `ansible/`
+					// in `ansible/roles/web/files/openapi.yaml`) and any
+					// structural-looking word nested inside the payload.
+					return { ansiblePath: false, varsFile: false };
+				}
+			}
+			// Unknown section (`library`, `molecule`, …) or a bare
+			// `roles/<name>/` file: the name is opaque, keep scanning.
+			i += 2;
+			continue;
+		}
+		if (ANSIBLE_PATH_SEGMENTS[segment]) {
+			path = true;
+			if (segment === "vars" || segment === "defaults") vars = true;
+		}
+		i++;
+	}
+	return { ansiblePath: path, varsFile: vars };
+}
+
+function classifyAnsiblePath(filePath: string, projectRoot?: string): AnsiblePathClass {
+	const segments = projectRelativeDirSegments(filePath, projectRoot);
+	if (segments === null) return { ansiblePath: false, varsFile: false };
+	return classifyAnsiblePathSegments(segments);
+}
+
+function readFileHead(filePath: string): string | null {
+	let fd = -1;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const buf = Buffer.alloc(ANSIBLE_SNIFF_BYTES);
+		const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+		return buf.subarray(0, bytesRead).toString("utf-8");
+	} catch {
+		return null;
+	} finally {
+		if (fd !== -1) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// Ignore close errors; the read result (or null) stands.
+			}
+		}
+	}
+}
+
+export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): boolean {
+	const lowered = filePath.toLowerCase();
+	const base = path.basename(lowered);
+	if (TASKFILE_BASENAMES[base]) return false;
+	const head = options?.content ?? readFileHead(filePath);
+	// One positional classification per call: the structural signal and the
+	// vars-file flag come from the same segment scan (CONTRACT.md §3).
+	const cls = classifyAnsiblePath(filePath, options?.projectRoot);
+	const ansiblePath = cls.ansiblePath;
+	// Unreadable files carry no vetoes, so a conventional entry-point name
+	// still counts alongside the path signal.
+	if (head === null) return ANSIBLE_BASENAMES[base] || ansiblePath;
+	if (KUBERNETES_API_SIGNAL.test(head) && KUBERNETES_KIND_SIGNAL.test(head)) {
+		// Only vars files outrank the manifest guess: the leaf role section
+		// decides the file kind, so a manifest under `tasks/` (even a
+		// `tasks/` nested under a role named `vars`) stays a manifest,
+		// while `apiVersion`/`kind` under `group_vars/`, `host_vars/`,
+		// `vars/`, or `defaults/` are ordinary variable names.
+		if (!cls.varsFile) return false;
+	}
+	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
+	// `services:` is also an ordinary Ansible variable name (a `defaults/main.yml`
+	// services map), so a file already under a structural Ansible directory
+	// outranks the Compose guess; the key only vetoes otherwise.
+	if (COMPOSE_SIGNAL.test(head) && !ansiblePath) return false;
+	// The conventional basenames accept only after the document vetoes above:
+	// a manifest, workflow, or Compose file named `playbook.yml`/`site.yml`
+	// stays with the generic YAML server.
+	if (ANSIBLE_BASENAMES[base]) return true;
+	// Block-scalar bodies are documentation text, not structure: a `docs: |`
+	// scalar quoting `become:`/`ansible.builtin.*` lines must not count as
+	// Ansible markers (thread :587; CONTRACT-C12.md §2). Vetoes above keep
+	// the raw head — they are column-0 anchored and scalar bodies always
+	// carry indent, so a body line can never match them.
+	if (ANSIBLE_CONTENT_SIGNAL.test(stripYamlBlockScalarBodies(head))) return true;
+	return ansiblePath;
+}
+
+
 /**
  * Find all servers that can handle a file based on extension.
  * Returns servers sorted with primary (non-linter) servers first.
  */
-export function getServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
+export function getServersForFile(
+	config: LspConfig,
+	filePath: string,
+	options?: AnsibleFileOptions,
+): Array<[string, ServerConfig]> {
 	const ext = path.extname(filePath).toLowerCase();
 	const extNoDot = ext.startsWith(".") ? ext.slice(1) : ext;
 	const fileName = path.basename(filePath).toLowerCase();
@@ -561,7 +906,11 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
 			);
 		});
 
-		if (supportsFile) {
+		// The ansible server claims the shared .yml/.yaml extensions but only
+		// serves Ansible files. Without this gate every YAML file in an Ansible
+		// project (manifests, workflows, Compose) would take the ansible slot
+		// for single-server operations instead of the generic YAML server.
+		if (supportsFile && !(name === "ansible" && !isAnsibleFile(filePath, options))) {
 			matches.push([name, serverConfig]);
 		}
 	}
@@ -578,8 +927,12 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
  * Find the primary server for a file (prefers type-checkers over linters).
  * Used for operations like definition, hover, references that need type intelligence.
  */
-export function getServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
-	const servers = getServersForFile(config, filePath);
+export function getServerForFile(
+	config: LspConfig,
+	filePath: string,
+	options?: AnsibleFileOptions,
+): [string, ServerConfig] | null {
+	const servers = getServersForFile(config, filePath, options);
 	return servers.length > 0 ? servers[0] : null;
 }
 

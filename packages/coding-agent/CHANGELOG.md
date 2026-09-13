@@ -116,6 +116,9 @@
 - Custom `Other` answers are now applied before the Ask dialog becomes interactive again, so the next Enter is no longer discarded ([#11558](https://github.com/can1357/oh-my-pi/pull/11558) by [@schickling-assistant](https://github.com/schickling-assistant)).
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
 - Fixed wrong-typed `compat.stripImageInput` in `models.yml` being silently accepted, so the documented vision opt-out is now validated like its neighbours ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
+### Added
+
+- Added the `ansible` built-in LSP server (`ansible-language-server`) with `ansible` language ID for playbooks and Ansible YAML files, auto-detected in projects with `ansible.cfg`, `.ansible-lint`, or `ansible-navigator.yml` ([#11471](https://github.com/can1357/oh-my-pi/pull/11471) by [@JamieJ5926](https://github.com/JamieJ5926)).
 
 ## [18.1.16] - 2026-09-09
 

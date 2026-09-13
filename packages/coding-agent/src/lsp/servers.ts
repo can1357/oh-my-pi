@@ -13,7 +13,7 @@ import {
 	syncContent,
 	WARMUP_TIMEOUT_MS,
 } from "./client";
-import { getServersForFile, type LspConfig, loadConfig } from "./config";
+import { type AnsibleFileOptions, getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
 
@@ -215,12 +215,20 @@ export function getLspServers(config: LspConfig): Array<[string, ServerConfig]> 
 	);
 }
 
-export function getLspServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
-	return getServersForFile(config, filePath).filter(([, serverConfig]) => !isCustomLinter(serverConfig));
+export function getLspServersForFile(
+	config: LspConfig,
+	filePath: string,
+	options?: AnsibleFileOptions,
+): Array<[string, ServerConfig]> {
+	return getServersForFile(config, filePath, options).filter(([, serverConfig]) => !isCustomLinter(serverConfig));
 }
 
-export function getLspServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
-	const servers = getLspServersForFile(config, filePath);
+export function getLspServerForFile(
+	config: LspConfig,
+	filePath: string,
+	options?: AnsibleFileOptions,
+): [string, ServerConfig] | null {
+	const servers = getLspServersForFile(config, filePath, options);
 	return servers.length > 0 ? servers[0] : null;
 }
 
