@@ -17,7 +17,8 @@ pub enum VcsKind {
 
 /// Status counts shown by status displays.
 ///
-/// Jujutsu has no index, so its `staged` is always zero.
+/// Jujutsu has no index, so its `staged` is always zero. Upstream counts are
+/// git-only; jj leaves them `None`, as does git when no upstream is configured.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatusSummary {
 	/// Files with staged (index) changes.
@@ -26,6 +27,10 @@ pub struct StatusSummary {
 	pub unstaged:  u32,
 	/// Untracked files (gitignore-filtered).
 	pub untracked: u32,
+	/// Commits on HEAD not reachable from the upstream tracking branch.
+	pub ahead:     Option<u32>,
+	/// Commits on the upstream tracking branch not reachable from HEAD.
+	pub behind:    Option<u32>,
 }
 
 /// Resolved git repository metadata, discovered by walking the filesystem —
