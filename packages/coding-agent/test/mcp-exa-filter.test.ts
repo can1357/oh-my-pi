@@ -168,15 +168,26 @@ describe("Exa MCP filtering", () => {
 				url: "https://mcp.exa.ai/mcp",
 				enabledTools: ["web_fetch_ex[a]"],
 			},
+			mixedWithNativeLiteral: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_exa", "web_fetch_ex[a]"],
+			},
 			nativeGlob: {
 				type: "http",
 				url: "https://mcp.exa.ai/mcp",
 				enabledTools: ["web_search_ex[a]"],
 			},
 		};
-		const result = filterExaMCPServers(configs, { nonNativeGlob: SOURCE, nativeGlob: SOURCE });
+		const result = filterExaMCPServers(configs, {
+			nonNativeGlob: SOURCE,
+			mixedWithNativeLiteral: SOURCE,
+			nativeGlob: SOURCE,
+		});
 
-		expect(Object.keys(result.configs)).toEqual(["nonNativeGlob"]);
+		// The unresolved entry keeps the server even when another entry DID
+		// resolve — that resolution cannot speak for the fetch tool.
+		expect(Object.keys(result.configs).sort()).toEqual(["mixedWithNativeLiteral", "nonNativeGlob"]);
 	});
 
 	test("does not read an inherited object member as native", () => {
