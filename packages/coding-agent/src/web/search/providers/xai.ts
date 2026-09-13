@@ -18,6 +18,8 @@ const XAI_WEB_SEARCH_MODEL = "grok-4.5";
 const XAI_WEB_SEARCH_REASONING_EFFORT = "low";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
+/** Messages at least this long are treated as substantive content, not relay narration. */
+const SUBSTANTIVE_MIN_CHARS = 300;
 
 interface XAIUrlCitationAnnotation {
 	type?: string;
@@ -45,6 +47,7 @@ interface XAIWebSearchSource {
 
 interface XAIResponseOutputItem {
 	type?: string;
+	phase?: "commentary" | "final_answer" | null;
 	content?: XAIResponseContentPart[] | null;
 	annotations?: XAIUrlCitationAnnotation[] | null;
 	action?: { sources?: XAIWebSearchSource[] | null } | null;
@@ -266,23 +269,69 @@ function collectWebSearchSources(
 }
 
 function parseAnswer(response: XAIResponsesResponse): string | undefined {
-	const topLevelText = response.output_text?.trim();
-	if (topLevelText) return topLevelText;
-
-	const answerParts: string[] = [];
 	const output = Array.isArray(response.output) ? response.output : [];
-	for (const item of output) {
-		if (!item || typeof item !== "object") continue;
-		const content = Array.isArray(item.content) ? item.content : [];
-		for (const part of content) {
-			if (!part || typeof part !== "object") continue;
-			const text = part.output_text ?? part.text;
-			if (text?.trim()) answerParts.push(text.trim());
-		}
-	}
+	// A top-level aggregate can contain narration even without explicit phases.
+	// Prefer filtered messages; use the aggregate only when no messages exist.
 
-	const answer = answerParts.join("\n").trim();
-	return answer ? answer : undefined;
+	// Explicit phases take precedence. Unphased relay messages use the last
+	// message/citation/length heuristic; keep commentary positions so removing
+	// one cannot promote preceding unphased narration into a final answer.
+	const messages: Array<{ texts: string[]; hasCitations: boolean; phase: XAIResponseOutputItem["phase"] }> = [];
+	for (const item of output) {
+		if (!item || typeof item !== "object" || (item.type != null && item.type !== "message")) continue;
+		const content = Array.isArray(item.content) ? item.content : null;
+		if (content === null && item.type == null) continue;
+		// Relays cast external JSON into the typed interface; normalize the
+		// phase to a recognized value so "" or unknown strings cannot strand a
+		// message outside both the final_answer branch and the unphased
+		// heuristic.
+		const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : null;
+		const entry = { texts: [] as string[], hasCitations: false, phase };
+		for (const part of content ?? []) {
+			if (!part || typeof part !== "object") continue;
+			const text = (part.output_text ?? part.text)?.trim();
+			if (text) entry.texts.push(text);
+			for (const annotation of Array.isArray(part.annotations) ? part.annotations : []) {
+				if (annotation?.type === "url_citation" && typeof annotation.url === "string" && annotation.url.trim()) {
+					entry.hasCitations = true;
+					break;
+				}
+			}
+		}
+		for (const annotation of Array.isArray(item.annotations) ? item.annotations : []) {
+			if (annotation?.type === "url_citation" && typeof annotation.url === "string" && annotation.url.trim()) {
+				entry.hasCitations = true;
+				break;
+			}
+		}
+		messages.push(entry);
+	}
+	const hasFinalAnswerContent = messages.some(m => m.phase === "final_answer" && m.texts.length > 0);
+	if (!hasFinalAnswerContent) {
+		// A tagged-but-empty final is authoritative: the relay uses the phase
+		// protocol and produced no answer, so the aggregate — which mixes the
+		// narration in — must not be promoted either.
+		if (messages.some(m => m.phase === "final_answer")) return undefined;
+		// Without authoritative phased content, an empty final message means
+		// no answer — do not promote heuristic-kept earlier content.
+		const lastMessage = messages.at(-1);
+		if (!lastMessage) return response.output_text?.trim() || undefined;
+		if (lastMessage.texts.length === 0 && lastMessage.phase !== "commentary") return undefined;
+	}
+	const kept = messages.filter(
+		(entry, index) =>
+			entry.phase === "final_answer" ||
+			(entry.phase == null &&
+				(index === messages.length - 1 ||
+					entry.hasCitations ||
+					entry.texts.join("").length >= SUBSTANTIVE_MIN_CHARS)),
+	);
+
+	const answer = kept
+		.flatMap(entry => entry.texts)
+		.join("\n")
+		.trim();
+	return answer || undefined;
 }
 
 function parseUsage(usage: XAIResponsesUsage | null | undefined): SearchUsage | undefined {
