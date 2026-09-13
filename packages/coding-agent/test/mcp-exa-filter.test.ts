@@ -173,6 +173,12 @@ describe("Exa MCP filtering", () => {
 				url: "https://mcp.exa.ai/mcp",
 				enabledTools: ["web_search_exa", "web_fetch_ex[a]"],
 			},
+			unresolvedWithDenyAll: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_ex[a]"],
+				disabledTools: ["*"],
+			},
 			nativeGlob: {
 				type: "http",
 				url: "https://mcp.exa.ai/mcp",
@@ -182,11 +188,13 @@ describe("Exa MCP filtering", () => {
 		const result = filterExaMCPServers(configs, {
 			nonNativeGlob: SOURCE,
 			mixedWithNativeLiteral: SOURCE,
+			unresolvedWithDenyAll: SOURCE,
 			nativeGlob: SOURCE,
 		});
 
 		// The unresolved entry keeps the server even when another entry DID
-		// resolve — that resolution cannot speak for the fetch tool.
+		// resolve — that resolution cannot speak for the fetch tool. A deny-all
+		// still wins over both: nothing survives it, named or not.
 		expect(Object.keys(result.configs).sort()).toEqual(["mixedWithNativeLiteral", "nonNativeGlob"]);
 	});
 

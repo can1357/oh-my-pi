@@ -336,6 +336,9 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	// native integration provides the name it spells — the only case a drop is
 	// provable. A pattern entry is judged the same way, with the safe bias
 	// that a glob addressing the native name keeps the server mounted.
+	// A deny that excludes every name leaves nothing to contribute whatever the
+	// allowlist names, so it is decided first.
+	if ((config.disabledTools ?? []).some(deniesEveryName)) return false;
 	const pool = [...NATIVE_EXA_MCP_TOOLS, ...allowlist];
 	const { allowed: effective, unmatched } = filterMCPTools({
 		toolNames: pool,
