@@ -83,7 +83,13 @@ interface PreservedPreloadScript {
 	params?: Record<string, unknown>;
 	/** Main-frame document that already received an immediate invocation. */
 	loaderId?: string;
+	/** Frame/loader snapshot that already received the immediate invocation. */
+	frameLoaderIds?: Record<string, string>;
 	sequence: number;
+}
+
+function hasNewFrameDocument(previous: Record<string, string>, current: Record<string, string>): boolean {
+	return Object.entries(current).some(([id, loader]) => previous[id] !== loader);
 }
 
 function markPreloadApplication(source: unknown, marker: string): string {
@@ -1066,7 +1072,7 @@ export class RelayBridge {
 		}
 		const loaderId =
 			msg.params?.runImmediately === true
-				? await this.#mainFrameLoaderId(ref.tabId).catch(err => {
+				? await this.#frameDocumentState(ref.tabId).catch(err => {
 						if (isExtensionTransportInterrupted(err)) {
 							tab.forceFreshRootBeforeReplay = true;
 							throw err;
@@ -1088,7 +1094,16 @@ export class RelayBridge {
 			return;
 		}
 		const clientIdentifier = `preload:${ref.tabId}:${++this.#sessionSeq}`;
-		this.#rememberPreloadScript(tab, sessionId, clientIdentifier, rootIdentifier, msg.params, loaderId);
+		this.#rememberPreloadScript(
+			tab,
+			sessionId,
+			clientIdentifier,
+			rootIdentifier,
+			msg.params,
+			loaderId?.mainLoaderId,
+			undefined,
+			loaderId?.frameLoaderIds,
+		);
 		this.#reply(conn, msg, { ...result, identifier: clientIdentifier });
 	}
 
@@ -1860,6 +1875,7 @@ export class RelayBridge {
 		params: Record<string, unknown> | undefined,
 		loaderId?: string,
 		cleanupRootIdentifier?: string,
+		frameLoaderIds?: Record<string, string>,
 	): void {
 		let scripts = tab.preloadScripts.get(ownerSessionId);
 		if (!scripts) {
@@ -1873,6 +1889,7 @@ export class RelayBridge {
 			cleanupRootIdentifier,
 			params,
 			loaderId,
+			frameLoaderIds,
 			sequence: ++this.#subscriptionSeq,
 		});
 	}
@@ -2889,7 +2906,18 @@ export class RelayBridge {
 		}
 		if (method === "Page.frameNavigated") {
 			const frame = params?.frame;
-			if (frame && typeof frame === "object" && !("parentId" in frame)) tab.mainFrameNavigationGeneration++;
+			if (frame && typeof frame === "object") {
+				if (!("parentId" in frame)) tab.mainFrameNavigationGeneration++;
+				const frameId = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
+				const loaderId = "loaderId" in frame && typeof frame.loaderId === "string" ? frame.loaderId : undefined;
+				if (frameId !== undefined && loaderId !== undefined) {
+					for (const scripts of tab.preloadScripts.values()) {
+						for (const script of scripts.values()) {
+							if (script.frameLoaderIds) script.frameLoaderIds[frameId] = loaderId;
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -3307,21 +3335,31 @@ export class RelayBridge {
 			? this.#rpc({ op: "send", tabId: tab.tabId, method: "Page.enable" })
 			: Promise.resolve();
 		const currentLoaderPromise = hasImmediatePreload
-			? this.#mainFrameLoaderId(tab.tabId).catch(() => undefined)
+			? this.#frameDocumentState(tab.tabId).catch(() => undefined)
 			: Promise.resolve(undefined);
-		const [, currentLoaderId] = await Promise.all([enablePageEvents, currentLoaderPromise]);
+		const [, currentDocumentState] = await Promise.all([enablePageEvents, currentLoaderPromise]);
+		const currentLoaderId = currentDocumentState?.mainLoaderId;
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
 			const previousLoaderId = recoveryLoaderId ?? script.loaderId;
+			const previousFrameLoaderIds = script.frameLoaderIds ? { ...script.frameLoaderIds } : undefined;
+			if (recoveryLoaderId !== undefined && previousFrameLoaderIds && currentDocumentState?.mainFrameId) {
+				previousFrameLoaderIds[currentDocumentState.mainFrameId] = recoveryLoaderId;
+			}
+			const frameDocumentChanged =
+				previousFrameLoaderIds !== undefined &&
+				currentDocumentState !== undefined &&
+				hasNewFrameDocument(previousFrameLoaderIds, currentDocumentState.frameLoaderIds);
 			const runImmediately =
 				script.params?.runImmediately === true &&
-				(previousLoaderId !== undefined && currentLoaderId !== undefined
-					? previousLoaderId !== currentLoaderId
-					: previousLoaderId === undefined ||
-						currentLoaderId === undefined ||
-						runImmediatePreloads ||
-						(recoveryNavigationGeneration !== undefined &&
-							tab.mainFrameNavigationGeneration !== recoveryNavigationGeneration));
+				(frameDocumentChanged ||
+					(previousLoaderId !== undefined && currentLoaderId !== undefined
+						? previousLoaderId !== currentLoaderId
+						: previousLoaderId === undefined ||
+							currentLoaderId === undefined ||
+							runImmediatePreloads ||
+							(recoveryNavigationGeneration !== undefined &&
+								tab.mainFrameNavigationGeneration !== recoveryNavigationGeneration)));
 			const applicationMarker =
 				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
 					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
@@ -3374,6 +3412,7 @@ export class RelayBridge {
 			let appliedToCurrentDocument = false;
 			let navigationDuringRegistration = false;
 			let finalizedLoaderId = currentLoaderId;
+			let finalizedFrameLoaderIds = currentDocumentState?.frameLoaderIds;
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
@@ -3488,16 +3527,20 @@ export class RelayBridge {
 				tab.preloadApplicationMarkers.delete(previousApplicationMarker);
 			}
 			if (navigationDuringRegistration && rootIdentifier !== identifier) {
-				const loaderAfterReplay = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
+				const loaderAfterReplay = await this.#frameDocumentState(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
 						tab.forceFreshRootBeforeReplay = true;
 						throw err;
 					}
 					return undefined;
 				});
-				if (loaderAfterReplay !== undefined) finalizedLoaderId = loaderAfterReplay;
+				if (loaderAfterReplay !== undefined) {
+					finalizedLoaderId = loaderAfterReplay.mainLoaderId;
+					finalizedFrameLoaderIds = loaderAfterReplay.frameLoaderIds;
+				}
 			}
 			if (finalizedLoaderId !== undefined) current.loaderId = finalizedLoaderId;
+			if (finalizedFrameLoaderIds !== undefined) current.frameLoaderIds = finalizedFrameLoaderIds;
 		}
 		if (temporarilyObserveNavigations) {
 			try {
@@ -3549,13 +3592,33 @@ export class RelayBridge {
 	}
 
 	async #mainFrameLoaderId(tabId: number): Promise<string | undefined> {
+		return (await this.#frameDocumentState(tabId)).mainLoaderId;
+	}
+
+	async #frameDocumentState(tabId: number): Promise<{
+		mainFrameId?: string;
+		mainLoaderId?: string;
+		frameLoaderIds: Record<string, string>;
+	}> {
 		const result = (await this.#rpc({
 			op: "send",
 			tabId,
 			method: "Page.getFrameTree",
-		})) as { frameTree?: { frame?: { loaderId?: unknown } } } | undefined;
-		const loaderId = result?.frameTree?.frame?.loaderId;
-		return typeof loaderId === "string" ? loaderId : undefined;
+		})) as { frameTree?: { frame?: { id?: unknown; loaderId?: unknown }; childFrames?: unknown[] } } | undefined;
+		const frameLoaderIds: Record<string, string> = {};
+		const visit = (tree: unknown): void => {
+			if (!tree || typeof tree !== "object") return;
+			const node = tree as { frame?: { id?: unknown; loaderId?: unknown }; childFrames?: unknown[] };
+			if (typeof node.frame?.id === "string" && typeof node.frame.loaderId === "string") {
+				frameLoaderIds[node.frame.id] = node.frame.loaderId;
+			}
+			for (const child of node.childFrames ?? []) visit(child);
+		};
+		visit(result?.frameTree);
+		const mainFrameId = typeof result?.frameTree?.frame?.id === "string" ? result.frameTree.frame.id : undefined;
+		const mainLoaderId =
+			typeof result?.frameTree?.frame?.loaderId === "string" ? result.frameTree.frame.loaderId : undefined;
+		return { mainFrameId, mainLoaderId, frameLoaderIds };
 	}
 
 	#assertExtensionCurrent(expected: RelaySocket | null): void {
