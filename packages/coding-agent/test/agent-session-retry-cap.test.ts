@@ -662,6 +662,71 @@ describe("AgentSession retry delay cap", () => {
 		return localStorage;
 	}
 
+	/**
+	 * Runs one isolated session whose model caps out, and returns the emitted
+	 * `auto_retry_end.finalError` — the message that names the winning wait's
+	 * provenance. Shares the caller's storage so the block/report state that
+	 * shaped the wait is the same one the message describes; `retry.maxDelayMs`
+	 * stays small on purpose so the cap fires and the message is emitted.
+	 */
+	async function captureCapFinalError(
+		storage: AuthStorage,
+		model: Model,
+		errorMessage = "429 quota exceeded for this account",
+	): Promise<string> {
+		const registry = new ModelRegistry(storage, path.join(tempDir.path(), "models.yml"));
+		const mock = createMockModel({ handler: () => ({ throw: errorMessage }) });
+		const probeAgent = new Agent({
+			getApiKey: requested => registry.resolver(requested, probeAgent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requested, context, options) => mock.stream(requested, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const probeSession = new AgentSession({
+			agent: probeAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+		});
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		probeSession.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+		try {
+			await probeSession.prompt("Trigger the delay cap to surface the wait's provenance");
+			await probeSession.waitForIdle();
+		} finally {
+			await probeSession.dispose();
+		}
+		const finalError = retryEndEvents[0]?.finalError;
+		if (finalError === undefined) {
+			throw new Error("Expected the delay cap to emit an auto_retry_end finalError");
+		}
+		return finalError;
+	}
+
+	/**
+	 * AuthStorage with no usage provider: `markUsageLimitReached` records the
+	 * block but can never extend it from a report, so the only wait sources are
+	 * this call's own `retryAfterMs` and whatever block the credential already
+	 * carries. The caller owns closing it.
+	 */
+	async function createMarkOnlyStorage(): Promise<AuthStorage> {
+		const storage = await AuthStorage.create(
+			path.join(tempDir.path(), `mark-only-${Date.now()}-${Math.random()}.db`),
+		);
+		await storage.set("opencode-go", { type: "api_key", key: "opencode-go-mark-only-key" });
+		return storage;
+	}
+
 	it("sleeps until the report-derived unblock deadline when it outlasts the error hint", async () => {
 		// Contract: when the usage report reveals a later exhausted window
 		// than the error text names (here a 60s hint while the weekly window
@@ -825,6 +890,20 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryEndEvents[0]).toMatchObject({ success: true });
 			expect(lastAssistant(session).stopReason).toBe("stop");
 			expect(session.isRetrying).toBe(false);
+			// A complete report reset is provider-stated timing, so when the cap
+			// fires the wait is reported as requested rather than estimated.
+			// Fresh storage: the only wait source is this call's report reset.
+			const probeStorage = await createOpencodeStorageWithUsage(
+				{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
+				{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
+			);
+			try {
+				const capFinalError = await captureCapFinalError(probeStorage, exhaustedModel);
+				expect(capFinalError).toContain("Provider requested");
+				expect(capFinalError).not.toContain("OMP-estimated");
+			} finally {
+				probeStorage.close();
+			}
 		} finally {
 			localStorage.close();
 		}
@@ -1317,6 +1396,118 @@ describe("AgentSession retry delay cap", () => {
 		} finally {
 			priorStorage.close();
 			restartedStorage.close();
+		}
+	});
+
+	it("reports a winning persisted block as estimated, not provider-requested", async () => {
+		// Contract: a block only the persisted store holds carries no
+		// provenance. When the merged stored deadline outlasts this call's
+		// 30-minute heuristic and the provider stated nothing, the cap must
+		// describe the wait as an OMP estimate instead of adopting the pinned
+		// block and crediting it to the provider.
+		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		if (!exhaustedModel) {
+			throw new Error("Expected bundled OpenCode Go test model to exist");
+		}
+
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const priorStorage = new AuthStorage(store);
+		const restartedStorage = new AuthStorage(store);
+		try {
+			await priorStorage.reload();
+			await restartedStorage.reload();
+			await priorStorage.set("opencode-go", { type: "api_key", key: "opencode-go-persisted-key" });
+			await restartedStorage.reload();
+			await priorStorage.getApiKey("opencode-go", "sibling-session");
+			// Hintless mark: the stored ~1h deadline is a heuristic guess, and
+			// it outlasts the probe's own 30-minute fallback.
+			await priorStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+				retryAfterMs: 3_600_000,
+			});
+
+			const capFinalError = await captureCapFinalError(restartedStorage, exhaustedModel);
+			expect(capFinalError).toContain("OMP-estimated");
+			expect(capFinalError).not.toContain("Provider requested");
+		} finally {
+			priorStorage.close();
+			restartedStorage.close();
+		}
+	});
+
+	it("reports a winning provider-timed block as provider-requested", async () => {
+		// Counterpart to the persisted-block case: an in-memory block written
+		// with `providerTimed` keeps its provenance, so the same cap describes
+		// that wait as provider-stated.
+		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		if (!exhaustedModel) {
+			throw new Error("Expected bundled OpenCode Go test model to exist");
+		}
+
+		const storage = await createMarkOnlyStorage();
+		try {
+			await storage.getApiKey("opencode-go", "sibling-session");
+			await storage.markUsageLimitReached("opencode-go", "sibling-session", {
+				retryAfterMs: 3_600_000,
+				providerTimed: true,
+			});
+
+			const capFinalError = await captureCapFinalError(storage, exhaustedModel);
+			expect(capFinalError).toContain("Provider requested");
+			expect(capFinalError).not.toContain("OMP-estimated");
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("names a winning sibling unblock by the provenance of that sibling's block", async () => {
+		// The sibling-unblock branch adopts the earliest blocked sibling's
+		// deadline when it undercuts the current wait — here a ~20-minute block
+		// against this call's 30-minute heuristic. That deadline's provenance
+		// comes from the sibling's own block, so the same branch must report a
+		// provider-parked sibling as requested and a heuristic-parked one as
+		// estimated.
+		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		if (!exhaustedModel) {
+			throw new Error("Expected bundled OpenCode Go test model to exist");
+		}
+
+		const providerTimedStorage = await createMarkOnlyStorage();
+		try {
+			await providerTimedStorage.set("opencode-go", [
+				{ type: "api_key", key: "opencode-go-timed-sibling-1" },
+				{ type: "api_key", key: "opencode-go-timed-sibling-2" },
+			]);
+			// Park the sibling the probe will not use, with provider timing.
+			await providerTimedStorage.getApiKey("opencode-go", "sibling-session");
+			await providerTimedStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+				retryAfterMs: 1_200_000,
+				providerTimed: true,
+			});
+
+			const timedFinalError = await captureCapFinalError(providerTimedStorage, exhaustedModel);
+			expect(timedFinalError).toContain("Provider requested");
+			expect(timedFinalError).not.toContain("OMP-estimated");
+		} finally {
+			providerTimedStorage.close();
+		}
+
+		const heuristicStorage = await createMarkOnlyStorage();
+		try {
+			await heuristicStorage.set("opencode-go", [
+				{ type: "api_key", key: "opencode-go-heuristic-sibling-1" },
+				{ type: "api_key", key: "opencode-go-heuristic-sibling-2" },
+			]);
+			// Same deadline, but the sibling block was a hintless guess.
+			await heuristicStorage.getApiKey("opencode-go", "sibling-session");
+			await heuristicStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+				retryAfterMs: 1_200_000,
+			});
+
+			const heuristicFinalError = await captureCapFinalError(heuristicStorage, exhaustedModel);
+			expect(heuristicFinalError).toContain("OMP-estimated");
+			expect(heuristicFinalError).not.toContain("Provider requested");
+		} finally {
+			heuristicStorage.close();
 		}
 	});
 

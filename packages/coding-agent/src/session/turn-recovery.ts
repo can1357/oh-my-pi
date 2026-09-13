@@ -252,6 +252,7 @@ type UsageLimitOutcome = {
 	switchedCredential: boolean;
 	retryAfterMs: number;
 	retryAtMs: number | undefined;
+	retryAtTimed: boolean | undefined;
 	blockedUntilMs: number | undefined;
 	priorBlockedUntilMs: number | undefined;
 	priorBlockedUntilTimed: boolean | undefined;
@@ -628,6 +629,7 @@ export class TurnRecovery {
 					switchedCredential: outcome.switched,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
+					retryAtTimed: outcome.retryAtTimed,
 					blockedUntilMs: outcome.blockedUntilMs,
 					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
 					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
@@ -2263,14 +2265,26 @@ export class TurnRecovery {
 					const requestedBlockedUntilMs = Date.now() + (recordedUsageLimitOutcome.retryAfterMs ?? 0);
 					if (recordedUsageLimitOutcome.blockedUntilMs > requestedBlockedUntilMs) {
 						const blockedRemainingMs = Math.max(0, recordedUsageLimitOutcome.blockedUntilMs - Date.now());
-						if (blockedRemainingMs > usageLimitWaitMs) usageLimitWaitMs = blockedRemainingMs;
+						if (blockedRemainingMs > usageLimitWaitMs) {
+							usageLimitWaitMs = blockedRemainingMs;
+							// This branch is reached only when the pre-existing deadline
+							// outlasts this call's own request. A provider-timed
+							// in-memory block at that deadline would already have been
+							// adopted by the `priorBlockedUntilTimed` branch above
+							// (same deadline, same read), so what wins here is a block
+							// the persisted store held across a restart — and those
+							// carry no provenance. Never inherit this call's heuristic
+							// contribution and report it as a provider claim.
+							usageLimitWaitTimed = false;
+						}
 					}
 				}
 				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
 					usageLimitWaitMs = siblingAvailabilityWaitMs;
-					// A sibling's unblock deadline comes from OMP's own block
-					// bookkeeping, not from anything this provider stated.
-					usageLimitWaitTimed = false;
+					// The sibling's unblock deadline is OMP's own block
+					// bookkeeping; it counts as provider timing only when
+					// AuthStorage reports the block itself was provider-parked.
+					usageLimitWaitTimed = recordedUsageLimitOutcome.retryAtTimed === true;
 				}
 				if (usageLimitWaitMs > delayMs) {
 					delayMs = usageLimitWaitMs;

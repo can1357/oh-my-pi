@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Retry fail-fast messages now distinguish a provider-stated wait from an OMP-estimated cooldown, so a hintless usage-limit heuristic no longer surfaces as `Provider requested …` ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
+- Retry fail-fast messages now distinguish a provider-stated wait from an OMP-estimated cooldown, so a hintless usage-limit heuristic no longer surfaces as `Provider requested …` ([#11924](https://github.com/can1357/oh-my-pi/pull/11924) by [@yugasun](https://github.com/yugasun)).
 
 ## [18.1.19] - 2026-09-12
 

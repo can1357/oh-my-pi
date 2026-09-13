@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AuthStorage.markUsageLimitReached` now reports whether the chosen wait came from provider-stated timing (`retryAtTimed` for the sibling-unblock deadline), so callers can describe the wait without re-deriving its provenance ([#11924](https://github.com/can1357/oh-my-pi/pull/11924) by [@yugasun](https://github.com/yugasun)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added
