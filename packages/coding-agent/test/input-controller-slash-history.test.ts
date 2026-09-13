@@ -10,6 +10,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 // executeBuiltinSlashCommand and the controller returned before any
 // addToHistory call. The fix centralizes recording after dispatch, with a
 // secret filter (shouldSkipHistory) for credential-bearing commands.
+const DEFAULT_SESSION_ID = "session-1";
 function makeCtx(isStreaming = false) {
 	const addToHistory = vi.fn();
 	const handleMCPCommand = vi.fn(async () => {});
@@ -42,6 +43,7 @@ function makeCtx(isStreaming = false) {
 	};
 	const ctx = {
 		editor,
+		sessionManager: { getSessionId: () => DEFAULT_SESSION_ID },
 		session: {
 			isStreaming,
 			isCompacting: false,
@@ -103,7 +105,25 @@ describe("input controller — slash command history (#3148)", () => {
 
 		await editor.onSubmit?.("/hotkeys");
 
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys", DEFAULT_SESSION_ID);
+	});
+
+	it("files a session-switching command under the conversation it was typed in", async () => {
+		let sessionId = "source-session";
+		const { ctx, editor, addToHistory } = makeCtx();
+		ctx.sessionManager = {
+			getSessionId: () => sessionId,
+		} as unknown as InteractiveModeContext["sessionManager"];
+		// `/hotkeys` rides the shared dispatch path; its handler stands in for `/new` or
+		// `/resume`, which switch the conversation before the controller records the command.
+		ctx.handleHotkeysCommand = () => {
+			sessionId = "destination-session";
+		};
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("/hotkeys");
+
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys", "source-session");
 	});
 
 	it("records a non-secret /mcp subcommand", async () => {
@@ -113,7 +133,7 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/mcp list");
 
 		expect(handleMCPCommand).toHaveBeenCalledWith("/mcp list");
-		expect(addToHistory).toHaveBeenCalledWith("/mcp list");
+		expect(addToHistory).toHaveBeenCalledWith("/mcp list", DEFAULT_SESSION_ID);
 	});
 
 	it("does NOT record /mcp add with a --token (would leak the bearer token)", async () => {
@@ -158,7 +178,7 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/queue inspect the final result");
 
 		expect(followUp).toHaveBeenCalledWith("inspect the final result", undefined);
-		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result");
+		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result", DEFAULT_SESSION_ID);
 		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 

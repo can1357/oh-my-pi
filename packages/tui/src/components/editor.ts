@@ -443,7 +443,7 @@ interface HistoryEntry {
 }
 
 interface HistoryStorage {
-	add(prompt: string, cwd?: string): Promise<void>;
+	add(prompt: string, cwd?: string, sessionId?: string): Promise<void>;
 	getRecent(limit: number): HistoryEntry[];
 }
 
@@ -886,15 +886,17 @@ export class Editor implements Component, Focusable {
 
 	/**
 	 * Add a prompt to history for up/down arrow navigation.
-	 * Called after successful submission.
+	 * Called after successful submission. `sessionId` pins the conversation the prompt was
+	 * typed in: a command can switch sessions while it runs, and the prompt belongs to the
+	 * one that was active when it was submitted.
 	 */
-	addToHistory(text: string): void {
+	addToHistory(text: string, sessionId?: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 
 		const stor = this.#historyStorage;
 		if (stor) {
-			stor.add(trimmed, getProjectDir()).catch(error => {
+			stor.add(trimmed, getProjectDir(), sessionId).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}

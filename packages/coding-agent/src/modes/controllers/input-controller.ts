@@ -928,16 +928,20 @@ export class InputController {
 					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
+				// Commands such as /new, /resume and /fork switch the conversation while they
+				// run, so the id is captured before dispatch: the command belongs to the
+				// conversation it was typed in, not the one it moved to.
+				const submittedIn = this.ctx.sessionManager.getSessionId();
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
 					// Record the original slash command text so Up Arrow recalls
 					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 					text = slashResult;
 				}
 			}
@@ -1604,15 +1608,18 @@ export class InputController {
 
 		if (text) {
 			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+			// Same reason as the submit path: capture the conversation before a session-switching
+			// command runs, so the recorded text is filed where it was typed.
+			const submittedIn = this.ctx.sessionManager.getSessionId();
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
 			if (slashResult === true) {
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 				return;
 			}
 			if (typeof slashResult === "string") {
 				// Command handled but returned remaining text to use as prompt.
 				// Record the original slash command text so Up Arrow recalls it.
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 				text = slashResult;
 			}
 		}
