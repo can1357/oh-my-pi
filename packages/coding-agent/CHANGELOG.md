@@ -13,6 +13,7 @@
 ### Changed
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
+- Added per-subagent tool scoping: an agent definition's `tools:` list is now a hard allowlist for custom, extension, and MCP proxy tools, and a new `disallowedTools:` frontmatter field removes tools by exact name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all; top-level sessions and agents without `tools:` are unaffected ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
 
 ## [18.1.19] - 2026-09-12
 
