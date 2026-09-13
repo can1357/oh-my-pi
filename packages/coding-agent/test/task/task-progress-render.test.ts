@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import { type RenderResultOptions, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { SettingPath, SettingValue } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { taskToolRenderer } from "@oh-my-pi/pi-coding-agent/task/renderer";
+import { subprocessToolRegistry } from "@oh-my-pi/pi-coding-agent/task/subprocess-tool-registry";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
+import { FEED_MODEL_BADGE_WIDTH } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 
 function runningProgress(overrides: Partial<AgentProgress> = {}): AgentProgress {
 	return {
@@ -67,6 +70,264 @@ describe("task progress rendering", () => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
+
+	it("places the model and advisor before the live agent title without displacing stats", async () => {
+		Settings.instance.set("task.showResolvedModelBadge", true);
+		const theme = (await getThemeByName("dark"))!;
+		const progress = runningProgress({
+			id: "BadgeWorker",
+			agent: "scout",
+			description: "Inspect rendering",
+			resolvedModel: "openai/gpt-5:high",
+			resolvedModelIdentity: "openai/gpt-5",
+			resolvedThinkingLevel: ThinkingLevel.High,
+			advisor: true,
+			requests: 3,
+			cost: 0.25,
+		});
+		const row = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [], details: detailsFor(progress) },
+					{ expanded: false, isPartial: true },
+					theme,
+				),
+				"BadgeWorker",
+			),
+		);
+		expect(row).toContain(`openai/gpt-5 ${theme.icon.advisor} BadgeWorker: Inspect rendering`);
+		expect(row).not.toContain(":high");
+		expect(row).toContain(`${theme.thinking.high.split(" ")[0]} openai/gpt-5`);
+		expect(row.indexOf(theme.status.done)).toBeLessThan(row.indexOf("openai/gpt-5"));
+		expect(row).toContain(`${theme.format.bracketLeft}scout${theme.format.bracketRight}`);
+		expect(row.indexOf("3 req")).toBeGreaterThan(row.indexOf("BadgeWorker"));
+		expect(row).toContain("$0.25");
+	});
+
+	it("keeps the settled model before the name and only marks an enabled advisor", async () => {
+		Settings.instance.set("task.showResolvedModelBadge", true);
+		const theme = (await getThemeByName("dark"))!;
+		const renderRow = (advisor: boolean): string =>
+			Bun.stripANSI(
+				findRow(
+					taskToolRenderer.renderResult(
+						{
+							content: [],
+							details: {
+								projectAgentsDir: null,
+								totalDurationMs: 1000,
+								results: [
+									finishedResult({
+										id: "SettledWorker",
+										description: "Inspect rendering",
+										resolvedModel: "openai/gpt-5:high",
+										resolvedModelIdentity: "openai/gpt-5",
+										resolvedThinkingLevel: ThinkingLevel.High,
+										advisor,
+										durationMs: 1000,
+										requests: 3,
+									}),
+								],
+							},
+						},
+						{ expanded: false, isPartial: false },
+						theme,
+					),
+					"SettledWorker",
+				),
+			);
+		const withoutAdvisor = renderRow(false);
+		expect(withoutAdvisor).toContain("openai/gpt-5 SettledWorker: Inspect rendering");
+		expect(withoutAdvisor).not.toContain(theme.icon.advisor);
+		expect(withoutAdvisor).not.toContain(":high");
+		expect(withoutAdvisor.indexOf("3 req")).toBeGreaterThan(withoutAdvisor.indexOf("SettledWorker"));
+		expect(renderRow(true)).toContain(`openai/gpt-5 ${theme.icon.advisor} SettledWorker`);
+	});
+
+	it("keeps the name and status on the first row at 40 columns across resizes", async () => {
+		Settings.instance.set("task.showResolvedModelBadge", true);
+		const theme = (await getThemeByName("dark"))!;
+		const metadata = {
+			id: "ArchitectureScout",
+			agent: "scout",
+			description: "Inspect rendering boundaries",
+			resolvedModelIdentity: "openai/custom-architecture-model:high",
+			resolvedThinkingLevel: ThinkingLevel.High,
+			advisor: true,
+		};
+		const snapshots: { details: TaskToolDetails; status?: string }[] = [
+			{ details: detailsFor(runningProgress(metadata)) },
+			{ details: detailsFor(runningProgress({ ...metadata, status: "completed" })) },
+			{ details: detailsFor(runningProgress({ ...metadata, status: "failed" })), status: "failed" },
+			{
+				details: { projectAgentsDir: null, totalDurationMs: 0, results: [finishedResult(metadata)] },
+				status: "done",
+			},
+			{
+				details: {
+					projectAgentsDir: null,
+					totalDurationMs: 0,
+					results: [finishedResult({ ...metadata, exitCode: 1 })],
+				},
+				status: "failed",
+			},
+		];
+		for (const { details, status } of snapshots) {
+			const component = taskToolRenderer.renderResult(
+				{ content: [], details },
+				{ expanded: false, isPartial: !!details.progress },
+				theme,
+			);
+			for (const width of [160, 40, 160]) {
+				const rows = component.render(width);
+				for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+				const plainRows = rows.map(row => Bun.stripANSI(row));
+				const firstStatusRow = plainRows.find(row => row.startsWith(theme.boxRound.vertical));
+				expect(firstStatusRow).toBeDefined();
+				expect(firstStatusRow).toContain(metadata.id);
+				expect(firstStatusRow).toContain(`${theme.format.bracketLeft}scout${theme.format.bracketRight}`);
+				if (status) {
+					expect(firstStatusRow).toContain(`${theme.format.bracketLeft}${status}${theme.format.bracketRight}`);
+				}
+				expect(plainRows.join("\n")).toContain(metadata.description);
+				if (width === 160) {
+					const thinkingGlyph = theme.thinking.high.split(" ")[0];
+					expect(firstStatusRow).toContain("openai/");
+					expect(firstStatusRow).toContain(":high");
+					expect(firstStatusRow).toContain(thinkingGlyph);
+					const badge = firstStatusRow!
+						.slice(firstStatusRow!.indexOf(thinkingGlyph), firstStatusRow!.indexOf(metadata.id))
+						.trimEnd();
+					expect(visibleWidth(badge)).toBeLessThanOrEqual(FEED_MODEL_BADGE_WIDTH);
+					expect(firstStatusRow).toContain(theme.icon.advisor);
+				}
+			}
+		}
+	});
+
+	it("hides model and advisor metadata together on progress and settled rows", async () => {
+		Settings.instance.set("task.showResolvedModelBadge", false);
+		const theme = (await getThemeByName("dark"))!;
+		const metadata = {
+			id: "HiddenBadge",
+			resolvedModel: "openai/gpt-5:high",
+			resolvedModelIdentity: "openai/gpt-5",
+			resolvedThinkingLevel: ThinkingLevel.High,
+			advisor: true,
+		};
+		const snapshots: TaskToolDetails[] = [
+			detailsFor(runningProgress(metadata)),
+			{ projectAgentsDir: null, totalDurationMs: 0, results: [finishedResult(metadata)] },
+		];
+		for (const details of snapshots) {
+			const row = Bun.stripANSI(
+				findRow(
+					taskToolRenderer.renderResult(
+						{ content: [], details },
+						{ expanded: false, isPartial: !!details.progress },
+						theme,
+					),
+					"HiddenBadge",
+				),
+			);
+			expect(row).toContain(`${theme.status.done} HiddenBadge`);
+			expect(row).not.toContain("openai/gpt-5");
+			expect(row).not.toContain(theme.icon.advisor);
+		}
+	});
+
+	it("preserves nested subprocess IDs and status when no width is known during row construction", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			totalDurationMs: 0,
+			results: [finishedResult({ id: "UnknownWidthWorker", agent: "scout", exitCode: 1 })],
+		};
+		const component = subprocessToolRegistry.getHandler("task")!.renderFinal!([details], theme, false);
+		const text = Bun.stripANSI(component.render(120).join("\n"));
+		expect(text).toContain("UnknownWidthWorker");
+		expect(text).toContain(`${theme.format.bracketLeft}scout${theme.format.bracketRight}`);
+		expect(text).toContain(`${theme.format.bracketLeft}failed${theme.format.bracketRight}`);
+	});
+
+	it("renders model-bearing progress and results before settings initialization", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		resetSettingsForTest();
+		const metadata = { id: "ColdStart", resolvedModelIdentity: "provider/model", advisor: true };
+		for (const details of [
+			detailsFor(runningProgress(metadata)),
+			{ projectAgentsDir: null, totalDurationMs: 0, results: [finishedResult(metadata)] },
+		]) {
+			const text = Bun.stripANSI(
+				taskToolRenderer
+					.renderResult({ content: [], details }, { expanded: false, isPartial: false }, theme)
+					.render(60)
+					.join("\n"),
+			);
+			expect(text).toContain("ColdStart");
+			expect(text).not.toContain("provider/model");
+			expect(text).not.toContain(theme.icon.advisor);
+		}
+	});
+
+	it("preserves long descriptions below bounded IDs and required status with badges on or off", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const description = "First distinctive description section followed by every remaining detail and final marker";
+		const metadata = {
+			id: `LongWorker${"界".repeat(30)}`,
+			agent: `custom-role-${"extended-".repeat(10)}`,
+			description,
+			resolvedModelIdentity: "provider/model",
+			advisor: true,
+		};
+		for (const enabled of [true, false]) {
+			Settings.instance.override("task.showResolvedModelBadge", enabled);
+			for (const details of [
+				detailsFor(runningProgress({ ...metadata, status: "failed" })),
+				{ projectAgentsDir: null, totalDurationMs: 0, results: [finishedResult({ ...metadata, exitCode: 1 })] },
+			]) {
+				const component = taskToolRenderer.renderResult(
+					{ content: [], details },
+					{ expanded: false, isPartial: false },
+					theme,
+				);
+				for (const width of [40, 160, 40]) {
+					const rows = component.render(width).map(row => Bun.stripANSI(row));
+					for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+					const statusRow = rows.find(row => row.includes("LongWorker"))!;
+					expect(statusRow).toContain("LongWorker");
+					expect(statusRow).toContain(`${theme.format.bracketLeft}failed${theme.format.bracketRight}`);
+					const text = rows.join("").replaceAll(theme.boxRound.vertical, "").replace(/\s+/g, "");
+					expect(text).toContain(description.replace(/\s+/g, ""));
+				}
+			}
+		}
+	});
+
+	it("preserves old snapshot selectors without inventing thinking glyphs", async () => {
+		Settings.instance.set("task.showResolvedModelBadge", true);
+		const theme = (await getThemeByName("dark"))!;
+		const metadata = { id: "LegacyWorker", resolvedModel: "custom/model:high" };
+		const snapshots: TaskToolDetails[] = [
+			detailsFor(runningProgress(metadata)),
+			{ projectAgentsDir: null, totalDurationMs: 0, results: [finishedResult(metadata)] },
+		];
+		for (const details of snapshots) {
+			const row = Bun.stripANSI(
+				findRow(
+					taskToolRenderer.renderResult(
+						{ content: [], details },
+						{ expanded: false, isPartial: !!details.progress },
+						theme,
+					),
+					"LegacyWorker",
+				),
+			);
+			expect(row).toContain(`${theme.status.done} custom/model:high LegacyWorker`);
+			expect(row).not.toContain(theme.thinking.high.split(" ")[0]);
+		}
+	});
+
 	it("renders running task rows static with the agent dot", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		expect(theme).toBeDefined();
@@ -441,6 +702,42 @@ describe("task progress rendering", () => {
 		// The run summary footer still counts the full batch.
 		expect(collapsed).toContain("5 succeeded");
 		expect(collapsed).toContain("1 failed");
+	});
+	it("expands tabs in task descriptions before measuring and rendering", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const description = "Inspect\trendering\tboundaries";
+		const snapshots: TaskToolDetails[] = [
+			detailsFor(runningProgress({ id: "TabWorker", description })),
+			{ projectAgentsDir: null, totalDurationMs: 0, results: [finishedResult({ id: "TabWorker", description })] },
+		];
+		for (const details of snapshots) {
+			const rows = taskToolRenderer
+				.renderResult({ content: [], details }, { expanded: false, isPartial: !!details.progress }, theme)
+				.render(120);
+			for (const row of rows) expect(Bun.stripANSI(row)).not.toContain("\t");
+			const text = rows.map(row => Bun.stripANSI(row)).join("\n");
+			expect(text).toContain("TabWorker");
+			expect(text).toContain("Inspect");
+			expect(text).toContain("rendering");
+		}
+		const longDescription = `First\tsection with a tab followed by enough detail to force the continuation line at narrow widths`;
+		const narrow: TaskToolDetails[] = [
+			detailsFor(runningProgress({ id: "TabNarrow", description: longDescription })),
+			{
+				projectAgentsDir: null,
+				totalDurationMs: 0,
+				results: [finishedResult({ id: "TabNarrow", description: longDescription })],
+			},
+		];
+		for (const details of narrow) {
+			const rows = taskToolRenderer
+				.renderResult({ content: [], details }, { expanded: false, isPartial: !!details.progress }, theme)
+				.render(40);
+			for (const row of rows) {
+				expect(Bun.stripANSI(row)).not.toContain("\t");
+				expect(visibleWidth(row)).toBeLessThanOrEqual(40);
+			}
+		}
 	});
 });
 

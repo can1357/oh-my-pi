@@ -4,14 +4,14 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
 - JavaScript: `await browser.open(options)` returns a `BrowserTab`; `browser.tab(name)` returns an existing handle; `await browser.close(options)` releases tabs.
 - Python: `await browser.open(name=…, url=…)`, synchronous `browser.tab(name)`, and `await browser.close(name=…)`. Python methods accept keyword arguments.
-- `open` options: `name`, `url`, `app`, `viewport`, `wait_until`, `dialogs`, `timeout`.
+- `open` options: `name`, `url`, `app`, `viewport`, `wait_until`, `dialogs`, `timeout`, `persist`.
 - `close` options: `name`, `all`, `kill`, `timeout`.
 - Direct tab helpers:
   - Navigation: `url`, `title`, `goto`.
   - Inspection: `observe`, `ariaSnapshot`, `screenshot`, `extract`.
   - Interaction: `click`, `type`, `fill`, `press`, `scroll`, `drag`, `scrollIntoView`, `select`, `uploadFile`.
   - Waiting: `waitFor`, `waitForSelector`, `waitForUrl`.
-  - Page execution: `evaluate`.
+  - Page execution: `evaluate`. `tab.evaluate(string)` evaluates the string as a page-global expression; top-level `return` is invalid. Pass a function or invoke an IIFE string to use `return`.
 - `tab.id(n)` / `tab.ref("e5")` return `BrowserElement` handles supporting `click`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, and `evaluate`. A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
 - JavaScript `await tab.run(fnOrCode, { args?, timeout? })` runs a function or code string. Functions receive `{ tab, page, browser, wait, assert }`; cell closures are not captured. Plain data, functions, and `RegExp` values are supported in `args`.
 - Python `await tab.run(code, timeout=…)` accepts a JavaScript code string only. Direct Python helpers use the same method names; keyword arguments become a trailing JavaScript options object.
@@ -28,6 +28,7 @@ Application modes:
 - `app.relay: true`: drive the user's Chrome through the omp relay. `app.target` selects a tab by URL/title substring; without it, the visible tab is adopted. Opening with `url` navigates that adopted tab.
 - Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. Name a target or create a dedicated tab; NEVER navigate the visible tab without authorization.
 - Closing releases the managed tab. It never closes relay/CDP-attached pages. Spawned browsers remain open unless `kill: true`.
+- Idle tabs auto-freeze at turn settle (animated pages stop burning CPU/GPU) and unfreeze on next use; tabs idle past the idle-close timeout are closed. Pass `persist: true` on `open` to keep a tab live across turns (e.g. multi-step login); `browser.close` still releases explicitly.
 </instruction>
 
 <examples>

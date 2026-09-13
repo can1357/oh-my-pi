@@ -94,3 +94,50 @@ export type DemotedThinkingCarrier = object & { [kDemotedThinking]?: boolean };
 export function isDemotedThinking(block: DemotedThinkingCarrier | null | undefined): boolean {
 	return block?.[kDemotedThinking] === true;
 }
+
+/**
+ * Marks an Anthropic wire message that was serialized from a source
+ * `role: "user"` message.
+ *
+ * The wire role alone cannot answer this. `convertAnthropicMessages` emits
+ * `role: "user"` for several things that are not a conversational turn:
+ * `developer` messages on models without mid-conversation `system` support,
+ * `tool_result` runs, and the synthetic `Continue.` pads inserted between
+ * adjacent assistants. Prompt-cache decimation counts conversational turns,
+ * so it reads this marker instead of guessing from wire content.
+ *
+ * Symbol-keyed so the marker never persists across the JSONL round-trip and
+ * never reaches the wire.
+ */
+export const kConversationalUser = Symbol("provider.message.conversationalUser");
+
+/** Carries the conversational-user marker without exposing a string-keyed property. */
+export type ConversationalUserCarrier = object & { [kConversationalUser]?: boolean };
+
+/** True for wire messages serialized from a source `role: "user"` message. */
+export function isConversationalUser(message: ConversationalUserCarrier | null | undefined): boolean {
+	return message?.[kConversationalUser] === true;
+}
+
+/**
+ * Marks a `role: "user"` message that `transformMessages` synthesized rather
+ * than one the user sent.
+ *
+ * The stale-tool-result note is deliberately emitted as `user` so no provider
+ * elevates untrusted tool output to instruction priority, which leaves it
+ * indistinguishable from a real turn by role alone. Prompt-cache decimation
+ * must not count it, or an orphan result appearing or disappearing in a
+ * compacted history shifts every later checkpoint.
+ *
+ * Symbol-keyed so the marker never persists across the JSONL round-trip and
+ * never reaches the wire.
+ */
+export const kSyntheticUser = Symbol("provider.message.syntheticUser");
+
+/** Carries the synthetic-user marker without exposing a string-keyed property. */
+export type SyntheticUserCarrier = object & { [kSyntheticUser]?: boolean };
+
+/** True for `user` messages synthesized by message transformation. */
+export function isSyntheticUser(message: SyntheticUserCarrier | null | undefined): boolean {
+	return message?.[kSyntheticUser] === true;
+}

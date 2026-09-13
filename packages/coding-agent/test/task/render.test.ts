@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import { getThemeByName, setThemeInstance, type Theme } from "../../src/modes/theme/theme";
-import { renderResult } from "../../src/task/render";
+import { renderResult, taskCardAgentIds } from "../../src/task/render";
 import { taskToolRenderer } from "../../src/task/renderer";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "../../src/task/types";
 
@@ -283,5 +283,82 @@ describe("task live progress rendering", () => {
 			);
 
 		expect(render(0)).toBe(render(1));
+	});
+});
+
+describe("taskCardAgentIds", () => {
+	function makeResult(id: string): SingleResult {
+		return {
+			index: 0,
+			id,
+			agent: "task",
+			agentSource: "bundled",
+			task: "do work",
+			exitCode: 0,
+			output: "done",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 1,
+		};
+	}
+
+	it("collects in-flight progress ids before any result settles", () => {
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 1,
+			progress: [
+				{ ...makeProgress([]), id: "LiveOne" },
+				{ ...makeProgress([]), id: "LiveTwo" },
+			],
+		};
+		expect(taskCardAgentIds(details)).toEqual(["LiveOne", "LiveTwo"]);
+	});
+
+	it("unions settled result ids and dedupes repeats", () => {
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [makeResult("DoneOne"), makeResult("DoneOne")],
+			totalDurationMs: 1,
+			progress: [{ ...makeProgress([]), id: "DoneOne" }],
+		};
+		expect(taskCardAgentIds(details)).toEqual(["DoneOne"]);
+	});
+
+	it("collects nested worker ids from extracted task snapshots", () => {
+		const nested: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [makeResult("NestedDone")],
+			totalDurationMs: 1,
+			progress: [{ ...makeProgress([]), id: "NestedLive" }],
+		};
+		const inflight: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 1,
+			progress: [{ ...makeProgress([]), id: "InflightLive" }],
+		};
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 1,
+			progress: [
+				{
+					...makeProgress([]),
+					id: "Outer",
+					extractedToolData: { task: [nested] },
+					inflightTaskDetails: inflight,
+				},
+			],
+		};
+		expect(taskCardAgentIds(details)).toEqual(["Outer", "NestedDone", "NestedLive", "InflightLive"]);
+	});
+
+	it("ignores non-task shapes without throwing", () => {
+		expect(taskCardAgentIds(undefined)).toEqual([]);
+		expect(taskCardAgentIds(null)).toEqual([]);
+		expect(taskCardAgentIds({ results: [{ id: 42 }, null, {}] })).toEqual([]);
 	});
 });

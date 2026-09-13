@@ -7,6 +7,7 @@ import type {
 } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
+import type { LoopConditionConfig } from "../../loop-condition";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -88,6 +89,7 @@ export interface SegmentContext {
 	loopMode: {
 		state: "waiting" | "running" | "paused";
 		limit?: LoopLimitRuntime;
+		condition?: LoopConditionConfig;
 	} | null;
 	goalMode: {
 		enabled: boolean;
@@ -95,6 +97,16 @@ export interface SegmentContext {
 	} | null;
 	vibeMode: {
 		enabled: boolean;
+	} | null;
+	/** Modal editing state, or null when `tui.vimMode` is off. */
+	vim: {
+		mode: "insert" | "normal" | "visual" | "visual-line";
+		/** Half-typed operator/count (`"2d"`), empty when nothing is pending. */
+		pending: string;
+		/** Lines spanned by the active Visual selection; 0 outside Visual modes. */
+		selectedLines: number;
+		/** `tui.vimModeDisplay`: how the mode renders in the status line. */
+		display: "text" | "icon" | "none";
 	} | null;
 	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)

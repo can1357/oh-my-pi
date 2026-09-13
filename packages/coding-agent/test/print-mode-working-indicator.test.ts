@@ -322,7 +322,7 @@ describe("print mode working indicator", () => {
 		expect(stdoutEvents.at(-1)).toBe("flush");
 	});
 
-	it("waits for advisor catch-up before hard-exit disposal", async () => {
+	it("waits for advisor catch-up before returning a terminal failure", async () => {
 		const message = makeAssistantMessage("");
 		message.stopReason = "error";
 		message.errorMessage = "primary request failed";
@@ -330,12 +330,7 @@ describe("print mode working indicator", () => {
 		const { promise: catchup, resolve: resolveCatchup } = Promise.withResolvers<void>();
 		const { promise: catchupStarted, resolve: markCatchupStarted } = Promise.withResolvers<void>();
 		let disposed = false;
-		let exitCode: number | undefined;
 		let catchupTimeoutMs: number | undefined;
-		vi.spyOn(process, "exit").mockImplementation(code => {
-			exitCode = code as number;
-			throw new Error("process exit");
-		});
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
@@ -368,10 +363,44 @@ describe("print mode working indicator", () => {
 		expect(disposed).toBe(false);
 		resolveCatchup();
 
-		await expect(run).rejects.toThrow("process exit");
+		expect(await run).toBe(1);
 		expect(disposed).toBe(true);
-		expect(exitCode).toBe(1);
 		expect(catchupTimeoutMs).toBe(PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS);
 		expect(stderrOutput.join("")).toContain("primary request failed");
+	});
+
+	it("returns exit code 1 for a terminal failure in JSON mode without writing to stderr", async () => {
+		const message = makeAssistantMessage("");
+		message.stopReason = "error";
+		message.errorMessage = "primary request failed";
+		const messages: AssistantMessage[] = [];
+		let disposed = false;
+		const session = {
+			state: { messages },
+			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			sessionManager: {
+				getHeader: () => undefined,
+				buildSessionContext: () => ({ messages: [] }),
+				getEntries: () => [],
+			},
+			settings: { get: () => false },
+			extensionRunner: undefined,
+			subscribe: () => () => {},
+			prompt: async () => {
+				messages.push(message);
+				return true;
+			},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {
+				disposed = true;
+			},
+		} as unknown as AgentSession;
+
+		// JSON mode carries the error in the event stream, not on stderr; the exit
+		// code is what tells automation the turn failed (issue #11498).
+		expect(await runPrintMode(session, { mode: "json", initialMessage: "hello" })).toBe(1);
+		expect(disposed).toBe(true);
+		expect(stderrOutput.join("")).toBe("");
 	});
 });

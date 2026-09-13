@@ -450,7 +450,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				toolBlocks.size > 0 ? "toolUse" : latestStopReason === StopReason.MAX_TOKENS ? "length" : "stop";
 			output.stopReason = doneReason;
 
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 

@@ -3,7 +3,7 @@ use std::{
 	ffi::{OsStr, OsString},
 	io,
 	os::windows::ffi::{OsStrExt, OsStringExt},
-	path::{Component, Path},
+	path::{Component, Path, PathBuf, Prefix},
 	ptr,
 };
 
@@ -459,7 +459,45 @@ fn refuse_protected_default(scheme: &str) -> Result<()> {
 	)
 }
 
+/// Rewrite a canonicalized transaction path into a form the Windows shell can
+/// launch.
+///
+/// Transaction paths descend from `fs::canonicalize`, which returns verbatim
+/// (`\\?\`) paths. `ShellExecuteEx` — the API browsers use to hand a custom
+/// scheme to its registered handler — refuses those, so registering a verbatim
+/// command installs a handler that resolves but never starts: association
+/// lookup succeeds, the relay never runs, and sign-in waits out its deadline on
+/// a callback that cannot arrive.
+fn shell_path(path: &Path) -> Result<PathBuf> {
+	let mut components = path.components();
+	let Some(Component::Prefix(prefix)) = components.next() else {
+		return Ok(path.to_path_buf());
+	};
+	let mut shell = match prefix.kind() {
+		Prefix::Disk(_) | Prefix::UNC(..) => return Ok(path.to_path_buf()),
+		Prefix::VerbatimDisk(letter) => {
+			PathBuf::from(format!("{}:\\", char::from(letter.to_ascii_uppercase())))
+		},
+		Prefix::VerbatimUNC(server, share) => {
+			let mut root = OsString::from(r"\\");
+			root.push(server);
+			root.push(r"\");
+			root.push(share);
+			root.push(r"\");
+			PathBuf::from(root)
+		},
+		Prefix::Verbatim(_) | Prefix::DeviceNS(_) => bail!(
+			"the Windows shell cannot launch an OAuth callback handler stored under {}",
+			path.display()
+		),
+	};
+	shell.extend(components.filter(|component| !matches!(component, Component::RootDir)));
+	Ok(shell)
+}
+
 fn relay_command(helper: &Path, callback: &Path) -> Result<OsString> {
+	let helper = shell_path(helper)?;
+	let callback = shell_path(callback)?;
 	if helper.as_os_str().encode_wide().any(|unit| unit == 0)
 		|| callback.as_os_str().encode_wide().any(|unit| unit == 0)
 	{
@@ -675,6 +713,47 @@ mod tests {
 				r#""C:\Program Files\omp\callback \"helper\".exe" "C:\OAuth callbacks\pending\\" "%1""#
 			)
 		);
+	}
+
+	#[test]
+	fn command_rewrites_canonicalized_verbatim_paths_the_shell_cannot_launch() {
+		let command = relay_command(
+			Path::new(r"\\?\C:\Users\dev\.omp\oauth\callback-helper.exe"),
+			Path::new(r"\\?\C:\Users\dev\.omp\oauth\callback.url"),
+		)
+		.unwrap();
+		assert_eq!(
+			command,
+			OsString::from(
+				r#""C:\Users\dev\.omp\oauth\callback-helper.exe" "C:\Users\dev\.omp\oauth\callback.url" "%1""#
+			)
+		);
+	}
+
+	#[test]
+	fn command_rewrites_verbatim_unc_paths_to_their_shell_form() {
+		let command = relay_command(
+			Path::new(r"\\?\UNC\files\home\dev\callback-helper.exe"),
+			Path::new(r"\\?\UNC\files\home\dev\callback.url"),
+		)
+		.unwrap();
+		assert_eq!(
+			command,
+			OsString::from(
+				r#""\\files\home\dev\callback-helper.exe" "\\files\home\dev\callback.url" "%1""#
+			)
+		);
+	}
+
+	#[test]
+	fn command_refuses_volume_paths_instead_of_registering_a_dead_handler() {
+		let error = relay_command(
+			Path::new(r"\\?\Volume{d0e5f6a7-0000-0000-0000-000000000000}\callback-helper.exe"),
+			Path::new(r"\\?\Volume{d0e5f6a7-0000-0000-0000-000000000000}\callback.url"),
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("cannot launch"), "{error}");
 	}
 
 	#[test]

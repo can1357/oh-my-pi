@@ -23,6 +23,7 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 function yieldEmittingSession(
 	initialTools: string[] = ["read", "yield"],
@@ -35,6 +36,7 @@ function yieldEmittingSession(
 	const serving = (model: Model | undefined): { selector: string; isFallback: boolean } | undefined =>
 		model ? { selector: `${model.provider}/${model.id}`, isFallback: false } : undefined;
 	const session = {
+		...createSessionDefaults(),
 		state: { messages: [] },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: modelSwitch?.from,
@@ -75,14 +77,6 @@ function yieldEmittingSession(
 				});
 			}
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
-		getLastAssistantMessage: () => undefined,
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 	};
 	return session as unknown as AgentSession;
 }

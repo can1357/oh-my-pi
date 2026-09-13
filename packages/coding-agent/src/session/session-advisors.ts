@@ -16,6 +16,7 @@ import {
 	compactionContextTokens,
 	createCompactionSummaryMessage,
 	estimateTranscriptTokens,
+	getAnthropicCompactionPayload,
 	NativeCompactionError,
 	prepareCompaction,
 	type SessionMessageEntry,
@@ -35,12 +36,15 @@ import type {
 import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
+	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
+	ADVISOR_MAX_BUDGET_PER_UPDATE,
 	AdviseTool,
 	type AdvisorAgent,
 	type AdvisorConfig,
+	type AdvisorEmissionDecision,
 	AdvisorEmissionGuard,
 	AdvisorLoopGuard,
 	type AdvisorMessageDetails,
@@ -163,10 +167,17 @@ interface ActiveAdvisor {
 	retryFallbackPendingSuccess: boolean;
 	signature: string;
 }
-
 interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
 	advisorUsageAnchorStartIndex?: number;
+	/**
+	 * Provider-native replay state from `compact()` (e.g. the Anthropic
+	 * compaction block), mirroring entry `preserveData` on the primary
+	 * session. The message payload replays it on later requests; the next
+	 * maintenance run persists it back into the reconstructed entry so the
+	 * following preparation keeps the opaque state and cache continuity.
+	 */
+	preserveData?: Record<string, unknown>;
 }
 
 interface AdvisorRuntimeDescriptor {
@@ -214,10 +225,13 @@ export interface SessionAdvisorsOptions {
 	mcpResources?: CursorMcpResourceAdapter;
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
+	sharedMaxNotesPerUpdate?: number;
 	contextPrompt?: string;
 	/** Active memory backend's developer instructions, wrapped for advisors. */
 	memoryPrompt?: string;
 	configs?: AdvisorConfig[];
+	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
+	configWarnings?: string[];
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 }
@@ -310,12 +324,14 @@ export class SessionAdvisors {
 	#advisorMcpResources: SessionAdvisorsOptions["mcpResources"];
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
+	#advisorSharedMaxNotesPerUpdate: number | undefined;
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
+	#advisorConfigWarnings: string[];
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -347,9 +363,11 @@ export class SessionAdvisors {
 		this.#advisorMcpResources = options.mcpResources;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
+		this.#advisorSharedMaxNotesPerUpdate = options.sharedMaxNotesPerUpdate;
 		this.#advisorContextPrompt = options.contextPrompt;
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
+		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
@@ -364,6 +382,9 @@ export class SessionAdvisors {
 		this.#advisorPrimaryTurnsCompleted++;
 		for (const advisor of this.#advisors) {
 			if (advisor.runtime.disposed) continue;
+			// Only the terminal primary boundary owns the deferred flush. Continuing
+			// tool turns must keep partial-work critiques withheld.
+			if (willContinue !== true) advisor.adviseTool.beginUpdate(false);
 			try {
 				advisor.runtime.onTurnEnd(messages, { willContinue });
 			} catch (error) {
@@ -611,6 +632,19 @@ export class SessionAdvisors {
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}
+	#advisorMaxNotesPerUpdate(config?: AdvisorConfig): number {
+		const clamp = (value: unknown): number | undefined =>
+			typeof value === "number" && Number.isFinite(value) && value >= 1
+				? Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.trunc(value))
+				: undefined;
+
+		return (
+			clamp(config?.maxNotesPerUpdate) ??
+			clamp(this.#advisorSharedMaxNotesPerUpdate) ??
+			clamp(this.#host.settings.get("advisor.maxNotesPerUpdate")) ??
+			ADVISOR_DEFAULT_BUDGET_PER_UPDATE
+		);
+	}
 
 	#isAdvisorInterruptImmuneTurnActive(): boolean {
 		return isAdvisorInterruptImmuneTurnActive({
@@ -785,7 +819,8 @@ export class SessionAdvisors {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
+		const budget = this.#advisorMaxNotesPerUpdate(config);
+		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
 			"\u001f",
 		);
 	}
@@ -836,15 +871,16 @@ export class SessionAdvisors {
 				signature,
 			} = descriptor;
 
-			const emissionGuard = new AdvisorEmissionGuard();
+			const budgetPerUpdate = this.#advisorMaxNotesPerUpdate(config);
+			const emissionGuard = new AdvisorEmissionGuard({ budgetPerUpdate });
 			const adviseTool = new AdviseTool(
 				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
-				note => this.#acceptAdvice(advisorRef, note),
+				(note, severity) => this.#acceptAdvice(advisorRef, note, severity),
 			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [advisorSystemPrompt];
+			const systemPrompt = [prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate })];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
@@ -1191,9 +1227,8 @@ export class SessionAdvisors {
 	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
 	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
 	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
-	 * aside. Suppression by the per-advisor emission guard drops the note silently —
-	 * the model still saw `Recorded.`, so it isn't tempted to rephrase the same note
-	 * past the dedupe.
+	 * aside. The emission guard has already accepted the note; rejected calls never
+	 * enter this route and receive their specific policy outcome from `AdviseTool`.
 	 */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
@@ -1203,15 +1238,14 @@ export class SessionAdvisors {
 		return isTerminalTextAssistantAnswer(messages[tail]);
 	}
 
-	/** Emission-guard gate: the noise/empty/dedupe filter plus the
-	 *  one-advise-per-update budget, consumed the moment a note is emitted —
-	 *  whether it is delivered live or held for a deferred flush. A suppressed
-	 *  note never consumes the budget, so it cannot burn an update's slot ahead
-	 *  of a substantive concern. Returns whether the note may reach the primary. */
-	#acceptAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): boolean {
-		if (advisor.emissionGuard.accept(note)) return true;
-		logger.debug("advisor advice suppressed by emission guard", { severity, advisor: advisor.name });
-		return false;
+	/** Emission-guard gate: classify noise, duplicates, and over-budget notes so
+	 *  AdviseTool can report the exact outcome instead of claiming every rejection
+	 *  is a duplicate. Accepted notes consume the current update's budget. */
+	#acceptAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
+		const decision = advisor.emissionGuard.accept(note, severity);
+		if (decision !== "accepted")
+			logger.debug("advisor advice suppressed by emission guard", { decision, severity, advisor: advisor.name });
+		return decision;
 	}
 
 	/** Route an already-accepted advice note to the primary. Never re-runs the
@@ -1612,11 +1646,15 @@ export class SessionAdvisors {
 					type: "compaction",
 					id,
 					parentId,
-					timestamp,
+					// ISO like every CompactionEntry: the next round reads this
+					// back as previousSummaryTimestamp, and a millis string
+					// does not survive `new Date()` (NaN rewrite marker).
+					timestamp: new Date(message.timestamp || Date.now()).toISOString(),
 					summary: message.summary,
 					shortSummary: message.shortSummary,
 					firstKeptEntryId: advisorSummary.firstKeptEntryId || `msg-${i + 1}`,
 					tokensBefore: message.tokensBefore,
+					preserveData: advisorSummary.preserveData,
 				} satisfies CompactionEntry;
 			}
 
@@ -1700,6 +1738,9 @@ export class SessionAdvisors {
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						tools: agent.state.tools,
+						// The advisor's own live prompt, so a provider-native compaction
+						// re-issues the advisor's request shape and reads its cached prefix.
+						remoteSystemPrompt: agent.state.systemPrompt,
 						sessionId: advisorProviderSessionId,
 						promptCacheKey: advisorProviderSessionId,
 						metadata: advisorMetadata,
@@ -1737,8 +1778,29 @@ export class SessionAdvisors {
 		// compaction. Record their exact array boundary on the in-memory summary so
 		// only assistants appended afterward can become the next usage anchor.
 		const advisorUsageAnchorStartIndex = preparation.recentMessages.length + 1;
+		const anthropicPayload = getAnthropicCompactionPayload(compactResult.preserveData);
+		// A native summary replays its block on later requests, so its rewrite
+		// marker must precede the retained tail: a fresh timestamp would make
+		// `historyRewriteAt` newer than the tail and strip its bound thinking
+		// on the very next request. Reuse the previous compaction's marker when
+		// one exists, else sit just before the retained tail. Local summaries
+		// keep the existing fresh timestamp.
+		const firstRetained = preparation.recentMessages[0];
+		const summaryTimestamp =
+			anthropicPayload !== undefined
+				? (preparation.previousSummaryTimestamp ??
+					(firstRetained ? new Date(firstRetained.timestamp - 1).toISOString() : new Date().toISOString()))
+				: new Date().toISOString();
 		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), { shortSummary }),
+			...createCompactionSummaryMessage(summary, tokensBefore, summaryTimestamp, {
+				shortSummary,
+				// A provider-native compaction returns its replay state in
+				// preserveData; carry it on the in-memory summary so later
+				// advisor requests replay the native block (and beta/edit)
+				// instead of resending the summary as ordinary text.
+				providerPayload: anthropicPayload,
+			}),
+			preserveData: compactResult.preserveData,
 			firstKeptEntryId,
 			advisorUsageAnchorStartIndex,
 		} satisfies AdvisorCompactionSummaryMessage;
@@ -1832,6 +1894,16 @@ export class SessionAdvisors {
 	}
 
 	/**
+	 * WATCHDOG.yml problems found during startup discovery (dropped entries,
+	 * unparseable files). Pulled by the interactive mode AFTER the UI subscribes
+	 * to session events — a constructor-time `emitNotice` would fire before any
+	 * listener exists and be lost.
+	 */
+	get configWarnings(): readonly string[] {
+		return this.#advisorConfigWarnings;
+	}
+
+	/**
 	 * Replace the live advisor roster from an edited `WATCHDOG.yml` (the `/advisor
 	 * configure` save path). Swaps the configs + shared baseline, then rebuilds the
 	 * runtimes in place so the change applies without a restart. When the advisor is
@@ -1839,10 +1911,14 @@ export class SessionAdvisors {
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
-	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
+	applyAdvisorConfigs(
+		advisors: AdvisorConfig[],
+		sharedInstructions: string | undefined,
+		sharedMaxNotesPerUpdate?: number,
+	): number {
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
-		if (!this.#advisorEnabled) return 0;
+		this.#advisorSharedMaxNotesPerUpdate = sharedMaxNotesPerUpdate;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 		return this.#advisors.length;

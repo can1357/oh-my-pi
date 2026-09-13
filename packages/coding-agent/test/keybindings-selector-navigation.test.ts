@@ -345,6 +345,19 @@ describe("selector navigation keybindings", () => {
 		expect(list.getSelectedExtension()?.id).toBe("tool-a");
 	});
 
+	it("appends bare j/k to the extension search filter instead of navigating", () => {
+		setKeybindings(TEST_KEYBINDINGS);
+		const list = new ExtensionList([
+			createExtension("jira", "Jira"),
+			createExtension("json", "JSON"),
+			createExtension("apple", "Apple"),
+		]);
+
+		for (const ch of "jira") list.handleInput(ch);
+
+		expect(list.getSearchQuery()).toBe("jira");
+	});
+
 	it("uses tui.select.down in history search", async () => {
 		setKeybindings(TEST_KEYBINDINGS);
 		const selected: string[] = [];

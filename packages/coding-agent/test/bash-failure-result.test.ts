@@ -97,6 +97,40 @@ describe("BashTool execution results", () => {
 		expect(text).not.toContain("Command exited with code");
 	});
 
+	it("keeps the raw diagnostics when a minimized failure cannot be persisted as an artifact", async () => {
+		// The native minimizer streams the raw bytes live, then reports a lossy
+		// summary. This session has no artifact allocator (the `ToolSession`
+		// contract makes it optional), so the original capture has nowhere to go:
+		// substituting the summary would silently drop every actionable line.
+		const rawOutput =
+			"test/event-cache.e2e-spec.ts:281:5 error TS2304 Cannot find name 'foo'\n" +
+			"test/event-cache.e2e-spec.ts:300:9 error TS2345 Argument of type 'string' is not assignable\n";
+		spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, options, onChunk) {
+			onChunk?.(null, rawOutput);
+			return Promise.resolve({
+				exitCode: 1,
+				cancelled: false,
+				timedOut: false,
+				workingDir: process.cwd(),
+				minimized: {
+					filter: "lint",
+					text: "test/event-cache.e2e-spec.ts:281-405 multiple ... errors\n",
+					originalText: rawOutput,
+					inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
+					outputBytes: 54,
+				},
+			});
+		});
+
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-minimized-unpersisted", { command: "pnpm lint" });
+
+		expect(result.isError).toBe(true);
+		expect(result.details?.exitCode).toBe(1);
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(text).toContain("TS2304 Cannot find name 'foo'");
+	});
+
 	it("preserves final-stage output when a pipeline ends in head or tail", async () => {
 		const tool = new BashTool(makeSession());
 

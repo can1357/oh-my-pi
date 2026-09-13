@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
+import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -94,6 +95,43 @@ describe("callSessionTool", () => {
 			undefined,
 			context,
 		);
+	});
+
+	it("settles an interrupted speculative wait without starting ordinary tool execution", async () => {
+		const started = Promise.withResolvers<void>();
+		const controller = new AbortController();
+		const lateClaim = Promise.withResolvers<undefined>();
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ordinary" }] });
+		const shadowCell = {
+			async claim(
+				_name: string,
+				_args: unknown,
+				_identity: { siteId: string; occurrence: number },
+				_remainingTimeoutMs: number,
+				_signal?: AbortSignal,
+			) {
+				started.resolve();
+				return await lateClaim.promise;
+			},
+		} as unknown as EvalShadowCellSession;
+		const call = callSessionTool(
+			"read",
+			{ path: "/tmp/waiting.txt" },
+			{
+				session: createSession([createTool("read", execute)]),
+				signal: controller.signal,
+				identity: { siteId: "site-1", occurrence: 0 },
+				shadowCell,
+			},
+		);
+
+		await started.promise;
+		controller.abort();
+
+		await expect(call).rejects.toThrow();
+		expect(execute).not.toHaveBeenCalled();
+		lateClaim.reject(new Error("late speculative failure"));
+		await Promise.resolve();
 	});
 
 	it("validates optional nulls before executing a real todo tool", async () => {

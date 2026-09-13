@@ -58,7 +58,8 @@
 - Multiple questions: returns `details.results[]`; the fallback permits arrow-key back/forward navigation, while a rich UI presents the complete form.
 - Single-select: one option or custom input.
 - Multi-select: toggled choices or custom input. In the fallback, `Done selecting` appears only when forward navigation is not active and at least one choice is selected.
-- Rich ask dialog: supports per-question headers, option previews, answer notes, and a `Chat about this` redirect.
+- Rich ask dialog: supports per-question headers, option previews, answer notes, and a `Chat about this` redirect. Submitting a nonempty custom answer advances to the next question, or to review for a single multi-select question; existing checkbox selections are preserved. A single-select question still submits immediately when it is the only question.
+- Custom editor: paste followed by Enter submits the pasted text, including when they arrive together. Submission waits for an in-flight clipboard read; cancellation discards pending clipboard delivery.
 - Selector/editor fallback: supports labels/descriptions but not headers, previews, notes, or chat redirect.
 
 ## Side Effects

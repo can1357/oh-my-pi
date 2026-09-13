@@ -836,7 +836,7 @@ function handleMetadata(event: MetadataEvent, model: Model<"bedrock-converse-str
 		output.usage.cacheRead = event.usage.cacheReadInputTokens || 0;
 		output.usage.cacheWrite = event.usage.cacheWriteInputTokens || 0;
 		output.usage.totalTokens = event.usage.totalTokens || output.usage.input + output.usage.output;
-		calculateCost(model, output.usage);
+		calculateCost(model, output.usage, output.timestamp);
 	}
 }
 
@@ -922,6 +922,34 @@ function buildSystemPrompt(
 	if (cachePoint) blocks.push(cachePoint);
 
 	return blocks;
+}
+
+function buildToolResultBlock(
+	message: ToolResultMessage,
+	model: Model<"bedrock-converse-stream">,
+	hoistedImages: ImageBlockWire[],
+): ToolResultBlockWire {
+	const content: Array<TextBlockWire | ImageBlockWire> = [];
+	for (const block of message.content) {
+		if (block.type === "image") {
+			const image: ImageBlockWire = { image: createImageBlock(block.mimeType, block.data) };
+			if (model.requiresToolResultImageHoisting) {
+				content.push({ text: "(see attached image)" });
+				hoistedImages.push(image);
+			} else {
+				content.push(image);
+			}
+		} else {
+			content.push({ text: block.text.toWellFormed() });
+		}
+	}
+	return {
+		toolResult: {
+			toolUseId: normalizeToolCallId(message.toolCallId),
+			content,
+			status: message.isError ? "error" : "success",
+		},
+	};
 }
 
 function convertMessages(
@@ -1022,38 +1050,20 @@ function convertMessages(
 			case "toolResult": {
 				// Collect all consecutive toolResult messages into a single user message —
 				// Bedrock requires all tool results to be in one message.
-				const toolResults: ToolResultBlockWire[] = [];
-				toolResults.push({
-					toolResult: {
-						toolUseId: normalizeToolCallId(m.toolCallId),
-						content: m.content.map(c =>
-							c.type === "image"
-								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
-						),
-						status: m.isError ? "error" : "success",
-					},
-				});
+				const contentBlocks: UserContent[] = [];
+				const hoistedImages: ImageBlockWire[] = [];
+				contentBlocks.push(buildToolResultBlock(m, model, hoistedImages));
 
 				let j = i + 1;
 				while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 					const nextMsg = transformedMessages[j] as ToolResultMessage;
-					toolResults.push({
-						toolResult: {
-							toolUseId: normalizeToolCallId(nextMsg.toolCallId),
-							content: nextMsg.content.map(c =>
-								c.type === "image"
-									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
-							),
-							status: nextMsg.isError ? "error" : "success",
-						},
-					});
+					contentBlocks.push(buildToolResultBlock(nextMsg, model, hoistedImages));
 					j++;
 				}
 				i = j - 1;
 
-				result.push({ role: "user", content: toolResults });
+				contentBlocks.push(...hoistedImages);
+				result.push({ role: "user", content: contentBlocks });
 				break;
 			}
 			default:

@@ -259,6 +259,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	advisor?: string;
 	/** Whether this session runs inside an isolation worktree (nested-isolation gate must persist across cold revives). */
 	isIsolated?: boolean;
+	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
+	isolated?: boolean;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
