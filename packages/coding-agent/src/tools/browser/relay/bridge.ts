@@ -2937,6 +2937,12 @@ export class RelayBridge {
 			// later attach has already superseded this detach.
 			if (!tab.reattachedAfterDetach) {
 				tab.attached = false;
+				// The detach event is the authoritative debugger-root boundary. The
+				// detach RPC response can be lost with its extension socket after Chrome
+				// has already committed the detach, so retire every root-local cleanup ID
+				// here rather than waiting only for the RPC-success continuation.
+				tab.pendingPreloadScriptCleanup = [];
+				tab.preloadApplicationMarkers.clear();
 				// Chrome has confirmed that the shared debugger root is gone. Reset
 				// cached Runtime state on the event path as well as the RPC-success
 				// path: extension-side persistence can fail after detach succeeded,

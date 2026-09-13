@@ -91,6 +91,10 @@ export async function detachWithRecoveryLoaderObservation(
 	frameLoaderIds?: Map<number, Record<string, string>>,
 ): Promise<void> {
 	const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
+	const mainLoaderIdBeforeObservation = loaderIds.get(tabId);
+	const frameLoaderIdsBeforeObservation = frameLoaderIds
+		? { ...frameLoaderIds.get(tabId) }
+		: undefined;
 	// Page events may have been disabled after recovery. Observe them for the
 	// entire snapshot-to-detach window so a committed navigation can supersede
 	// the snapshot before debugger ownership ends. Observation is best-effort:
@@ -109,11 +113,25 @@ export async function detachWithRecoveryLoaderObservation(
 		} catch {}
 	}
 	const loaderState = await readLoaderState().catch(() => undefined);
-	if (loaderGeneration === loaderGenerations.get(tabId)) {
-		const mainLoaderId = typeof loaderState === "string" ? loaderState : loaderState?.mainLoaderId;
-		if (typeof mainLoaderId === "string") loaderIds.set(tabId, mainLoaderId);
-		if (typeof loaderState === "object" && frameLoaderIds)
+	const mainLoaderId = typeof loaderState === "string" ? loaderState : loaderState?.mainLoaderId;
+	const loaderStateChanged = loaderGeneration !== loaderGenerations.get(tabId);
+	if (typeof mainLoaderId === "string") {
+		const observedMainLoaderId = loaderIds.get(tabId);
+		if (!loaderStateChanged || observedMainLoaderId === mainLoaderIdBeforeObservation)
+			loaderIds.set(tabId, mainLoaderId);
+	}
+	if (typeof loaderState === "object" && frameLoaderIds) {
+		if (!loaderStateChanged) {
 			frameLoaderIds.set(tabId, loaderState.frameLoaderIds);
+		} else {
+			const observedFrameLoaderIds = frameLoaderIds.get(tabId) ?? {};
+			const navigationDeltas = Object.fromEntries(
+				Object.entries(observedFrameLoaderIds).filter(
+					([frameId, loaderId]) => frameLoaderIdsBeforeObservation?.[frameId] !== loaderId,
+				),
+			);
+			frameLoaderIds.set(tabId, { ...loaderState.frameLoaderIds, ...navigationDeltas });
+		}
 	}
 	await detach();
 	if (observingPage) await onObservedDetachSuccess();

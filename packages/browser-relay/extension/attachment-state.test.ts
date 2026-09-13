@@ -155,6 +155,54 @@ describe("attachment-state", () => {
 		expect(calls).toContain("fresh-root-cleared");
 	});
 
+	it("merges frame navigation deltas into a pending recovery snapshot", async () => {
+		const loaderIds = new Map([[1, "main-before"]]);
+		const frameLoaderIds = new Map<number, Record<string, string>>([
+			[1, { main: "main-before", changed: "changed-before" }],
+		]);
+		const generations = new Map([[1, 1]]);
+		const snapshot = Promise.withResolvers<{
+			mainLoaderId: string;
+			frameLoaderIds: Record<string, string>;
+		}>();
+		const pending = detachWithRecoveryLoaderObservation(
+			loaderIds,
+			generations,
+			1,
+			async () => {},
+			async () => snapshot.promise,
+			async () => {},
+			async () => {},
+			async () => {},
+			frameLoaderIds,
+		);
+
+		captureRecoveryLoaderNavigation(
+			loaderIds,
+			generations,
+			1,
+			"Page.frameNavigated",
+			{ frame: { id: "changed", parentId: "main", loaderId: "changed-after" } },
+			frameLoaderIds,
+		);
+		snapshot.resolve({
+			mainLoaderId: "main-before",
+			frameLoaderIds: {
+				main: "main-before",
+				unchanged: "unchanged-before",
+				changed: "changed-before",
+			},
+		});
+		await pending;
+
+		expect(loaderIds.get(1)).toBe("main-before");
+		expect(frameLoaderIds.get(1)).toEqual({
+			main: "main-before",
+			unchanged: "unchanged-before",
+			changed: "changed-after",
+		});
+	});
+
 	it("requires a fresh root when observed orphan detach fails", async () => {
 		const calls: string[] = [];
 		const pending = detachWithRecoveryLoaderObservation(

@@ -4865,6 +4865,75 @@ describe("RelayBridge tab grouping", () => {
 		).toEqual([]);
 	});
 
+	it("retires old-root preload cleanup when detach confirmation outruns its RPC", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const departing = new FakeCdpSocket();
+		const departingConn = bridge.cdpConnected(departing);
+		const departingSession = await attachPage(bridge, ext, departing, departingConn, 1);
+		const survivor = new FakeCdpSocket();
+		const survivorConn = bridge.cdpConnected(survivor);
+		const survivorSession = await attachPage(bridge, ext, survivor, survivorConn, 1);
+
+		bridge.cdpMessage(
+			departingConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: departingSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__departing = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1);
+		ack(bridge, ext, "send", { identifier: "reused-on-new-root" });
+		bridge.cdpMessage(
+			survivorConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: survivorSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__survivor = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1);
+		ack(bridge, ext, "send", { identifier: "survivor-old-root" });
+		bridge.cdpMessage(
+			survivorConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: survivorSession, method: "Fetch.enable" }),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Fetch.enable"));
+		bridge.extClosed(ext);
+		bridge.cdpClosed(departingConn);
+		await flush();
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => replacement.pending("detach").length === 1, "fresh-root detach");
+		bridge.extMessage(
+			replacement,
+			JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed", relayInitiated: true }),
+		);
+		bridge.extClosed(replacement);
+		await flush();
+
+		const fresh = new FakeExtSocket();
+		connect(bridge, fresh, [tab({ tabId: 1, groupId: -1 })], { attachedTabIds: [], recoverableTabIds: [] });
+		await waitFor(() => fresh.pending("attach").length === 1, "fresh-root attach");
+		ack(bridge, fresh, "attach");
+		await waitFor(
+			() => fresh.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"surviving preload replay",
+		);
+		ack(bridge, fresh, "send", { identifier: "reused-on-new-root" });
+		await flush();
+
+		expect(fresh.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toEqual([]);
+	});
+
 	it("forces a fresh root when a replacement interrupts the post-registration loader probe", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
