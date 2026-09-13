@@ -234,6 +234,41 @@ describe("runEvalCompletion", () => {
 		expect(`${model.provider}/${model.id}`).toBe("p/slow");
 	});
 
+	it("uses the tier fallback chain after the primary model fails", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
+		expect(result).toEqual({
+			text: "fallback answer",
+			details: { model: "p/fallback", tier: "smol", structured: false },
+		});
+	});
+
+	it("retries the same model at a lower effort when the fallback chain suffixes it", async () => {
+		const session = makeSession({ available: [SMOL, DEFAULT, REASONING_SLOW], roles: { slow: "p/slow" } });
+		session.settings.set("retry.fallbackChains", { slow: ["p/slow:low"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "low-effort answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["slow", "slow"]);
+		const primaryOpts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		const fallbackOpts = spy.mock.calls[1]?.[2] as { reasoning?: unknown };
+		expect(primaryOpts.reasoning).toBe(Effort.High);
+		expect(fallbackOpts.reasoning).toBe(Effort.Low);
+		expect(result.text).toBe("low-effort answer");
+	});
+
 	it("returns the completion text in plain mode", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "the answer" }));
 		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() });

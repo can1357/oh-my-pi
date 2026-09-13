@@ -993,13 +993,17 @@ export async function splitDelimitedPathEntry(
 		return parts?.every(options.routedUrlPredicate) ? parts : null;
 	}
 	if (isInternalUrlPath(normalizedEntry)) return null;
-	// A real POSIX file may contain the delimiter and a selector-shaped tail
+	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
 	// resolves — or is only ambiguous — so downstream literal-preferring
-	// splitters see it before delimiter expansion peels or splits (issue #4618
-	// reviewer feedback: delimited expansion ran before the literal check).
+	// splitters see it before delimiter expansion peels or splits (issue #4618).
 	if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
-	const peeledEntry = splitPathAndSel(normalizedEntry).path;
+	const selectorSplit = splitPathAndSel(normalizedEntry);
+	const peeledEntry = selectorSplit.path;
+	// A range may instead target a literal file whose name combines delimiters
+	// with glob syntax (`a;b[1].md:1-2`). Check the exact peeled path before the
+	// search splitter interprets those characters and semicolon fan-out wins.
+	if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(peeledEntry, cwd)) !== "missing") return null;
 	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter))) {
 		return null;
 	}

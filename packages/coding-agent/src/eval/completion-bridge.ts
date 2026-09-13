@@ -13,21 +13,30 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
-import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { instrumentedCompleteSimple, resolveTelemetry, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
 import {
 	expandRoleAlias,
 	formatModelString,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	resolveModelFromString,
+	resolveModelOverride,
 } from "../config/model-resolver";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
+import {
+	findRetryFallbackCandidates,
+	getRetryFallbackChains,
+	type RetryFallbackResolutionContext,
+	resolveRetryFallbackChainKey,
+} from "../session/retry-fallback-chains";
+import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
@@ -96,29 +105,87 @@ export function releaseCompletionHandles(ownerId: string): void {
 	}
 }
 
+interface CompletionCandidate {
+	model: Model<Api>;
+	reasoning: Effort | undefined;
+	disableReasoning: boolean;
+}
+
+function reasoningForCandidate(
+	tier: CompletionTier,
+	model: Model<Api>,
+	level?: ThinkingLevel,
+): Pick<CompletionCandidate, "reasoning" | "disableReasoning"> {
+	if (shouldDisableReasoning(level)) return { reasoning: undefined, disableReasoning: true };
+	const requested = toReasoningEffort(level) ?? reasoningForTier(tier, model);
+	return {
+		reasoning: clampThinkingLevelForModel(model, requested),
+		disableReasoning: false,
+	};
+}
+
 /**
- * Resolve a tier to a concrete {@link Model}. `default` prefers the session's
- * active model and falls back to the `@default` role; `smol`/`slow` resolve
- * their respective role patterns. Returns `undefined` when nothing matches.
+ * Identity used to dedupe fallback candidates. A chain may retry the same model
+ * at a different effort (`slow: ["provider/model:low"]`), so the key folds in
+ * the effective reasoning settings — matching the shared resolver, which treats
+ * differently suffixed selectors as distinct.
  */
-function resolveTierModel(tier: CompletionTier, session: ToolSession): Model<Api> | undefined {
+function candidateIdentity(
+	model: Model<Api>,
+	reasoning: Pick<CompletionCandidate, "reasoning" | "disableReasoning">,
+): string {
+	const effort = reasoning.disableReasoning ? "off" : (reasoning.reasoning ?? "inherit");
+	return `${formatModelStringWithRouting(model)}|${effort}`;
+}
+
+/**
+ * Resolve a tier to its primary model and configured retry-fallback candidates.
+ * `default` prefers the session's active model before the `@default` role.
+ */
+function resolveTierCandidates(tier: CompletionTier, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
-	if (!modelRegistry) return undefined;
+	if (!modelRegistry) return [];
 	const available = modelRegistry.getAvailable();
-	if (available.length === 0) return undefined;
+	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
-	const resolve = (pattern: string | undefined): Model<Api> | undefined => {
+	const resolve = (pattern: string | undefined): { model: Model<Api>; selector: string } | undefined => {
 		if (!pattern) return undefined;
-		const expanded = expandRoleAlias(pattern, session.settings);
-		return resolveModelFromString(expanded, available, matchPreferences);
+		const selector = expandRoleAlias(pattern, session.settings);
+		const model = resolveModelFromString(selector, available, matchPreferences);
+		return model ? { model, selector } : undefined;
 	};
+	const primary =
+		tier === "default"
+			? (resolve(session.getActiveModelString?.() ?? session.getModelString?.()) ?? resolve(TIER_TO_PATTERN.default))
+			: resolve(TIER_TO_PATTERN[tier]);
+	if (!primary) return [];
 
-	if (tier === "default") {
-		const activePattern = session.getActiveModelString?.() ?? session.getModelString?.();
-		return resolve(activePattern) ?? resolve(TIER_TO_PATTERN.default);
+	const candidates: CompletionCandidate[] = [{ model: primary.model, ...reasoningForCandidate(tier, primary.model) }];
+	const retry = session.settings.getGroup("retry");
+	if (!retry.enabled || !retry.modelFallback) return candidates;
+
+	const context: RetryFallbackResolutionContext = {
+		chains: getRetryFallbackChains(session.settings),
+		getModelRole: role => session.settings.getModelRole(role),
+		modelLookup: modelRegistry,
+	};
+	const chainKey = resolveRetryFallbackChainKey(context, primary.selector, primary.model, tier);
+	if (!chainKey) return candidates;
+
+	const disabledProviders = new Set(session.settings.get("disabledProviders"));
+	const seen = new Set([candidateIdentity(primary.model, candidates[0])]);
+	for (const selector of findRetryFallbackCandidates(context, chainKey, primary.selector, primary.model)) {
+		const resolved = resolveModelOverride([selector.raw], modelRegistry, session.settings);
+		const model = resolved.model;
+		if (!model || disabledProviders.has(model.provider)) continue;
+		const reasoning = reasoningForCandidate(tier, model, selector.thinkingLevel);
+		const identity = candidateIdentity(model, reasoning);
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		candidates.push({ model, ...reasoning });
 	}
-	return resolve(TIER_TO_PATTERN[tier]);
+	return candidates;
 }
 
 /**
@@ -139,17 +206,12 @@ async function executeCompletion(
 	finalTier: CompletionTier,
 	system: string | undefined,
 	schema: Record<string, unknown> | undefined,
-	model: Model<Api>,
+	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
-	const apiKey = await registry?.getApiKey(model);
-	if (!registry || !apiKey) {
-		throw new ToolError(
-			`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
-		);
-	}
+	if (!registry) throw new ToolError("completion() has no model registry.");
 
 	const tools: Tool[] | undefined = schema
 		? [
@@ -163,28 +225,47 @@ async function executeCompletion(
 		: undefined;
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
 	const systemPrompt = system ? [system] : ["You are a helpful assistant."];
-	const response = await instrumentedCompleteSimple(
-		model,
-		{
-			systemPrompt,
-			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-			tools,
-		},
-		{
-			apiKey: registry.resolver(model, session.getSessionId?.() ?? undefined),
-			signal,
-			reasoning: reasoningForTier(finalTier, model),
-			toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
-		},
-		{ telemetry, oneshotKind: "eval_completion" },
-	);
-
-	if (response.stopReason === "error") {
-		throw new ToolError(response.errorMessage ?? "completion() request failed.");
+	let response: AssistantMessage | undefined;
+	let model: Model<Api> | undefined;
+	for (const [index, candidate] of candidates.entries()) {
+		model = candidate.model;
+		try {
+			const apiKey = await registry.getApiKey(model);
+			if (!apiKey) {
+				throw new ToolError(
+					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
+				);
+			}
+			response = await instrumentedCompleteSimple(
+				model,
+				{
+					systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+					tools,
+				},
+				{
+					apiKey: registry.resolver(model, session.getSessionId?.() ?? undefined),
+					signal,
+					reasoning: candidate.reasoning,
+					disableReasoning: candidate.disableReasoning,
+					toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+				},
+				{ telemetry, oneshotKind: "eval_completion" },
+			);
+		} catch (error) {
+			if (signal.aborted || index === candidates.length - 1) throw error;
+			continue;
+		}
+		if (response.stopReason === "aborted") {
+			throw new ToolError("completion() request aborted.");
+		}
+		if (response.stopReason === "error") {
+			if (!signal.aborted && index < candidates.length - 1) continue;
+			throw new ToolError(response.errorMessage ?? "completion() request failed.");
+		}
+		break;
 	}
-	if (response.stopReason === "aborted") {
-		throw new ToolError("completion() request aborted.");
-	}
+	if (!response || !model) throw new ToolError("completion() request failed.");
 
 	let resultText: string;
 	if (schema) {
@@ -224,8 +305,8 @@ export async function runEvalCompletion(
 	}
 	const { prompt, model: modelTier, system, schema } = parsed;
 	const finalTier: CompletionTier = modelTier ?? "default";
-	const model = resolveTierModel(finalTier, options.session);
-	if (!model) {
+	const candidates = resolveTierCandidates(finalTier, options.session);
+	if (candidates.length === 0) {
 		throw new ToolError(
 			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
 		);
@@ -242,7 +323,7 @@ export async function runEvalCompletion(
 		settled: false,
 	};
 	completionHandles.set(id, entry);
-	entry.promise = executeCompletion(prompt, finalTier, system, schema, model, options.session, signal)
+	entry.promise = executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal)
 		.then(
 			result => {
 				entry.result = result;
