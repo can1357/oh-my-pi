@@ -136,6 +136,22 @@ describe("HistorySearchComponent", () => {
 		expect(render(component).plain).toContain("History (this session)");
 	});
 
+	it("drops the Tab hint when the ring has a single scope", () => {
+		const component = new HistorySearchComponent(
+			scopedStorage({}),
+			GLOBAL_ONLY,
+			() => {},
+			() => {},
+		);
+
+		const { plain } = render(component);
+		expect(plain).toContain("History (all projects)");
+		expect(plain).toContain("No history in all projects.");
+		// Advertising a Tab that cannot change anything would promise a no-op.
+		expect(plain).not.toContain("tab");
+		expect(plain).not.toContain("Press Tab for");
+	});
+
 	it("names the active scope in the empty state and points at the next one", () => {
 		const component = new HistorySearchComponent(
 			scopedStorage({}),

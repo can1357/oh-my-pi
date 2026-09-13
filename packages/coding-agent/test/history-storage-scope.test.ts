@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { historyScopeRing } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import { HistoryStorage, type HistoryScope } from "@oh-my-pi/pi-coding-agent/session/history-storage";
@@ -27,12 +27,12 @@ function git(cwd: string, ...args: string[]): void {
 
 /** Repo A (plus a nested directory and an out-of-tree linked worktree) and an unrelated repo B. */
 function createFixtures(root: string): Fixtures {
-	const repoA = join(root, "repo-a");
-	const repoB = join(root, "repo-b");
-	const repoASub = join(repoA, "src", "deep");
-	const repoAWorktree = join(root, "repo-a-wt");
-	mkdirSync(repoASub, { recursive: true });
-	mkdirSync(repoB, { recursive: true });
+	const repoA = path.join(root, "repo-a");
+	const repoB = path.join(root, "repo-b");
+	const repoASub = path.join(repoA, "src", "deep");
+	const repoAWorktree = path.join(root, "repo-a-wt");
+	fs.mkdirSync(repoASub, { recursive: true });
+	fs.mkdirSync(repoB, { recursive: true });
 	git(repoA, "init", "--quiet");
 	git(repoA, "commit", "--allow-empty", "--quiet", "-m", "init");
 	git(repoB, "init", "--quiet");
@@ -76,7 +76,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		expect(promptsOf(storage, { kind: "session", value: "s1" })).toEqual([
 			"theta ghost cwd",
@@ -97,7 +97,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		expect(promptsOf(storage, { kind: "cwd", value: fixtures.repoA })).toEqual([
 			"zeta anonymous",
@@ -112,7 +112,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		// The worktree lives outside repo-a, so only primary-root resolution can group it.
 		expect(new Set(promptsOf(storage, { kind: "repo", value: fixtures.repoA }))).toEqual(
@@ -131,9 +131,9 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
-		const emptyRepo = join(dir.path(), "repo-c");
-		mkdirSync(emptyRepo, { recursive: true });
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
+		const emptyRepo = path.join(dir.path(), "repo-c");
+		fs.mkdirSync(emptyRepo, { recursive: true });
 		git(emptyRepo, "init", "--quiet");
 
 		expect(storage.getRecent(100, { kind: "repo", value: emptyRepo })).toEqual([]);
@@ -143,7 +143,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		const ghost = join(dir.path(), "ghost");
+		const ghost = path.join(dir.path(), "ghost");
 		await seed(storage, fixtures, ghost);
 
 		const repoPrompts = promptsOf(storage, { kind: "repo", value: fixtures.repoA });
@@ -155,7 +155,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		// Six later rows belong to other scopes; the newest s1 prompt must still win.
 		expect(storage.getRecent(1, { kind: "session", value: "s1" }).map(entry => entry.prompt)).toEqual([
@@ -167,7 +167,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		expect(storage.search("deploy", 100, { kind: "session", value: "s1" }).map(e => e.prompt)).toEqual([
 			"alpha deploy pipeline",
@@ -181,7 +181,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		// "silon" is an infix of "epsilon": FTS cannot reach it, only the LIKE fallback can.
 		expect(storage.search("silon", 100, { kind: "session", value: "s1" }).map(e => e.prompt)).toEqual([
@@ -193,11 +193,51 @@ describe("HistoryStorage scope filtering", () => {
 		]);
 	});
 
+	it("matches a repository reached through a symlink to its physical spelling", async () => {
+		const dir = tempDir!;
+		const fixtures = createFixtures(dir.path());
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await seed(storage, fixtures, dir.path() + "/ghost");
+		const link = dir.join("repo-a-link");
+		fs.symlinkSync(fixtures.repoA, link, "dir");
+		// A row submitted while the symlinked spelling was current: stored `cwd` keeps it.
+		await storage.add("submitted through the link", link, "s1");
+
+		// Both spellings must see the same repository — stored rows may carry either.
+		const viaPhysical = new Set(promptsOf(storage, { kind: "repo", value: fixtures.repoA }));
+		const viaLink = new Set(promptsOf(storage, { kind: "repo", value: link }));
+		expect(viaLink).toEqual(viaPhysical);
+		expect(viaPhysical).toContain("alpha deploy pipeline");
+		expect(viaPhysical).toContain("submitted through the link");
+	});
+
+	it("re-resolves repository membership after a nested repository appears", async () => {
+		const dir = tempDir!;
+		const outer = dir.join("outer");
+		const inner = path.join(outer, "inner");
+		fs.mkdirSync(inner, { recursive: true });
+		git(outer, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("before nested init", inner, "s1");
+
+		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual(["before nested init"]);
+
+		// A repository created while the process runs must be picked up: the cache is dropped
+		// on the next write, so the rows below stop belonging to the outer repository.
+		git(inner, "init", "--quiet");
+		await storage.add("after nested init", inner, "s1");
+
+		expect(new Set(promptsOf(storage, { kind: "repo", value: inner }))).toEqual(
+			new Set(["after nested init", "before nested init"]),
+		);
+		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
+	});
+
 	it("reads with the scope the search ring hands to the panel", async () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		// The ring is the only path Ctrl+R uses: its entries must carry the subject, so the
 		// head scope must read real rows rather than an empty set.
@@ -210,7 +250,7 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
-		await seed(storage, fixtures, join(dir.path(), "ghost"));
+		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
 		expect(promptsOf(storage)).toHaveLength(8);
 		expect(promptsOf(storage, { kind: "global" })).toHaveLength(8);

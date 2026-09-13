@@ -220,17 +220,14 @@ export class HistorySearchComponent extends OverlayPanel {
 
 	#updateChrome(): void {
 		const label = SCOPE_LABELS[this.#scopeAt(this.#scopeIndex).kind];
-		const next = SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind];
 		this.title = `History (${label})`;
 		const dot = theme.fg("dim", theme.sep.dot);
-		this.#hint.setText(
-			[
-				rawKeyHint("↑↓", "navigate"),
-				rawKeyHint("enter", "select"),
-				rawKeyHint("tab", next),
-				rawKeyHint("esc", "cancel"),
-			].join(dot),
-		);
+		const hints = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select")];
+		// A one-scope ring cannot cycle, so advertising Tab would promise a no-op.
+		if (this.#scopes.length > 1)
+			hints.push(rawKeyHint("tab", SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]));
+		hints.push(rawKeyHint("esc", "cancel"));
+		this.#hint.setText(hints.join(dot));
 	}
 
 	handleInput(keyData: string): void {
@@ -315,7 +312,9 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#selectedIndex = 0;
 		const emptyMessage = query
 			? "No matching history"
-			: `No history in ${SCOPE_LABELS[scope.kind]}. Press Tab for ${SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]}.`;
+			: this.#scopes.length > 1
+				? `No history in ${SCOPE_LABELS[scope.kind]}. Press Tab for ${SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]}.`
+				: `No history in ${SCOPE_LABELS[scope.kind]}.`;
 		this.#resultsList.setResults(this.#results, this.#selectedIndex, query ? queryTokens(query) : [], emptyMessage);
 	}
 }

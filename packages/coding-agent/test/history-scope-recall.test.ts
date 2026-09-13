@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
@@ -77,10 +77,10 @@ afterAll(() => {
 describe("scoped prompt recall", () => {
 	it("recalls only the active conversation, and only the active project's prompts", async () => {
 		const dir = tempDir!;
-		const repoA = join(dir.path(), "repo-a");
-		const repoB = join(dir.path(), "repo-b");
-		mkdirSync(repoA, { recursive: true });
-		mkdirSync(repoB, { recursive: true });
+		const repoA = path.join(dir.path(), "repo-a");
+		const repoB = path.join(dir.path(), "repo-b");
+		fs.mkdirSync(repoA, { recursive: true });
+		fs.mkdirSync(repoB, { recursive: true });
 		git(repoA, "init", "--quiet");
 		git(repoB, "init", "--quiet");
 		const dbPath = dir.join("history.db");
@@ -132,8 +132,8 @@ describe("scoped prompt recall", () => {
 
 	it("keeps prompts submitted through the bound editor readable in cwd and repo scopes", async () => {
 		const dir = tempDir!;
-		const repo = join(dir.path(), "repo");
-		mkdirSync(repo, { recursive: true });
+		const repo = path.join(dir.path(), "repo");
+		fs.mkdirSync(repo, { recursive: true });
 		git(repo, "init", "--quiet");
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		storage.setSessionResolver(() => "session-1");

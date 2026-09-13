@@ -1,7 +1,14 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { checkpointWal, getDbBusyTimeoutMs, getHistoryDbPath, logger, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	checkpointWal,
+	getDbBusyTimeoutMs,
+	getHistoryDbPath,
+	logger,
+	normalizePathForComparison,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 import { primaryRootOrCwd } from "../utils/active-repo-context";
 
 /** A unique prompt with provenance from its most recent submission. */
@@ -102,7 +109,9 @@ export class HistoryStorage {
 	#upsertRowStmt: Statement;
 	// Scope fragments vary per query shape, so statements are cached by full SQL text.
 	#stmts = new Map<string, Statement>();
-	// Repository membership per stored directory: a directory never changes repository mid-process.
+	// Repository membership per stored directory, in normalized form. Repository topology can
+	// change while the process runs (a nested `git init`, an added worktree), so the cache is
+	// dropped on every write: the next read after a submission re-resolves it.
 	#rootCache = new Map<string, string>();
 
 	private constructor(dbPath: string) {
@@ -181,6 +190,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
+		this.#rootCache.clear();
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
@@ -430,19 +440,25 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * because `cwd` holds the raw submission directory: a subdirectory or a linked worktree
 	 * shares only its primary root with the repository, never its path, so a plain equality
 	 * (or a path prefix) would drop most of a repository's history.
+	 *
+	 * Roots are compared in their normalized form (symlinks resolved, case folded on Windows):
+	 * the same checkout reached as `/repo` and through a symlink yields two spellings of one
+	 * root, and stored rows keep whichever spelling was current when they were submitted.
 	 */
 	#repoDirs(root?: string): string[] {
 		if (!root) return [];
+		const target = normalizePathForComparison(root);
 		const rows = this.#prepare(
 			"SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''",
 		).all() as Array<{ cwd: string }>;
-		return rows.map(row => row.cwd).filter(dir => this.#rootOf(dir) === root);
+		return rows.map(row => row.cwd).filter(dir => this.#rootOf(dir) === target);
 	}
 
+	/** Normalized primary root of `dir`, memoized until the next write invalidates the cache. */
 	#rootOf(dir: string): string {
 		const cached = this.#rootCache.get(dir);
 		if (cached !== undefined) return cached;
-		const root = primaryRootOrCwd(dir);
+		const root = normalizePathForComparison(primaryRootOrCwd(dir));
 		this.#rootCache.set(dir, root);
 		return root;
 	}

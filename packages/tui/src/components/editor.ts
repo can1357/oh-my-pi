@@ -909,6 +909,9 @@ export class Editor implements Component, Focusable {
 	rememberDraft(restore?: () => void): void {
 		const text = this.getText();
 		if (!text.trim()) return;
+		// Apply any pending source change first: the draft belongs to the context the user is in
+		// now, and the next browse would otherwise re-seed over it and lose it for good.
+		this.#rehydrateHistory();
 		const pastes = new Map<number, string>();
 		for (const match of text.matchAll(/\[Paste #(\d+)(?:, (?:\+\d+ lines|\d+ chars))?\]/g)) {
 			const id = Number(match[1]);

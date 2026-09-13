@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	historyScopeKey,
@@ -37,8 +37,8 @@ afterEach(async () => {
 describe("resolveHistoryScope", () => {
 	it("falls back to cwd — never to global — when the scope has no subject", () => {
 		const dir = tempDir!;
-		const repo = join(dir.path(), "repo");
-		mkdirSync(repo, { recursive: true });
+		const repo = path.join(dir.path(), "repo");
+		fs.mkdirSync(repo, { recursive: true });
 		git(repo, "init", "--quiet");
 		const outsideRepo: HistoryScopeContext = { sessionId: "", cwd: dir.path() };
 
@@ -52,8 +52,8 @@ describe("resolveHistoryScope", () => {
 
 	it("resolves each scope to its own subject", () => {
 		const dir = tempDir!;
-		const repo = join(dir.path(), "repo");
-		mkdirSync(repo, { recursive: true });
+		const repo = path.join(dir.path(), "repo");
+		fs.mkdirSync(repo, { recursive: true });
 		git(repo, "init", "--quiet");
 		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
 
@@ -67,8 +67,8 @@ describe("resolveHistoryScope", () => {
 describe("historyScopeRing", () => {
 	it("rotates the narrow-to-wide ring around the resolved start scope", () => {
 		const dir = tempDir!;
-		const repo = join(dir.path(), "repo");
-		mkdirSync(repo, { recursive: true });
+		const repo = path.join(dir.path(), "repo");
+		fs.mkdirSync(repo, { recursive: true });
 		git(repo, "init", "--quiet");
 		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
 
@@ -86,10 +86,10 @@ describe("historyScopeRing", () => {
 
 	it("resolves repository scope from a subdirectory or a linked worktree", () => {
 		const dir = tempDir!;
-		const repo = join(dir.path(), "repo");
-		const sub = join(repo, "src", "deep");
-		const worktree = join(dir.path(), "repo-wt");
-		mkdirSync(sub, { recursive: true });
+		const repo = path.join(dir.path(), "repo");
+		const sub = path.join(repo, "src", "deep");
+		const worktree = path.join(dir.path(), "repo-wt");
+		fs.mkdirSync(sub, { recursive: true });
 		git(repo, "init", "--quiet");
 		git(repo, "commit", "--allow-empty", "--quiet", "-m", "init");
 		git(repo, "worktree", "add", "--quiet", "--detach", worktree);
