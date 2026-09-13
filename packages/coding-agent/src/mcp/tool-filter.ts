@@ -87,13 +87,29 @@ const compiledPatterns = new Map<string, ToolMatcher>();
 
 /**
  * Quote a BARE `"` in a pattern before compiling: picomatch's parser reads a
- * bare quote and derails (a lone one compiles to an empty match). A quote the
- * author already escaped (`\"`, the glob spelling for a literal quote) is left
- * alone — escaping it again yields `\\"`, which matches a backslash followed by
- * a quote and so silently stops matching the intended name.
+ * bare quote and derails (a lone one compiles to an empty match).
+ *
+ * "Bare" is decided by backslash PARITY, not by the immediately preceding
+ * character: in `\\\\"` the first backslash escapes the second, so the quote is
+ * bare and must be quoted, while in `\\"` the quote is already escaped (the glob
+ * spelling for a literal quote) and escaping it again would yield `\\\\"` —
+ * matching a backslash followed by a quote and silently missing the intended
+ * name.
  */
-function quoteDoubles(pattern: string): string {
-	return pattern.replaceAll(/(?<!\\)"/g, '\\"');
+function quoteBareDoubles(pattern: string): string {
+	let out = "";
+	let backslashes = 0;
+	for (const char of pattern) {
+		if (char === "\\") {
+			backslashes++;
+			out += char;
+			continue;
+		}
+		if (char === '"' && backslashes % 2 === 0) out += '\\"';
+		else out += char;
+		backslashes = 0;
+	}
+	return out;
 }
 
 /** Does the pattern hold four or more consecutive backslashes? */
@@ -108,14 +124,13 @@ function compilePattern(pattern: string): ToolMatcher {
 
 	let matcher: ToolMatcher;
 	if (backslashRun(pattern)) {
-		// Picomatch's parser never returns once a pattern carries a run of four
-		// or more backslashes trailing a glob metacharacter — an infinite loop
-		// no `try`/`catch` can rescue — so such a pattern is rejected before the
-		// parser is entered. (Picomatch 4.0.7: `*\\\\`, `[a]\\\\`, `{a,b}\\\\`,
-		// `|\\\\` and `/\\\\` all hang; a bare run with no metacharacter, and
-		// every run of three, compile in microseconds. The predicate is
-		// deliberately wider than the measured hangs — a backslash is never part
-		// of a sanitized name, so no legitimate entry is lost.)
+		// Picomatch's parser never returns once a pattern carries a run of four or
+		// more backslashes — measured to hang even for a run with no other glob
+		// metacharacter, so the guard has to cover the whole class. An infinite
+		// loop no `try`/`catch` can rescue, so the pattern is rejected before the
+		// parser is entered. (Picomatch 4.0.7: `*\\\\`, `[a]\\\\`, `{a,b}\\\\`, `|\\\\`,
+		// `/\\\\` and a bare `\\\\\\\\` all hang; every run of three compiles in
+		// microseconds.)
 		matcher = () => false;
 	} else if (/[*?[\]{}\\|()]/.test(pattern)) {
 		try {
@@ -128,7 +143,7 @@ function compilePattern(pattern: string): ToolMatcher {
 			// spelling (`a.b`, `\*`) addresses that spelling, while the
 			// sanitized spelling is the second domain a name outside the
 			// identifier alphabet is reached through.
-			const regex = picomatch.makeRe(quoteDoubles(pattern), PARSE_OPTIONS);
+			const regex = picomatch.makeRe(quoteBareDoubles(pattern), PARSE_OPTIONS);
 			matcher = (name: string) => regex.test(name) || regex.test(sanitizeToolName(name));
 		} catch {
 			// A pattern the engine rejects — a descending class range such as

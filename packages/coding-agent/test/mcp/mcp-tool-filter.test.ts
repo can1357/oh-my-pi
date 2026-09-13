@@ -232,6 +232,12 @@ test("double quotes are ordinary characters", () => {
 	// quote, so the entry silently stopped matching the tool it named.
 	expect(run(['"'], ['\\"']).allowed).toEqual(['"']);
 	expect(run(['"', "x"], ['\\"']).allowed).toEqual(['"']);
+	// Parity, not the preceding character, decides bareness: with two backslashes
+	// the first escapes the second, so the quote is bare and must still be quoted
+	// before reaching picomatch. The entry therefore addresses a name holding one
+	// literal backslash followed by a quote.
+	const backslash = "\\";
+	expect(run([backslash + '"', "x"], [backslash.repeat(2) + '"']).allowed).toEqual([backslash + '"']);
 });
 
 test("POSIX bracket classes expand the way picomatch expands them", () => {
