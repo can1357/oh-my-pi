@@ -780,9 +780,9 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 				await expect(router.resolve(`memory://${twinId}`, context)).rejects.toThrow(
 					/not found in the calling session's scoped bank/,
 				);
-				await expect(router.resolve("memory://root", context)).resolves.toMatchObject({
-					content: "shared cwd summary",
-				});
+				await expect(router.resolve("memory://root", context)).rejects.toThrow(
+					"File-backed memory artifacts only exist with memory.backend=local (active backend: mnemopi).",
+				);
 			} finally {
 				setAgentDir(previousAgentDir);
 				await twinState?.dispose({ consolidate: false });
@@ -964,13 +964,16 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 		InternalUrlRouter.resetForTests();
 	});
 
-	it("reports the file-backed root as local-only on hindsight instead of prescribing 'enable memories'", async () => {
+	it("rejects stale local root artifacts after switching to hindsight", async () => {
 		const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-protocol-11909-hindsight-"));
 		const previousAgentDir = getAgentDir();
 		try {
 			setAgentDir(path.join(cleanupRoot, "agent"));
 			const cwd = path.join(cleanupRoot, "project");
 			await fs.mkdir(cwd, { recursive: true });
+			const memoryRoot = getMemoryRoot(getAgentDir(), cwd);
+			await fs.mkdir(memoryRoot, { recursive: true });
+			await Bun.write(path.join(memoryRoot, "memory_summary.md"), "stale local summary");
 			const settings = Settings.isolated({ "memory.backend": "hindsight" });
 			await expect(InternalUrlRouter.instance().resolve("memory://root", { cwd, settings })).rejects.toThrow(
 				"File-backed memory artifacts only exist with memory.backend=local (active backend: hindsight). Use `recall`/`reflect` to search Hindsight memories.",

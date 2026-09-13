@@ -322,12 +322,12 @@ function unknownNamespaceError(namespace: string): Error {
 }
 
 /**
- * Error for the file-backed `memory://root` namespace when no artifacts exist.
- * Only `memory.backend=local` ever populates the on-disk root; hindsight keeps
- * memory server-side and mnemopi in SQLite banks, so on those backends the root
- * is permanently absent. The message is backend-aware so it never prescribes
- * "enable memories" to a caller whose backend is already healthy — it points at
- * the tools that can actually answer instead.
+ * Error for the file-backed `memory://root` namespace when it is unavailable.
+ * Only `memory.backend=local` owns this namespace; hindsight keeps memory
+ * server-side and mnemopi in SQLite banks. Non-local callers must not see
+ * potentially stale files left by an earlier local session. The backend-aware
+ * message points at the tools that can actually answer instead of prescribing
+ * "enable memories" to a caller whose backend is already healthy.
  */
 function fileBackedRootUnavailableError(backend: string | undefined): Error {
 	if (backend === undefined || backend === "local") {
@@ -449,6 +449,14 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			throw new Error(
 				`Mnemopi memory ${namespace} not found in any scoped bank. Use \`recall\` to list available ids.`,
 			);
+		}
+
+		// A project may retain files from an earlier local session. Reject known
+		// non-local callers before probing the filesystem so those stale
+		// artifacts cannot leak across backend changes. Contextless legacy
+		// callers have no active backend to gate and retain the registry sweep.
+		if (backend !== undefined && backend !== "local") {
+			throw fileBackedRootUnavailableError(backend);
 		}
 
 		const roots = memoryRootsForContext(context, caller.session);
