@@ -262,6 +262,10 @@ describe("input controller — collab guest history", () => {
 			sendPrompt: vi.fn(),
 		} as unknown as InteractiveModeContext["collabGuest"];
 		harness.ctx.shutdown = vi.fn(async () => {});
+		// One registered skill, so `/skill:probe` reaches the skill branch that records its text.
+		harness.ctx.skillCommands.set("skill:probe", { name: "probe" } as unknown as Parameters<
+			InteractiveModeContext["skillCommands"]["set"]
+		>[1]);
 		const controller = controllerFor(harness.ctx);
 		return { ...harness, controller };
 	}
@@ -294,19 +298,30 @@ describe("input controller — collab guest history", () => {
 	});
 
 	it("applies the same guard on the follow-up path", async () => {
-		// `/new` is consumed and refused by the allowlist; the rest are left unconsumed by the
-		// dispatcher and reach `clearDraft`, which would record them.
-		const refused = ["/new", "/model opus", "/hotkeys extra", "/not-a-builtin do something", "/"];
+		// `/new` is consumed and refused by the allowlist, `/skill:probe` is recorded inside
+		// `#invokeSkillCommand`, and the rest reach `clearDraft` unconsumed.
+		const refused = [
+			"/new",
+			"/model opus",
+			"/hotkeys extra",
+			"/skill:probe do the thing",
+			"/not-a-builtin do something",
+			"/",
+		];
 		const recorded: string[] = [];
+		const prompted: string[] = [];
 
 		for (const command of refused) {
-			const { editor, addToHistory, controller } = guestCtx();
+			const { editor, addToHistory, prompt, controller } = guestCtx();
 			editor.setText(command);
 			await controller.handleFollowUp();
 			if (addToHistory.mock.calls.length > 0) recorded.push(command);
+			if (prompt.mock.calls.length > 0) prompted.push(command);
 		}
 
 		expect(recorded).toEqual([]);
+		// Nothing was delivered either: a refused command must not run on the replica.
+		expect(prompted).toEqual([]);
 
 		const allowed = guestCtx();
 		allowed.editor.setText("/hotkeys");

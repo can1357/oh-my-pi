@@ -1628,17 +1628,22 @@ export class InputController {
 			}
 		}
 
+		// A guest gets the same refusal on this path as on submit: the dispatcher left slash text it
+		// did not consume — a host-only builtin, a skill, an unknown command — and this path would
+		// otherwise run it locally and record it (skills record inside `#invokeSkillCommand`, below).
+		// Bash and python input stay ungated here, as they always were.
+		if (this.ctx.collabGuest && text.startsWith("/")) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			this.ctx.editor.setText("");
+			return;
+		}
+
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
 		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks))) {
 			return;
 		}
-
-		// Below, `clearDraft(text)` records the text it is handed, and this path reaches it for
-		// every command the dispatcher left unconsumed — the same set the guest branch refuses on
-		// submit. Hand it nothing for those, so a refused command stays out of history here too.
-		const recordable = this.#guestRefusesSlash(text) ? undefined : text;
 
 		// Hand the message back on dispatch failure (model/API-key validation,
 		// queue rejection): restore both text AND pending images so an image-only
@@ -1655,7 +1660,7 @@ export class InputController {
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.clearDraft(recordable);
+			this.ctx.editor.clearDraft(text);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -1671,7 +1676,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.clearDraft(recordable);
+		this.ctx.editor.clearDraft(text);
 		try {
 			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
 				imageCount: images?.length ?? 0,
