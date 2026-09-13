@@ -295,6 +295,8 @@ const ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX = 80;
 const ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX = 200;
 /** Budget for the tombstone lookup while explaining a denial; the error itself is already known. */
 const ENTITLEMENT_LOOKUP_BUDGET_MS = 2_000;
+/** Accounts named in a verdict before the rest are counted; large broker pools must not overflow the renderer. */
+const ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX = 8;
 
 /** One line of provider-controlled text, safe for a terminal error renderer and no longer than `max`. */
 function boundedDiagnostic(text: string, max: number): string {
@@ -7036,7 +7038,12 @@ export class AuthStorage {
 		// pool (a pinned runtime/config key, say) and the denial is not ours to
 		// explain.
 		if (deniedCount === 0) return undefined;
-		const parts = [head, `No other signed-in ${provider} account can serve it: ${tried.join(", ")}.`];
+		const named = tried.slice(0, ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX);
+		const unnamed = tried.length - named.length;
+		const parts = [
+			head,
+			`No other signed-in ${provider} account can serve it: ${named.join(", ")}${unnamed > 0 ? `, and ${unnamed} more` : ""}.`,
+		];
 
 		let recentlySignedOut: string[] = [];
 		try {

@@ -1032,6 +1032,42 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		).toBeUndefined();
 	});
 
+	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(
+			CODEX_PROVIDER,
+			Array.from({ length: 11 }, (_, index) => ({
+				type: "oauth" as const,
+				access: `pool-${index}`,
+				refresh: `ref-${index}`,
+				expires: farExpiry(),
+				email: `member${index}@example.com`,
+			})),
+		);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-large-pool";
+		// Every account gets the denial in turn until rotation has nowhere left to go.
+		for (let attempt = 0; attempt < 11; attempt += 1) {
+			const bearer = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: bearer,
+			});
+		}
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial);
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).toContain("member7@example.com denied, and 3 more.");
+		expect((verdict.message.match(/@example\.com denied/g) ?? []).length).toBe(8);
+	});
+
 	test("the verdict sanitizes and bounds provider-controlled text and never waits on a stalled tombstone lookup", async () => {
 		if (!store) throw new Error("test setup failed");
 		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
