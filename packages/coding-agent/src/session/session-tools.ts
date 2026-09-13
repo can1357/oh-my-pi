@@ -1421,14 +1421,19 @@ export class SessionTools {
 		// than leaving the inherited snapshot's order followed by append order.
 		const next = [...rebuilt, ...added].sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
 		// `Skill` carries no body content (loaded on demand via filePath), so
-		// identity + description is the observable prompt surface to compare.
+		// identity + description + the frontmatter flags that change the
+		// rendered/reachable surface (`hide`, folded from `disable-model-invocation`
+		// too — extensibility/skills.ts) are the observable prompt surface to
+		// compare. A frontmatter-only edit (PR #9379 review) must still count as
+		// a change even when name/filePath/description are untouched.
 		const unchanged =
 			next.length === this.#skills.length &&
 			next.every(
 				(skill, index) =>
 					skill.name === this.#skills[index].name &&
 					skill.filePath === this.#skills[index].filePath &&
-					skill.description === this.#skills[index].description,
+					skill.description === this.#skills[index].description &&
+					(skill.hide ?? false) === (this.#skills[index].hide ?? false),
 			);
 		if (unchanged) return false;
 		this.#skills = next;
