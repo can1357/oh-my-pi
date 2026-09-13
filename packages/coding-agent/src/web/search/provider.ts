@@ -104,6 +104,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.synthetic,
 		load: async () => new (await import("./providers/synthetic")).SyntheticProvider(),
 	},
+	ollama: {
+		id: "ollama",
+		label: SEARCH_PROVIDER_LABELS.ollama,
+		load: async () => new (await import("./providers/ollama")).OllamaProvider(),
+	},
 	searxng: {
 		id: "searxng",
 		label: SEARCH_PROVIDER_LABELS.searxng,
