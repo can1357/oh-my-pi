@@ -894,6 +894,12 @@ export class Editor implements Component, Focusable {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 
+		// A command can switch the conversation or the working directory without a browse in
+		// between: re-seed first, so the entry is filed under the context active now rather than
+		// the one the list was seeded for. Returning to a context then re-seeds again, because
+		// the stored key is the context this submission moved to.
+		this.#rehydrateHistory();
+
 		const stor = this.#historyStorage;
 		if (stor) {
 			stor.add(trimmed, origin?.cwd ?? getProjectDir(), origin?.sessionId).catch(error => {

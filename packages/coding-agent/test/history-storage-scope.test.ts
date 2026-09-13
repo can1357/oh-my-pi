@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -227,6 +228,35 @@ describe("HistoryStorage scope filtering", () => {
 			new Set(["after nested init", "before nested init"]),
 		);
 		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
+	});
+
+	it("sees a row committed by another connection without a local write", async () => {
+		const dir = tempDir!;
+		const fixtures = createFixtures(dir.path());
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("alpha local", fixtures.repoA, "s1");
+		// Warm both memos for this repository and for this exact directory.
+		expect(promptsOf(storage, { kind: "repo", value: fixtures.repoA })).toEqual(["alpha local"]);
+		expect(promptsOf(storage, { kind: "cwd", value: fixtures.repoA })).toEqual(["alpha local"]);
+
+		// Another OMP process commits rows under a directory this process never saw, and under a
+		// symlinked spelling of the known one. No local write follows.
+		const link = dir.join("repo-a-link");
+		fs.symlinkSync(fixtures.repoA, link, "dir");
+		const external = new Database(dir.join("history.db"));
+		const insert = external.prepare(
+			"INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, strftime('%s','now'), ?, ?)",
+		);
+		insert.run("beta external subdir", fixtures.repoASub, "s2");
+		insert.run("gamma external link", link, "s2");
+		external.close();
+
+		expect(new Set(promptsOf(storage, { kind: "repo", value: fixtures.repoA }))).toEqual(
+			new Set(["gamma external link", "beta external subdir", "alpha local"]),
+		);
+		expect(new Set(promptsOf(storage, { kind: "cwd", value: fixtures.repoA }))).toEqual(
+			new Set(["gamma external link", "alpha local"]),
+		);
 	});
 
 	it("reads with the scope the search ring hands to the panel", async () => {

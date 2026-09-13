@@ -125,6 +125,8 @@ export class HistoryStorage {
 	#physicalByStored = new Map<string, string>();
 	#rootByPhysical = new Map<string, string>();
 	#dirsByTarget = new Map<string, string[]>();
+	/** `PRAGMA data_version` last observed; it moves only for commits by another connection. */
+	#dataVersion = 0;
 
 	private constructor(dbPath: string) {
 		this.#ensureDir(dbPath);
@@ -168,6 +170,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 	cwd = excluded.cwd,
 	session_id = excluded.session_id
 		`);
+		// A fresh connection's version is a baseline, not a delta.
+		this.#dataVersion = this.#readDataVersion();
 	}
 
 	/** Opens the process-wide prompt history database. */
@@ -460,6 +464,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 */
 	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
 		if (!target) return [];
+		this.#dropDirSetsIfExternallyChanged();
 		const normalized = normalizePathForComparison(target);
 		const cacheKey = `${kind}\u0000${normalized}`;
 		const cached = this.#dirsByTarget.get(cacheKey);
@@ -478,6 +483,27 @@ ON CONFLICT(prompt) DO UPDATE SET
 				cwd: string;
 			}>
 		).map(row => row.cwd);
+	}
+
+	/** Current `PRAGMA data_version`, which another connection's commit alone moves. */
+	#readDataVersion(): number {
+		const row = this.#db.query("PRAGMA data_version").get() as { data_version?: number } | null;
+		return row?.data_version ?? 0;
+	}
+
+	/**
+	 * Drop the stored-directory memo when another process committed to the shared database.
+	 *
+	 * `PRAGMA data_version` moves only for foreign commits, so this complements — never replaces
+	 * — the unconditional clear in `#insertBatch`, which covers our own writes. Only the
+	 * directory list depends on the row set; the path-derived memos describe the filesystem and
+	 * are deliberately left alone, since rebuilding them costs an order of magnitude more.
+	 */
+	#dropDirSetsIfExternallyChanged(): void {
+		const version = this.#readDataVersion();
+		if (version === this.#dataVersion) return;
+		this.#dataVersion = version;
+		this.#dirsByTarget.clear();
 	}
 
 	/** Normalized physical spelling of a stored directory, memoized until the next write. */

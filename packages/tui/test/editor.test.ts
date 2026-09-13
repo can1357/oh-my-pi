@@ -187,6 +187,25 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("persisted from the second context");
 		});
 
+		it("keeps a submission in the context it was typed in, across an untravelled round trip", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				A: [{ prompt: "persisted in A" }],
+				B: [{ prompt: "persisted in B" }],
+			};
+			let key = "A";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+
+			// Session B is resumed, a prompt is submitted there, and A is resumed again without
+			// browsing history while in B: B's submission must not surface in A's recall.
+			key = "B";
+			editor.addToHistory("typed in B");
+			key = "A";
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted in A");
+		});
+
 		it("re-seeds from storage when the host's source key changes", () => {
 			const byKey: Record<string, { prompt: string }[]> = {
 				first: [{ prompt: "prompt from the first context" }],
