@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- ACP clients now receive the live subagent roster as a `notifications/agent_registry` extension notification ([#11302](https://github.com/can1357/oh-my-pi/pull/11302) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ### Changed
 
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead

@@ -28,12 +28,20 @@ afterAll(() => {
 	authStorage.close();
 });
 
+/**
+ * The factory mirrors the session's run state onto its registry ref, so every
+ * double needs the subscription even when the test is about something else.
+ */
+function fakeAcpSession(extra: Record<string, unknown> = {}): AgentSession {
+	return { subscribeRunState: () => () => {}, ...extra } as unknown as AgentSession;
+}
+
 describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 	it("forces enableMCP=false even when baseOptions opts in", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-mcp-isolation-");
 		try {
 			const settings = Settings.isolated({});
-			const fakeSession = {} as AgentSession;
+			const fakeSession = fakeAcpSession();
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);
@@ -79,13 +87,13 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 		try {
 			const settings = Settings.isolated({});
 			let disposed = false;
-			const fakeSession = {
+			const fakeSession = fakeAcpSession({
 				extensionRunner: undefined,
 				getAllToolNames: () => ["read"],
 				dispose: async () => {
 					disposed = true;
 				},
-			} as unknown as AgentSession;
+			});
 			const factory = createAcpSessionFactory({
 				baseOptions: {} as CreateAgentSessionOptions,
 				settings,
@@ -120,7 +128,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				`import { writeFileSync } from "node:fs"; export default function (pi) { pi.events.on("acp-session-live", () => writeFileSync(${JSON.stringify(firedPath)}, "fired")); }`,
 			);
 			let captured: CreateAgentSessionOptions | undefined;
-			const fakeSession = {} as AgentSession;
+			const fakeSession = fakeAcpSession();
 			const factory = createAcpSessionFactory({
 				baseOptions: {
 					disableExtensionDiscovery: true,
@@ -196,7 +204,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 			const projectDir = tempDir.join("project");
 			await Bun.write(`${projectDir}/.omp/TITLE_SYSTEM.md`, "Project-specific title policy.");
 
-			const fakeSession = {} as AgentSession;
+			const fakeSession = fakeAcpSession();
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);

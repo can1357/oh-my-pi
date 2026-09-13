@@ -517,6 +517,8 @@ async function createHarness(
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
 		},
+		// `initialize` starts the agent-registry mirror, which sends here.
+		extNotification: async () => {},
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
 			: undefined,
