@@ -462,11 +462,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	constructor(db: Database) {
 		this.#db = db;
 		this.#initializeSchema();
-		try {
-			this.#purgeExpiredDisabledRows();
-		} catch {
-			// Best-effort cleanup; don't let it break store initialization
-		}
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();

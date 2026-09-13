@@ -86,7 +86,7 @@ describe("disabled credential tombstone retention", () => {
 		expect(await store.listDisabledCredentials("openai-codex")).toEqual([]);
 	});
 
-	it("expires old tombstones on open while preserving fresh tombstones and old active rows", async () => {
+	it("expires only aged tombstones — never aged active rows — when a reopened store is read", async () => {
 		if (!store) throw new Error("test setup failed");
 		const expiredId = store.upsertAuthCredentialForProvider("openai-codex", credential("expired"))[0].id;
 		store.deleteAuthCredential(expiredId, AUTOMATIC_CAUSE);
@@ -99,12 +99,14 @@ describe("disabled credential tombstone retention", () => {
 		ageRow(dbPath, activeId);
 		store = await SqliteAuthCredentialStore.open(dbPath);
 
+		// Opening alone leaves rows untouched so a just-migrated legacy tombstone stays inspectable.
+		expect(readRows(dbPath).map(row => row.id)).toEqual([expiredId, freshId, activeId]);
+		expect(await store.listDisabledCredentials("openai-codex")).toMatchObject([
+			{ id: freshId, cause: AUTOMATIC_CAUSE },
+		]);
 		expect(readRows(dbPath)).toEqual([
 			{ id: freshId, disabled_cause: AUTOMATIC_CAUSE },
 			{ id: activeId, disabled_cause: null },
-		]);
-		expect(await store.listDisabledCredentials("openai-codex")).toMatchObject([
-			{ id: freshId, cause: AUTOMATIC_CAUSE },
 		]);
 	});
 
