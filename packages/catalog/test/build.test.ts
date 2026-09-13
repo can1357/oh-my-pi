@@ -1239,7 +1239,7 @@ describe("model cache spec round trip", () => {
 	it("warns with redacted identities when an authoritative discovery drops previously advertised models", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-dropped-discovery-"));
 		const dbPath = path.join(tempDir, "models.db");
-		const provider = "https://provider.example/v1?apiKey=provider-secret&ref=keep";
+		const provider = "catalog apiKey=provider-secret";
 		const keptModel = completionsSpec({ id: "https://models.example/model?token=kept-secret&ref=keep", provider });
 		const entitledModel = completionsSpec({
 			id: "https://models.example/model?token=dropped-secret&ref=keep",
@@ -1269,7 +1269,7 @@ describe("model cache spec round trip", () => {
 			expect(shrunk.models.map(model => model.id)).toEqual([keptModel.id]);
 			expect(warnSpy).toHaveBeenCalledTimes(1);
 			expect(warnSpy.mock.calls[0]?.[1]).toEqual({
-				provider: "https://provider.example/v1?apiKey=[redacted]&ref=keep",
+				provider: "catalog apiKey=[redacted]",
 				dropped: ["https://models.example/model?token=[redacted]&ref=keep", "family apiKey=[redacted]"],
 			});
 

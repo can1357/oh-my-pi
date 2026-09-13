@@ -336,7 +336,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				.map(model => redactSecrets(redactUrlSecrets(model.id)));
 			if (dropped.length > 0) {
 				logger.warn("Model discovery dropped models the previous catalog advertised", {
-					provider: redactUrlSecrets(options.providerId),
+					provider: redactSecrets(redactUrlSecrets(options.providerId)),
 					dropped,
 				});
 			}
