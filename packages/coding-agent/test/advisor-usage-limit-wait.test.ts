@@ -45,6 +45,17 @@ describe("planAdvisorUsageLimitWait", () => {
 		expect(waitMs).toBeUndefined();
 	});
 
+	it("declines (latch) immediately when maxRetries is 0", () => {
+		// maxRetries=0 must mean no retries at all, matching the primary path.
+		const waitMs = planAdvisorUsageLimitWait({
+			blockedUntilMs: NOW + 50_000,
+			retry: { ...RETRY, maxRetries: 0 },
+			attempt: 0,
+			nowMs: NOW,
+		});
+		expect(waitMs).toBeUndefined();
+	});
+
 	it("declines (latch) when retry is disabled", () => {
 		const waitMs = planAdvisorUsageLimitWait({
 			blockedUntilMs: NOW + 50_000,

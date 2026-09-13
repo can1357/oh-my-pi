@@ -139,7 +139,9 @@ export function planAdvisorUsageLimitWait(args: {
 }): number | undefined {
 	const { retryAtMs, blockedUntilMs, retryAfterMs, retry, attempt, nowMs } = args;
 	if (!retry.enabled) return undefined;
-	if (retry.maxRetries > 0 && attempt >= retry.maxRetries) return undefined;
+	// A direct compare keeps maxRetries=0 meaning "no retries" (latch immediately),
+	// matching the primary retry path's exhausted-budget semantics.
+	if (attempt >= retry.maxRetries) return undefined;
 	// Retry as soon as either the just-blocked credential frees or a temporarily
 	// blocked sibling does — the next attempt's getApiKey re-ranks and picks up
 	// whichever is available first.
