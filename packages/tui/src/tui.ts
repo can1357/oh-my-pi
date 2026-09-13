@@ -120,6 +120,9 @@ export interface RenderScheduler {
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 }
+/** Passive layer painted beside the editor, without allocating transcript rows. */
+export type CursorOverlayRenderer = (width: number, maxRows: number) => readonly string[];
+
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
 	readonly columns: number;
@@ -668,6 +671,12 @@ export class TUI extends Container {
 	// Screen row where the provider's mutable viewport begins (0-based); rows
 	// above it hold history still visible on the physical screen.
 	#providerViewportTop = 0;
+	#cursorOverlayRender: CursorOverlayRenderer | undefined;
+	#cursorOverlayOffset = 0;
+	#cursorOverlayEditorRows = 0;
+	#cursorOverlayBacking: { top: number; rows: string[]; painted: readonly string[] } | undefined;
+	/** Only the current physical screen, never native scrollback. */
+	#providerScreen: readonly string[] = [];
 	// Net composer-space offset of the published hit-test origin behind the
 	// painted top, from the last paint: replay-replaced rows minus viewport
 	// rows the paint prepended for a short viewport. Negative while prepended
@@ -858,6 +867,7 @@ export class TUI extends Container {
 	#resizeInPlaceActive = false;
 	#resizeScrollbackMode: ResizeScrollbackMode = TUI.#initialResizeScrollbackMode();
 	#resizeReplaySize: string | undefined;
+	#cursorOverlayResizePending = false;
 	// Holds an alternate-screen exit until its replacement full paint can emit it
 	// atomically. It must survive a deferred Ghostty image frame.
 	#pendingAltExit = "";
@@ -882,10 +892,28 @@ export class TUI extends Container {
 		return mode === "append" || mode === "rebuild" || mode === "preserve" ? mode : "preserve";
 	}
 
+	/**
+	 * Set a passive, non-focus-stealing layer for the current composed frame.
+	 * The frame provider must support complete history replay: a resize can
+	 * archive painted overlay cells before SIGWINCH reaches the application.
+	 */
+	setCursorOverlay(render: CursorOverlayRenderer | undefined, cursorOffset: number, editorRows: number): void {
+		if (render && !this.#frameProvider?.beginHistoryReplay) {
+			throw new Error("Cursor overlays require a frame provider with beginHistoryReplay()");
+		}
+		this.#cursorOverlayRender = render;
+		this.#cursorOverlayOffset = cursorOffset;
+		this.#cursorOverlayEditorRows = editorRows;
+	}
+
 	/** Install the product-owned bounded frame provider. */
 	setFrameProvider(provider: TerminalFrameProvider | undefined): void {
 		this.#frameProvider = provider;
 		this.#providerWindow = [];
+		this.#providerScreen = [];
+		this.#cursorOverlayRender = undefined;
+		this.#cursorOverlayBacking = undefined;
+		this.#cursorOverlayResizePending = false;
 		this.#resizeReplaySize = undefined;
 		this.requestRender(true);
 	}
@@ -1115,6 +1143,7 @@ export class TUI extends Container {
 			this.#resizeAltActive ||
 			this.#resizeProbe !== undefined ||
 			this.#resizeInPlaceActive ||
+			this.#cursorOverlayBacking !== undefined ||
 			this.#ghosttyInitialImageDelayTimer !== undefined
 		) {
 			return { top: 0, length: 0 };
@@ -1224,6 +1253,7 @@ export class TUI extends Container {
 					return;
 				}
 				if (this.#altActive) {
+					if (this.#cursorOverlayBacking) this.#cursorOverlayResizePending = true;
 					// A fullscreen overlay owns the alt buffer: repaint the modal at
 					// the new size. Never snapshot the normal window or probe its
 					// anchor against the alternate grid — not even for a toggle echo.
@@ -1320,6 +1350,7 @@ export class TUI extends Container {
 	 * in-flight CPR tag so a rewrap-invalidated reply cannot anchor a new geometry.
 	 */
 	#trackResizeBurst(): void {
+		if (this.#cursorOverlayBacking) this.#cursorOverlayResizePending = true;
 		const burstLastHeight = this.#resizeBurstLastHeight ?? this.#previousHeight;
 		if (this.terminal.rows > burstLastHeight) this.#resizeBurstGrew = true;
 		this.#resizeBurstLastHeight = this.terminal.rows;
@@ -1823,25 +1854,38 @@ export class TUI extends Container {
 
 	#flushHistoryBeforeStop(): void {
 		const provider = this.#frameProvider;
-		if (provider?.beginHistoryFlush === undefined) return;
+		if (!provider || (!provider.beginHistoryFlush && !this.#cursorOverlayBacking)) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		if (width <= 0 || height <= 0) return;
-		provider.beginHistoryFlush();
+		provider.beginHistoryFlush?.();
 		while (true) {
 			let plan: TerminalFramePlan;
 			do {
 				this.#imageBudget.beginPass();
 				plan = provider.renderFrame({ columns: width, rows: height });
 			} while (this.#imageBudget.endPass());
-			if (plan.history === undefined) return;
+			if (plan.history === undefined) {
+				if (this.#cursorOverlayBacking) {
+					this.#emitPlanFrame(
+						width,
+						height,
+						Array.from(plan.viewport).slice(0, height),
+						undefined,
+						provider,
+						true,
+					);
+				}
+				return;
+			}
 			let viewport = Array.from(plan.viewport);
 			if (viewport.length > height) viewport = viewport.slice(0, height);
 			const acceptedBefore = this.#acceptedHistoryBatchId;
-			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+			this.#emitPlanFrame(width, height, viewport, plan.history, provider, true);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
 				throw new Error("History flush did not accept the offered batch");
 			}
+			if (!provider.beginHistoryFlush) return;
 		}
 	}
 
@@ -2549,6 +2593,14 @@ export class TUI extends Container {
 	 * the `widthChanged`-gated commit-ledger logic in {@link #doRender}.
 	 */
 	#prepareResizeReplay(width: number, height: number): void {
+		// Only resize may invalidate backing that is no longer addressable. Replay
+		// the semantic ledger after the burst settles, even in preserve/append mode;
+		// ordinary popup open/filter/close never clears native history.
+		if (this.#cursorOverlayResizePending) {
+			this.#cursorOverlayResizePending = false;
+			this.#prepareForcedRender(true);
+			return;
+		}
 		const size = `${width}x${height}`;
 		if (
 			!this.#hasEverRendered ||
@@ -2630,6 +2682,7 @@ export class TUI extends Container {
 		viewportRows: string[],
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
+		flushing = false,
 	): void {
 		let viewport = viewportRows;
 		if (this.#getTopmostVisibleOverlay() !== undefined) {
@@ -2707,8 +2760,45 @@ export class TUI extends Container {
 			!this.#forceViewportRepaintOnNextRender &&
 			!destructiveReset &&
 			this.#providerWindow.length > 0;
+		const marker = markers[0];
+		const editorTop = Math.max(0, newTop + (marker?.row ?? 0) - this.#cursorOverlayOffset);
+		const editorBottom = Math.min(height, editorTop + this.#cursorOverlayEditorRows);
+		const above = editorTop >= height - editorBottom;
+		const available = above ? editorTop : height - editorBottom;
+		const overlayRows =
+			marker && !flushing && !this.hasOverlay() && available > 0
+				? this.#prepareLinesArray(this.#cursorOverlayRender?.(width, available) ?? [], width)
+				: [];
+		const overlayCount = Math.min(overlayRows.length, available);
+		const overlayTop = above ? editorTop - overlayCount : editorBottom;
+		const previousOverlay = this.#cursorOverlayBacking;
+		// A partial multicell overwrite destroys the whole glyph, not only the
+		// covered row. Restore its anchor and all reserved rows as one unit.
+		let restoredScaledBacking = false;
+		if (previousOverlay && geometryStable && !destructiveReset && !pendingAltExit) {
+			let restoreTop = previousOverlay.top;
+			let restoreEnd = restoreTop + previousOverlay.rows.length;
+			while (this.#osc66SpacerGlyphWidth(this.#providerScreen, restoreTop) >= 0) restoreTop--;
+			while (this.#osc66SpacerGlyphWidth(this.#providerScreen, restoreEnd) >= 0) restoreEnd++;
+			restoredScaledBacking =
+				restoreTop < previousOverlay.top || restoreEnd > previousOverlay.top + previousOverlay.rows.length;
+			// Restore physical cells before an append can scroll them into history.
+			for (let row = restoreTop; row < restoreEnd; row++) {
+				if (!restoredScaledBacking && diffable && row >= overlayTop && row < overlayTop + overlayCount) continue;
+				buffer += `\x1b[${row + 1};1H${this.#lineRewriteSequence(
+					this.#providerScreen[row] ?? "",
+					width,
+					row,
+					-1,
+					-1,
+					this.#osc66SpacerGlyphWidth(this.#providerScreen, row),
+				)}`;
+			}
+		}
+		this.#cursorOverlayBacking = undefined;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
+				if (newTop + index >= overlayTop && newTop + index < overlayTop + overlayCount) continue;
 				if (this.#providerWindow[index] === prepared[index]) continue;
 				buffer += `\x1b[${newTop + index + 1};1H${this.#lineRewriteSequence(
 					prepared[index] ?? "",
@@ -2762,11 +2852,29 @@ export class TUI extends Container {
 		}
 		const mutableTop = newTop + replayViewportRows;
 		const mutablePrepared = replayViewportRows > 0 ? prepared.slice(replayViewportRows) : prepared;
-		const marker = markers[0];
 		const target =
 			marker !== undefined && rows > 0
 				? this.#targetHardwareCursorState({ row: newTop + Math.min(marker.row, rows - 1), col: marker.col }, height)
 				: null;
+		const screenPrefix = destructiveReset ? [] : this.#providerScreen.slice(0, startTop);
+		while (screenPrefix.length < startTop) screenPrefix.push("");
+		this.#providerScreen = [...screenPrefix, ...preparedHistory.slice(-height), ...prepared].slice(-height);
+		if (overlayCount > 0) {
+			const covered: string[] = [];
+			for (let index = 0; index < overlayCount; index++) {
+				const row = overlayTop + index;
+				covered.push(this.#providerScreen[row] ?? "");
+				if (
+					diffable &&
+					!restoredScaledBacking &&
+					this.#providerWindow.length === rows &&
+					previousOverlay?.painted[row - previousOverlay.top] === overlayRows[index]
+				)
+					continue;
+				buffer += `\x1b[${row + 1};1H${this.#lineRewriteSequence(overlayRows[index]!, width, row)}`;
+			}
+			this.#cursorOverlayBacking = { top: overlayTop, rows: covered, painted: overlayRows.slice(0, overlayCount) };
+		}
 		if (target) {
 			buffer += `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
 			this.#parkedViewportOffset = Math.max(0, target.row - mutableTop);

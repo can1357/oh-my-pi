@@ -311,6 +311,7 @@ export class Composer implements TerminalFrameProvider {
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		if (!this.#started || this.#stopped) return { viewport: [] };
+		this.ui.setCursorOverlay(undefined, 0, 0);
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
 		if (this.#resizeRetiredHeaderStart !== undefined) {

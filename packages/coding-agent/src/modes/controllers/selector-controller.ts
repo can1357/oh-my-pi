@@ -587,6 +587,10 @@ export class SelectorController {
 				this.ctx.eventController.refreshIdleCompactionTimer();
 				break;
 
+			case "display.commandSuggestionsPopup":
+				this.ctx.editor.commandSuggestionsPopup = value as boolean;
+				this.ctx.ui.requestRender();
+				break;
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;

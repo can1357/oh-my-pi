@@ -447,6 +447,39 @@ describe("Editor component", () => {
 	});
 
 	describe("autocomplete triggers", () => {
+		it("removes the previous passive popup when completion switches to an absolute path", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.focused = true;
+			editor.commandSuggestionsPopup = true;
+			let popupVisible = false;
+			editor.onAutocompleteRender = render => {
+				popupVisible = render !== undefined;
+			};
+			editor.setAutocompleteProvider({
+				async getSuggestions(lines, cursorLine, cursorCol) {
+					const prefix = lines[cursorLine]!.slice(0, cursorCol);
+					return { prefix, items: [{ label: "candidate", value: prefix === "/" ? "help" : "/tmp/file" }] };
+				},
+				applyCompletion(lines, cursorLine, cursorCol) {
+					return { lines, cursorLine, cursorCol };
+				},
+			});
+			for (const input of ["/", "tmp/f"]) {
+				const updated = Promise.withResolvers<void>();
+				editor.onAutocompleteUpdate = updated.resolve;
+				editor.handleInput(input);
+				await updated.promise;
+				const rows = editor.render(80).join("\n");
+				if (input === "/") {
+					expect(popupVisible).toBe(true);
+					expect(rows).not.toContain("candidate");
+				} else {
+					expect(rows).toContain("candidate");
+					expect(popupVisible).toBe(false);
+				}
+			}
+		});
+
 		it("triggers slash-command autocomplete without losing the hardware cursor anchor", async () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.focused = true;
@@ -474,7 +507,7 @@ describe("Editor component", () => {
 			expect(editor.render(80).some(line => line.includes(CURSOR_MARKER))).toBe(true);
 		});
 
-		it("caps wrapped slash-command descriptions at two rows with an ellipsis", async () => {
+		it.each(["/", "  /"])("caps wrapped command descriptions for prefix %j at two rows", async prefix => {
 			const editor = new Editor(defaultEditorTheme);
 			const longDescription =
 				"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems and it keeps rambling on far past what two popup rows can hold.";
@@ -488,7 +521,7 @@ describe("Editor component", () => {
 			const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
 			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
 
-			editor.handleInput("/");
+			editor.handleInput(prefix);
 			await autocompleteUpdated;
 
 			const rendered = editor.render(80).map(line => stripVTControlCharacters(line));

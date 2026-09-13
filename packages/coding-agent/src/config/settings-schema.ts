@@ -1301,6 +1301,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.commandSuggestionsPopup": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Command Suggestions Popup",
+			description:
+				"Show slash-command suggestions in a bordered popup without moving the chat or changing native scrolling",
+		},
+	},
+
 	"display.shimmer": {
 		type: "enum",
 		values: ["classic", "kitt", "disabled"] as const,

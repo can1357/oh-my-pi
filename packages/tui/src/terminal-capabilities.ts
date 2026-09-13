@@ -867,6 +867,9 @@ export function encodeKittyPlacement(options: {
 	if (options.placementId) params.push(`p=${options.placementId}`);
 	if (options.columns) params.push(`c=${options.columns}`);
 	if (options.rows) params.push(`r=${options.rows}`);
+	// Keep inline graphics below opaque UI cells without removing their data
+	// or placements from native scrollback (Kitty graphics stacking contract).
+	params.push("z=-2147483648");
 	return wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 }
 
@@ -877,7 +880,7 @@ export function encodeKittyPlacement(options: {
  * not match (passthrough placements stay untouched).
  */
 const KITTY_DIRECT_PLACEMENT_LINE =
-	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?$/;
+	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?(?:,z=-2147483648)?\x1b\\(?:\x1b8)?$/;
 
 export interface ParsedKittyPlacementLine {
 	imageId: number;
@@ -937,6 +940,7 @@ export function encodeKittyPlacementLine(options: {
 		const srcY = Math.floor((options.imageHeightPx * hiddenRows) / options.rows);
 		params.push(`y=${srcY}`, `h=${Math.max(1, options.imageHeightPx - srcY)}`);
 	}
+	params.push("z=-2147483648");
 	// No tmux passthrough: inside tmux the component's own line arrives
 	// wrapped, never parses, and never reaches this rewrite.
 	const apc = `\x1b_G${params.join(",")}\x1b\\`;
