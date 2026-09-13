@@ -1,4 +1,4 @@
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, redactSecrets, SECRET_NAME } from "@oh-my-pi/pi-utils";
 import type { JsonRpcError } from "./types";
 
 /** MCP transport used by a failed operation. */
@@ -39,11 +39,6 @@ const MAX_DATA_DEPTH = 5;
 const MAX_DATA_ENTRIES = 30;
 const FETCH_VERBOSE_ADVICE =
 	/\s*For more information, pass `verbose: true` in the second argument to fetch\(\)\.?\s*$/i;
-// Substring match, not exact: compound names (`client_secret`, `clientSecret`,
-// `private_key`, `signingSecret`, `access_token`) must classify as secrets so
-// their values never reach the exposed `data:` diagnostic.
-const SECRET_KEY =
-	/(?:authorization|bearer|cookie|secret|passw(?:or)?d|pwd|token|credential|api[-_]?key|private[-_]?key|access[-_]?key|signature)/i;
 const TRACE_KEYS = /^(?:trace[-_]?id|request[-_]?id|correlation[-_]?id|traceparent)$/i;
 
 export class MCPTransportError extends Error {
@@ -85,16 +80,7 @@ function errorCode(error: unknown): string | number | undefined {
 }
 
 function sanitizeDiagnosticText(value: string, maxChars: number): string {
-	return value
-		.replace(FETCH_VERBOSE_ADVICE, "")
-		.replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]")
-		.replace(/([?&](?:access[-_]?token|api[-_]?key|key|token|secret|password)=)[^&#\s]+/gi, "$1[redacted]")
-		.replace(
-			/((?:authorization|api[-_]?key|private[-_]?key|access[-_]?key|token|secret|passw(?:or)?d|pwd|credential)\s*[:=]\s*)[^\s,;}]+/gi,
-			"$1[redacted]",
-		)
-		.slice(0, maxChars)
-		.trim();
+	return redactSecrets(value.replace(FETCH_VERBOSE_ADVICE, "")).slice(0, maxChars).trim();
 }
 
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {
@@ -114,12 +100,12 @@ function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unk
 	for (const key in value) {
 		if (count++ === MAX_DATA_ENTRIES) break;
 		const item = value[key];
-		result[key] = SECRET_KEY.test(key) ? "[redacted]" : sanitizeData(item, depth + 1, seen);
+		result[key] = SECRET_NAME.test(key) ? "[redacted]" : sanitizeData(item, depth + 1, seen);
 	}
 	return result;
 }
 
-function serializeData(value: unknown): string | undefined {
+export function serializeMCPDiagnosticData(value: unknown): string | undefined {
 	if (value === undefined) return undefined;
 	try {
 		const serialized = JSON.stringify(sanitizeData(value, 0, new WeakSet()));
@@ -178,7 +164,7 @@ export function createMCPJsonRpcError(
 		message: `MCP error ${error.code}: ${error.message}`,
 		retryable: false,
 		code: error.code,
-		data: serializeData(error.data),
+		data: serializeMCPDiagnosticData(error.data),
 		traceId: safeTraceId(traceId) ?? findTraceId(error.data),
 	});
 }

@@ -310,6 +310,35 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(callbacks.at(-1)?.credentials).toHaveLength(3);
 	});
 
+	test("keeps disabled history within the same account pool as the active view", async () => {
+		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		storage!.upsertCredential("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));
+		const snapshot = storage!.exportSnapshot();
+		const a = snapshot.credentials.find(entry => entry.identityKey?.includes("a@example.com"))!;
+		const b = snapshot.credentials.find(entry => entry.identityKey?.includes("b@example.com"))!;
+		const codex = snapshot.credentials.find(entry => entry.provider === "openai-codex")!;
+		expect(storage!.disableCredentialById(b.id, "invalid_grant")).toBe(true);
+		expect(storage!.disableCredentialById(codex.id, "invalid_grant")).toBe(true);
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({
+			client,
+			streamSnapshots: false,
+			accountPool: new Map([["anthropic", new Set([a.identityKey!])]]),
+		});
+		const clientStorage = new AuthStorage(remote);
+		await clientStorage.revalidateCredentials();
+		expect(clientStorage.listOAuthAccounts("anthropic").map(account => account.email)).toEqual(["a@example.com"]);
+		expect((await clientStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([codex.id]);
+		expect(storage!.disableCredentialById(a.id, "invalid_grant")).toBe(true);
+		expect((await clientStorage.listActionableDisabledCredentials()).map(summary => summary.id).sort()).toEqual(
+			[a.id, codex.id].sort(),
+		);
+		// Pool routing does not erase the broker-wide forensic history.
+		expect((await client.listDisabledCredentials()).map(summary => summary.id).sort()).toEqual(
+			[a.id, b.id, codex.id].sort(),
+		);
+	});
+
 	test("advances the SSE generation without exposing an excluded entry", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await client.fetchSnapshot();
