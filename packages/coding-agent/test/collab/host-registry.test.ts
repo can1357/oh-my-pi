@@ -144,6 +144,79 @@ afterEach(async () => {
 });
 
 describe("collab host registry lifecycle (#6099)", () => {
+	for (const transition of ["suspend", "stop", "fatal close"] as const) {
+		it(`closes guest traffic and deferred replies on ${transition}`, async () => {
+			const { ctx, state } = makeHostContext();
+			const originalConnect = CollabSocket.prototype.connect;
+			let transport: CollabSocket | undefined;
+			const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+				transport = this;
+				return originalConnect.call(this);
+			});
+			host = new CollabHost(ctx);
+			try {
+				await host.start(RELAY_URL, WEB_URL);
+			} finally {
+				capture.mockRestore();
+			}
+			if (!transport) throw new Error("host transport missing");
+			const parsed = parseCollabLink(host.link);
+			if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+			const receive = transport.onFrame!;
+			receive(
+				{
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: "writer",
+					writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+				},
+				1,
+			);
+			const pendingPrompt = Promise.withResolvers<boolean>();
+			const prompt = spyOn(ctx.session, "promptCustomMessage").mockImplementation(() => pendingPrompt.promise);
+			const abort = spyOn(ctx.session, "abort").mockResolvedValue(undefined);
+			const notice = spyOn(ctx.session, "emitNotice");
+			receive({ t: "prompt", text: "accepted before transition" }, 1);
+			expect(prompt).toHaveBeenCalledTimes(1);
+			const cancel = new AbortController();
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, cancel.signal);
+			const drain = Promise.withResolvers<void>();
+			const flush = spyOn(transport, "flush").mockImplementation(() => drain.promise);
+			let stopping: Promise<void> | undefined;
+			if (transition === "suspend") state.sessionId = "another-session";
+			else if (transition === "stop") stopping = host.stop("test stop");
+			else transport.onClose?.("room closed", false);
+			const send = spyOn(transport, "send");
+			notice.mockClear();
+			try {
+				receive({ t: "hello", proto: COLLAB_PROTO, name: "late writer" }, 2);
+				receive({ t: "prompt", text: "must not run" }, 1);
+				receive({ t: "abort" }, 1);
+				receive({ t: "agent-cmd", cmd: "chat", agentId: "missing-agent", text: "" }, 1);
+				receive({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+				receive({ t: "fetch-transcript", reqId: 1, agentId: "missing-agent", fromByte: 0 }, 1);
+				state.subscribed?.({ type: "notice", level: "info", message: "must not mirror", source: "test" });
+				transport.onControl?.({ t: "peer-left", peer: 1 });
+				cancel.abort();
+				pendingPrompt.reject(new Error("late failure"));
+				await pendingPrompt.promise.catch(() => {});
+				expect(await answer).toEqual({ kind: "unavailable" });
+				expect(prompt).toHaveBeenCalledTimes(1);
+				expect(abort).not.toHaveBeenCalled();
+				expect(notice).not.toHaveBeenCalled();
+				expect(send).not.toHaveBeenCalled();
+				expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+			} finally {
+				drain.resolve();
+				flush.mockRestore();
+				send.mockRestore();
+				prompt.mockRestore();
+				abort.mockRestore();
+				notice.mockRestore();
+				await stopping;
+			}
+		});
+	}
 	it("publishes metadata after the relay connects and hands out links per access", async () => {
 		const { ctx, state } = makeHostContext();
 		host = new CollabHost(ctx, { instanceId: "host-under-test", generation: 3, access: "control" });

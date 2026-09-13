@@ -293,8 +293,8 @@ export class CollabHost {
 	 * must stay local rather than reach the previous session's guests.
 	 */
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (this.ending || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
-		if (!this.#sessionStillCurrent()) return null;
+		if (!this.#guestTrafficAllowed() || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS)
+			return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -318,12 +318,12 @@ export class CollabHost {
 		const socket = this.#socket;
 		if (!socket) return;
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) socket.send(frame, peerId);
+			if (peer.canWrite) this.#send(frame, peerId);
 		}
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
-		if (this.#stopped) throw new CollabHostStoppedError("collab host already stopped");
+		if (this.ending) throw new CollabHostStoppedError("collab host already stopped");
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
@@ -340,7 +340,7 @@ export class CollabHost {
 		firstOpen.promise.catch(() => {});
 		this.#abortStart = firstOpen.reject;
 		const key = await importRoomKey(rawKey);
-		if (this.#stopped) throw new CollabHostStoppedError("collab host stopped before connecting");
+		if (this.ending) throw new CollabHostStoppedError("collab host stopped before connecting");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
@@ -398,7 +398,7 @@ export class CollabHost {
 		// resolves), and anything that happens after its welcome snapshot must
 		// reach it; the local registry work below is independent of that.
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
+			if (isWireAgentEvent(event)) this.#send({ t: "event", event: shrinkForReplication(event) });
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -408,14 +408,12 @@ export class CollabHost {
 		const observabilityBus = this.#ctx.subagentEventBus ?? this.#ctx.eventBus;
 		if (observabilityBus) {
 			for (const channel of COLLAB_BUS_CHANNELS) {
-				this.#busUnsubscribers.push(
-					observabilityBus.on(channel, data => this.#broadcast({ t: "bus", channel, data })),
-				);
+				this.#busUnsubscribers.push(observabilityBus.on(channel, data => this.#send({ t: "bus", channel, data })));
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
-			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
+			if (isWireSessionEntry(entry)) this.#send({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
@@ -567,8 +565,7 @@ export class CollabHost {
 	 * is handed out for a room that already refuses joins.
 	 */
 	#registrySnapshot(): CollabHostSnapshot {
-		if (this.ending) throw new Error("collab host stopping");
-		if (!this.#sessionStillCurrent()) throw new Error("session switched");
+		if (!this.#guestTrafficAllowed()) throw new Error("collab room unavailable");
 		const model = this.#ctx.session.model;
 		return {
 			instanceId: this.#instanceId,
@@ -586,16 +583,22 @@ export class CollabHost {
 		};
 	}
 
-	#broadcast(frame: CollabFrame): void {
-		if (this.ending || !this.#socket || !this.#sessionStillCurrent()) return;
-		this.#socket.send(frame);
+	/** Shared liveness and session-identity gate for guest traffic and deferred actions. */
+	#guestTrafficAllowed(): boolean {
+		return !this.ending && this.#sessionStillCurrent();
+	}
+
+	/** Only outbound path; stop() deliberately bypasses it for the final goodbye. */
+	#send(frame: CollabFrame, toPeer = 0): void {
+		if (!this.#guestTrafficAllowed()) return;
+		this.#socket?.send(frame, toPeer);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
 		// Inbound frames act on the mirrored session (join snapshots, prompts,
 		// aborts, agent control); none may reach a session this room never
 		// shared, or one whose room is already ending.
-		if (this.ending || !this.#sessionStillCurrent()) return;
+		if (!this.#guestTrafficAllowed()) return;
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
@@ -633,7 +636,7 @@ export class CollabHost {
 
 	/** Reject a mutating frame from a read-only peer with a targeted error. */
 	#rejectReadOnly(action: string, fromPeer: number): void {
-		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+		this.#send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
 	}
 
 	/**
@@ -643,16 +646,13 @@ export class CollabHost {
 	 */
 	#rejectWhileStarting(action: string, fromPeer: number): boolean {
 		if (this.#guestActionsReady()) return false;
-		this.#socket?.send(
-			{ t: "error", message: `${action} is unavailable until the host finishes starting up` },
-			fromPeer,
-		);
+		this.#send({ t: "error", message: `${action} is unavailable until the host finishes starting up` }, fromPeer);
 		return true;
 	}
 
 	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
 		if (proto !== COLLAB_PROTO) {
-			this.#socket?.send(
+			this.#send(
 				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
 				fromPeer,
 			);
@@ -677,7 +677,7 @@ export class CollabHost {
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
-		socket.send(
+		this.#send(
 			{
 				t: "welcome",
 				proto: COLLAB_PROTO,
@@ -692,7 +692,7 @@ export class CollabHost {
 		this.#sendSnapshotChunks(entries, fromPeer);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
-				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
+				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
 		this.#ctx.session.emitNotice(
@@ -718,7 +718,7 @@ export class CollabHost {
 		const socket = this.#socket;
 		if (!socket) return;
 		if (entries.length === 0) {
-			socket.send({ t: "snapshot-chunk", entries: [], final: true }, fromPeer);
+			this.#send({ t: "snapshot-chunk", entries: [], final: true }, fromPeer);
 			return;
 		}
 		let i = 0;
@@ -735,7 +735,7 @@ export class CollabHost {
 				batchBytes += entryBytes;
 				i++;
 			}
-			socket.send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
+			this.#send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
 		}
 	}
 
@@ -753,7 +753,7 @@ export class CollabHost {
 		// The request already settled (or never existed for this peer). A writer that
 		// reconnected after the broadcast `ui-request-end` resends its answer and would
 		// otherwise wait forever, so acknowledge it directly.
-		this.#socket?.send({ t: "ui-request-end", reqId }, fromPeer);
+		this.#send({ t: "ui-request-end", reqId }, fromPeer);
 	}
 
 	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
@@ -784,7 +784,7 @@ export class CollabHost {
 			)
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
-				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
 			});
 	}
 
@@ -797,13 +797,18 @@ export class CollabHost {
 		const name = peer.name;
 		void this.#ctx.session
 			.abort({ reason: USER_INTERRUPT_LABEL })
-			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
+			.then(() => {
+				if (!this.#guestTrafficAllowed()) return;
+				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
+			})
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
 
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		// Relay controls arrive outside the normal frame handler.
+		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
@@ -866,10 +871,10 @@ export class CollabHost {
 	}
 
 	#scheduleAgentsBroadcast(): void {
-		if (this.#stopped || this.#agentsDebounce) return;
+		if (this.ending || this.#agentsDebounce) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() });
+			this.#send({ t: "agents", agents: this.#snapshotAgents() });
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
@@ -881,34 +886,38 @@ export class CollabHost {
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
 		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {
 			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			this.#send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
 				const trimmed = text?.trim();
 				if (!trimmed) {
-					this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
+					this.#send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
 				AgentLifecycleManager.global()
 					.ensureLive(agentId)
-					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
+					.then(session => {
+						if (!this.#guestTrafficAllowed()) return;
+						return session.prompt(trimmed, { streamingBehavior: "steer" });
+					})
 					.catch(fail);
 				break;
 			}
 			case "kill": {
 				const kill = async () => {
 					const ref = AgentRegistry.global().get(agentId);
-					if (!ref) return;
+					if (!ref || !this.#guestTrafficAllowed()) return;
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
+					if (!this.#guestTrafficAllowed()) return;
 					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
 				};
 				kill().catch(fail);
@@ -923,7 +932,7 @@ export class CollabHost {
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
-			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
+			this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
 		const file = AgentRegistry.global().get(agentId)?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
@@ -963,14 +972,14 @@ export class CollabHost {
 	}
 
 	#scheduleStateBroadcast(): void {
-		if (this.#stopped || this.#stateDebounce) return;
+		if (this.ending || this.#stateDebounce) return;
 		this.#stateDebounce = setTimeout(() => {
 			this.#stateDebounce = null;
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
 			this.#lastStateJson = json;
-			this.#broadcast({ t: "state", state });
+			this.#send({ t: "state", state });
 		}, STATE_DEBOUNCE_MS);
 	}
 
