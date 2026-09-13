@@ -13,9 +13,9 @@ import * as path from "node:path";
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "../../../tools/path-utils";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
-import type { PluginRuntimeConfig } from "../types";
+import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
-import { cachePlugin } from "./cache";
+import { cachePlugin, getCachedPluginPath } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
@@ -39,9 +39,9 @@ import type {
 	MarketplacePluginEntry,
 	MarketplaceRegistryEntry,
 } from "./types";
-import { buildPluginId, parsePluginId } from "./types";
+import { buildPluginId, nameSegmentCollisionKey, parsePluginId } from "./types";
 
-const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-zA-Z0-9][a-zA-Z0-9._~-]*\/)?[a-zA-Z0-9][a-zA-Z0-9._~-]*$/;
 const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
 
 function assertRuntimePackageName(name: string): string {
@@ -49,6 +49,12 @@ function assertRuntimePackageName(name: string): string {
 		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
 	}
 	return name;
+}
+
+/** Runtime state captured when a plugin key is removed, carried to a renamed key. */
+interface RemovedRuntimeState {
+	state?: PluginRuntimeState;
+	settings?: Record<string, unknown>;
 }
 
 // ── Options ──────────────────────────────────────────────────────────────────
@@ -91,15 +97,21 @@ export class MarketplaceManager {
 
 	async addMarketplace(source: string): Promise<MarketplaceRegistryEntry> {
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
-		const existingNames = new Set(reg.marketplaces.map(m => m.name));
 
 		const { catalog, clonePath } = await fetchMarketplace(source, this.#opts.marketplacesCacheDir);
 
-		if (existingNames.has(catalog.name)) {
+		const catalogKey = nameSegmentCollisionKey(catalog.name);
+		const existingName = reg.marketplaces.find(m => nameSegmentCollisionKey(m.name) === catalogKey)?.name;
+		if (existingName) {
 			if (clonePath) {
 				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
 			}
-			throw new Error(`Marketplace "${catalog.name}" already exists`);
+			if (existingName === catalog.name) {
+				throw new Error(`Marketplace "${catalog.name}" already exists`);
+			}
+			throw new Error(
+				`Marketplace "${catalog.name}" conflicts with existing marketplace "${existingName}" on case-insensitive filesystems`,
+			);
 		}
 
 		// Promote the temp clone to its final cache location now that we know it's not a duplicate.
@@ -298,11 +310,54 @@ export class MarketplaceManager {
 			tmpDir: os.tmpdir(),
 		});
 
-		// 5. Determine version: catalog entry > plugin manifest > git SHA > fallback
+		// The cache is keyed by marketplace/plugin/version and shared across scopes,
+		// so a forced reinstall replaces the copy the OTHER scope also references.
+		// Capture that scope's current runtime names from the cache before it is
+		// replaced, so a manifest rename can migrate its link/lockfile key too.
+		const otherScope: "user" | "project" = scope === "user" ? "project" : "user";
+		const otherRegistryPath =
+			otherScope === "project" ? this.#opts.projectInstalledRegistryPath : this.#opts.installedRegistryPath;
+		const otherScopeOldNames = new Map<string, string>();
+
+		// 5. Resolve registration identity before replacing an active cache. A
+		// forced reinstall can reuse the same cache key, so validation after
+		// cachePlugin would already have destroyed the prior contents on failure.
 		let version!: string;
 		let cachePath!: string;
+		let packageName!: string;
+		let previousPackageNames!: Set<string>;
+		let otherScopeEntries: readonly InstalledPluginEntry[] = [];
 		try {
+			// Inspecting the other scope reads its manifest and can throw on a
+			// malformed package.json; keep it inside the cleanup guard so the temp
+			// clone created by resolvePluginSource is still removed on failure.
+			otherScopeEntries = otherRegistryPath
+				? (getInstalledPlugin(await readInstalledPluginsRegistry(otherRegistryPath), pluginId) ?? [])
+				: [];
+			for (const entry of otherScopeEntries) {
+				otherScopeOldNames.set(entry.installPath, await this.#resolvePluginPackageName(entry.installPath, name));
+			}
+
 			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			packageName = await this.#resolvePluginPackageName(sourcePath, name);
+			// Resolve the runtime names this plugin id currently owns BEFORE cachePlugin
+			// can overwrite the existing cache. A forced reinstall reuses the same cache
+			// key, so reading afterward would see only the new name and strand the old
+			// runtime link and lockfile key (e.g. a case-only rename Foo → foo).
+			previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
+			const targetReg = await readInstalledPluginsRegistry(registryPath);
+			await this.#assertRuntimePackageNameAvailable(scope, packageName, targetReg, pluginId, previousPackageNames);
+			// The cache dir is keyed by marketplace/name/version. On case-insensitive
+			// filesystems a different plugin id whose cache path differs only by case
+			// (e.g. an old "Foo" still installed after a catalog rename to "foo")
+			// resolves to the same dir, so cachePlugin would clobber it. Reject before
+			// replacing the cache, checking both scopes' installed registries.
+			const prospectiveCachePath = getCachedPluginPath(this.#opts.pluginsCacheDir, marketplace, name, version);
+			const registriesToCheck =
+				otherRegistryPath && otherRegistryPath !== registryPath
+					? [targetReg, await readInstalledPluginsRegistry(otherRegistryPath)]
+					: [targetReg];
+			this.#assertCachePathAvailable(prospectiveCachePath, pluginId, registriesToCheck);
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
@@ -312,9 +367,6 @@ export class MarketplaceManager {
 				await fs.rm(tempCloneRoot, { recursive: true, force: true }).catch(() => {});
 			}
 		}
-
-		const packageName = await this.#resolvePluginPackageName(cachePath, name);
-		const previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
 
 		// Only now clean up old entries — new cache succeeded, so it is safe to remove old ones.
 		if (existing && existing.length > 0) {
@@ -355,12 +407,41 @@ export class MarketplaceManager {
 		const newInstReg = addInstalledPlugin(freshInstReg, pluginId, installedEntry);
 		await writeInstalledPluginsRegistry(registryPath, newInstReg);
 
+		// Carry the renamed-from key's runtime state (feature selection + settings)
+		// so a case-only rename preserves the user's configuration.
+		let carried: RemovedRuntimeState | undefined;
 		for (const previousPackageName of previousPackageNames) {
 			if (previousPackageName !== packageName) {
-				await this.#removeRuntimePlugin(scope, previousPackageName);
+				const removed = await this.#removeRuntimePlugin(scope, previousPackageName);
+				carried ??= removed;
 			}
 		}
-		await this.#registerRuntimePlugin(scope, packageName, cachePath, version, wasDisabled ? false : undefined);
+		await this.#registerRuntimePlugin(
+			scope,
+			packageName,
+			cachePath,
+			version,
+			wasDisabled ? false : undefined,
+			carried,
+		);
+
+		// If this reinstall renamed the runtime key and the other scope references
+		// the same (now-replaced) cache, migrate that scope's link and lockfile key
+		// too, so it does not resolve the new cache content under the stale name.
+		for (const entry of otherScopeEntries) {
+			if (entry.installPath !== cachePath) continue;
+			const oldName = otherScopeOldNames.get(entry.installPath);
+			if (oldName === undefined || oldName === packageName) continue;
+			const removed = await this.#removeRuntimePlugin(otherScope, oldName);
+			await this.#registerRuntimePlugin(
+				otherScope,
+				packageName,
+				cachePath,
+				entry.version,
+				entry.enabled === false ? false : undefined,
+				removed,
+			);
+		}
 
 		this.#clearCache();
 
@@ -813,6 +894,97 @@ export class MarketplaceManager {
 		return linkPath;
 	}
 
+	/**
+	 * Reject when the prospective cache dir case-collides with a different plugin
+	 * id's installed cache path. On case-insensitive filesystems those paths are
+	 * the same directory, so cachePlugin would clobber the other plugin's cache
+	 * while its registry entry and runtime link keep pointing at it.
+	 */
+	#assertCachePathAvailable(
+		cachePath: string,
+		pluginId: string,
+		registries: readonly InstalledPluginsRegistry[],
+	): void {
+		const key = cachePath.toLowerCase();
+		for (const registry of registries) {
+			for (const installedPluginId in registry.plugins) {
+				if (installedPluginId === pluginId) continue;
+				for (const entry of registry.plugins[installedPluginId]) {
+					if (entry.installPath.toLowerCase() === key) {
+						throw new Error(
+							`Plugin cache path for "${pluginId}" case-collides with installed plugin "${installedPluginId}" ` +
+								`on case-insensitive filesystems. Uninstall "${installedPluginId}" first.`,
+						);
+					}
+				}
+			}
+		}
+	}
+	async #assertRuntimePackageNameAvailable(
+		scope: "user" | "project",
+		packageName: string,
+		registry: InstalledPluginsRegistry,
+		pluginId: string,
+		targetScopeOwnNames: ReadonlySet<string>,
+	): Promise<void> {
+		const key = packageName.toLowerCase();
+
+		// Marketplace plugins recorded in this scope's installed registry (keyed by plugin id).
+		for (const installedPluginId in registry.plugins) {
+			if (installedPluginId === pluginId) continue;
+			const fallbackName = parsePluginId(installedPluginId)?.name ?? installedPluginId;
+			const installedNames = await this.#resolveInstalledPackageNames(
+				registry.plugins[installedPluginId],
+				fallbackName,
+			);
+			for (const installedName of installedNames) {
+				if (installedName.toLowerCase() === key) {
+					throw new Error(
+						`Runtime package name "${packageName}" conflicts with installed plugin "${installedPluginId}"`,
+					);
+				}
+			}
+		}
+
+		// Names this plugin id already owns in the target scope, so a forced reinstall
+		// — including a case-only rename of its own runtime key — is never a
+		// self-collision below. Names owned only in the other scope are excluded:
+		// that scope has a separate runtime root and node_modules, so they never
+		// alias a package in this scope's tree.
+		const owned = new Set<string>();
+		for (const ownName of targetScopeOwnNames) owned.add(ownName.toLowerCase());
+
+		// Ordinary npm plugins (package.json dependencies) and linked plugins
+		// (runtime-config entries with no dependency or installed_plugins record)
+		// would still have their node_modules link clobbered by registration on a
+		// case-insensitive filesystem. Other marketplace plugins also appear in the
+		// runtime config but were already rejected by the registry scan above.
+		const runtimeNames = await this.#readRuntimeDependencyNames(scope);
+		const config = await this.#loadRuntimeConfig(scope);
+		for (const configuredName in config.plugins) runtimeNames.add(configuredName);
+		for (const runtimeName of runtimeNames) {
+			const runtimeKey = runtimeName.toLowerCase();
+			if (runtimeKey === key && !owned.has(runtimeKey)) {
+				throw new Error(`Runtime package name "${packageName}" conflicts with installed package "${runtimeName}"`);
+			}
+		}
+	}
+
+	async #readRuntimeDependencyNames(scope: "user" | "project"): Promise<Set<string>> {
+		const names = new Set<string>();
+		try {
+			const pkg: { dependencies?: Record<string, unknown> } = await Bun.file(
+				path.join(this.#runtimeRoot(scope), "package.json"),
+			).json();
+			if (pkg.dependencies && typeof pkg.dependencies === "object") {
+				for (const dep in pkg.dependencies) names.add(dep);
+			}
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+		return names;
+	}
+
 	async #resolveInstalledPackageNames(
 		entries: readonly InstalledPluginEntry[],
 		fallbackName: string,
@@ -830,6 +1002,7 @@ export class MarketplaceManager {
 		cachePath: string,
 		version: string,
 		enabled: boolean | undefined,
+		carry?: RemovedRuntimeState,
 	): Promise<void> {
 		const linkPath = this.#runtimePackagePath(scope, packageName);
 		await fs.mkdir(path.dirname(linkPath), { recursive: true });
@@ -840,19 +1013,28 @@ export class MarketplaceManager {
 		const previous = config.plugins[packageName];
 		config.plugins[packageName] = {
 			version,
-			enabledFeatures: previous?.enabledFeatures ?? null,
-			enabled: enabled ?? previous?.enabled ?? true,
+			// Carry the renamed-from key's feature/enabled selection so a case-only
+			// rename does not silently reset them; an existing entry under the new
+			// key still wins.
+			enabledFeatures: previous?.enabledFeatures ?? carry?.state?.enabledFeatures ?? null,
+			enabled: enabled ?? previous?.enabled ?? carry?.state?.enabled ?? true,
 		};
+		if (carry?.settings !== undefined && config.settings[packageName] === undefined) {
+			config.settings[packageName] = carry.settings;
+		}
 		await this.#writeRuntimeConfig(scope, config);
 	}
 
-	async #removeRuntimePlugin(scope: "user" | "project", packageName: string): Promise<void> {
+	async #removeRuntimePlugin(scope: "user" | "project", packageName: string): Promise<RemovedRuntimeState> {
 		await fs.rm(this.#runtimePackagePath(scope, packageName), { recursive: true, force: true });
 
 		const config = await this.#loadRuntimeConfig(scope);
+		const state = config.plugins[packageName];
+		const settings = config.settings[packageName];
 		delete config.plugins[packageName];
 		delete config.settings[packageName];
 		await this.#writeRuntimeConfig(scope, config);
+		return { state, settings };
 	}
 
 	async #setRuntimePluginEnabled(scope: "user" | "project", packageName: string, enabled: boolean): Promise<void> {
