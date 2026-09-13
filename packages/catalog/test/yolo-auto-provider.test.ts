@@ -48,7 +48,6 @@ describe("Yolo-Auto provider discovery", () => {
 			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 131072,
-			maxTokens: null,
 		});
 		// The documented wire surface flows from the bundled reference into
 		// discovered models: generic chat-template thinking, effort steering, and
@@ -164,11 +163,11 @@ describe("Yolo-Auto provider discovery", () => {
 		});
 	});
 
-	test("prefers curated metadata over a stale previous bundle", async () => {
+	test("prefers curated metadata while preserving the generated output cap", async () => {
 		// A credentialed `gen:models` run bakes live discovery into
-		// models.json; that previous bundle row must not shadow later
-		// corrections to YOLO_AUTO_STATIC_MODELS. Simulate a stale bundle row
-		// (262K context, no template dialect) and require the curated surface.
+		// models.json; that previous bundle row carries generated output limits
+		// alongside metadata that later curation may correct. Simulate a bundle
+		// with stale context and template metadata plus a 384K output cap.
 		const originalGetBundledModels = modelsModule.getBundledModels;
 		vi.spyOn(modelsModule, "getBundledModels").mockImplementation((provider => {
 			if (provider === "yolo-auto") {
@@ -183,7 +182,7 @@ describe("Yolo-Auto provider discovery", () => {
 						input: ["text", "image"],
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 						contextWindow: 262_144,
-						maxTokens: null,
+						maxTokens: 384_000,
 					}),
 				];
 			}
@@ -197,6 +196,7 @@ describe("Yolo-Auto provider discovery", () => {
 
 			expect(flash).toMatchObject({
 				contextWindow: 131072,
+				maxTokens: 384_000,
 				compat: { thinkingFormat: "chat-template" },
 			});
 		} finally {
