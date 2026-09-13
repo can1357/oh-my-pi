@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Subagents that declare `tools:` now receive exactly that tool list: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog, instead of being force-included as before ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+
+### Added
+
+- Added per-subagent tool scoping: an agent definition's `tools:` list is now a hard allowlist for custom, extension, and MCP proxy tools, and a new `disallowedTools:` frontmatter field removes tools by exact name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all; top-level sessions and agents without `tools:` are unaffected ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

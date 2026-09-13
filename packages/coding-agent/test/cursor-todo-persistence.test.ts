@@ -264,6 +264,56 @@ describe("cursor todo persistence", () => {
 		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: false });
 	});
 
+	it("settles a server-resolved todo call without mirroring when the scope denies todo", () => {
+		// `update_todos` / `read_todos` are resolved server-side and dispatched
+		// straight to `todoSync`, never passing through the frame-tool scope
+		// gate. A scope that denies `todo` (enforced allowlist omitting it, or
+		// a `disallowedTools` pattern matching it) must still see the call
+		// settled (the interactive card resolves on this result) but with local
+		// state untouched — regression: the scope gate never ran in-band, so a
+		// scoped session's todo state was still mutated and persisted.
+		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "pending" }] }]);
+		const scopedHandlers = new CursorExecHandlers({
+			cwd: "/tmp",
+			tools: new Map(),
+			isToolExecutable: name => name !== "todo",
+			getTodoPhases: h.current,
+			setTodoPhases: next => {
+				h.entries.push({
+					type: "custom",
+					customType: USER_TODO_EDIT_CUSTOM_TYPE,
+					data: { phases: next },
+				} as SessionEntry);
+			},
+			persistTodoPhases: phases => {
+				h.entries.push({
+					type: "custom",
+					customType: USER_TODO_EDIT_CUSTOM_TYPE,
+					data: { phases },
+				} as SessionEntry);
+			},
+			emitEvent: event => {
+				h.events.push(event);
+			},
+		});
+		const before = h.current();
+
+		const result = scopedHandlers.todoSync(
+			{ merged: false, todos: [{ content: "sneaky", status: "in_progress" }] },
+			"call-1",
+		);
+
+		expect(h.current()).toBe(before);
+		expect(h.entries).toEqual([]);
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Todo snapshot not mirrored");
+		// The denied scope must still settle the interactive card: resolved todo
+		// blocks never run through the agent loop, so this event is the only
+		// thing clearing the call from `pendingTools`. Without it the card
+		// animates until end-of-turn cleanup.
+		expect(h.events).toHaveLength(1);
+		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: false });
+	});
+
 	it("settles a server error as a failure without touching local state", () => {
 		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "pending" }] }]);
 		const before = h.current();

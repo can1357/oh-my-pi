@@ -29,6 +29,7 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
+import { HIDDEN_TOOL_NAMES, type HiddenToolName } from "../../tools/builtin-names";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -178,6 +179,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
+		if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
+			throw new Error(`Cannot register tool '${tool.name}': '${tool.name}' is a reserved protocol tool.`);
+		}
 		const registered = {
 			definition: tool,
 			extensionPath: this.extension.path,

@@ -108,6 +108,18 @@ describe("parseAgentFields", () => {
 		expect(fields?.tools).toEqual(["glob", "grep", "yield"]);
 	});
 
+	test("preserves an explicit empty tools array as an enforced allowlist", () => {
+		const fields = parseAgentFields({
+			name: "reviewer",
+			description: "desc",
+			tools: [],
+		});
+
+		// An explicit empty list must not collapse to "undeclared": enforcement
+		// stays on downstream, and only the mandatory `yield` is appended.
+		expect(fields?.tools).toEqual(["yield"]);
+	});
+
 	test("parses autoloadSkills from array frontmatter", () => {
 		const fields = parseAgentFields({
 			name: "oracle",
@@ -208,5 +220,39 @@ describe("parseAgentFields", () => {
 		);
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "  " })?.advisor).toBeUndefined();
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.advisor).toBeUndefined();
+	});
+
+	test("parses disallowedTools from array frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "reviewer",
+			description: "desc",
+			disallowedTools: ["mcp__*", "bash"],
+		});
+		expect(fields?.disallowedTools).toEqual(["mcp__*", "bash"]);
+	});
+
+	test("parses disallowedTools from CSV string", () => {
+		const fields = parseAgentFields({
+			name: "reviewer",
+			description: "desc",
+			disallowedTools: "mcp__*, bash",
+		});
+		expect(fields?.disallowedTools).toEqual(["mcp__*", "bash"]);
+	});
+
+	test("normalizes disallowedTools names and preserves wildcards", () => {
+		const fields = parseAgentFields({
+			name: "reviewer",
+			description: "desc",
+			disallowedTools: ["MCP__DB_*", "Search"],
+		});
+		expect(fields?.disallowedTools).toEqual(["mcp__db_*", "grep"]);
+	});
+
+	test("returns undefined disallowedTools when field absent or empty", () => {
+		expect(parseAgentFields({ name: "reviewer", description: "desc" })?.disallowedTools).toBeUndefined();
+		expect(
+			parseAgentFields({ name: "reviewer", description: "desc", disallowedTools: [] })?.disallowedTools,
+		).toBeUndefined();
 	});
 });
