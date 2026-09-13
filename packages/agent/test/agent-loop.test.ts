@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type BranchSummaryMessage, type CompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	agentLoop,
 	agentLoopContinue,
@@ -45,9 +46,61 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
 
+async function withPromptCacheDiagnostics<T>(fn: () => T | Promise<T>): Promise<T> {
+	const previous = Bun.env.PI_PROMPT_CACHE_DEBUG;
+	Bun.env.PI_PROMPT_CACHE_DEBUG = "1";
+	try {
+		return await fn();
+	} finally {
+		if (previous === undefined) delete Bun.env.PI_PROMPT_CACHE_DEBUG;
+		else Bun.env.PI_PROMPT_CACHE_DEBUG = previous;
+	}
+}
+
 const harmonyMitigationModel = createHarmonyMitigationModel();
 
 describe("agentLoop with AgentMessage", () => {
+	it("forwards transcript context-generation state to the provider options", async () => {
+		await withPromptCacheDiagnostics(async () => {
+			const mock = createMockModel({ responses: [{ content: ["done"] }] });
+			const branchSummary: BranchSummaryMessage = {
+				role: "branchSummary",
+				summary: "branch",
+				fromId: "branch-a",
+				timestamp: 10,
+			};
+			const compactionSummary: CompactionSummaryMessage = {
+				role: "compactionSummary",
+				summary: "compaction",
+				tokensBefore: 100,
+				timestamp: 20,
+			};
+			const prunedToolResult: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "lookup",
+				content: [{ type: "text", text: "pruned" }],
+				isError: false,
+				prunedAt: 30,
+				timestamp: 31,
+			};
+			const context: AgentContext = {
+				systemPrompt: ["You are helpful."],
+				messages: [branchSummary, compactionSummary, prunedToolResult],
+				tools: [],
+			};
+			const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+			await agentLoop([createUserMessage("Continue")], context, config, undefined, mock.stream).result();
+
+			expect(mock.calls[0]?.options?.promptCacheDiagnosticContext).toEqual({
+				branchState: { timestamp: 10, fromId: "branch-a" },
+				compactionState: { timestamp: 20 },
+				pruneState: 30,
+			});
+		});
+	});
+
 	it("should emit events with AgentMessage types", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],

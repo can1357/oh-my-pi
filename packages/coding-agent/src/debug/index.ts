@@ -5,6 +5,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as url from "node:url";
+import { formatPromptCacheDebugView, getPromptCacheDebugSnapshot } from "@oh-my-pi/pi-ai";
 import { getWorkProfile } from "@oh-my-pi/pi-natives";
 import {
 	isNotificationSuppressed,
@@ -51,6 +52,7 @@ const DEBUG_MENU_ITEMS: SelectItem[] = [
 		label: "Test: terminal protocols",
 		description: "Styling, links, text sizing, graphics, notify",
 	},
+	{ value: "cache", label: "View: prompt-cache diagnostics", description: "Show bounded cache churn report" },
 	{ value: "raw-sse", label: "View: raw SSE stream", description: "Show live provider SSE frames" },
 	{
 		value: "remote-debugger",
@@ -129,6 +131,9 @@ export class DebugSelectorComponent extends OverlayPanel {
 			case "remote-debugger":
 				await this.#handleStartRemoteDebugger();
 				break;
+			case "cache":
+				await this.#handleViewPromptCache();
+				break;
 			case "system":
 				await this.#handleViewSystemInfo();
 				break;
@@ -203,6 +208,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
+				promptCacheDebug: getPromptCacheDebugSnapshot(),
 				cpuProfile,
 				workProfile,
 			});
@@ -262,6 +268,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
+				promptCacheDebug: getPromptCacheDebugSnapshot(),
 			});
 
 			loader.stop();
@@ -299,6 +306,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 				memoryStats,
+				promptCacheDebug: getPromptCacheDebugSnapshot(),
 			});
 
 			loader.stop();
@@ -396,6 +404,13 @@ export class DebugSelectorComponent extends OverlayPanel {
 		});
 		this.ctx.ui.setFocus(viewer);
 		this.ctx.ui.requestRender();
+	}
+	async #handleViewPromptCache(): Promise<void> {
+		const block = new TranscriptBlock();
+		block.addChild(new DynamicBorder());
+		for (const line of formatPromptCacheDebugView()) block.addChild(new Text(line, 1, 0));
+		block.addChild(new DynamicBorder());
+		this.ctx.present(block);
 	}
 
 	async #handleStartRemoteDebugger(): Promise<void> {

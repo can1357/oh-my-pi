@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
 import {
 	convertAnthropicMessages,
@@ -5,6 +8,10 @@ import {
 	supportsAnthropicCompaction,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
+import {
+	PromptCacheDebugJournal,
+	type PromptCacheDiagnosticContextInput,
+} from "@oh-my-pi/pi-ai/utils/prompt-cache-debug";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
@@ -108,11 +115,15 @@ async function captureInjected(
 	return { beta, payload };
 }
 
-function mockEvents(stopReason: string, modelId = model.id): Record<string, unknown>[] {
+function mockEvents(stopReason: string, modelId = model.id, cacheRead = 0): Record<string, unknown>[] {
 	return [
 		{
 			type: "message_start",
-			message: { id: "msg_compact", model: modelId, usage: { input_tokens: 0, output_tokens: 0 } },
+			message: {
+				id: "msg_compact",
+				model: modelId,
+				usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: cacheRead },
+			},
 		},
 		{
 			type: "content_block_start",
@@ -127,7 +138,13 @@ function mockEvents(stopReason: string, modelId = model.id): Record<string, unkn
 				input_tokens: 0,
 				output_tokens: 0,
 				iterations: [
-					{ type: "compaction", input_tokens: 64, output_tokens: 2002, cache_creation_input_tokens: 80_082 },
+					{
+						type: "compaction",
+						input_tokens: 64,
+						output_tokens: 2002,
+						cache_creation_input_tokens: 80_082,
+						cache_read_input_tokens: cacheRead,
+					},
 				],
 			},
 		},
@@ -139,6 +156,28 @@ function sseResponse(events: Record<string, unknown>[]): Response {
 	return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
 		headers: { "Content-Type": "text/event-stream" },
 	});
+}
+
+function diagnosticTextEvents(cacheRead: number): Record<string, unknown>[] {
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: `msg_diagnostic_${cacheRead}`,
+				model: model.id,
+				usage: { input_tokens: 64, output_tokens: 0, cache_read_input_tokens: cacheRead },
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "end_turn" },
+			usage: { input_tokens: 64, output_tokens: 1, cache_read_input_tokens: cacheRead },
+		},
+		{ type: "message_stop" },
+	];
 }
 
 withOfficialAnthropicEndpoint();
@@ -534,5 +573,116 @@ describe("Anthropic compaction replay", () => {
 		expect(control?.index).toBeGreaterThan(nextIndex);
 		const keptIndex = wire.findIndex(message => JSON.stringify(message).includes("sig_kept"));
 		expect(wire.slice(0, keptIndex).some(message => message.role === "system")).toBe(false);
+	});
+});
+
+describe("Anthropic prompt-cache diagnostic adapter", () => {
+	it("records caller context across a signed on-demand compaction and isolates journal sequences", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prompt-cache-adapter-"));
+		const firstJournal = new PromptCacheDebugJournal({ filePath: path.join(tempDir, "first.jsonl") });
+		const secondJournal = new PromptCacheDebugJournal({ filePath: path.join(tempDir, "second.jsonl") });
+		try {
+			await withEnv({ PI_PROMPT_CACHE_DEBUG: "1" }, async () => {
+				let cacheRead = 700;
+				let compaction = false;
+				const fetchMock: typeof fetch = Object.assign(
+					async (_input: string | URL | Request, init?: RequestInit) => {
+						if (compaction) {
+							expect(JSON.parse(String(init?.body ?? "{}")).compaction).toEqual({ type: "summarize" });
+							return sseResponse(mockEvents("compaction", model.id, cacheRead));
+						}
+						return sseResponse(diagnosticTextEvents(cacheRead));
+					},
+					{ preconnect: fetch.preconnect },
+				);
+				const transitionState: PromptCacheDiagnosticContextInput = {
+					branchState: { timestamp: 10, fromId: "branch-a" },
+					compactionState: { timestamp: 20 },
+					pruneState: 30,
+				};
+				const adapterContext: Context = {
+					systemPrompt: ["stable"],
+					tools: [
+						{
+							name: "lookup",
+							description: "stable",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					],
+					messages: [{ role: "user", content: "stable", timestamp: 1 }],
+				};
+				const options = (
+					journal: PromptCacheDebugJournal,
+					promptCacheDiagnosticContext?: PromptCacheDiagnosticContextInput,
+				) => ({
+					apiKey: "sk-ant-test",
+					cacheRetention: "short" as const,
+					sessionId: "anthropic-diagnostic-adapter-regression",
+					...(promptCacheDiagnosticContext ? { promptCacheDiagnosticContext } : {}),
+					providerOptions: { promptCacheDiagnosticJournal: journal },
+					fetch: fetchMock,
+				});
+
+				await streamAnthropic(model, adapterContext, options(firstJournal)).result();
+				cacheRead = 2;
+				compaction = true;
+				const compacted = await streamAnthropic(model, adapterContext, {
+					...options(firstJournal, transitionState),
+					anthropicCompaction: {},
+				}).result();
+				expect(compacted.providerPayload).toMatchObject({ content: SUMMARY, signature: SIGNATURE });
+				compaction = false;
+				cacheRead = 1;
+				await streamAnthropic(model, adapterContext, options(firstJournal, transitionState)).result();
+				cacheRead = 0;
+				await streamAnthropic(
+					model,
+					adapterContext,
+					options(firstJournal, { ...transitionState, compactionState: { timestamp: 40 } }),
+				).result();
+				cacheRead = 900;
+				await streamAnthropic(
+					model,
+					{ messages: [{ role: "user", content: "other-session", timestamp: 3 }] },
+					{ ...options(secondJournal), sessionId: "other-session" },
+				).result();
+			});
+
+			await firstJournal.flush();
+			await secondJournal.flush();
+			const sequences = async (filePath: string) =>
+				(await Bun.file(filePath).text())
+					.trim()
+					.split("\n")
+					.map(line => {
+						const record: unknown = JSON.parse(line);
+						if (!record || typeof record !== "object" || !("sequence" in record)) {
+							throw new Error("journal record omitted a sequence");
+						}
+						if (typeof record.sequence !== "number") throw new Error("journal sequence is not numeric");
+						return record.sequence;
+					});
+			expect(await sequences(path.join(tempDir, "first.jsonl"))).toEqual([1, 2, 3, 4]);
+			expect(await sequences(path.join(tempDir, "second.jsonl"))).toEqual([1]);
+
+			const [first, second, third, fourth] = firstJournal.records;
+			expect(first?.bodySource).toBe("wire");
+			expect(second?.bodySource).toBe("wire");
+			expect(second?.context.compaction).toBe("absent");
+			expect(second?.context.branchStateDigest).not.toBeNull();
+			expect(second?.context.compactionStateDigest).not.toBeNull();
+			expect(second?.context.pruneStateDigest).not.toBeNull();
+			expect(second?.context.mutation).toBe("compaction");
+			expect(second?.reset).toMatchObject({ observed: true, cause: "compaction-branch-replay" });
+			expect(third?.context.branchStateDigest).toBe(second?.context.branchStateDigest);
+			expect(third?.context.compactionStateDigest).toBe(second?.context.compactionStateDigest);
+			expect(third?.context.mutation).not.toBe("compaction");
+			expect(third?.reset).toMatchObject({ observed: true, cause: "unknown" });
+			expect(fourth?.context.compactionStateDigest).not.toBe(third?.context.compactionStateDigest);
+			expect(fourth?.context.mutation).toBe("compaction");
+			expect(fourth?.reset).toMatchObject({ observed: true, cause: "compaction-branch-replay" });
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

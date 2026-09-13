@@ -3,8 +3,9 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { PromptCacheDebugJournal } from "@oh-my-pi/pi-ai/utils/prompt-cache-debug";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { waitForDelayOrAbort } from "./helpers";
+import { waitForDelayOrAbort, withEnv } from "./helpers";
 
 const model: Model<"anthropic-messages"> = buildModel({
 	id: "claude-sonnet-4-5",
@@ -299,6 +300,41 @@ describe("anthropic first-event timeout retries", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "retry recovered" }]);
 		expect(result.responseId).toBe("msg_retry_success");
+	});
+
+	it("terminalizes each diagnostic attempt before retrying a transient provider failure", async () => {
+		await withEnv({ PI_PROMPT_CACHE_DEBUG: "1" }, async () => {
+			const journal = new PromptCacheDebugJournal();
+			let attempt = 0;
+			const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
+				attempt += 1;
+				if (attempt === 1) {
+					return createRejectedAnthropicRequest(
+						new AIError.AnthropicApiError(502, "502 Bad Gateway", new Headers()),
+					) as never;
+				}
+				return createAnthropicMockStream({
+					signal: requestOptions?.signal,
+					events: createSuccessfulAnthropicEvents("retry recovered"),
+				}) as never;
+			}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+			const client = { messages: { create } } as AnthropicMessagesClientLike;
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal: AbortSignal | undefined) => {});
+
+			const result = await streamAnthropic(model, context, {
+				client,
+				providerRetryWait,
+				providerOptions: { promptCacheDiagnosticJournal: journal },
+			}).result();
+
+			expect(attempt).toBe(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(result.stopReason).toBe("stop");
+			expect(journal.records.map(record => record.outcome)).toEqual(["error", "success"]);
+			expect(journal.records[0]!.status).toBe(502);
+			expect(journal.records[0]!.errorCode).toBe("AnthropicApiError");
+			expect(journal.records[1]!.reset.previousSequence).toBeNull();
+		});
 	});
 
 	it("keeps the first-event watchdog armed when only pings arrive before message_start", async () => {
