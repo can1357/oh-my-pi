@@ -340,6 +340,25 @@ describe("agent state file", () => {
 		expect(await Bun.file(stateFile()).exists()).toBe(false);
 	});
 
+	it("removes the file it published even when the terminal reads differently at exit", async () => {
+		// A bare PTY closed under the process resolves as "/dev/pts/N (deleted)", so a terminal id
+		// computed at exit is not the one the file was published under. Standing in for that, the
+		// pane changes between publishing and the exit cleanup.
+		const register = spyOn(postmortem, "register");
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("attention");
+		await agentStateFileSettled();
+		const published = stateFile();
+		expect(await Bun.file(published).exists()).toBe(true);
+
+		process.env.TMUX_PANE = `${PANE}-gone`;
+		const registration = register.mock.calls.find(call => call[0] === "agent-state-file");
+		expect(registration).toBeDefined();
+		await registration?.[1](postmortem.Reason.SIGTERM);
+
+		expect(await Bun.file(published).exists()).toBe(false);
+	});
+
 	it("does not publish an update that a removal overtook mid-flight", async () => {
 		// The update yields at every await, and the teardown and exit removal is synchronous, so it
 		// can land between the last check and the rename completing - finding nothing to delete,
