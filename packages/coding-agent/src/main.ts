@@ -83,6 +83,7 @@ import { ensureTheme, initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import { AgentRegistry } from "./registry/agent-registry";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -168,7 +169,11 @@ import { cfgLspEnabled } from "./lsp/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
-type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
+type RunAcpMode = (
+	createSession: AcpSessionFactory,
+	initialSession?: AgentSession,
+	registry?: AgentRegistry,
+) => Promise<never> | Promise<void>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<number>;
 type RunRpcMode = (session: AgentSession, options?: RpcModeOptions) => Promise<never>;
 
@@ -544,6 +549,16 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
+		// `createAgentSession` attaches every ref as `running`, and only the task
+		// and revival paths mirror run state back onto it. Without this an ACP
+		// session reads `running` for its entire life, between prompts included,
+		// which is stale to the roster, to `notifications/agent_registry`, and to
+		// anything that keys work off the status. Fire-and-forget, the same shape
+		// the task path uses: the listener lives on the session and goes with it.
+		// The registry has to be the one `createAgentSession` registered into, or
+		// an embedder's isolated ref stays stale while the global one rejects
+		// every update.
+		(args.baseOptions.agentRegistry ?? AgentRegistry.global()).syncOwnedSession(nextSession);
 		const runner = nextSession.extensionRunner;
 		const reparsedArgs = applyExtensionFlags(
 			runner
@@ -2153,7 +2168,9 @@ export async function runRootCommand(
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
 			stopStartupWatchdog();
-			await runAcpMode(createAcpSession);
+			// Same registry the factory registers into, so the roster the client is
+			// sent is the one these sessions are actually in.
+			await runAcpMode(createAcpSession, undefined, sessionOptions.agentRegistry);
 		} else {
 			// Resolve extension-registered CLI flags before creating the session so a
 			// bad `@file` fails fast WITHOUT leaving a junk session/breadcrumb

@@ -860,6 +860,8 @@ describe("ACP event mapper", () => {
 				sessionUpdate: async (notification: SessionNotification) => {
 					updates.push(notification);
 				},
+				// `initialize` starts the agent-registry mirror, which sends here.
+				extNotification: async () => {},
 				signal: abortController.signal,
 				closed: Promise.resolve(),
 			} as unknown as AgentSideConnection;
