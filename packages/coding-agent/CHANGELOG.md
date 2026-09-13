@@ -21,6 +21,18 @@
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
 
+### Changed
+
+- The `xai` web-search provider now follows the provider's catalog default model (`grok-4.6` — same list price, roughly a third of the server-side tool calls per query) and its model is configurable via `providers.webSearchXaiModel` / `XAI_SEARCH_MODEL`.
+
+### Added
+
+- Registry-less callers of the `xai` web-search provider now honor `XAI_BASE_URL`. Custom endpoints retain their configured `xai-oauth` API keys; only official OAuth/env credentials fall back to an available `xai` key.
+
+### Fixed
+
+- xAI web search keeps custom-endpoint fallback credentials paired with their transport and honors the selected model's reasoning-effort compatibility.
+- GitHub Copilot model-policy 403s (plan, model policy, org restriction) no longer delete stored credentials, so the provider stays listed in `/model` after a per-model access denial instead of disappearing until the next `/login` ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
 ### Fixed
 
 - The hidden notice announcing a mid-session tool-availability change now states that it lists only what changed, so an additions-only notice no longer reads as the complete tool set and the model keeps using tools that are still callable ([#11824](https://github.com/can1357/oh-my-pi/issues/11824) by [@camjac251](https://github.com/camjac251)).

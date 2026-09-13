@@ -362,6 +362,7 @@ therefore completes through the paste-code path.
 | `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
 | `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |
 | `GEMINI_SEARCH_MODEL`                               | Gemini search model override                                              |
+| `XAI_SEARCH_MODEL`                                 | xAI (Grok) search model override                                          |
 | `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                                    |
 | `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override                                    |
 | `KAGI_API_KEY`                                      | Kagi search provider                                                      |
