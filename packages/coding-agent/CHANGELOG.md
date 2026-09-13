@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Fixed standalone `omp read skill://<name>` failing with `Unknown skill` by discovering configured skills before resolving the URI ([#10961](https://github.com/can1357/oh-my-pi/issues/10961)).
 
 ## [18.1.19] - 2026-09-12
 

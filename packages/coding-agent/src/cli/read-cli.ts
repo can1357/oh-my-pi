@@ -8,6 +8,8 @@
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
+import { initializeWithSettings } from "../discovery";
+import { loadSkills } from "../extensibility/skills";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { closeDaemonClients } from "../launch/client";
@@ -57,6 +59,22 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	let failed = false;
 
 	try {
+		if (extractUriScheme(cmd.path) === "skill") {
+			initializeWithSettings(settings);
+			const discovered = await loadSkills({
+				...settings.getGroup("skills"),
+				cwd,
+				disabledExtensions: settings.get("disabledExtensions") ?? [],
+				extensionRoots: {
+					explicit: [],
+					mode: "merge",
+					configured: settings.get("extensions") ?? [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				},
+			});
+			session.skills = discovered.skills;
+		}
+
 		if (shouldDiscoverMcp(cmd.path)) {
 			authStorage = await discoverAuthStorage();
 			const result = await discoverAndLoadMCPTools(cwd, {
