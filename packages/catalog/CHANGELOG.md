@@ -5,6 +5,7 @@
 ### Changed
 
 - Updated DEFAULT_ANTIGRAVITY_VERSION fallback to 2.13.0 matching current Cloud Code Assist releases ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
+
 ## [18.1.20] - 2026-09-13
 
 ### Fixed
