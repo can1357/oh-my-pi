@@ -703,7 +703,7 @@ describe("remote compaction setting", () => {
 		]);
 	});
 
-	it("uses the ChatGPT Codex compact endpoint for openai-codex models", async () => {
+	it("uses the explicitly configured Codex compact endpoint for openai-codex models", async () => {
 		const baseModel = getBundledModel("openai", "gpt-5.1");
 		if (!baseModel) throw new Error("Expected openai/gpt-5.1 model to exist");
 
@@ -712,6 +712,11 @@ describe("remote compaction setting", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
+			remoteCompaction: {
+				...baseModel.remoteCompaction,
+				enabled: true,
+				endpoint: "https://chatgpt.com/backend-api/codex/responses/compact",
+			},
 		};
 
 		const entries: SessionEntry[] = [
@@ -750,6 +755,11 @@ describe("remote compaction setting", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
+			remoteCompaction: {
+				...baseModel.remoteCompaction,
+				enabled: true,
+				endpoint: "https://chatgpt.com/backend-api/codex/responses/compact",
+			},
 		};
 		const assistant: AssistantMessage = {
 			role: "assistant",
