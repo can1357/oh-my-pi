@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as crypto from "node:crypto";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -317,7 +318,7 @@ describe("collab registry", () => {
 		await resolveCollabHostLink(f.snapshot.instanceId, "view", { dir });
 
 		const files = await collectRegularFiles(dir);
-		expect(files).toContain(path.join(dir, `${f.snapshot.instanceId}.json`));
+		expect(files.filter(file => file.endsWith(".json"))).toHaveLength(1);
 		for (const file of files) {
 			const content = await Bun.file(file).text();
 			expect(content).not.toContain(f.controlUrl);
@@ -430,7 +431,7 @@ describe("collab registry", () => {
 		});
 	});
 
-	it("does not prune a successor room that republished under the same instance while the query failed", async () => {
+	it("does not prune a successor room that republished under the same instance between stale-entry validation and removal", async () => {
 		const dir = await tempDir();
 		// Stale metadata for generation N whose endpoint is already gone.
 		await writeMetadata(dir, "rotating-host.json", {
@@ -441,34 +442,57 @@ describe("collab registry", () => {
 			createdAt: Date.now(),
 			token: "stale-token",
 		});
-		// The listing reads N's metadata, then its connect fails with ENOENT —
-		// and in that gap generation N+1 publishes under the same instance name.
+		// The listing finds N dead and starts removing it; before its first
+		// unlink lands, generation N+1 publishes under the same instance. The
+		// removal must only ever hit N's own artifacts.
 		const successor = makeFixture({ instanceId: "rotating-host", sessionId: "generation-2" });
+		const realRm = nodeFs.promises.rm;
 		let republished: Promise<CollabHostPublication> | undefined;
-		const connect = spyOn(net, "createConnection").mockImplementation(() => {
-			const socket = new net.Socket();
+		const rm = spyOn(nodeFs.promises, "rm").mockImplementation(async (target, options) => {
 			republished ??= publish(dir, successor);
-			void republished.then(() =>
-				socket.emit("error", Object.assign(new Error("no such socket"), { code: "ENOENT" })),
-			);
-			return socket;
+			await republished;
+			return realRm(target, options);
 		});
 		let hosts: CollabHostSnapshot[];
 		try {
 			hosts = await listCollabHosts({ dir });
 		} finally {
-			connect.mockRestore();
+			rm.mockRestore();
 		}
-		await republished;
+		expect(republished).toBeDefined();
 
-		// The stale query yields nothing, and the successor's files survived the prune.
+		// The stale query yields nothing, N's metadata is gone, and the
+		// successor stays listed and linkable.
 		expect(hosts).toEqual([]);
+		expect(await fs.readdir(dir)).not.toContain("rotating-host.json");
 		expect(await listCollabHosts({ dir })).toMatchObject([
 			{ instanceId: "rotating-host", sessionId: "generation-2" },
 		]);
 		expect(await resolveCollabHostLink("rotating-host", "control", { dir })).toMatchObject({
 			url: successor.controlUrl,
 		});
+	});
+
+	it("leaves no artifacts behind when the metadata write fails, and the instance can publish again", async () => {
+		const dir = await tempDir();
+		const f = makeFixture();
+		const realOpen = nodeFs.promises.open;
+		const open = spyOn(nodeFs.promises, "open").mockImplementation(async (...args: Parameters<typeof realOpen>) => {
+			const handle = await realOpen(...args);
+			// The exclusive create succeeded; the write then hits a full disk.
+			handle.writeFile = () =>
+				Promise.reject(Object.assign(new Error("no space left on device"), { code: "ENOSPC" }));
+			return handle;
+		});
+		try {
+			await expect(publish(dir, f)).rejects.toMatchObject({ code: "ENOSPC" });
+		} finally {
+			open.mockRestore();
+		}
+		expect(await fs.readdir(dir)).toEqual([]);
+
+		await publish(dir, f);
+		expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: f.snapshot.instanceId }]);
 	});
 
 	it("removes metadata and socket and disappears from listings after close", async () => {
@@ -525,7 +549,8 @@ describe("collab registry", () => {
 		const pub = await publish(dir, f);
 
 		expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
-		expect((await fs.stat(path.join(dir, `${f.snapshot.instanceId}.json`))).mode & 0o777).toBe(0o600);
+		const [metaName] = (await fs.readdir(dir)).filter(n => n.endsWith(".json"));
+		expect((await fs.stat(path.join(dir, metaName ?? ""))).mode & 0o777).toBe(0o600);
 		expect((await fs.stat(pub.endpoint)).mode & 0o777).toBe(0o600);
 	});
 

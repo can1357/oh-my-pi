@@ -101,9 +101,11 @@ export interface CollabRegistryOptions {
 
 export interface CollabPublishOptions extends CollabRegistryOptions {
 	/**
-	 * Names the endpoint and metadata file. Defaults to a fresh random ID; a
-	 * host that rotates rooms passes its process-lifetime instance ID so the
-	 * replacement publication reuses the same entry.
+	 * Identity recorded in the metadata and matched by `omp collab link <id>`.
+	 * Defaults to a fresh random ID; a host that rotates rooms passes its
+	 * process-lifetime instance ID so the replacement room keeps the same id.
+	 * The metadata file and endpoint are always named per publication, so a
+	 * stale entry and its successor never share artifacts.
 	 */
 	instanceId?: string;
 	/**
@@ -367,12 +369,12 @@ function socketFallbackDir(dir: string, base: string): string {
  * would silently stay absent from `omp collab list`. Listers never guess the
  * relocated path; the metadata records the endpoint.
  */
-async function resolveSocketEndpoint(dir: string, instanceId: string, fallbackBase: string): Promise<string> {
-	const canonical = path.join(dir, `${instanceId}.sock`);
+async function resolveSocketEndpoint(dir: string, entryId: string, fallbackBase: string): Promise<string> {
+	const canonical = path.join(dir, `${entryId}.sock`);
 	if (Buffer.byteLength(canonical) < SUN_PATH_LIMIT) return canonical;
 	const shortDir = socketFallbackDir(dir, fallbackBase);
 	await ensurePrivateDir(shortDir);
-	return path.join(shortDir, `${instanceId}.sock`);
+	return path.join(shortDir, `${entryId}.sock`);
 }
 
 /**
@@ -391,16 +393,19 @@ export async function publishCollabHost(
 	const dir = options?.dir ?? collabHostsRuntimeDir();
 	await ensurePrivateDir(dir);
 
-	// Unpredictable instance ID: names the endpoint and the metadata file, so
-	// PID reuse cannot attach stale metadata to an unrelated process.
 	const instanceId = options?.instanceId ?? crypto.randomBytes(8).toString("hex");
 	if (!INSTANCE_ID_PATTERN.test(instanceId)) throw new Error("invalid collab registry instance id");
+	// Unpredictable per-publication entry ID names the endpoint and the metadata
+	// file: PID reuse cannot attach stale metadata to an unrelated process, and a
+	// room that rotates never shares artifact names with its predecessor, so a
+	// lister pruning the stale entry can never remove the live successor's.
+	const entryId = crypto.randomBytes(8).toString("hex");
 	const token = crypto.randomBytes(32).toString("hex");
 	const endpoint =
 		process.platform === "win32"
-			? `\\\\.\\pipe\\omp-collab-${instanceId}`
-			: await resolveSocketEndpoint(dir, instanceId, options?.socketFallbackBase ?? DEFAULT_SOCKET_FALLBACK_BASE);
-	const metaPath = path.join(dir, `${instanceId}.json`);
+			? `\\\\.\\pipe\\omp-collab-${entryId}`
+			: await resolveSocketEndpoint(dir, entryId, options?.socketFallbackBase ?? DEFAULT_SOCKET_FALLBACK_BASE);
+	const metaPath = path.join(dir, `${entryId}.json`);
 
 	const liveSockets = new Set<net.Socket>();
 	const server = net.createServer(socket => {
@@ -425,15 +430,16 @@ export async function publishCollabHost(
 		// Write-then-rename so a concurrent list never observes a partial file
 		// (it would classify the entry as malformed and prune it, leaving this
 		// host published but undiscoverable). The temp suffix keeps it outside
-		// the `*.json` listing filter; the instance ID makes the name unique.
+		// the `*.json` listing filter; the entry ID makes the name unique. Any
+		// failure after the exclusive create removes the temp file again.
 		const tmpPath = `${metaPath}.tmp`;
 		const handle = await fs.promises.open(tmpPath, "wx", 0o600);
 		try {
-			await handle.writeFile(JSON.stringify(meta), "utf8");
-		} finally {
-			await handle.close();
-		}
-		try {
+			try {
+				await handle.writeFile(JSON.stringify(meta), "utf8");
+			} finally {
+				await handle.close();
+			}
 			await fs.promises.rename(tmpPath, metaPath);
 		} catch (err) {
 			fs.rmSync(tmpPath, { force: true });
@@ -545,15 +551,13 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
+/**
+ * Remove one stale entry. Artifact names are unique per publication, so the
+ * metadata and endpoint observed dead can only belong to that publication;
+ * a room that rotated meanwhile lives under different names and is untouched.
+ */
 async function pruneEntry(dir: string, name: string, meta: DiscoveryMetadata | null): Promise<void> {
 	try {
-		if (meta) {
-			// A host that rotated rooms republishes under the same instance name.
-			// If the entry on disk is no longer the one that failed to answer,
-			// the failure belongs to the previous room: leave the successor alone.
-			const current = parseDiscoveryMetadata(await Bun.file(path.join(dir, name)).text());
-			if (!current || current.token !== meta.token || current.endpoint !== meta.endpoint) return;
-		}
 		await fs.promises.rm(path.join(dir, name), { force: true });
 		// Only unlink sockets this registry could have created: beside the
 		// metadata, or in its own relocated socket directory.
