@@ -102,6 +102,17 @@ test("literal entries with glob metacharacters match only their exact spelling",
 	expect(result.allowed).toEqual(["a.b"]);
 });
 
+test("a literal entry does not admit a differently-cased sibling", () => {
+	// SEP-986 names are `[a-zA-Z0-9_-]`, and a server may advertise `read` and
+	// `READ` as distinct tools. Folding case in the filter's sanitizer would let
+	// `enabledTools: ["read"]` admit both — exposing a tool the entry did not
+	// select. Each spelling reaches only itself.
+	expect(run(["read", "READ"], ["read"]).allowed).toEqual(["read"]);
+	expect(run(["read", "READ"], ["READ"]).allowed).toEqual(["READ"]);
+	// A glob behaves the same way: it matches the case it spells.
+	expect(run(["read", "READ"], ["RE*"]).allowed).toEqual(["READ"]);
+});
+
 test("picomatch classes agree with standard glob semantics", () => {
 	expect(run(["file_1", "file_a"], ["file_[0-9]"]).allowed).toEqual(["file_1"]);
 	expect(run(["file_!"], ["file_[!a]"]).allowed).toEqual(["file_!"]);
