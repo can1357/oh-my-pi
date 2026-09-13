@@ -155,6 +155,30 @@ describe("Exa MCP filtering", () => {
 		expect(Object.keys(result.configs).sort()).toEqual(["nonNativeLiteral", "unbounded"]);
 	});
 
+	test("keeps an unrestricted exa server whose glob denotes a non-native tool", () => {
+		// `web_fetch_ex[a]` denotes `web_fetch_exa`, which the native
+		// integration does not provide. The pool holds only the native name and
+		// the entry's own spelling, so the glob matches nothing there and the
+		// selection is unknown — dropping the server would silently discard the
+		// tool the entry names. Contrast the glob spelled at the native name,
+		// which matches the pool and drops the server.
+		const configs: Record<string, MCPServerConfig> = {
+			nonNativeGlob: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_ex[a]"],
+			},
+			nativeGlob: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_ex[a]"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { nonNativeGlob: SOURCE, nativeGlob: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["nonNativeGlob"]);
+	});
+
 	test("does not read an inherited object member as native", () => {
 		// The native set is looked up by name, and a tool the server really
 		// advertises may be called `constructor` or `__proto__`. An ordinary

@@ -427,6 +427,18 @@ test("a run of literal backslashes cannot hang the compiler", () => {
 	expect(result.unmatched).toEqual(["[a]" + eight]);
 });
 
+test("a run of three literal backslashes still compiles", () => {
+	// The hang needs FOUR; three is safe, and rejecting it would silently drop
+	// a legitimate pattern. `a` + three backslashes is the picomatch spelling
+	// that reaches a raw name holding `a` and two backslashes.
+	const three = "\\\\\\";
+	const result = run(["a\\\\", "a"], ["a" + three]);
+	expect(result.allowed).toEqual(["a\\\\"]);
+	expect(result.unmatched).toEqual([]);
+	// The same run under a glob prefix is likewise inert, not rejected.
+	expect(run(["web_a\\\\"], ["*" + three]).unmatched).toEqual([]);
+});
+
 test("a trailing backslash addresses one literal backslash", () => {
 	// picomatch compiles a trailing `\` through its matcher-factory fast path,
 	// so the translated form must spell it out: a bare `\` compiles to `$^`

@@ -94,9 +94,9 @@ function quoteDoubles(pattern: string): string {
 	return pattern.replaceAll('"', '\\"');
 }
 
-/** Does the pattern hold three or more consecutive backslashes? */
+/** Does the pattern hold four or more consecutive backslashes? */
 function backslashRun(pattern: string): boolean {
-	return /\\{3}/.test(pattern);
+	return /\\{4}/.test(pattern);
 }
 
 /** Compile one filter entry into a matcher over sanitized tool names. */
@@ -106,12 +106,14 @@ function compilePattern(pattern: string): ToolMatcher {
 
 	let matcher: ToolMatcher;
 	if (backslashRun(pattern)) {
-		// Picomatch's parser never returns once its input carries four or more
-		// consecutive backslashes — an infinite loop no `try`/`catch` can
-		// rescue — so such a pattern is rejected before the parser is entered.
-		// A legitimate identifier entry never holds one: three backslashes
-		// spell two escaped characters, and a backslash is never part of a
-		// sanitized name anyway.
+		// Picomatch's parser never returns once a pattern carries a run of four
+		// or more backslashes trailing a glob metacharacter — an infinite loop
+		// no `try`/`catch` can rescue — so such a pattern is rejected before the
+		// parser is entered. (Picomatch 4.0.7: `*\\\\`, `[a]\\\\`, `{a,b}\\\\`,
+		// `|\\\\` and `/\\\\` all hang; a bare run with no metacharacter, and
+		// every run of three, compile in microseconds. The predicate is
+		// deliberately wider than the measured hangs — a backslash is never part
+		// of a sanitized name, so no legitimate entry is lost.)
 		matcher = () => false;
 	} else if (/[*?[\]{}\\|()]/.test(pattern)) {
 		try {

@@ -337,11 +337,19 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	// provable. A pattern entry is judged the same way, with the safe bias
 	// that a glob addressing the native name keeps the server mounted.
 	const pool = [...NATIVE_EXA_MCP_TOOLS, ...allowlist];
-	const effective = filterMCPTools({
+	const { allowed: effective, unmatched } = filterMCPTools({
 		toolNames: pool,
 		enabledTools: allowlist,
 		disabledTools: config.disabledTools,
-	}).allowed;
+	});
+	if (effective.length === 0) {
+		// Nothing matched. An entry that matched NO pool name cannot be judged:
+		// `web_fetch_ex[a]` denotes `web_fetch_exa`, which is not in the pool,
+		// so its selection is unknown here and the conservative direction keeps
+		// the server. Only when every entry matched (and every match was the
+		// native tool) is the drop provable — as with `web_search_ex[a]`.
+		return unmatched.length > 0;
+	}
 	return effective.some(tool => !NATIVE_EXA_MCP_TOOLS.has(tool.toLowerCase()));
 }
 
