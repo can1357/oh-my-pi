@@ -10,11 +10,12 @@ import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth }
 import { getDefault, settings } from "../../../config/settings";
 import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
 import { parseSSE } from "../../../mcp/json-rpc";
+import { isExaEnvHelperInjected } from "../../../mcp/reload";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
-import type { SearchParams } from "./base";
+import type { SearchAvailabilityContext, SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
@@ -126,6 +127,12 @@ export interface ExaSearchParams {
 	 */
 	authStorage?: AuthStorage;
 	sessionId?: string;
+	/**
+	 * The calling session's own MCP-discovered Exa key
+	 * (`getSessionExaApiKey`). Preferred over the process-global
+	 * `EXA_API_KEY`, which holds only the first session's injection.
+	 */
+	sessionExaApiKey?: string;
 }
 
 interface ExaSearchResult {
@@ -351,7 +358,11 @@ function buildExaMcpArgs(params: ExaSearchParams): Record<string, unknown> {
 
 async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchResponse> {
 	const query = new URLSearchParams();
-	const apiKey = findApiKey();
+	// Same rule as the native path above: `findApiKey()` reads the process-global
+	// `EXA_API_KEY`, so when that value is one the injection helper installed it
+	// belongs to whichever session injected FIRST. Prefer this session's own key,
+	// and when it has none send the request keyless rather than as a peer.
+	const apiKey = params.sessionExaApiKey ?? (isExaEnvHelperInjected() ? undefined : findApiKey());
 	if (apiKey) query.set("exaApiKey", apiKey);
 	query.set("tools", "web_search_exa");
 	const fetchImpl = params.fetch ?? fetch;
@@ -431,13 +442,43 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 	// AuthStorage-backed key takes precedence (existing behavior); probe it once
 	// so the env-key and keyless-MCP fallbacks below stay intact, then drive the
 	// authStorage path through the central force-refresh/rotate retry policy.
+	//
+	// `excludeEnv` when the live `EXA_API_KEY` is one THIS harness injected:
+	// `getApiKey` resolves the dedicated env var itself, so without it a session
+	// picked up whichever peer injected first, took the resolver branch, and
+	// authenticated against that peer's account even holding a key of its own.
+	// An OPERATOR-exported value is not excluded — that override is deliberate.
+	const excludeEnv = isExaEnvHelperInjected();
 	const storedKey = params.authStorage
-		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal })
+		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal, excludeEnv })
 		: undefined;
+	// Below AuthStorage, which is an explicit per-provider credential the
+	// operator configured. Between the session's OWN MCP-discovered key and
+	// `EXA_API_KEY`, the environment decides:
+	//
+	//   - An OPERATOR-exported `EXA_API_KEY` wins. `applyMCPEnvironment` refuses
+	//     to overwrite a foreign value precisely to honor that override, but it
+	//     still records the config-discovered key for this session — so picking
+	//     the recorded key first authenticated to the MCP-configured account and
+	//     silently defeated the documented override.
+	//   - A key THIS harness injected does not. That variable is process-global,
+	//     so with several top-level sessions it holds whichever session injected
+	//     FIRST and every later session would authenticate as that one; the
+	//     session's own key is the correct answer there.
+	const envKey = getEnvApiKey("exa");
+	const sessionKeyOutranksEnv = envKey === undefined || excludeEnv;
 	const keyOrResolver: ApiKey | undefined =
 		storedKey && params.authStorage
-			? params.authStorage.resolver("exa", { sessionId: params.sessionId })
-			: getEnvApiKey("exa");
+			? params.authStorage.resolver("exa", { sessionId: params.sessionId, excludeEnv })
+			: sessionKeyOutranksEnv
+				? // No fallback onto `envKey` here. Both reasons this branch is taken
+					// rule it out: either there is no env key at all, or the env key is
+					// one THIS harness injected — process-global, so falling back to it
+					// makes a session with no key of its own authenticate and bill
+					// against whichever session injected first. Without a session key the
+					// correct answer is the keyless MCP path below.
+					params.sessionExaApiKey
+				: envKey;
 	const response = keyOrResolver
 		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
 		: await callExaMcpSearch(params);
@@ -481,9 +522,30 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
-	isAvailable(authStorage: AuthStorage): boolean {
+	isAvailable(authStorage: AuthStorage, context?: SearchAvailabilityContext): boolean {
 		if (!this.#settingsAllowSearch()) return false;
-		return !!getEnvApiKey("exa") || authStorage.hasAuth("exa");
+		// The session's own MCP-discovered key counts: `search()` accepts it, so a
+		// session holding one can service the request even when the process-global
+		// env key (another session's, possibly since removed) and the broker
+		// credential are both absent.
+		//
+		// A HELPER-OWNED env key does not count on its own, for the same reason
+		// `search()` refuses it: it belongs to whichever session injected first.
+		// Admitting on it sent this session down the keyless MCP fallback — which
+		// is documented as explicit-selection-only — instead of moving on to its
+		// next configured provider. An operator's own export still counts, since
+		// that is a deliberate process-wide credential.
+		if (context?.sessionExaApiKey) return true;
+		// A HELPER-OWNED `EXA_API_KEY` does not admit on its own. It belongs to
+		// whichever session injected first, and `search()` refuses it, so
+		// admitting here sent this session into the keyless MCP fallback —
+		// documented as explicit-selection-only — instead of moving on to its next
+		// configured provider. `hasAuth` is checked through the same lens because
+		// it ALSO reads the environment (`#hasDedicatedEnvAuth`), so testing the
+		// env term alone left the same key admitting one line over. An operator's
+		// own export still counts: that is a deliberate process-wide credential.
+		if (isExaEnvHelperInjected()) return authStorage.hasNonEnvCredential("exa");
+		return getEnvApiKey("exa") !== undefined || authStorage.hasAuth("exa");
 	}
 
 	/**
@@ -517,6 +579,7 @@ export class ExaProvider extends SearchProvider {
 			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
 			sessionId: params.sessionId,
+			sessionExaApiKey: params.sessionExaApiKey,
 			fetch: params.fetch,
 		});
 	}

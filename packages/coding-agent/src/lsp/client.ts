@@ -57,6 +57,11 @@ export function setSharedLspEnabled(enabled: boolean): void {
 	sharedLspEnabled = enabled;
 }
 
+/** Whether new language servers attach to a broker-shared instance. */
+export function isSharedLspEnabled(): boolean {
+	return sharedLspEnabled;
+}
+
 /**
  * Configure the global fallback idle timeout for LSP clients (used in tests/overrides).
  * When unset, each client evaluates against its workspace config (`getConfig(client.cwd).idleTimeoutMs`).

@@ -60,7 +60,9 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		if (!skill) {
 			const available = skills.map(s => s.name);
 			const availableStr = available.length > 0 ? available.join(", ") : "none";
-			throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
+			throw new Error(
+				`Unknown skill: ${skillName}\nAvailable: ${availableStr}\nIf it was added since this session started, run refresh (or /refresh skills) to re-scan the roster.`,
+			);
 		}
 
 		let targetPath: string;

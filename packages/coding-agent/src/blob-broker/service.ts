@@ -111,6 +111,8 @@ export class ImageUrlService {
 	/** Backend range and content key retained by URL for ordered fallback. */
 	#publicationSourceByUrl = new Map<string, { rangeStart: number; rangeEnd: number; hash: string }>();
 	#callback: { port: number; token: string; server: Bun.Server<undefined> } | null | undefined;
+	/** Set by `dispose()`; stops this service from starting anything new. */
+	#disposed = false;
 	#daemonEnabled: boolean;
 	#providerFiles: ProviderFileManager | undefined;
 	#providerFilePosition: number;
@@ -134,6 +136,33 @@ export class ImageUrlService {
 		this.#savingsJournal = options?.savingsJournal;
 	}
 
+	/**
+	 * Release every backend, exposure process, and callback server this service
+	 * started. Required when a settings reload replaces the service: the
+	 * retired instance otherwise keeps a tunnel and a listening port alive.
+	 */
+	async dispose(): Promise<void> {
+		// Fenced BEFORE the snapshot. A provider/advisor request already inside
+		// `decorateContext()` can reach `#ensureBackend()` after this map is
+		// cleared, and an empty map is not a closed door: it would start a fresh
+		// backend and callback server that nothing is left to stop, leaking a
+		// tunnel and a listening port past the reload that retired this service.
+		this.#disposed = true;
+		const pending = [...this.#backendPromises.values()];
+		this.#backendPromises.clear();
+		for (const backendPromise of pending) {
+			try {
+				(await backendPromise)?.stop();
+			} catch (error) {
+				logger.warn("blob-broker: backend shutdown failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		this.#callback?.server.stop(true);
+		this.#callback = undefined;
+	}
+
 	/** Kick off daemon/exposure startup in the background to hide latency. */
 	prewarm(): void {
 		const position = Math.min(this.#providerFilePosition, this.#configs.length);
@@ -146,6 +175,9 @@ export class ImageUrlService {
 		configs: readonly BlobBrokerWorkerConfig[] = this.#configs,
 		key = "all",
 	): Promise<BlobBackend | null> {
+		// A late caller gets "no backend", which every call site already handles
+		// as an unreachable destination, rather than a resource nothing owns.
+		if (this.#disposed) return Promise.resolve(null);
 		let pending = this.#backendPromises.get(key);
 		if (!pending) {
 			pending = this.#resolveBackend(configs);
@@ -190,6 +222,7 @@ export class ImageUrlService {
 	 * the first lazy registration against a daemon backend.
 	 */
 	#ensureCallbackServer(): { port: number; token: string } | null {
+		if (this.#disposed) return null;
 		if (this.#callback !== undefined) return this.#callback;
 		try {
 			const token = crypto.randomUUID();
@@ -533,6 +566,9 @@ export class ImageUrlService {
 	}
 
 	stop(): void {
+		// Same fence as `dispose()`: this is the synchronous teardown of the same
+		// state, so it is reachable from a request still inside `decorateContext()`.
+		this.#disposed = true;
 		this.#callback?.server.stop(true);
 		this.#callback = null;
 		for (const pending of this.#backendPromises.values()) void pending.then(backend => backend?.stop());

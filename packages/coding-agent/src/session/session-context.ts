@@ -75,6 +75,13 @@ export interface SessionContext {
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
 	serviceTier?: ServiceTierByFamily;
+	/**
+	 * Families in `serviceTier` that still follow `tier.*` rather than being a
+	 * session-local pin. The consumer re-derives these from the live config, so
+	 * a config edit made while the session was stopped is not overridden by the
+	 * value the receipt happened to capture. Absent on pre-provenance receipts.
+	 */
+	serviceTierSettingsTrackingFamilies?: ReadonlyArray<keyof ServiceTierByFamily>;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
 	/** Names of TTSR rules that have been injected this session */
@@ -235,6 +242,7 @@ export function buildSessionContext(
 			messages: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
+			serviceTierSettingsTrackingFamilies: undefined,
 			models: {},
 			injectedTtsrRules: [],
 			mode: "none",
@@ -253,6 +261,7 @@ export function buildSessionContext(
 			messages: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
+			serviceTierSettingsTrackingFamilies: undefined,
 			models: {},
 			injectedTtsrRules: [],
 			mode: "none",
@@ -275,6 +284,7 @@ export function buildSessionContext(
 	let thinkingLevel: string | undefined = "off";
 	let configuredThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
+	let serviceTierSettingsTrackingFamilies: ReadonlyArray<keyof ServiceTierByFamily> | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
@@ -304,6 +314,9 @@ export function buildSessionContext(
 			}
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
+			// Carried from the SAME entry as the map, so a later receipt without
+			// provenance correctly clears an earlier one's.
+			serviceTierSettingsTrackingFamilies = entry.settingsTrackingFamilies;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			// Legacy fallback: infer default model from assistant messages only
 			// when no explicit `model_change` (role=default) entry has been
@@ -693,6 +706,7 @@ export function buildSessionContext(
 		thinkingLevel,
 		configuredThinkingLevel,
 		serviceTier,
+		serviceTierSettingsTrackingFamilies,
 		models,
 		injectedTtsrRules,
 		mode,

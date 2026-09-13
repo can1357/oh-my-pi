@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { stringArrayEqual } from "../utils/string-array";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -83,6 +84,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
+	$flag,
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
@@ -99,12 +101,21 @@ import {
 import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
+import { type Rule, setActiveRules } from "../capability/rule";
+import { bucketRules } from "../capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	getModelMatchPreferences,
+	pickDefaultAvailableModel,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily } from "../config/service-tier";
+import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { applySettingsTrackedServiceTiers, buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
@@ -112,6 +123,8 @@ import {
 	onExtendedContextChanged,
 	onModelRolesChanged,
 } from "../config/settings";
+import type { SettingPath } from "../config/settings-schema";
+import { resolveDialect } from "../config/tool-dialect";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
@@ -147,6 +160,7 @@ import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
+import { type RefreshResult, type RefreshScope, reloadSkillsAndRules } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
@@ -156,6 +170,9 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { MCPManager } from "../mcp/manager";
+import { shouldFilterBrowserMCPForPrelude } from "../mcp/config";
+import { applyMCPEnvironment, reloadMcpServers } from "../mcp/reload";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -181,6 +198,7 @@ import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -199,7 +217,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import { GATED_TOOL_SETTINGS, type ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
@@ -357,7 +375,12 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import {
+	type BranchSummaryEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type NewSessionOptions,
+	thinkingFollowsSettings,
+} from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -533,6 +556,216 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 	};
 }
 
+/**
+ * Content-identity comparison of two rule snapshots, position by position.
+ * Discovery yields a stable order, so a positional compare is a correct
+ * roster-identity test. Compares every field the system prompt renders from —
+ * not just name+path — so editing a rule's body/description/globs/`alwaysApply`
+ * WITHOUT renaming still counts as a change and rebuilds the advertised roster.
+ * Detects a rules-only change across a refresh so the prompt rebuilds even when
+ * no skill changed. (The skills-side equivalent lives in
+ * {@link SessionTools.applyReloadedSkills}, which owns the per-session `#skills`
+ * snapshot that `skill://` binds.)
+ */
+function rulesEqual(a: readonly Rule[], b: readonly Rule[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (!ruleIdentityEqual(a[i], b[i])) return false;
+	}
+	return true;
+}
+
+/** Equality over the rule fields that affect the rendered system prompt. */
+function ruleIdentityEqual(a: Rule, b: Rule): boolean {
+	return (
+		a.name === b.name &&
+		a.path === b.path &&
+		a.content === b.content &&
+		a.description === b.description &&
+		(a.alwaysApply ?? false) === (b.alwaysApply ?? false) &&
+		stringArrayEqual(a.globs, b.globs)
+	);
+}
+
+/** Order-sensitive equality of two optional string arrays. */
+
+/**
+ * Settings the system-prompt render reads from the LIVE settings instance —
+ * every `settings.get(...)` / `settings.getGroup(...)` inside
+ * `rebuildSystemPrompt` (sdk.ts), plus the ones its helpers read. A settings
+ * reload swaps what that closure reads without re-rendering anything, so
+ * `#doRefresh` snapshots these across the reload and rebuilds only when one
+ * actually moved — keeping a no-op refresh byte-identical for provider prompt
+ * caching.
+ *
+ * Omitting a path the render reads is a silent staleness bug: the refresh
+ * reports success while the model keeps seeing the pre-edit block. Settings the
+ * render consumes but that reach the prompt through a DIFFERENT observer are
+ * deliberately absent — `browser.enabled`/`computer.enabled` rebuild through
+ * the eval-prelude effective-change listener, `modelRoles` through the model
+ * swap, and `secrets.enabled` through the obfuscator rebuild, which reports its
+ * own prompt-state move (the flag is not the render's input anyway: the
+ * `<redacted-content>` block tracks whether the built obfuscator actually
+ * reports secrets). `inlineToolDescriptors` and `task.eager` ARE here: making
+ * `rebuildSystemPrompt` read them live fixed what a rebuild renders, but a
+ * rebuild still has to be triggered, and either one can be the only thing that
+ * moved.
+ */
+const PROMPT_AFFECTING_SETTING_PATHS = [
+	// Workstation block: the model-identification line.
+	"includeModelInPrompt",
+	// Personality block ("none" omits it entirely).
+	"personality",
+	// `xd://` device docs: the mode, and the allowlist selecting which dynamic
+	// devices the `builtins` mode inlines.
+	"tools.xdevDocs",
+	"tools.xdevInlineDevices",
+	// Whether the skill roster is advertised at all.
+	"skillful",
+	// Filters the context-file rediscovery the render performs, so it changes
+	// which AGENTS.md/context files the prompt embeds.
+	"disabledExtensions",
+	// Tool-catalog rendering: an owned/in-band dialect forces the full
+	// functions-namespace catalog instead of the compact name list.
+	"tools.format",
+	// Task/delegation guidance blocks.
+	"task.batch",
+	"task.maxConcurrency",
+	// `scoutAvailable` (via `isScoutSpawnable`).
+	"task.disabledAgents",
+	// `taskIrcEnabled` (via `isIrcEnabled`).
+	"task.maxRecursionDepth",
+	// `autoQaEnabled` (via `isAutoQaEnabled`).
+	"dev.autoqa",
+	"dev.autoqaConsent",
+	// `security://` namespace availability block.
+	"security.enabled",
+	// Selects the memory backend, which renders both the appended memory
+	// instructions and the `memory://root` availability block.
+	"memory.backend",
+	// Rendering contracts stated to the model.
+	"tui.renderMermaid",
+	"tui.reactions",
+	// `BashTool`'s rendered description gates the `async: true` guidance line on
+	// this, and its advertised schema gains/loses the `async` parameter with it.
+	// Both read the setting live, so the provider wire follows a reload on its
+	// own — but under `inlineToolDescriptors` the tool catalog (descriptions AND
+	// schemas) is rendered INTO the system prompt, which only a rebuild moves.
+	// Without this the model kept being told async was unavailable (or still
+	// offered it) after `/refresh settings` flipped it.
+	"async.enabled",
+	// Whether the workspace tree is rendered into the prompt. The render reads
+	// it live and rescans the tree on the off→on flip, so a refresh that edits
+	// it must rebuild — otherwise the refresh reports success while the model
+	// keeps seeing (or keeps missing) the tree.
+	"includeWorkspaceTree",
+	// Whether the intent-field guidance block is rendered, and whether the
+	// required field is injected into every tool schema. The render reads it
+	// live, so a refresh that edits it must rebuild — otherwise the prompt keeps
+	// instructing the model about a field the schemas no longer carry (or omits
+	// guidance for one they now require).
+	"tools.intentTracing",
+	// Gates the auto-background guidance line in the `bash` and `eval` rendered
+	// descriptions, which `inlineToolDescriptors` embeds in the system prompt.
+	// Same shape as `async.enabled` above: execution and the tool property
+	// follow the setting live, so without a rebuild only the model kept the
+	// retired guidance. The two tools read SEPARATE keys — `EvalTool.description`
+	// passes `eval.autoBackground.enabled`, never the bash one — so both are
+	// listed. The thresholds are NOT here: no template renders the number, so
+	// changing one moves no prompt text.
+	"bash.autoBackground.enabled",
+	"eval.autoBackground.enabled",
+	// Whether `EvalTool.description` advertises `@tool`/`tool(fn)` and the
+	// `tools` spawn option. Read live at render, so the embedded catalog kept
+	// offering (or withholding) kernel-defined subagent tools after a refresh.
+	"eval.tools.enabled",
+	// The backends `EvalTool.description` renders its language schema from. A
+	// session keeps `eval` registered when only ONE of these moves, so the
+	// gated-tool reconcile sees no transition and nothing else rebuilds — while
+	// the embedded description still documents the retired language.
+	"eval.py",
+	"eval.js",
+	// Read live by `rebuildSystemPrompt`, so a rebuild renders the current value
+	// — but nothing else necessarily moves when one of these does.
+	// `inlineToolDescriptors` is the sharper case: it prunes provider tool
+	// descriptions immediately, so without a rebuild the model loses the
+	// descriptions in BOTH places (pruned on the wire, absent from the compact
+	// prompt). `task.eager` keeps rendering the retired delegation guidance.
+	"inlineToolDescriptors",
+	"task.eager",
+	// Both memory backends TRUNCATE their rendered developer instructions to
+	// these limits (`mnemopi/backend.ts`, `sharpshooter/backend.ts`), so the
+	// limit is prompt text, not just a budget: editing it alone left the model
+	// with the old-sized memory block until some unrelated rebuild happened.
+	// Listed for both backends rather than the active one, since `memory.backend`
+	// above can move in the same reload.
+	"mnemopi.injectionTokenLimit",
+	"sharpshooter.injectionTokenLimit",
+] as const satisfies readonly SettingPath[];
+
+/**
+ * Effective values of {@link PROMPT_AFFECTING_SETTING_PATHS}, in the same
+ * order. Compared across a settings reload with `Bun.deepEquals` — deep, not
+ * identity, because the array-valued paths (`tools.xdevInlineDevices`,
+ * `disabledExtensions`, `task.disabledAgents`) are rebuilt by the reload, so an
+ * identity compare would report a change on every refresh and defeat provider
+ * prompt caching.
+ */
+type PromptAffectingSettings = readonly unknown[];
+
+/**
+ * Sampling settings sdk.ts copies into mutable {@link Agent} fields at
+ * construction. Each path's name is also its `Agent` field name, so
+ * `#applyReloadedGenerationSettings` can write them by key.
+ *
+ * Request building reads those fields (`agent.ts` request assembly), never the
+ * live `Settings`, so `/refresh settings` must push each reloaded value across
+ * or the session keeps generating under its launch-time configuration.
+ */
+const GENERATION_SAMPLING_SETTING_PATHS = [
+	"temperature",
+	"topP",
+	"topK",
+	"minP",
+	"presencePenalty",
+	"repetitionPenalty",
+] as const satisfies readonly SettingPath[];
+
+type GenerationSamplingSettingPath = (typeof GENERATION_SAMPLING_SETTING_PATHS)[number];
+
+/**
+ * Agent-facing snapshot of every request-generation setting a reload can move:
+ * the sampling controls above (sentinels already collapsed), the reasoning
+ * summary flag, the per-effort thinking budgets, the owned tool dialect, and
+ * the remaining provider-loop fields.
+ *
+ * `dialect`/`preferWebsockets`/`abortOnFabricatedToolResult`/`kimiApiFormat`
+ * are not plain `settings.get` reads like the sampling group: each is DERIVED
+ * (a `tools.format` + active-model resolution, and `off`/`on`/`auto` and
+ * `auto`/`openai`/`anthropic` tristates that must reach the agent as a
+ * boolean-or-`undefined` / format-or-`undefined`), so they are resolved here
+ * once and compared by value.
+ */
+interface GenerationSettings {
+	readonly sampling: Readonly<Record<GenerationSamplingSettingPath, number | undefined>>;
+	readonly hideThinkingSummary: boolean;
+	readonly thinkingBudgets: Agent["thinkingBudgets"];
+	readonly dialect: Agent["dialect"];
+	readonly preferWebsockets: boolean | undefined;
+	readonly abortOnFabricatedToolResult: boolean;
+	readonly kimiApiFormat: Agent["kimiApiFormat"];
+	/**
+	 * Decides whether the required intent field is injected into every tool
+	 * schema, so it is part of the provider-facing request shape, not just the
+	 * prompt. `PI_INTENT_TRACING` overrides the setting and is read here the same
+	 * way sdk.ts reads it at construction, so an env-pinned session keeps its
+	 * value across a refresh.
+	 */
+	readonly intentTracing: boolean;
+	readonly pruneToolDescriptions: boolean;
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -697,6 +930,30 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	/** Spawn depth: 0 top-level, 1+ subagent. Reads the depth-dependent tool gates.*/
+	readonly #taskDepth: number;
+
+	/**
+	 * Whether this session may MUTATE its MCP manager's connections.
+	 *
+	 * True unless this is a subagent: `structured-subagent.ts` hands a child
+	 * `session.mcpManager ?? MCPManager.instance()`, so a child shares a manager
+	 * with its parent and reconciling there rewrites the PARENT's live servers
+	 * from the child's settings scope.
+	 *
+	 * Deliberately NOT keyed on owning the manager. A top-level embedder that
+	 * passes its own `mcpManager` owns it no less for having built it outside
+	 * the session, and an ownership gate silently turns every MCP reconcile
+	 * into a no-op for those callers. Depth names the hazard; ownership
+	 * only correlates with it.
+	 */
+	get #mayMutateMcpConnections(): boolean {
+		return this.#taskDepth === 0;
+	}
+	// The registry this session was created against (SDK-supplied or the global
+	// fallback). Skill fan-out iterates THIS registry and restricts to this
+	// session's own descendants — never a foreign global tree.
+	#agentRegistry: AgentRegistry;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -711,6 +968,9 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	#reconcileSharedLsp: AgentSessionConfig["reconcileSharedLsp"];
+	#reconcileAutoLearn: AgentSessionConfig["reconcileAutoLearn"];
+	#reconcileScopedModels: AgentSessionConfig["reconcileScopedModels"];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -753,6 +1013,132 @@ export class AgentSession {
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
+	#applyReloadedRoster: AgentSessionConfig["applyReloadedRoster"];
+	#onBeforeRefresh: ((scope: RefreshScope) => void | Promise<void>) | undefined;
+	/**
+	 * The rendered rule roster (rulebook + always-apply) last advertised in the
+	 * system prompt, snapshot for change detection across a `refresh`. These
+	 * buckets are reload-stable (a TTSR-conditioned rule is consumed by the
+	 * manager, not re-bucketed — see `bucketRules`), so a name+path compare is a
+	 * sound roster-identity test. Seeded from the session's initial discovered
+	 * roster (`config.initialRosterRules`) so a settings-only refresh re-buckets
+	 * the COMPLETE set — dropping only newly-gated rules — instead of rebuilding
+	 * from TTSR entries alone and wiping every non-TTSR rule.
+	 */
+	#rosterRules: readonly Rule[];
+	/**
+	 * The COMPLETE, UNGATED rule roster the last disk discovery produced — every
+	 * rule that passed `agents` scoping, before `ttsr.disabledRules`/`builtinRules`
+	 * removed any of them. This is the source a settings-only refresh re-buckets,
+	 * so gating applies in BOTH directions: re-bucketing the GATED set
+	 * ({@link #rosterRules} + the manager's live rules) could only ever drop more,
+	 * making a reverted `disabledRules` entry unrecoverable without a full
+	 * `rules`/`all` rediscovery. Seeded from `config.initialSourceRules` and
+	 * re-snapshot on every roster refresh.
+	 */
+	#sourceRosterRules: readonly Rule[];
+	/**
+	 * Whether {@link #sourceRosterRules} is a real UNGATED discovery output
+	 * rather than the gated-roster fallback the constructor substitutes when no
+	 * `initialSourceRules` was supplied.
+	 *
+	 * It decides whether that set is authoritative about which rule names still
+	 * EXIST. When it is, a settings-only reconcile may drop a live TTSR
+	 * registration whose name is gone from disk; when it is not, the fallback
+	 * legitimately omits every TTSR rule (the manager consumed them, so they are
+	 * absent from the gated buckets) and treating it as authoritative would
+	 * delete registrations that were never deleted on disk.
+	 */
+	#hasUngatedSourceRoster: boolean;
+	/**
+	 * Caller-supplied rule policy (SDK `rules`/`--no-rules`). When set, an
+	 * in-session `refresh` re-buckets these rules instead of scanning disk, so it
+	 * cannot re-enable ambient rules the session excluded. `undefined` means a
+	 * refresh re-discovers rules from disk (the default, roster-editing behavior).
+	 */
+	readonly #rulesPolicy: readonly Rule[] | undefined;
+	/**
+	 * Whether {@link #rulesPolicy} is an INHERITED parent roster rather than an
+	 * explicit caller restriction. The subagent spawn path always forwards the
+	 * parent's `session.rules`, so a defined policy alone cannot distinguish
+	 * "my parent handed me its roster" from "my caller restricted me": a parent
+	 * refresh replaces the former in this running child and never widens the
+	 * latter.
+	 */
+	readonly #rulesPolicyInherited: boolean;
+	readonly #skillsPolicyInherited: boolean;
+	/**
+	 * Resolved agent name for rule `agents` scoping, mirroring the value init
+	 * bucketed with. Both refresh re-bucket paths pass it so a reload keeps the
+	 * session's agent scope instead of admitting every agent-scoped rule.
+	 */
+	readonly #agentRuleName: string | undefined;
+	/**
+	 * The MCP manager this session was constructed with (owned or an inherited
+	 * parent's). An in-session `refresh('mcp'|'all')` reconnects THIS instance,
+	 * not the process-global `MCPManager.instance()` — with multiple top-level
+	 * SDK/ACP sessions, `setInstance` is called per session, so `instance()` may
+	 * be a different session's manager, and refreshing session A would disconnect
+	 * session B's servers. `undefined` when the session has no MCP manager.
+	 */
+	readonly #mcpManager: MCPManager | undefined;
+	/**
+	 * In-session refresh serialization. The tail chains overlapping `refresh()`
+	 * callers so they run strictly one-at-a-time; it is deliberately
+	 * failure-swallowing (`run.then(() => {}, () => {})`) so one caller's throw
+	 * never rejects the next.
+	 */
+	#refreshTail: Promise<unknown> = Promise.resolve();
+	/**
+	 * Tail of the `browser.enabled`/`computer.enabled` prelude reconciliation the
+	 * settings effective-change listener starts. Retained (not fire-and-forget)
+	 * so `#doRefresh` can await the work a `settings.reload()` kicked off before
+	 * reporting the refresh complete. Failure-swallowing for the same reason as
+	 * {@link #refreshTail}; the listener owns the error recovery.
+	 */
+	#evalPreludeReconciliation: Promise<void> = Promise.resolve();
+	/**
+	 * Join handle for the Code Mode reconciliation the `onCodeModeChanged`
+	 * subscriber starts. The subscriber launches the work EAGERLY and stores only
+	 * this promise, so `#doRefresh` can wait for the tool repartition and prompt
+	 * rebuild without the listener itself deferring anything — a listener that
+	 * deferred its first step by even a microtask would report a stale prompt to
+	 * a caller asserting right after `settings.override()`.
+	 * Failure-swallowing like {@link #refreshTail}; the subscriber logs.
+	 */
+	#codeModeReconciliation: Promise<void> = Promise.resolve();
+	/**
+	 * Join handle for the `extendedContext` reconciliation, same eager-start /
+	 * promise-only-handle contract as {@link #codeModeReconciliation}. Without it
+	 * a refresh could return before the model registry and live model carried the
+	 * new context window, so the next turn computed compaction limits (or sent a
+	 * request) against the pre-refresh window.
+	 */
+	#extendedContextReconciliation: Promise<void> = Promise.resolve();
+	/**
+	 * Join handle for reconciliations owned OUTSIDE this class — the settings
+	 * listeners `createAgentSession` installs for the subsystems it constructs
+	 * (workspace roots, and anything later added beside them).
+	 *
+	 * Same eager-start / promise-only-handle contract as the fields above: the
+	 * listener starts its work immediately and only hands the promise here, so a
+	 * refresh can join it. Settings listeners are synchronous and their return
+	 * values are discarded, so without a registered handle a refresh reports
+	 * completion — and the turn loop can dispatch the next provider request —
+	 * while the prompt still advertises the pre-refresh state.
+	 * Failure-swallowing like {@link #refreshTail}; the listener owns recovery.
+	 */
+	#hostReconciliation: Promise<void> = Promise.resolve();
+
+	/**
+	 * Register work a `/refresh settings` must wait for, from a settings listener
+	 * outside this class. Both the in-flight and any earlier reconciliation stay
+	 * joinable, so a refresh that moved several such settings waits for all.
+	 */
+	registerHostReconciliation(work: Promise<unknown>): void {
+		const previous = this.#hostReconciliation;
+		this.#hostReconciliation = Promise.allSettled([previous, work]).then(() => {});
+	}
 
 	readonly #ttsr: TtsrCoordinator;
 	readonly #stats: SessionStatsTracker;
@@ -806,6 +1192,12 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	/**
+	 * Host hook rebuilding {@link #obfuscator} from the reloaded secrets config,
+	 * and reporting whether the host's secret-placeholder prompt state moved with
+	 * it. See {@link AgentSessionConfig.rebuildObfuscator}.
+	 */
+	#rebuildObfuscator: AgentSessionConfig["rebuildObfuscator"];
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1365,6 +1757,9 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
+		this.#reconcileSharedLsp = config.reconcileSharedLsp;
+		this.#reconcileAutoLearn = config.reconcileAutoLearn;
+		this.#reconcileScopedModels = config.reconcileScopedModels;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -1377,7 +1772,7 @@ export class AgentSession {
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			setThinkingLevel: level => this.setThinkingLevel(level),
+			setThinkingLevel: level => this.setThinkingLevelForRecovery(level),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -1578,6 +1973,19 @@ export class AgentSession {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		this.#applyReloadedRoster = config.applyReloadedRoster;
+		this.#onBeforeRefresh = config.onBeforeRefresh;
+		this.#rulesPolicy = config.rules;
+		this.#rulesPolicyInherited = config.rulesInherited === true;
+		this.#skillsPolicyInherited = config.skillsInherited === true;
+		this.#rosterRules = config.initialRosterRules ?? [];
+		// Falls back to the gated roster when no ungated source was supplied, so a
+		// session constructed without it keeps the prior drop-only behavior rather
+		// than re-bucketing an empty set and wiping the roster.
+		this.#sourceRosterRules = config.initialSourceRules ?? this.#rosterRules;
+		this.#hasUngatedSourceRoster = config.initialSourceRules !== undefined;
+		this.#agentRuleName = config.agentRuleName;
+		this.#mcpManager = config.mcpManager;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -1588,6 +1996,7 @@ export class AgentSession {
 			extensionRunner: () => this.#extensionRunner,
 			clientBridge: () => this.#clientBridge,
 			agentKind: () => this.#agentKind,
+			taskDepth: () => this.#taskDepth,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			queuedMessageCount: () => this.queuedMessageCount,
@@ -1609,6 +2018,7 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createBooleanGatedTool: config.createBooleanGatedTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -1617,6 +2027,7 @@ export class AgentSession {
 			setDeviceOnlyWrite: config.setDeviceOnlyWrite,
 			setPendingFullWriteDescription: config.setPendingFullWriteDescription,
 			ensureGoalRegistered: config.ensureGoalRegistered,
+			createSettingGatedTools: config.createSettingGatedTools,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
@@ -1639,6 +2050,11 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.#rebuildObfuscator = config.rebuildObfuscator;
+		// `this` is shadowed inside the host object literals' getters below, so
+		// the live-value getters need a lexical alias to reach this instance's
+		// private fields.
+		const session = this;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1652,14 +2068,23 @@ export class AgentSession {
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
-			obfuscator: this.#obfuscator,
+			// A getter, not the captured reference: `/refresh settings` REBUILDS
+			// the obfuscator when `secrets.enabled`/`secrets.yml` moves, and this
+			// boundary is what obfuscates every outbound provider context. Copied
+			// once, a session that enabled secrets on disk kept shipping the
+			// configured values to providers.
+			get obfuscator() {
+				return session.#obfuscator;
+			},
 		};
 		this.#providerBoundary = new SessionProviderBoundary(providerBoundaryHost);
 		const streamGuardsHost: StreamGuardsHost = {
 			agent: this.agent,
 			settings: this.settings,
 			sessionManager: this.sessionManager,
-			obfuscator: this.#obfuscator,
+			get obfuscator() {
+				return session.#obfuscator;
+			},
 			model: () => this.model,
 			isDisposed: () => this.#isDisposed,
 			promptGeneration: () => this.#promptGeneration,
@@ -1672,6 +2097,8 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#taskDepth = config.memoryTaskDepth ?? 0;
+		this.#agentRegistry = config.agentRegistry ?? AgentRegistry.global();
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -1766,9 +2193,17 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
-			obfuscator: this.#obfuscator,
+			// Getters, not copied values: `/refresh settings` moves the session's
+			// live `#preferWebsockets` and rebuilds `#obfuscator`, and a captured
+			// primitive/reference would keep every advisor and side-channel request
+			// on the construction-time transport and secret set.
+			get obfuscator() {
+				return session.#obfuscator;
+			},
 			providerSessionState: this.#providerSessionState,
-			preferWebsockets: this.#preferWebsockets,
+			get preferWebsockets() {
+				return session.#preferWebsockets;
+			},
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
@@ -1830,7 +2265,11 @@ export class AgentSession {
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
-			preferWebsockets: this.#preferWebsockets,
+			// Live, for the same reason as the advisor host: compaction and
+			// summarization oneshots read this rather than the agent's field.
+			get preferWebsockets() {
+				return session.#preferWebsockets;
+			},
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
@@ -1916,7 +2355,9 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
-			obfuscator: this.#obfuscator,
+			get obfuscator() {
+				return session.#obfuscator;
+			},
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
@@ -1945,16 +2386,74 @@ export class AgentSession {
 		// extended-context setting flips at runtime: the registry re-clamps (or
 		// restores) premium long-context windows, and the live model object must
 		// follow so compaction thresholds and context display react immediately.
-		this.#unsubscribeExtendedContext = onExtendedContextChanged(() => void this.#reapplyExtendedContextPolicy());
+		// Same eager-start / retained-handle shape: the reconcile begins now, and
+		// `#extendedContextReconciliation` only lets `#doRefresh` join it.
+		this.#unsubscribeExtendedContext = onExtendedContextChanged(() => {
+			// `#reapplyExtendedContextPolicy` catches internally and never rejects,
+			// so the handle needs no separate failure swallow.
+			this.#extendedContextReconciliation = this.#reapplyExtendedContextPolicy();
+		});
 		this.#unsubscribeEvalPreludeSettings = this.settings.onEffectiveChange((path, value) => {
 			if (path !== "browser.enabled" && path !== "computer.enabled") return;
-			void (async () => {
+			// Serialized onto a tail, and the tail is RETAINED, so an awaiting
+			// caller (`#doRefresh`) can join the work this notification starts.
+			// `settings.reload()` emits synchronously and this listener returns
+			// immediately, so without a joinable handle a `/refresh settings` that
+			// moved either setting reported completion while the browser-MCP tool
+			// set and the system prompt were still mid-reconcile.
+			// Started EAGERLY and NOT chained onto the previous notification: this
+			// listener fires synchronously from `settings.reload()`/`override()`,
+			// and callers observe its first step (the browser-MCP filter call, the
+			// prelude/prompt update) in that same turn. Serializing it behind an
+			// earlier tail would delay those by a microtask and report a stale
+			// prompt. `#evalPreludeReconciliation` below is a JOIN handle only, so
+			// `#doRefresh` can await whatever is in flight.
+			const reconciliation = (async () => {
 				if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
-					const tools = await this.#reconcileBrowserMcpFilter(value === true);
-					await this.refreshMCPTools(tools);
+					// Two corrections the sibling MCP paths already make.
+					//
+					// Inheritance: a subagent granted `refresh` is handed its parent's
+					// manager (`structured-subagent.ts` forwards `session.mcpManager`),
+					// so reconciling here would connect or disconnect the PARENT's
+					// browser transports from the child's settings scope while only the
+					// child's tool registry is rebuilt.
+					//
+					// Keyed on task depth rather than on owning the manager: a
+					// TOP-LEVEL SDK caller that supplies its own manager owns no less
+					// of it for having built it outside the session, and gating on
+					// ownership silently stopped reconciling for every embedder that
+					// passes `mcpManager` — the case upstream's own
+					// `sdk-computer-prelude-toggle` test pins. Depth names the actual
+					// hazard: only a child shares a manager with someone else.
+					//
+					// Effective availability, not the raw setting: the filter means
+					// "the callable browser prelude replaces these servers", which
+					// needs `eval` registered AND active. Forwarding the bare value
+					// disconnects the browser servers of a session that has no
+					// prelude to replace them, stripping its only browser capability.
+					if (this.#mayMutateMcpConnections) {
+						const tools = await this.#reconcileBrowserMcpFilter(
+							shouldFilterBrowserMCPForPrelude({
+								restrictToolNames: false,
+								browserEnabled: value === true,
+								evalRegistered: this.#tools.registry.has("eval"),
+								evalActive: this.agent.state.tools.some(tool => tool.name === "eval"),
+							}),
+						);
+						await this.refreshMCPTools(tools);
+					}
 				}
 				await this.refreshBaseSystemPrompt();
-			})().catch(error => {
+			})();
+			const previous = this.#evalPreludeReconciliation;
+			// The stored tail is deliberately failure-swallowing so one
+			// notification's throw never rejects the next in line, nor surfaces as
+			// an unhandled rejection through an awaiting refresh: the recovery
+			// below is the whole error contract for this path.
+			// Both the in-flight and any earlier reconciliation must be joinable, so
+			// a refresh that moved BOTH settings waits for the pair.
+			this.#evalPreludeReconciliation = Promise.allSettled([previous, reconciliation]).then(() => {});
+			reconciliation.catch(error => {
 				if (path === "browser.enabled" && value === true && this.settings.get("browser.enabled")) {
 					this.settings.override("browser.enabled", false);
 				}
@@ -1977,7 +2476,22 @@ export class AgentSession {
 			}
 		});
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
-			void this.#tools.reconcileCodeMode().catch(error => {
+			// Started EAGERLY, exactly like the eval-prelude listener above, and
+			// only the promise is retained. The signal fires synchronously from
+			// `settings.reload()`/`override()`, and callers assert on the
+			// repartitioned tool set in that same turn, so deferring the first step
+			// onto a tail would report a stale partition. The handle lets
+			// `#doRefresh` join the work instead of letting a refresh return while
+			// the Code Mode prompt and tool partition are still mid-flight.
+			const reconciliation = this.#tools.reconcileCodeMode();
+			// Failure-swallowing so one signal's throw neither rejects the next
+			// awaiting refresh nor surfaces as an unhandled rejection; the `catch`
+			// below is the whole error contract.
+			this.#codeModeReconciliation = reconciliation.then(
+				() => {},
+				() => {},
+			);
+			reconciliation.catch((error: unknown) => {
 				logger.warn("Code Mode reconcile after setting change failed", { error: String(error) });
 			});
 		});
@@ -5331,6 +5845,1396 @@ export class AgentSession {
 	}
 
 	/**
+	 * Re-read the frozen-at-session-start config surfaces from disk and swap the
+	 * fresh values into this live session, WITHOUT a restart. Pure re-READ: no
+	 * config file is written (the `/model` reformat footgun is avoided by
+	 * construction — see {@link Settings.reload}).
+	 *
+	 * Surfaces (scoped):
+	 * - `skills` / `rules`: re-scan the roster and re-publish the `skill://`
+	 *   / `rule://` snapshots (`skills` and `rules` re-scan together — the roster
+	 *   is one on-disk surface — and select which COUNT is surfaced).
+	 * - `settings`: re-read every settings layer + re-resolve the default model,
+	 *   swapping the active model iff it changed and the user has NOT pinned a
+	 *   session-only `/model` override.
+	 * - `mcp`: disconnect + rediscover MCP servers and rebind their tools.
+	 * - `all`: every surface above.
+	 *
+	 * Runs on the top-level session and fans the skills snapshot out to running
+	 * subagents (each binds its own `this.session.skills`). A no-op reload keeps
+	 * the system prompt byte-identical so Anthropic prompt caching keeps hitting.
+	 */
+	async refresh(scope: RefreshScope = "all"): Promise<RefreshResult> {
+		// Serialize onto the tail so overlapping callers run strictly in order,
+		// each seeing a fully-applied prior refresh.
+		const run = this.#refreshTail.then((): RefreshResult | Promise<RefreshResult> => this.#doRefresh(scope));
+		// The stored tail is deliberately failure-swallowing so one caller's throw
+		// never rejects the next in line.
+		this.#refreshTail = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
+	}
+
+	async #doRefresh(scope: RefreshScope): Promise<RefreshResult> {
+		// Host pre-hook: stage fresh config to disk before any surface is re-read.
+		// First statement in the critical section, so a throw here releases the
+		// mutex with all roster/settings/MCP state untouched.
+		if (this.#onBeforeRefresh) await this.#onBeforeRefresh(scope);
+		const doRoster = scope === "all" || scope === "skills" || scope === "rules";
+		const doSettings = scope === "all" || scope === "settings";
+		const doMcp = scope === "all" || scope === "mcp";
+
+		const result: RefreshResult = {};
+		let rosterChanged = false;
+
+		// Clear the process-global capability fs cache before re-reading ANY
+		// surface. `capability/fs.readFile` caches file bytes for the process
+		// lifetime with no mtime check, so re-running discovery over it would
+		// enumerate NEW skill/rule/.mcp.json files but serve STALE bytes for an
+		// EDITED one — the headline `refresh` case (edited rulebook, edited
+		// mcp.json). Every other reload path clears first for exactly this reason:
+		// `/new` and SessionTools.refreshSkills() call resetCapabilities(), and the
+		// MCP config writer invalidates on write.
+		//
+		// Settings-only refresh needs it too: `Settings.#readProjectSettings`
+		// reloads the foreign project layers (`.claude/settings.json`,
+		// `.cursor/settings.json`, `.omp/config.yml`, Codex `config.toml`, …)
+		// through `loadCapability(settingsCapability.id)`, whose providers read
+		// via that same cache. Without clearing, `/refresh settings` after editing
+		// one of those files re-read the STARTUP bytes and reported "settings
+		// unchanged" — the exact failure the tool exists to prevent.
+		resetCapabilities();
+
+		// Re-point the MCP manager's discovery cwd BEFORE any surface is re-read,
+		// and specifically before `settings.reload()` below. The manager captured
+		// its cwd at construction, but `/move` (and a cross-project resume)
+		// repoints `SessionManager` and `Settings` while leaving the manager
+		// behind — so every config load it performs reads the ORIGINAL project.
+		//
+		// The MCP reconnect further down is NOT the only load this refresh can
+		// trigger: `settings.reload()` emits `onEffectiveChange`, and the
+		// eval-prelude listener handles `browser.enabled` by calling
+		// `MCPManager.reconcileBrowserFilter`, which loads the MCP configuration
+		// itself. That listener fires SYNCHRONOUSLY from the reload, so a
+		// `setCwd` placed after it (or in the `mcp` branch alone) came too late:
+		// a `browser.enabled` true->false flip on a moved session loaded the
+		// PREVIOUS project's `.mcp.json` and spawned its stdio browser servers.
+		// Hoisted here it covers both loads on every scope, including
+		// `settings`-only, which never reaches the reconnect block at all.
+		//
+		// Gated on OWNERSHIP, the same predicate the reconnect block uses: a
+		// subagent that merely inherits its parent's manager must not repoint the
+		// shared manager's discovery at the child's directory.
+		if (this.#mayMutateMcpConnections) this.#mcpManager?.setCwd(this.sessionManager.getCwd());
+
+		// Re-read settings BEFORE the roster scan so a changed `skills.*` config
+		// (enabled/customDirectories/ignoredSkills) or `disabledExtensions` from
+		// disk is applied to this discovery — not the launch-time snapshot. The
+		// roster below reads the live `this.settings` instance, so it must be
+		// reloaded first. Runs for `settings`/`all`; a `skills`/`rules`-only
+		// refresh does not touch settings and reads whatever the live instance
+		// already holds.
+		if (doSettings) {
+			// Values the reload cannot apply on its own, captured BEFORE it so the
+			// post-reload comparison detects an actual on-disk CHANGE. Reconciling
+			// unconditionally would clobber a runtime selection an RPC/ACP client
+			// or the interactive selector made this session (each of these setters
+			// persists, so a session-held value the file lacks is exactly the shape
+			// a runtime override takes), and would re-render the system prompt on
+			// every refresh, breaking provider prompt caching.
+			const previousQueueModes = {
+				steeringMode: this.settings.get("steeringMode"),
+				followUpMode: this.settings.get("followUpMode"),
+				interruptMode: this.settings.get("interruptMode"),
+			};
+			// Same capture-then-compare shape, for the live SUBSYSTEMS a reload
+			// cannot reach: each is started/installed from its setting at
+			// construction and then read from its own runtime state, not from
+			// `settings.get(...)` at use time.
+			const previousSubsystems = {
+				memoryBackend: this.settings.get("memory.backend"),
+				autoLearnEnabled: this.settings.get("autolearn.enabled"),
+				// Copied into `ModelControls` at construction and read from there by
+				// Ctrl+P and `/models`; a reload alone never revisits it.
+				enabledModels: this.settings.get("enabledModels"),
+				advisorEnabled: this.settings.get("advisor.enabled"),
+				externalThinking: this.settings.get("externalThinking"),
+				browserEnabled: this.settings.get("browser.enabled"),
+				// Gate whether the `generate_image`/`tts` tool sets exist at all;
+				// installed once at construction with no later add/remove path.
+				imageGenEnabled: this.settings.get("generate_image.enabled"),
+				speechGenEnabled: this.settings.get("speechgen.enabled"),
+				// Same shape for the CORE built-ins gated on a plain boolean
+				// (`bash.enabled`, `glob`, `grep`, …): `createTools` reads each gate
+				// once at construction and the tools never re-check it.
+				// The compound-gated settings ride with the table: their tool gates
+				// are reconciled alongside them, so an edit to one alone still has
+				// to trigger.
+				booleanGatedTools: GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
+				// Module-level state in `lsp/client.ts`, consulted on every client
+				// COLD-START, so a reload alone left servers started after the
+				// refresh on the launch-time shared/private choice.
+				sharedLsp: this.settings.get("lsp.shared"),
+				computerEnabled: this.settings.get("computer.enabled"),
+				// Gates whether an obfuscator exists at all. The instance itself is
+				// built from `secrets.yml`, which this refresh also re-reads, so the
+				// rebuild below is keyed on the flag OR the file's content moving.
+				secretsEnabled: this.settings.get("secrets.enabled"),
+			};
+			// The search/image implementations read MODULE-level state that
+			// `applyProviderGlobalsFromSettings` installs at startup, never
+			// `settings.get(...)` at call time, so a reload alone leaves searches
+			// running the launch-time order/exclusions. Captured for the same
+			// change-gating reason as the rest: the interactive selector writes
+			// these globals directly on each edit, and re-applying an unmoved
+			// value would clobber that session-local selection.
+			const previousProviderGlobals = [
+				this.settings.get("providers.webSearchOrder"),
+				this.settings.get("providers.webSearchExclude"),
+				this.settings.get("providers.imageOrder"),
+			];
+			// The three `tier.*` settings are copied into `ModelControls`'s private
+			// per-family map at startup, and `agent.serviceTierResolver` reads that
+			// map — not the settings — on every request. Captured as the CONFIGURED
+			// map (not the live one) so the reconcile below can tell a family the
+			// config moved from one the session moved itself via `/fast`, the
+			// settings selector, or an RPC/ACP client.
+			const previousConfiguredServiceTiers = this.#configuredServiceTiers();
+			const previousPromptSettings = this.#promptAffectingSettings();
+			const previousGenerationSettings = this.#generationSettings();
+			const { changed } = await this.settings.reload();
+			result.settingsChanged = changed;
+			// NOT gated on `changed`. A resumed session restores its transcript
+			// model while `Settings` already holds a default that was edited while
+			// the process was stopped, so the first refresh reloads nothing (the
+			// file has not moved since startup read it) and the retired default
+			// stayed active indefinitely. `#applyReloadedModel` is self-guarding —
+			// it honors a `/model` pin, reproduces startup's selection, and returns
+			// false when the model does not move — so running it on an unchanged
+			// reload costs one re-resolve and swaps only when the config genuinely
+			// disagrees with the live model.
+			result.modelSwapped = await this.#applyReloadedModel();
+			// Reconcile the LIVE agent's queue modes. These are read from `Agent`
+			// state (`getSteeringMode`/`getFollowUpMode`/`getInterruptMode`), not
+			// from settings at use time, and move only through the matching
+			// setters — which is why the interactive settings selector calls them
+			// explicitly. Reloading `Settings` alone therefore left queuing running
+			// under the construction-time behavior while the refresh reported
+			// success. Applied through `this.agent` rather than the public
+			// `setSteeringMode`/`setFollowUpMode`/`setInterruptMode` wrappers: those
+			// write the value straight back into settings, which would re-dirty the
+			// layer this refresh just re-read from disk.
+			if (changed) {
+				const steeringMode = this.settings.get("steeringMode");
+				if (steeringMode !== previousQueueModes.steeringMode) this.agent.setSteeringMode(steeringMode);
+				const followUpMode = this.settings.get("followUpMode");
+				if (followUpMode !== previousQueueModes.followUpMode) this.agent.setFollowUpMode(followUpMode);
+				const interruptMode = this.settings.get("interruptMode");
+				if (interruptMode !== previousQueueModes.interruptMode) this.agent.setInterruptMode(interruptMode);
+			}
+			// Reconcile the LIVE agent's request-generation fields. Same class of
+			// staleness as the queue modes above: sdk.ts copies these into mutable
+			// `Agent` fields at construction and request building reads the fields,
+			// so a settings reload alone never reaches a model call.
+			// Also on a model swap with an UNCHANGED reload: `tools.format` and
+			// `inlineToolDescriptors` resolve `auto` against the model, so two models
+			// can disagree while the settings do not move. On the offline-edit resume
+			// path `#applyReloadedModel` swaps with `changed === false`, which left
+			// the agent pairing a new model with the old dialect/pruning policy. The
+			// method is per-field gated, so this reconciles only what actually moved.
+			if (changed || result.modelSwapped) {
+				this.#applyReloadedGenerationSettings(previousGenerationSettings);
+			}
+			// Same staleness one layer deeper: the per-family SERVICE TIER lives in
+			// `ModelControls`'s private map rather than an `Agent` field, and
+			// `agent.serviceTierResolver` consults it per request, so a `tier.*`
+			// edit plus `/refresh settings` otherwise kept every request on the
+			// launch-time tier while reporting success.
+			if (changed) {
+				this.#models.applyReloadedServiceTiers(previousConfiguredServiceTiers, this.#configuredServiceTiers());
+			}
+			// The system prompt is a RENDERED artifact: `rebuildSystemPrompt` reads
+			// these from the live settings instance, so a reload alone changes
+			// nothing the model sees. The interactive selector calls
+			// `refreshBaseSystemPrompt()` for each of them for exactly this reason,
+			// but a settings-only refresh with no roster change and no model swap
+			// left `rosterChanged` false and skipped the sole rebuild. Gated on a
+			// real value change so an unrelated settings edit keeps the prompt
+			// byte-identical and prompt caching keeps hitting.
+			if (changed && !Bun.deepEquals(previousPromptSettings, this.#promptAffectingSettings())) {
+				rosterChanged = true;
+			}
+			// Apply reloaded TTSR runtime settings (enabled/contextMode/interruptMode/
+			// repeatMode/repeatGap, plus builtinRules/disabledRules) to the reused
+			// manager, preserving injection/trigger state. The roster re-bucket below
+			// only forwards the gating flags; without this the interrupt/context/repeat
+			// runtime behavior would stay frozen at construction until restart. Runs
+			// on a `settings`-only refresh too, which never enters the roster block.
+			if (changed) this.ttsrManager?.reconfigure(this.settings.getGroup("ttsr"));
+			// A settings-only refresh (no roster block below) must still apply the
+			// reloaded TTSR *gating* — `ttsr.disabledRules`/`builtinRules`. These are
+			// bucketing-only levers enforced by `bucketRules`, which the roster path
+			// runs but a `settings` scope does not. Without this, toggling
+			// `disabledRules` + `/refresh settings` leaves a disabled rule still
+			// registered and still triggering. Re-bucket the CURRENT rule set (no
+			// disk rediscovery) against the new gating and retain the survivors.
+			// `scope: all`/`rules` already re-buckets from disk in the roster block,
+			// so this only runs on a settings-only refresh. Boundary: re-ENABLING a
+			// previously-dropped rule (removed from `disabledRules`, or
+			// `builtinRules` flipped back on) needs the roster rediscovery — a
+			// dropped rule is absent from the current set, so a settings-only
+			// refresh cannot resurrect it.
+			if (changed && !doRoster && this.#reconcileRuleGatingFromSettings()) rosterChanged = true;
+			// Sync the MCP notifications flag from the reloaded settings onto THIS
+			// session's manager. Runs on a `settings`-only refresh too (which never
+			// enters the MCP reconnect block): reloading `Settings` alone never calls
+			// `setNotificationsEnabled`, so a `mcp.notifications` false->true flip
+			// would otherwise leave already-connected servers unsubscribed — and even
+			// an `all` reconnect would re-connect them with the stale flag still off.
+			// `setNotificationsEnabled` self-guards on no-change and subscribes the
+			// live connections directly; the `all` reconnect below then re-subscribes
+			// the freshly reconnected servers under the now-current flag.
+			//
+			// Gated on subagent depth, like the project-config reconcile below: a
+			// child shares its parent's manager, and subscribing/unsubscribing there
+			// would rewrite the PARENT's live server subscriptions from the child's
+			// settings scope.
+			if (changed && this.#mayMutateMcpConnections) {
+				this.#mcpManager?.setNotificationsEnabled(this.settings.get("mcp.notifications") ?? false);
+			}
+			// Same shape for `mcp.enableProjectConfig`: `MCPManager` consumes it only
+			// during discovery, so flipping it off and running `/refresh settings`
+			// left the project servers this session already started connected and
+			// their tools callable. The reconnect block below is skipped on a
+			// settings-only refresh, so reconcile the filter here — like the browser
+			// MCP filter — and register the join so the refresh does not report
+			// success while servers are still being torn down. Self-guards on
+			// no-change, so an unrelated settings edit touches no connection.
+			//
+			// Gated on subagent depth, the same predicate the `doMcp` block below
+			// uses: a child shares its parent's manager, and reconciling there would
+			// disconnect the PARENT's project servers and rewrite its discovery policy
+			// from the child's settings scope. The child still refreshes its own tool
+			// view from the shared manager, which mutates nothing.
+			if (changed && !doMcp && this.#mcpManager) {
+				const manager = this.#mcpManager;
+				const mayMutate = this.#mayMutateMcpConnections;
+				this.registerHostReconciliation(
+					(async () => {
+						if (mayMutate) {
+							const reconciled = await manager.reconcileProjectConfigFilter(
+								this.settings.get("mcp.enableProjectConfig") ?? true,
+							);
+							// Exa MCP entries are filtered out in favour of the native
+							// integration, so the credential discovery extracted never
+							// rides a connection. Applied through the same helper startup
+							// and the full MCP reload use, keyed on this session's own
+							// manager so one session can neither replace nor delete a
+							// PEER session's injected key. Without this, revealing a
+							// project Exa entry left the native integration
+							// unauthenticated and hiding one kept the stale key live.
+							// Only when discovery actually ran: an absent list means the
+							// setting did not move, and applying an empty one would read as
+							// "the configured key was removed" and clear a live key.
+							if (reconciled.exaApiKeys) applyMCPEnvironment({ exaApiKeys: reconciled.exaApiKeys }, manager);
+						}
+						await this.refreshMCPTools(manager.getTools());
+					})(),
+				);
+			}
+			// A settings-only refresh must also install the reloaded `skills.*`
+			// snapshot and notify command-metadata subscribers. Reloading `Settings`
+			// alone never touches `SessionTools.#skillsSettings`, and that cached
+			// snapshot — not the live settings instance — is what gates the skill
+			// command surface for ACP discovery/execution (available-commands.ts,
+			// acp-agent.ts) and RPC skill invocation (rpc-mode.ts). Without this,
+			// editing `skills.enableSkillCommands` and running `/refresh settings`
+			// leaves all three accepting or rejecting `/skill:*` under the OLD flag
+			// until an unrelated `skills`/`all` refresh happens.
+			//
+			// Only on a settings-only refresh: the roster block below already
+			// installs the same snapshot through `applyReloadedSkills` and fires its
+			// own notification, so running here too would double-notify an `all`
+			// refresh. The installer self-reports the flag delta, so an unchanged
+			// config notifies nobody and prompt caching keeps hitting.
+			if (changed && !doRoster && this.#tools.applyReloadedSkillsSettings(this.settings.getGroup("skills"))) {
+				this.#notifyCommandMetadataChanged();
+			}
+			// Reconcile the live SUBSYSTEMS. Each of these is started (or its tools
+			// installed) from its setting at construction and thereafter reads its
+			// own runtime state, so reloading `Settings` alone left the subsystem
+			// running its launch-time behavior while the refresh reported success.
+			// Every branch is gated on the value having actually MOVED on disk, for
+			// the same reason as the queue modes above: each of these also has a
+			// session-local surface (`/advisor on`, the settings selector) whose
+			// selection the config file cannot see, and re-applying an unmoved
+			// setting would clobber it — and for the memory backend a blind
+			// re-apply would additionally tear down a healthy live backend.
+			if (changed) {
+				// `advisor.enabled` lives in `SessionAdvisors.#advisorEnabled` and
+				// moves only through this setter. A true->false refresh is the
+				// serious direction: it otherwise leaves the advisor running and
+				// consuming provider requests.
+				const advisorEnabled = this.settings.get("advisor.enabled");
+				if (advisorEnabled !== previousSubsystems.advisorEnabled) this.setAdvisorEnabled(advisorEnabled);
+				// `externalThinking` gates the private `think` scratchpad, which was
+				// reconciled only after a model change: enabling left `think` absent,
+				// disabling left it active and callable, until a model switch.
+				if (this.settings.get("externalThinking") !== previousSubsystems.externalThinking) {
+					await this.#tools.reconcileThinkTool();
+				}
+				// `generate_image.enabled`/`speechgen.enabled` gate whether those
+				// tool sets EXIST. sdk.ts pushes them into `customTools` once at
+				// construction with no later registration or removal path, so an
+				// enable left the tools unavailable and a disable left them active
+				// and callable — the same shape as `think` above. Gated on the
+				// values having moved for the same reason as every other branch
+				// here: the active tool set also moves through `/tools` and the
+				// Code Mode partition, and a blind re-apply would clobber that.
+				if (
+					this.settings.get("generate_image.enabled") !== previousSubsystems.imageGenEnabled ||
+					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled ||
+					!Bun.deepEquals(
+						previousSubsystems.booleanGatedTools,
+						GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
+					)
+				) {
+					const evalWasActive = this.agent.state.tools.some(tool => tool.name === "eval");
+					await this.#tools.reconcileSettingGatedTools();
+					// The browser-MCP filter asks whether a callable browser prelude
+					// replaces those servers, which reads `eval`'s registered/active
+					// state — and this reconcile is now what moves it. Without a
+					// re-filter, enabling a backend activates the prelude while the
+					// browser servers stay connected, and disabling the last one
+					// leaves them filtered out with nothing serving browser
+					// automation. Evaluated against the POST-reconcile tool state,
+					// and only on a real transition so an unrelated gate edit
+					// touches no connection.
+					const evalIsActive = this.agent.state.tools.some(tool => tool.name === "eval");
+					// Depth, not ownership — same reason as the `browser.enabled`
+					// listener: a top-level embedder supplying its own manager must
+					// still reconcile; only a subagent shares one with a parent.
+					if (evalWasActive !== evalIsActive && this.#reconcileBrowserMcpFilter && this.#mayMutateMcpConnections) {
+						const tools = await this.#reconcileBrowserMcpFilter(
+							shouldFilterBrowserMCPForPrelude({
+								restrictToolNames: false,
+								browserEnabled: this.settings.get("browser.enabled"),
+								evalRegistered: this.#tools.registry.has("eval"),
+								evalActive: evalIsActive,
+							}),
+						);
+						await this.refreshMCPTools(tools);
+					}
+				}
+				// `memory.backend` is prompt-affecting, so a change already rebuilds
+				// the prompt with the NEW backend's instructions — but the transition
+				// that disposes the old backend's state, starts the new one, and
+				// replaces its tools happens only here (the interactive settings
+				// controller calls this for the same reason). Without it the model
+				// sees the new backend over the old backend's tools, and calls
+				// targeting the new one fail until restart.
+				if (this.settings.get("memory.backend") !== previousSubsystems.memoryBackend) {
+					await this.applyMemoryBackend();
+				}
+				// `browser.enabled`/`computer.enabled` DO reach a listener — the
+				// eval-prelude `onEffectiveChange` subscriber — but it launches an
+				// async IIFE and returns immediately, so `settings.reload()` above
+				// resolved with the browser-MCP tool set and system prompt still
+				// unreconciled. Awaiting the session's own transition here makes it
+				// part of the awaited refresh: the refresh cannot report completion
+				// (nor can an `all` refresh reach the MCP disconnect below) while
+				// that work is still in flight. The listener self-guards, so this is
+				// an await of whatever it started rather than a second reconcile.
+				if (
+					this.settings.get("browser.enabled") !== previousSubsystems.browserEnabled ||
+					this.settings.get("computer.enabled") !== previousSubsystems.computerEnabled
+				) {
+					await this.#evalPreludeReconciliation;
+				}
+				// Provider ordering/exclusion lives in MODULE-level state the
+				// search and image implementations read at call time; only this
+				// centralized helper installs it (startup and every cwd-rescope
+				// path call it after reloading for exactly this reason). Without
+				// it, searches after `/refresh settings` keep using the old
+				// provider order or exclusions.
+				if (
+					!Bun.deepEquals(previousProviderGlobals, [
+						this.settings.get("providers.webSearchOrder"),
+						this.settings.get("providers.webSearchExclude"),
+						this.settings.get("providers.imageOrder"),
+					])
+				) {
+					applyProviderGlobalsFromSettings(this.settings);
+				}
+				// Same class as the provider globals above: `lsp.shared` is copied
+				// into module state that `getOrCreateClient` reads when it cold-starts
+				// a server, never re-read from settings, so language servers started
+				// after `/refresh settings` stayed shared (or private) against the
+				// refreshed value. Delegated to the host because the effective flag is
+				// `enableLsp && lsp.shared`, and `enableLsp` is a construction input a
+				// settings read cannot recover.
+				if (this.settings.get("lsp.shared") !== previousSubsystems.sharedLsp) {
+					this.#reconcileSharedLsp?.();
+				}
+				// `autolearn.enabled` off→on: the controller is never constructed for
+				// a session that started with it off, so the nudge could not fire
+				// however the setting moved. The DISABLE direction already works —
+				// the controller re-checks the setting when it fires.
+				if (this.settings.get("autolearn.enabled") !== previousSubsystems.autoLearnEnabled) {
+					this.#reconcileAutoLearn?.();
+				}
+				// `enabledModels` is copied OUT of settings into `ModelControls` at
+				// construction, and the only later write is the one-time
+				// post-discovery rebuild — so Ctrl+P and `/models` kept offering the
+				// launch-time allowlist indefinitely after an edit, including a clear.
+				// Awaited: the resolver may hit the registry, and the selector must
+				// not open against the old scope.
+				if (!stringArrayEqual(this.settings.get("enabledModels"), previousSubsystems.enabledModels)) {
+					await this.#reconcileScopedModels?.();
+				}
+				// The Code Mode signal DOES reach a listener, but that listener
+				// launches `reconcileCodeMode()` fire-and-forget, so the refresh
+				// could return — and the current tool loop make its next provider
+				// request — before the tool partition and prompt were repartitioned.
+				// `#codeModeReconciliation` is a JOIN handle the listener retains
+				// (never deferred work), so this awaits whatever it started.
+				await this.#codeModeReconciliation;
+				// Same shape for `extendedContext`: its subscriber starts
+				// `#reapplyExtendedContextPolicy()` with `void`, so the refresh
+				// could return before the model registry and live model received
+				// the new context window and the next turn would compute compaction
+				// limits from the stale one.
+				await this.#extendedContextReconciliation;
+				// Same shape again for the reconciliations `createAgentSession`'s own
+				// listeners own (workspace roots): they persist the new value and
+				// rebuild the prompt, so returning before they land leaves an added
+				// root unadvertised and a removed one still in the model's prompt.
+				await this.#hostReconciliation;
+			}
+			// The obfuscator is built ONCE at construction from `secrets.enabled`
+			// + `secrets.yml`. The `secrets.enabled` setting hook only toggles
+			// generic credential-pattern redaction, so enabling secrets on disk
+			// left the configured arbitrary secrets from `secrets.yml` still being
+			// sent to providers while the refresh reported the privacy setting
+			// updated. Rebuilt through the HOST hook, which also reassigns the
+			// sdk.ts closure local — the session's own field alone would not reach
+			// `convertToLlmFinal`, `transformProviderContext`, or tool-argument
+			// deobfuscation.
+			//
+			// Deliberately OUTSIDE the merged-settings change gate. `secrets.yml`
+			// is a disk surface this refresh re-reads but `Settings` never merges,
+			// so editing it alone leaves `reload()` reporting no change: gating the
+			// rebuild on that kept a newly added secret going to providers
+			// unobfuscated until some unrelated setting moved or the session
+			// restarted. Skipped entirely while secrets stay off, so the common
+			// refresh still pays no disk read; `previousSubsystems` keeps the
+			// enabled->disabled transition dropping the obfuscator.
+			const secretsEnabled = this.settings.get("secrets.enabled");
+			if (this.#rebuildObfuscator && (secretsEnabled || previousSubsystems.secretsEnabled)) {
+				const rebuilt = await this.#rebuildObfuscator();
+				this.#obfuscator = rebuilt.obfuscator;
+				// The `<redacted-content>` prompt block must move with the
+				// obfuscator's ability to MINT placeholders. It renders from a host
+				// closure value the merged-settings snapshot cannot see, so the host
+				// reports the move directly and the batched rebuild below picks it
+				// up. Without this the session started emitting `$$HASH$$` while the
+				// prompt still never told the model they were intentional — and a
+				// later unrelated rebuild reproduced the same stale flag.
+				if (rebuilt.promptStateChanged) rosterChanged = true;
+			}
+		}
+
+		if (doRoster) {
+			const ttsrManager = this.ttsrManager;
+			if (ttsrManager) {
+				const ttsrSettings = this.settings.getGroup("ttsr");
+				// Fresh skills-settings snapshot from the LIVE settings instance
+				// (reloaded above for an `all` refresh). Threaded into the reload AND
+				// back into the per-session snapshot so `skills.enableSkillCommands`
+				// changes reach the reload discovery and the command surface alike.
+				const freshSkillsSettings = this.settings.getGroup("skills");
+				const prevEnableSkillCommands = this.#tools.skillsSettings?.enableSkillCommands;
+				// Which rule set this refresh re-buckets. An EXPLICIT policy is a
+				// caller restriction and stays authoritative; an INHERITED one is
+				// just the roster the parent handed down at spawn, and the live
+				// `#sourceRosterRules` is its current successor (the parent's
+				// fan-out installs each newer roster there). Falls back to the
+				// policy when no real ungated source exists, so a session without
+				// one keeps re-bucketing the array it was launched with rather than
+				// the constructor's gated stand-in.
+				const inputRulePolicy = this.#rulesPolicyInherited
+					? this.#hasUngatedSourceRoster
+						? this.#sourceRosterRules
+						: this.#rulesPolicy
+					: this.#rulesPolicy;
+				const reloaded = await reloadSkillsAndRules({
+					cwd: this.sessionManager.getCwd(),
+					// Derive from the LIVE settings instance (reloaded above for an
+					// `all` refresh), not the frozen construction snapshot, so an
+					// edited `skills.*` config takes effect.
+					skillsSettings: freshSkillsSettings,
+					disabledExtensions: this.settings.get("disabledExtensions") ?? undefined,
+					// Same live roots the MCP reconnect threads: a session with
+					// explicit/session-local roots or discovery disabled must reload
+					// skills+rules against ITS scope, not process-level discovery.
+					extensionRoots: this.effectiveExtensionRoots,
+					ttsrManager,
+					ttsrSettings: {
+						builtinRules: ttsrSettings.builtinRules,
+						disabledRules: ttsrSettings.disabledRules,
+					},
+					// A non-reloadable roster (--no-skills / SDK `skills: []`) marks the
+					// session's skills frozen; `refreshSkills()` honors that. Feed the
+					// current snapshot back in so the reload keeps it (skipping the disk
+					// re-scan) instead of re-discovering ambient skills and enabling them.
+					skills: this.#tools.skillsReloadable ? undefined : this.skills,
+					// A caller-supplied rule policy (SDK `rules` / `--no-rules`) is
+					// re-bucketed as-is; the reload re-scans disk only when it is absent,
+					// so a refresh cannot re-enable ambient rules the session excluded.
+					//
+					// An INHERITED policy is not such a restriction: the spawn path
+					// always forwards the parent's roster, so a structured subagent
+					// carries one even though nobody chose it. It is also a FROZEN
+					// launch-time array, while the parent's fan-out keeps installing
+					// newer rosters into `#sourceRosterRules` — so re-bucketing the
+					// policy here rolled this child, and everything it spawns, back to
+					// the launch-time rule contents. Prefer the live inherited source
+					// roster and keep the fixed policy only for an explicit
+					// restriction.
+					rules: inputRulePolicy,
+					// Re-bucket under the SAME agent scope init used. Omitted,
+					// `bucketRules` disables `agents` scoping entirely and a refresh
+					// would activate rules scoped to other agents in this session.
+					agentName: this.#agentRuleName,
+					// Only a TOP-LEVEL session may replace the process-global
+					// skills/rules snapshots — that is exactly who publishes them at
+					// init (`sdk.ts` gates on `!options.parentTaskPrefix`, the same
+					// distinction `#agentKind` carries). A subagent's roster is
+					// bucketed under the CHILD's agent name, so publishing it left
+					// contextless consumers in the parent process (a
+					// `RuleProtocolHandler` with no session-local array,
+					// `getActiveSkills()`) serving the child's scoped set until the
+					// parent itself refreshed. The child still gets the fresh roster
+					// in its own session-local state below.
+					publishGlobals: this.#agentKind === "main",
+				});
+				// Compare against the value captured BEFORE the reload, and do it
+				// AFTER `applyReloadedSkills` installs `freshSkillsSettings`: the
+				// getter reads the very field that call overwrites, so reading it
+				// beforehand compared the old value with itself and was always
+				// false. With `skillsChanged` also false (roster unchanged), that
+				// left command-metadata subscribers unnotified and ACP/RPC clients
+				// advertising the old `/skill:*` set.
+				const skillsChanged = this.applyReloadedSkills(
+					reloaded.activeSkills,
+					freshSkillsSettings,
+					reloaded.skillWarnings,
+				);
+				const enableSkillCommandsChanged =
+					this.#tools.skillsSettings?.enableSkillCommands !== prevEnableSkillCommands;
+				// Rebuild the available-command metadata when the skill roster changed
+				// OR the `skills.enableSkillCommands` flag flipped — mirroring
+				// `refreshSkills()`, which always fires it. Gating on the flag alone
+				// left a freshly added/removed/renamed `/skill:*` command absent or
+				// stale until an unrelated notification, because a roster edit with
+				// commands already enabled leaves the flag unchanged.
+				if (skillsChanged || enableSkillCommandsChanged) {
+					this.#notifyCommandMetadataChanged();
+				}
+				// A rules-only change (edited rulebook / new always-apply rule with
+				// no skill change) must also rebuild the advertised prompt. Compare
+				// the rendered roster buckets — now reload-stable (bucketRules no
+				// longer mis-buckets already-registered TTSR rules) — against the
+				// last snapshot so the rebuild fires on a real rule change and
+				// stays a no-op otherwise (keeping prompt caching intact).
+				const nextRosterRules = [...reloaded.rulebookRules, ...reloaded.alwaysApplyRules];
+				const rulesChanged = !rulesEqual(this.#rosterRules, nextRosterRules);
+				this.#rosterRules = nextRosterRules;
+				// Re-snapshot the UNGATED discovery output too, so the next
+				// settings-only refresh re-buckets what is actually on disk now
+				// (including any rule currently gated off) rather than the
+				// launch-time set.
+				this.#sourceRosterRules = reloaded.sourceRules;
+				// A real discovery, so it IS authoritative about which rule names
+				// still exist — even if construction only had the gated fallback.
+				this.#hasUngatedSourceRoster = true;
+				// ACCUMULATE, never assign: on the default `refresh("all")` the
+				// settings phase above may already have set this (a moved
+				// `personality`/`includeModelInPrompt`/xdev prompt setting, or a TTSR
+				// gating reconcile). A plain assignment clobbered that decision
+				// whenever the skill/rule roster was unchanged, so the final guard
+				// skipped the rebuild and the refreshed setting never reached the
+				// model.
+				rosterChanged ||= skillsChanged || rulesChanged;
+				this.#applyReloadedRoster?.({
+					skills: reloaded.activeSkills,
+					rulebookRules: reloaded.rulebookRules,
+					alwaysApplyRules: reloaded.alwaysApplyRules,
+					// The set the reload PUBLISHED globally, so the host's
+					// session-local snapshot carries the identical rules rather
+					// than re-deriving them from the manager's retained registry.
+					publishedTtsrRules: reloaded.publishedTtsrRules,
+					sourceRules: reloaded.sourceRules,
+				});
+				// Fan the fresh roster out to running descendants. The skill fan-out
+				// above handles skills only; a child's rule state (its `activeRules`
+				// snapshot, its prompt buckets, and its own TTSR registrations) is
+				// just as stale, and `rule://` prefers that snapshot over the
+				// process global the reload just swapped.
+				this.#applyReloadedRulesToDescendants(reloaded.sourceRules);
+				// Skills and rules are ONE on-disk surface, so the discovery above
+				// necessarily rescans both — but the requested scope selects which
+				// COUNT is reported (the documented scoped contract). Reporting both
+				// made `/refresh skills` print a rules result and vice versa.
+				if (scope !== "rules") result.skills = reloaded.skills;
+				if (scope !== "skills") result.rules = reloaded.rules;
+			}
+		}
+
+		if (doMcp) {
+			// Refresh THIS session's own manager, not the process-global
+			// `MCPManager.instance()`: with multiple top-level SDK/ACP sessions,
+			// `createAgentSessionScoped` calls `setInstance` per session, so
+			// `instance()` may be a different session's manager — refreshing session
+			// A would disconnect session B's servers.
+			//
+			// Gated on subagent depth: a child granted the `refresh` tool shares its
+			// PARENT's manager, and disconnecting/rediscovering it would interrupt
+			// concurrent parent calls and replace the parent's MCP configuration with
+			// the child's settings/extension scope. A subagent `refresh('mcp')` is a
+			// no-op (result.mcp unset); a TOP-LEVEL embedder that supplied its own
+			// manager still refreshes.
+			const mcpManager = this.#mcpManager;
+			if (mcpManager && this.#mayMutateMcpConnections) {
+				// Reuse the shared reconnect-and-rebind sequence the /mcp reload and
+				// /reload-plugins surfaces use, so this path cannot drift from them.
+				// It clears the MCP prompt commands (no stale /server:prompt after a
+				// server is removed) and threads this session's extension roots so
+				// extension-declared servers survive the reconnect instead of
+				// vanishing until restart. Discovery options mirror startup (sdk.ts):
+				// without them, defaults re-enable project-level MCP servers a user
+				// opted out of via `mcp.enableProjectConfig: false` and reconnect
+				// browser servers startup deliberately filtered.
+				// Discovery already reads the session's CURRENT directory: the cwd
+				// repoint is hoisted to the top of this refresh, ahead of
+				// `settings.reload()`, because the eval-prelude listener that reload
+				// fires loads the MCP configuration too.
+				const mcpResult = await reloadMcpServers({
+					manager: mcpManager,
+					setMCPPromptCommands: commands => this.setMCPPromptCommands(commands),
+					refreshMCPTools: tools => this.refreshMCPTools(tools),
+					extensionRoots: this.effectiveExtensionRoots,
+					enableProjectConfig: this.settings.get("mcp.enableProjectConfig") ?? true,
+					// Startup does NOT pass the raw `browser.enabled` setting: it passes
+					// `shouldFilterBrowserMCPForPrelude(...)` (sdk.ts), which also
+					// requires the callable browser prelude to actually be reachable
+					// (`eval` registered AND active). Passing the bare setting here
+					// filters browser MCP servers out whenever the setting is on even
+					// though no prelude replaces them, so a refresh silently strips
+					// browser automation from a session that had it. `restrictToolNames`
+					// is necessarily false on this path — a restricted session gets no
+					// `mcpManager` at all (`enableMCP = !restrictToolNames`), and this
+					// code is inside that guard.
+					filterBrowser: shouldFilterBrowserMCPForPrelude({
+						restrictToolNames: false,
+						browserEnabled: this.settings.get("browser.enabled"),
+						evalRegistered: this.#tools.registry.has("eval"),
+						evalActive: this.agent.state.tools.some(tool => tool.name === "eval"),
+					}),
+				});
+				result.mcp = true;
+				// Surface per-server reconnect failures instead of unconditionally
+				// reporting success, mirroring the `/mcp reload` path
+				// (`#showMCPConnectionErrors`). A server that failed to reconnect is
+				// dropped from the tool set but the refresh otherwise ran.
+				if (mcpResult.errors.size > 0) result.mcpErrors = mcpResult.errors;
+			}
+		}
+
+		// Re-render the system prompt once if the roster changed (the MCP path
+		// already reconciles the prompt through its own signature-guarded rebuild;
+		// a model swap re-primes separately). Skipped on a no-op so prompt caching
+		// keeps hitting.
+		if (rosterChanged) {
+			await this.refreshBaseSystemPrompt();
+		}
+
+		return result;
+	}
+
+	/**
+	 * Snapshot the effective values of {@link PROMPT_AFFECTING_SETTING_PATHS}, in
+	 * order. A settings reload swaps the values the rebuild closure reads but
+	 * re-renders nothing, so `#doRefresh` compares this across the reload and
+	 * rebuilds only on a real change. Mirrors `Settings.#codeModeSignalSnapshot`.
+	 */
+	#promptAffectingSettings(): PromptAffectingSettings {
+		return PROMPT_AFFECTING_SETTING_PATHS.map(path => this.settings.get(path));
+	}
+
+	/**
+	 * The per-family tier map the CURRENT `tier.*` settings resolve to — exactly
+	 * what sdk.ts builds at construction, so a before/after pair around the
+	 * reload names the on-disk change rather than the live selection.
+	 */
+	#configuredServiceTiers(): ServiceTierByFamily {
+		return buildServiceTierByFamily(
+			this.settings.get("tier.openai"),
+			this.settings.get("tier.anthropic"),
+			this.settings.get("tier.google"),
+		);
+	}
+
+	/**
+	 * Snapshot the AGENT-FACING values of the request-generation settings — the
+	 * `-1` sentinels already collapsed to `undefined` and the thinking-budget
+	 * group materialized — so `#doRefresh` can compare across the reload and
+	 * apply only what actually moved. Mirrors {@link #promptAffectingSettings}.
+	 */
+	#generationSettings(): GenerationSettings {
+		const sampling = {} as Record<GenerationSamplingSettingPath, number | undefined>;
+		for (const path of GENERATION_SAMPLING_SETTING_PATHS) {
+			const value = this.settings.get(path);
+			// `-1` is the schema default and means "provider default", so it must
+			// reach the agent as `undefined`; passing it through would send a
+			// literal -1 as a real sampling value. Same mapping sdk.ts applies at
+			// construction and the interactive selector applies on each edit.
+			sampling[path] = value >= 0 ? value : undefined;
+		}
+		const websockets = this.settings.get("providers.openaiWebsockets") ?? "off";
+		const kimiApiFormat = this.settings.get("providers.kimiApiFormat");
+		return {
+			sampling,
+			hideThinkingSummary: this.settings.get("omitThinking"),
+			thinkingBudgets: this.settings.getGroup("thinkingBudgets"),
+			// Resolved against the LIVE model, exactly as sdk.ts resolves it at
+			// construction: `auto` depends on whether the active model supports
+			// native tools, so the same `tools.format` yields a different dialect
+			// per model.
+			dialect: resolveDialect(this.settings.get("tools.format"), this.model),
+			// `auto` means "let the provider/model decide" and must reach the
+			// agent as `undefined`, not as a boolean — same tristate mapping
+			// sdk.ts applies.
+			preferWebsockets: websockets === "on" ? true : websockets === "off" ? false : undefined,
+			abortOnFabricatedToolResult: this.settings.get("tools.abortOnFabricatedResult"),
+			// Same tristate shape: `auto` means "use the model's live protocol
+			// metadata" and must reach the agent as `undefined`, not as a literal
+			// format — the mapping sdk.ts applies at construction.
+			kimiApiFormat: kimiApiFormat === "auto" ? undefined : kimiApiFormat,
+			// Same env-override precedence sdk.ts applies at construction, so a
+			// `PI_INTENT_TRACING`-pinned session is not silently un-pinned by a
+			// settings edit.
+			intentTracing: $flag("PI_INTENT_TRACING", this.settings.get("tools.intentTracing")),
+			// Resolved against the model id, since `shouldInlineToolDescriptors`
+			// reads `auto` against it — so the effective value moves with a model
+			// swap as well as with the setting.
+			//
+			// Compared downstream against the AGENT's live field, not a
+			// settings-derived "previous": this runs after `settings.reload()`, so a
+			// settings-derived previous already equals the new value and the
+			// per-field gate would no-op on the swap-only path. The agent's field is
+			// what request assembly reads, and is the thing that must converge.
+			pruneToolDescriptions: shouldInlineToolDescriptors(
+				this.settings.get("inlineToolDescriptors"),
+				this.agent.state.model?.id,
+			),
+		};
+	}
+
+	/**
+	 * Apply the reloaded {@link GENERATION_SAMPLING_SETTING_PATHS}, `omitThinking`,
+	 * `thinkingBudgets`, the owned tool dialect and the remaining provider-loop
+	 * fields onto the live {@link Agent}, field by field, for each value that
+	 * MOVED across the reload.
+	 *
+	 * Written straight onto the agent's mutable fields — exactly what the
+	 * interactive settings selector does — because request generation reads
+	 * those fields, never the live `Settings`, so a reload alone left every
+	 * subsequent model call running the construction-time sampling and reasoning
+	 * configuration while the refresh reported success.
+	 *
+	 * The dialect matters most: `tools.format` is prompt-affecting, so a change
+	 * already rebuilds the rendered tool catalog. Rebuilding the prompt WITHOUT
+	 * moving the agent's dialect is worse than doing neither — the prompt would
+	 * describe native tool calling while the loop kept encoding in-band calls
+	 * (or the reverse), so tool use stops round-tripping entirely.
+	 *
+	 * Per-field change gating, not a blind re-apply: these same fields are what
+	 * the selector (and an SDK host) writes directly, and such a runtime value
+	 * is invisible to the config file, so re-applying an unmoved setting would
+	 * clobber a selection made this session.
+	 */
+	#applyReloadedGenerationSettings(previous: GenerationSettings): void {
+		const next = this.#generationSettings();
+		for (const path of GENERATION_SAMPLING_SETTING_PATHS) {
+			if (next.sampling[path] === previous.sampling[path]) continue;
+			this.agent[path] = next.sampling[path];
+		}
+		if (next.hideThinkingSummary !== previous.hideThinkingSummary) {
+			this.agent.hideThinkingSummary = next.hideThinkingSummary;
+		}
+		// Deep-compared: the reload rebuilds the group object, so an identity
+		// compare would report a change on every refresh.
+		if (!Bun.deepEquals(next.thinkingBudgets, previous.thinkingBudgets)) {
+			this.agent.thinkingBudgets = next.thinkingBudgets;
+		}
+		if (next.dialect !== previous.dialect) {
+			this.agent.dialect = next.dialect;
+		}
+		if (next.preferWebsockets !== previous.preferWebsockets) {
+			this.agent.preferWebsockets = next.preferWebsockets;
+		}
+		if (next.abortOnFabricatedToolResult !== previous.abortOnFabricatedToolResult) {
+			this.agent.abortOnFabricatedToolResult = next.abortOnFabricatedToolResult;
+		}
+		if (next.kimiApiFormat !== previous.kimiApiFormat) {
+			this.agent.kimiApiFormat = next.kimiApiFormat;
+		}
+		if (next.intentTracing !== previous.intentTracing) {
+			this.agent.intentTracing = next.intentTracing;
+		}
+		// `inlineToolDescriptors` decides whether the wire carries full tool
+		// descriptions. `#pruneToolDescriptions` moves with it so the session's
+		// own dump reports what the loop is actually sending.
+		if (next.pruneToolDescriptions !== this.agent.pruneToolDescriptions) {
+			this.agent.pruneToolDescriptions = next.pruneToolDescriptions;
+			this.#pruneToolDescriptions = next.pruneToolDescriptions;
+		}
+		// The session-level copy backs SIDE-CHANNEL requests (`/btw`, compaction,
+		// advisors), which read `#preferWebsockets` directly rather than the
+		// agent's field, so moving only the agent left every auxiliary host on the
+		// construction-time transport. The advisor/maintenance hosts expose this
+		// through getters, so writing the field reaches them too.
+		if (next.preferWebsockets !== previous.preferWebsockets) {
+			this.#preferWebsockets = next.preferWebsockets;
+		}
+	}
+
+	/**
+	 * Thread a freshly reloaded skills snapshot into this session's per-session
+	 * skills (which `skill://` binds — a `setActiveSkills` global swap alone
+	 * does not reach it) AND into every running DESCENDANT subagent's snapshot.
+	 * Subagents each captured their own `this.session.skills` at spawn, so they
+	 * carry the identical staleness.
+	 *
+	 * Fan-out iterates {@link #agentRegistry} — the registry this session was
+	 * created against ({@link CreateAgentSessionOptions.agentRegistry}, else the
+	 * global) — NOT `AgentRegistry.global()` unconditionally. An SDK host that
+	 * supplies its own registry registers its subagents THERE, so iterating the
+	 * global would (a) miss this session's real children and (b) overwrite the
+	 * snapshot of an unrelated session in the global tree with a roster
+	 * discovered from THIS session's cwd. Propagation is further restricted to
+	 * this session's own descendants (by `parentId` chain), so sibling trees
+	 * sharing one registry are never touched. Returns whether the top-level
+	 * skill set actually changed (drives the prompt rebuild).
+	 *
+	 * A descendant whose snapshot actually MOVED also gets its base system
+	 * prompt re-rendered: the snapshot is what `skill://` resolves against, but
+	 * the advertised roster is a rendered artifact, so without a rebuild the
+	 * child's later turns keep advertising the pre-refresh skill set (a skill
+	 * added, removed, renamed, or with an edited description). Only the changed
+	 * descendants rebuild, so a no-op refresh keeps every child's prompt
+	 * byte-identical and their provider prompt caching keeps hitting.
+	 *
+	 * The rebuilds are DISPATCHED, not awaited. Each runs on the descendant's
+	 * own tool-registry mutation tail, so awaiting them here would make the
+	 * parent's refresh block on whatever mutation that child is already running
+	 * — a tool registration, an MCP rebind, its own refresh — turning an
+	 * unrelated slow child operation into a stall of the parent's refresh, and
+	 * serializing N children behind each other. Worse, a descendant that is
+	 * itself refreshing can be awaiting the parent (the `#refreshTail` chain),
+	 * so awaiting downward closes a cycle. Dispatching keeps the fan-out
+	 * strictly one-directional: the snapshot swap is synchronous and complete on
+	 * return (so `skill://` resolves correctly immediately), and only the
+	 * rendered prompt settles asynchronously — before the child's next turn,
+	 * which joins that same tail in `buildSystemPromptForAgentStart` (the child
+	 * side of this contract: without that barrier a turn starting in the window
+	 * would read the pre-rebuild prompt). A failure is
+	 * logged rather than propagated: one child's rebuild must not fail the
+	 * parent's refresh, whose own surfaces already applied.
+	 */
+	applyReloadedSkills(
+		skills: readonly Skill[],
+		skillsSettings?: SkillsSettings,
+		skillWarnings?: readonly SkillWarning[],
+	): boolean {
+		const changed = this.#tools.applyReloadedSkills(skills, skillsSettings, skillWarnings);
+		for (const ref of this.#runningDescendants()) {
+			const descendant = ref.session;
+			if (!descendant) continue;
+			// An EXPLICIT caller policy (SDK `skills`, including `skills: []`) is
+			// the child's authoritative roster, exactly as in the adjacent rule
+			// fan-out and in the child's own refresh, which read the same marker.
+			// Bypassing it handed the child `skill://` access and a rebuilt prompt
+			// advertising skills the caller deliberately excluded.
+			//
+			// The provenance test is required, not the marker alone: the
+			// structured-subagent spawn ALWAYS forwards `session.skills`, so every
+			// structured child is non-reloadable even though nobody restricted it.
+			// Skipping on the marker alone would exclude exactly the children this
+			// fan-out exists to keep fresh.
+			if (!descendant.#tools.skillsReloadable && !descendant.#skillsPolicyInherited) continue;
+			// Restrict to this session's descendants. Advisors never resolve
+			// `skill://`, but a descendant advisor is a harmless no-op either way.
+			// The snapshot swap is synchronous; the rebuild it implies is not.
+			if (!descendant.#tools.applyReloadedSkills(skills, undefined, skillWarnings)) continue;
+			void descendant.refreshBaseSystemPrompt().catch((error: unknown) => {
+				logger.warn("Failed to rebuild a descendant's system prompt after a skill refresh", {
+					agentId: ref.id,
+					error: String(error),
+				});
+			});
+		}
+		return changed;
+	}
+
+	/**
+	 * This session's own running descendants in {@link #agentRegistry}, by
+	 * `parentId` chain — never `AgentRegistry.global()` unconditionally, and
+	 * never a sibling tree sharing one registry. Shared by the skill and rule
+	 * fan-outs so they cannot drift on which children they reach.
+	 */
+	#runningDescendants(): AgentRef[] {
+		const selfId = this.#agentId;
+		const refs = this.#agentRegistry.list();
+		if (selfId === undefined) return [];
+		// Index refs by id once so descendant checks walk the parentId chain in
+		// O(depth) rather than re-scanning the roster per candidate.
+		const byId = new Map(refs.map(ref => [ref.id, ref]));
+		const isDescendant = (ref: AgentRef): boolean => {
+			let current = ref.parentId;
+			const seen = new Set<string>();
+			while (current !== undefined && !seen.has(current)) {
+				if (current === selfId) return true;
+				seen.add(current);
+				current = byId.get(current)?.parentId;
+			}
+			return false;
+		};
+		return refs.filter(ref => ref.session !== undefined && ref.session !== this && isDescendant(ref));
+	}
+
+	/**
+	 * Fan a freshly reloaded rule roster out to every running DESCENDANT.
+	 *
+	 * The parent's own buckets are applied by `#applyReloadedRoster`; a
+	 * descendant needs its own pass, because each child holds THREE independent
+	 * pieces of rule state captured at spawn:
+	 *
+	 *   - its `activeRules` snapshot, which `rule://` resolution PREFERS over
+	 *     the process global (`rule-protocol.ts`), so a child keeps resolving
+	 *     deleted or pre-edit rules;
+	 *   - its rendered prompt buckets, so its later turns keep ADVERTISING the
+	 *     stale roster;
+	 *   - its own {@link TtsrManager}, so a condition rule deleted or edited on
+	 *     disk keeps triggering inside the child.
+	 *
+	 * Each descendant re-buckets the UNGATED source roster under ITS OWN agent
+	 * scope and TTSR settings — never the parent's gated buckets. A child runs
+	 * as a different agent, so `agents`-scoped rules partition differently, and
+	 * copying the parent's applicable set would both admit rules scoped away
+	 * from the child and hide rules scoped TO it. Re-bucketing through the
+	 * child's live manager also preserves its injection/trigger state (the
+	 * reuse-not-replace contract), so an already-injected `repeatMode: "once"`
+	 * rule does not re-fire.
+	 *
+	 * A descendant whose rendered roster actually MOVED is rebuilt; an unchanged
+	 * one is left byte-identical so its provider prompt caching keeps hitting.
+	 * Rebuilds are DISPATCHED, not awaited, for the same reason as the skill
+	 * fan-out: awaiting downward would block the parent's refresh on a child's
+	 * unrelated mutation and can close a cycle through `#refreshTail`.
+	 */
+	#applyReloadedRulesToDescendants(sourceRules: readonly Rule[]): void {
+		for (const ref of this.#runningDescendants()) {
+			const descendant = ref.session;
+			if (!descendant) continue;
+			const ttsrManager = descendant.ttsrManager;
+			if (!ttsrManager) continue;
+			try {
+				// An EXPLICIT caller policy (SDK `rules` / `--no-rules`) is the
+				// child's authoritative rule set, so a parent's refresh must not
+				// widen it — mirroring the parent's own `#rulesPolicy` handling.
+				//
+				// An INHERITED policy is the opposite case and the common one: the
+				// real spawn path ALWAYS forwards the parent's `session.rules`, so
+				// every structured subagent has `#rulesPolicy` defined even though
+				// it represents a disk roster the parent discovered, not a
+				// restriction anyone chose. Preferring it here selected the child's
+				// launch-time snapshot and left added, edited, and deleted rules
+				// stale in the child forever — the exact staleness this fan-out
+				// exists to fix. The fresh parent roster wins for that case.
+				const explicitPolicy = descendant.#rulesPolicyInherited ? undefined : descendant.#rulesPolicy;
+				const inputRules = explicitPolicy ?? sourceRules;
+				const ttsrSettings = descendant.settings.getGroup("ttsr");
+				// Pass the FRESH rule objects, never the child manager's retained
+				// instances: substituting by name would keep an edited rule's
+				// pre-edit conditions and content live inside the child. No state
+				// is lost — `addOrUpdateRule` swaps the stored reference in place
+				// (or recompiles the entry) without touching the separate
+				// name-keyed injection-record map — so a surviving rule keeps its
+				// injection/trigger state while an edit actually takes effect. A
+				// name absent from the fresh roster is never offered, so
+				// `retainRules` below drops its registration.
+				const { rulebookRules, alwaysApplyRules, ttsrRuleNames } = bucketRules(inputRules, ttsrManager, {
+					builtinRules: ttsrSettings.builtinRules,
+					disabledRules: ttsrSettings.disabledRules,
+					agentName: descendant.#agentRuleName,
+				});
+				ttsrManager.retainRules(ttsrRuleNames);
+				// Exactly the registrations this pass CONSUMED, mirroring the
+				// reload's own publication rule. `retainRules` above no-ops while
+				// the child's TTSR is globally disabled, so the raw registry can
+				// still hold a rule the child's buckets deliberately omit.
+				const publishedTtsrRules = ttsrManager.getRules().filter(rule => ttsrRuleNames.has(rule.name));
+				const nextRosterRules = [...rulebookRules, ...alwaysApplyRules];
+				const rulesChanged = !rulesEqual(descendant.#rosterRules, nextRosterRules);
+				descendant.#rosterRules = nextRosterRules;
+				descendant.#sourceRosterRules = inputRules;
+				descendant.#applyReloadedRoster?.({
+					skills: descendant.skills,
+					rulebookRules,
+					alwaysApplyRules,
+					publishedTtsrRules,
+					sourceRules: inputRules,
+				});
+				if (!rulesChanged) continue;
+				void descendant.refreshBaseSystemPrompt().catch((error: unknown) => {
+					logger.warn("Failed to rebuild a descendant's system prompt after a rules refresh", {
+						agentId: ref.id,
+						error: String(error),
+					});
+				});
+			} catch (error: unknown) {
+				// One child's re-bucket must not fail the parent's refresh, whose
+				// own surfaces already applied.
+				logger.warn("Failed to apply a refreshed rule roster to a descendant", {
+					agentId: ref.id,
+					error: String(error),
+				});
+			}
+		}
+	}
+
+	/**
+	 * Apply reloaded TTSR gating (`ttsr.disabledRules`/`builtinRules`) to the
+	 * session's rule set on a settings-only refresh — no disk rediscovery. The
+	 * roster path (`bucketRules`) is what actually enforces these levers, but a
+	 * `settings` scope never runs it, so a newly-disabled rule would stay
+	 * registered and keep triggering.
+	 *
+	 * Re-buckets the UNGATED source roster ({@link #sourceRosterRules}) — the
+	 * complete set the last discovery produced, before any gating dropped a rule
+	 * — so a gating flip applies in BOTH directions: a rule newly added to
+	 * `disabledRules` is dropped, and one whose entry was REVERTED (or restored
+	 * by flipping `builtinRules` back on) is re-bucketed and re-registered.
+	 * Re-bucketing the surviving GATED set instead could only ever drop further,
+	 * leaving a reverted setting unrecoverable without a `rules`/`all` refresh.
+	 *
+	 * The source roster is authoritative about which rules exist and what they
+	 * contain, so a live TTSR registration is never allowed to outrank it: a
+	 * rule the roster no longer lists is dropped, and an edited one re-registers
+	 * from its fresh object. Injection/trigger state survives regardless — it
+	 * lives in a separate name-keyed map `addOrUpdateRule` does not touch.
+	 * Returns whether the rendered roster changed (drives the prompt rebuild).
+	 */
+	#reconcileRuleGatingFromSettings(): boolean {
+		const ttsrManager = this.ttsrManager;
+		if (!ttsrManager) return false;
+		const ttsrSettings = this.settings.getGroup("ttsr");
+		const liveTtsrRules = ttsrManager.getRules();
+		// The FRESH source roster alone decides which rules exist and what they
+		// contain. A live registration can outlive its disk entry: while TTSR is
+		// disabled `retainRules` deliberately no-ops (an empty `keep` from a
+		// disabled manager carries no information), so a `/refresh rules` run in
+		// that window installs a fresh `#sourceRosterRules` while every stale
+		// registration stays. Unioning the live rules FIRST then gave each
+		// retained one precedence on the later settings-only re-enable, so a rule
+		// DELETED from disk came back and an EDITED one resumed with its pre-edit
+		// conditions and content.
+		//
+		// Passing the fresh objects loses no state: `#injectionRecords` is a
+		// separate name-keyed map, and `addOrUpdateRule` (via `bucketRules`)
+		// either swaps the stored reference in place or recompiles the entry
+		// without touching that map — so a surviving rule keeps its
+		// injection/trigger state while an edited one actually takes effect. A
+		// name absent from the source roster is simply never offered, so
+		// `retainRules` below drops it now that the manager is enabled again.
+		//
+		// Only when the source roster is a real UNGATED discovery: the
+		// constructor's gated fallback omits every TTSR rule by construction (the
+		// manager consumed them), so treating it as authoritative would delete
+		// registrations nothing deleted on disk. Without one, keep the prior
+		// live-first union.
+		const liveTtsrNames = new Set(liveTtsrRules.map(rule => rule.name));
+		const sourceRules = this.#hasUngatedSourceRoster
+			? [...this.#sourceRosterRules]
+			: [...liveTtsrRules, ...this.#sourceRosterRules.filter(rule => !liveTtsrNames.has(rule.name))];
+		const { rulebookRules, alwaysApplyRules, ttsrRuleNames } = bucketRules(sourceRules, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+			agentName: this.#agentRuleName,
+		});
+		ttsrManager.retainRules(ttsrRuleNames);
+		// Publish exactly the registrations this pass CONSUMED, mirroring the
+		// reload's own publication rule.
+		//
+		// `retainRules` is the only thing that drops a registration, and it
+		// deliberately no-ops while TTSR is globally disabled — so a rule retained
+		// across `ttsr.enabled: false` and THEN gated off (added to
+		// `disabledRules`, or swept by `builtinRules: false`) is still registered
+		// here, and spreading the manager's registrations unfiltered republished
+		// it into `activeRules` anyway.
+		//
+		// Filtering by "still allowed by the current gating" is too WIDE for that
+		// job, because while TTSR is disabled `addOrUpdateRule` declines every
+		// rule: a conditioned rule is then allowed but NOT consumed, so it reaches
+		// `activeRules` through its own bucket (the rulebook, when it has a
+		// description) while the retained registration republished it a second
+		// time — a duplicated rulebook entry, and a condition-only rule left
+		// addressable through `rule://` where a freshly disabled session has
+		// neither. What a rule is allowed to be and what the manager is actually
+		// holding are different questions, and only the latter belongs here.
+		const publishedTtsrRules = ttsrManager.getRules().filter(rule => ttsrRuleNames.has(rule.name));
+		const activeRules = [...rulebookRules, ...alwaysApplyRules, ...publishedTtsrRules];
+		// Only a TOP-LEVEL session may replace the process-global rule snapshot,
+		// the same gate the roster reload applies via `publishGlobals`. A
+		// structured subagent's set is bucketed under the CHILD's agent name, so
+		// publishing it from a child's `refresh("settings")` left contextless
+		// consumers in the parent process (a `RuleProtocolHandler` with no
+		// session-local array) serving the child's scoped rules. The child still
+		// gets its own session-local roster update below.
+		if (this.#agentKind === "main") setActiveRules(activeRules);
+		const nextRosterRules = [...rulebookRules, ...alwaysApplyRules];
+		const rulesChanged = !rulesEqual(this.#rosterRules, nextRosterRules);
+		this.#rosterRules = nextRosterRules;
+		this.#applyReloadedRoster?.({
+			skills: this.skills,
+			rulebookRules,
+			alwaysApplyRules,
+			// Whatever this reconcile published globally, so the session-local
+			// snapshot agrees with it exactly.
+			publishedTtsrRules,
+			// The same UNGATED set this reconcile re-bucketed. A settings-only
+			// refresh does no disk rediscovery, so the name set is unchanged — but
+			// the spawn-facing field must stay the ungated roster, never these
+			// gated buckets.
+			sourceRules,
+		});
+		return rulesChanged;
+	}
+
+	/**
+	 * Re-resolve the default model from the (already-reloaded) settings and swap
+	 * the session's active model iff it changed AND the user has not pinned a
+	 * session-only `/model` override (that pin is the highest-precedence choice
+	 * and a settings reload must not clobber it). Returns whether it swapped.
+	 *
+	 * A model pin suppresses only the model REPLACEMENT: the settings-derived
+	 * thinking reconcile still runs against the pinned model, because thinking
+	 * tracks settings on its own receipt and a `/model` pick records no thinking
+	 * pin.
+	 *
+	 * Selection reproduces STARTUP's default-selection path (sdk.ts
+	 * `tryResolveDefaultRole`, then the `pickDefaultAvailableModel` fallback):
+	 * resolve the `default` role alone, and when it resolves nothing fall back to
+	 * the ordinary available-model pick. It deliberately does NOT walk every
+	 * configured role. `resolveModelFromSettings` with its default role order
+	 * scans all of `MODEL_ROLE_IDS`, so a config with no `modelRoles.default` but
+	 * some auxiliary role set (`smol`, `task`, ...) returned that AUXILIARY
+	 * model as the session's primary — meaning any unrelated settings edit plus
+	 * `/refresh settings` silently demoted the session onto a cheap task model
+	 * that startup would never have chosen.
+	 */
+	async #applyReloadedModel(): Promise<boolean> {
+		// A `/model` pin blocks the model REPLACEMENT, not the thinking reconcile
+		// below it. Thinking tracks settings independently — a model pick says
+		// nothing about thinking, and the re-apply `setModel` performs is a no-op
+		// when the level does not move, so it leaves no pin receipt. Returning
+		// here stranded the configured level frozen solely because the model was
+		// pinned, with no session-level thinking override anywhere.
+		const modelPinned = this.#hasSessionModelOverride();
+		const availableModels = this.getAvailableModels();
+		const defaultRoleSpec = resolveModelRoleValue(this.settings.getModelRole("default"), availableModels, {
+			settings: this.settings,
+			matchPreferences: getModelMatchPreferences(this.settings),
+		});
+		// Startup's fallback when the default role resolves nothing: the ordinary
+		// provider-default pick over credentialed models, preferring providers with
+		// a concrete credential — never another role's model.
+		const resolved =
+			defaultRoleSpec.model ??
+			pickDefaultAvailableModel(
+				availableModels.filter(model => this.#modelRegistry.hasConfiguredAuth(model)),
+				provider => this.#modelRegistry.hasConcreteAuth(provider),
+			);
+		if (!resolved) return false;
+		// Carry the default role's explicit thinking suffix (already resolved
+		// above) so a selector change that only moves the thinking level — e.g.
+		// `provider/model:low` -> `provider/model:high` on the SAME model — still
+		// re-applies the level, reproducing startup resolution instead of falling
+		// back to the model-metadata default. Only trusted when the default role
+		// resolved to the same model the swap picked, so a level can never ride in
+		// from the available-model fallback above.
+		const resolvedThinkingLevel =
+			defaultRoleSpec.explicitThinkingLevel &&
+			defaultRoleSpec.model &&
+			modelsAreEqual(defaultRoleSpec.model, resolved)
+				? defaultRoleSpec.thinkingLevel
+				: undefined;
+		const current = this.model;
+		// An explicit session-level thinking selection outranks the configured
+		// default exactly as a `/model` pin outranks the configured model, so an
+		// unrelated settings edit must not recompute over it. Captured BEFORE the
+		// swap below: `setModel` records its own settings-tracking thinking
+		// receipt, which would make this read unconditionally true afterwards.
+		const thinkingFollowsSettings = this.#thinkingFollowsSettings();
+		// Startup's thinking resolution for an already-running session (sdk.ts
+		// `pickInitialThinkingLevel`, minus its startup-only inputs — the explicit
+		// `thinkingLevel` option and the persisted/restored session entries, both
+		// of which a live session has already consumed): the default role's
+		// explicit `:level` suffix, then the resolved model's own metadata
+		// default, then the global `defaultThinkingLevel`.
+		//
+		// The chain can legitimately bottom out at `undefined` (no suffix, no
+		// `thinking.defaultLevel`, `defaultThinkingLevel` explicitly null): that IS
+		// startup's answer — no thinking selection — so it must be applied rather
+		// than skipped, which would otherwise strand the prior level active.
+		const targetThinkingLevel =
+			resolvedThinkingLevel ??
+			resolved.thinking?.defaultLevel ??
+			parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
+		if (modelPinned) {
+			// Model replacement is blocked, but thinking still tracks settings.
+			// Resolved against the PINNED model, and WITHOUT the default role's
+			// `:level` suffix — reproducing startup's own chain for an explicit
+			// model, which skips the role suffix entirely (sdk.ts
+			// `pickInitialThinkingLevel` gates it on `!hasExplicitModel`) and falls
+			// to the selected model's metadata default, then the global
+			// `defaultThinkingLevel`. Using the configured default's suffix here
+			// would apply a level chosen for a model this session is not running.
+			const pinnedTarget =
+				current?.thinking?.defaultLevel ?? parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
+			if (thinkingFollowsSettings && this.configuredThinkingLevel() !== pinnedTarget) {
+				this.#models.setThinkingLevel(pinnedTarget, false, { settingsTracking: true });
+			}
+			return false;
+		}
+		if (current && current.provider === resolved.provider && current.id === resolved.id) {
+			// Model unchanged, but the configured thinking level may have moved.
+			// Apply the reloaded selector so `/refresh settings` reproduces the
+			// explicit `:level` suffix; the swap short-circuit must not skip a
+			// thinking-only change. When the suffix was REMOVED, the fallback above
+			// reproduces startup resolution instead of leaving the prior explicit
+			// level stuck active.
+			if (thinkingFollowsSettings && this.configuredThinkingLevel() !== targetThinkingLevel) {
+				this.#models.setThinkingLevel(targetThinkingLevel, false, { settingsTracking: true });
+			}
+			return false;
+		}
+		if (!this.#modelRegistry.hasConfiguredAuth(resolved)) return false;
+		// The pin as it stood BEFORE the swap. `setModel` re-applies thinking for
+		// the new model unconditionally, so a target whose
+		// `thinking.defaultLevel` differs from an explicitly pinned level MOVES
+		// that pin — and it does so before the follows-settings guard below can
+		// protect it, which only ever sees the post-swap value.
+		const pinnedBeforeSwap = thinkingFollowsSettings ? undefined : this.configuredThinkingLevel();
+		await this.setModel(resolved, "default", { settingsTracking: true });
+		if (!thinkingFollowsSettings) {
+			// Restore the user's pin the re-apply displaced. Re-pinned explicitly:
+			// the swap's own receipt is settings-tracking, so leaving it would
+			// reclassify a real pin as config-tracking.
+			if (this.configuredThinkingLevel() !== pinnedBeforeSwap) {
+				this.#models.setThinkingLevel(pinnedBeforeSwap, false, { explicit: true });
+			}
+			return true;
+		}
+		// Apply the SAME full fallback onto the swapped model, not just an explicit
+		// suffix: `setModel` preserves the previous model's level whenever the new
+		// one exposes no `thinking.defaultLevel`, so a swap onto a suffix-less
+		// model left a `:high` predecessor's level active where startup would have
+		// picked the global `defaultThinkingLevel`.
+		if (this.configuredThinkingLevel() !== targetThinkingLevel) {
+			this.#models.setThinkingLevel(targetThinkingLevel, false, { settingsTracking: true });
+		}
+		return true;
+	}
+
+	/**
+	 * Whether the session's thinking level still FOLLOWS the configured default
+	 * (so `#applyReloadedModel` may re-derive it), rather than being an explicit
+	 * session-level choice a settings reload must not clobber. Mirrors
+	 * {@link #hasSessionModelOverride} for `thinking_level_change`; the scan
+	 * itself is shared with `ModelControls`, which reads the same answer to
+	 * decide whether an explicit selection must record a pin.
+	 */
+	#thinkingFollowsSettings(): boolean {
+		return thinkingFollowsSettings(this.sessionManager.getBranch());
+	}
+
+	/**
+	 * Whether the user pinned a session-only model this session (an explicit
+	 * `/model` pick, which writes role `default`, or `temporary`, or a non-default
+	 * role). A `model_change` carrying the ephemeral fallback role or the
+	 * settings-tracking flag still tracks the settings default and is safe to
+	 * swap; anything else — including an explicit `default` selection — is a
+	 * user pin a settings reload must not clobber. The tracking marker is a
+	 * dedicated `settingsTracking` flag, not a role sentinel, so a user role
+	 * literally named "settings" reads as a real pin.
+	 *
+	 * A ROLE-LESS, unflagged entry is the ambiguous case, and it is resolved
+	 * POSITIONALLY rather than by trusting the missing role. Both shapes exist
+	 * on a transcript written before the cycle paths recorded a role:
+	 *
+	 *   - the settings-derived startup receipt, which sdk.ts appends at session
+	 *     creation — BEFORE the session has any message — and which must stay
+	 *     swappable, and
+	 *   - a Ctrl+P / `cycleModel` pin from the older code, an explicit user
+	 *     selection made mid-session, which must not be replaced.
+	 *
+	 * Nothing on the entry itself separates them: the field that would (`role`,
+	 * or the `settingsTracking` flag) is exactly the field those writers did not
+	 * set. Their POSITION does separate them, and soundly in the direction that
+	 * matters — startup's receipt is written before the first message, so a
+	 * role-less unflagged entry that follows a message cannot be it. Every
+	 * present-day mid-session writer marks itself (`temporary`, a real role, the
+	 * ephemeral role, or the tracking flag), so this reading only ever reaches a
+	 * genuinely historical entry.
+	 *
+	 * The residual imprecision is a FOREIGN import (`claude-session-store` /
+	 * `codex-session-store`), which synthesizes a role-less `model_change` ahead
+	 * of each assistant turn to record the model that turn ran on — not a user
+	 * pin. Those land after a message and so read as pinned here. That is the
+	 * deliberate direction: an imported transcript keeps running the model it was
+	 * running, and the cost is one `/model` pick to opt back into the configured
+	 * default — where the opposite error silently discards a selection the user
+	 * made and cannot see was dropped.
+	 */
+	#hasSessionModelOverride(): boolean {
+		const entries = this.sessionManager.getBranch();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type !== "model_change") continue;
+			// Walk PAST ephemeral retry-fallback transitions to classify the
+			// underlying change: a fallback neither tracks the configured default
+			// nor is a user pin, it just masks whatever sits beneath it. Returning
+			// here would let a fallback appended over an explicit pin read as "no
+			// pin", so a later refresh('settings') would clobber the pin.
+			if (entry.role === EPHEMERAL_MODEL_CHANGE_ROLE) continue;
+			if (entry.settingsTracking === true) return false;
+			if (entry.role !== undefined) return true;
+			// Role-less and unflagged: pinned iff it was written mid-session,
+			// which is the one thing startup's receipt can never have been.
+			for (let j = i - 1; j >= 0; j--) {
+				if (entries[j].type === "message") return true;
+			}
+			return false;
+		}
+		return false;
+	}
+
+	/**
 	 * Applies Code Mode at session startup: when the initial model activates
 	 * it (`codeMode` `on`, or `auto` matching a `code_mode_only` catalog flag),
 	 * the initial tool surface is routed through the Code Mode-aware path so
@@ -5379,6 +7283,11 @@ export class AgentSession {
 	}
 
 	/** Applies the external-thinking setting to the private scratchpad tool immediately. */
+	/** Records which boolean-gated built-ins this session's construction allowed. */
+	setSettingGatedBuiltinPermissions(names: ReadonlySet<string>): void {
+		this.#tools.setSettingGatedBuiltinPermissions(names);
+	}
+
 	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}
@@ -5408,7 +7317,7 @@ export class AgentSession {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
-	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
 	}
 
@@ -6510,7 +8419,7 @@ export class AgentSession {
 			const disposingBeforeTransition = this.#isDisposed;
 			await this.#memory.transition;
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return false;
-			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			const beforeAgentStartSystemPrompt = await this.buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;
 			// Emit before_agent_start extension event
@@ -7857,6 +9766,13 @@ export class AgentSession {
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		// Sampled BEFORE `newSession()` truncates the transcript: the carried
+		// level's provenance lives in the outgoing branch's receipts, and the
+		// receipt appended further down is the new session's only record of it.
+		// Unflagged, a level the old session merely inherited from
+		// `defaultThinkingLevel` reads as an explicit pin, so a later edit to that
+		// setting plus `/refresh settings` leaves a level the user never chose.
+		const carriedThinkingFollowsSettings = this.#thinkingFollowsSettings();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -7932,8 +9848,17 @@ export class AgentSession {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
-			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
+			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel(), {
+				settingsTracking: carriedThinkingFollowsSettings,
+			});
+			// Provenance restated, like the thinking receipt above: `/new` starts a
+			// fresh transcript, and a service-tier receipt with no tracking list
+			// reads as a legacy fully-pinned snapshot — freezing every family at the
+			// value `/new` captured, where a later `tier.*` edit could not reach it.
+			this.sessionManager.appendServiceTierChange(
+				this.#models.serviceTierEntry(),
+				this.#models.serviceTierTrackingFamilies(),
+			);
 
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;
@@ -8081,6 +10006,7 @@ export class AgentSession {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			settingsTracking?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
@@ -8123,9 +10049,32 @@ export class AgentSession {
 		return this.#models.getAvailableModels();
 	}
 
-	/** Selects the session thinking level and optionally persists it as the default. */
+	/**
+	 * Selects the session thinking level and optionally persists it as the
+	 * default. This is the public selection surface — ACP/RPC, the interactive
+	 * selector, extensions — so every call here is a real user choice and is
+	 * recorded as a pin a later `/refresh settings` must not clobber, even when
+	 * the selected level matches the one already active.
+	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
-		this.#models.setThinkingLevel(level, persist);
+		this.#models.setThinkingLevel(level, persist, { explicit: true });
+	}
+
+	/**
+	 * Move the thinking level for an automatic retry-fallback swap, carrying the
+	 * session's existing thinking provenance rather than pinning it.
+	 *
+	 * `setThinkingLevel` is the *user* selection surface and always writes an
+	 * explicit pin, which is wrong for a swap nobody asked for: entering or
+	 * leaving a fallback would silently convert a settings-tracking session into
+	 * a pinned one, and a later `defaultThinkingLevel` edit plus
+	 * `/refresh settings` would stop updating the level. Inheriting the current
+	 * answer keeps a config-tracking level config-tracking and leaves a real pin
+	 * pinned — the same reasoning `#reapplyThinkingLevel` applies to a
+	 * model-derived re-apply.
+	 */
+	setThinkingLevelForRecovery(level: ConfiguredThinkingLevel | undefined): void {
+		this.#models.setThinkingLevel(level, false, { settingsTracking: this.#thinkingFollowsSettings() });
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
@@ -9238,7 +11187,16 @@ export class AgentSession {
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				hasServiceTierEntry
+					? // Families the receipt marked as config-following are re-derived from
+						// the live config, so a `tier.*` edit is not overridden by the value
+						// that receipt captured. Real pins keep their persisted value.
+						applySettingsTrackedServiceTiers(
+							sessionContext.serviceTier ?? {},
+							sessionContext.serviceTierSettingsTrackingFamilies,
+							configuredServiceTierByFamily,
+						)
+					: configuredServiceTierByFamily,
 			);
 
 			if (switchingToDifferentSession) {

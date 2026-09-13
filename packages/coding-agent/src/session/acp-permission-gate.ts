@@ -1,14 +1,21 @@
 import { editInspect } from "@oh-my-pi/pi-natives";
 import { isRecord, stringProperty } from "@oh-my-pi/pi-utils";
+import { REFRESH_SCOPES } from "../extensibility/reload";
 import { resolveToCwd } from "../tools/path-utils";
 import type { ClientBridgePermissionOption } from "./client-bridge";
 
-/** Tools that require user permission before execution when an ACP client is connected. */
+/**
+ * Tools that require user permission before execution when an ACP client is
+ * connected. `refresh` is included because refresh("mcp"/"all") reconnects MCP —
+ * spawning project `.mcp.json` stdio subprocesses (arbitrary exec) — so an ACP
+ * client must gate it like bash/edit rather than let a model self-invoke it.
+ */
 export const PERMISSION_REQUIRED_TOOLS: Record<string, true> = {
 	bash: true,
 	edit: true,
 	delete: true,
 	move: true,
+	refresh: true,
 };
 
 /** Permission options presented to the client on each gated tool call. */
@@ -94,6 +101,41 @@ export function getPermissionIntent(
 			paths: intent.paths,
 			cacheKey: "edit:move",
 		};
+	}
+	if (toolName === "refresh") {
+		// Clamp the displayed scope to a known REFRESH_SCOPES member: scope here is
+		// raw model args, read BEFORE the tool's schema validates it, so an
+		// arbitrary/long/newline-bearing string would otherwise render straight
+		// into the permission dialog and could spoof it. A malformed value shows
+		// as "all" — the safe, most-privileged prompt (matching the execution-time
+		// default) — never an attacker-controlled string.
+		const rawScope = stringProperty(input, "scope");
+		const scope = (REFRESH_SCOPES as readonly string[]).includes(rawScope ?? "") ? rawScope : "all";
+		// Scopes that can spawn project `.mcp.json` stdio subprocesses (arbitrary
+		// exec) share ONE privileged permission identity, so a persisted decision
+		// on any of them is a decision about MCP execution — never a benign
+		// approval that silently authorizes it:
+		//
+		//   - `mcp`/`all` reconnect and rediscover MCP directly.
+		//   - `settings` reaches the same exec through the effective-change
+		//     listener: a persisted `browser.enabled` flip calls
+		//     `reconcileBrowserMcpFilter`, and `MCPManager.reconcileBrowserFilter`
+		//     loads the MCP configuration and connects browser stdio servers.
+		//
+		// The title says so too: an "always allow" the user cannot interpret is
+		// not consent, so the prompt names the capability rather than just the
+		// scope. The genuinely benign scopes (`skills`/`rules`) re-read the roster
+		// from disk and spawn nothing, so they keep their own per-scope keys and a
+		// blanket approval there stays scope-local.
+		const mcpExecCapable = scope === "mcp" || scope === "all" || scope === "settings";
+		if (mcpExecCapable) {
+			return {
+				toolName,
+				title: `Refresh ${scope} (may reconnect MCP servers)`,
+				cacheKey: "refresh:mcp-exec",
+			};
+		}
+		return { toolName, title: `Refresh ${scope}`, cacheKey: `refresh:${scope}` };
 	}
 	return undefined;
 }

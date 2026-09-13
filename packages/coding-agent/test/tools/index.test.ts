@@ -417,6 +417,32 @@ describe("createTools", () => {
 		expect(names).toContain("rewind");
 	});
 
+	it("pairs checkpoint/rewind even when the gate is off at startup", async () => {
+		// The requested list is built ONCE, but `checkpoint.enabled` is reconciled
+		// live against the INVOCATION permission set recorded here. Conditioning
+		// the pairing on the startup value recorded a one-sided permission for a
+		// session that launched with checkpointing off, and the refresh may only
+		// build a name that set carries — so turning the setting on later gave the
+		// agent `checkpoint` with no way to rewind, permanently.
+		let permitted: ReadonlySet<string> | undefined;
+		const session = createTestSession({
+			taskDepth: 1,
+			settings: createSettingsWithOverrides({ "checkpoint.enabled": false }),
+		});
+		session.setSettingGatedBuiltinPermissions = names => {
+			permitted = names;
+		};
+
+		const names = (await createTools(session, ["checkpoint"])).map(t => t.name);
+
+		// Exposure still follows the settings half: nothing is active while off.
+		expect(names).not.toContain("checkpoint");
+		expect(names).not.toContain("rewind");
+		// But both halves of the pair are permitted, so a later enable builds both.
+		expect(permitted?.has("checkpoint")).toBe(true);
+		expect(permitted?.has("rewind")).toBe(true);
+	});
+
 	it("does not auto-include checkpoint/rewind when neither is requested", async () => {
 		const names = (
 			await createTools(

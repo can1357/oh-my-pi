@@ -433,6 +433,37 @@ describe("AsyncJobManager", () => {
 		manager.cancel(firstJobId);
 	});
 
+	test("admits against an updated maxRunningJobs cap", () => {
+		// `async.maxJobs` is read once into the manager at construction, so a
+		// `/refresh settings` that raises it has to reach the live field or
+		// admission keeps refusing at the launch-time limit.
+		const manager = new AsyncJobManager({
+			maxRunningJobs: 1,
+			onJobComplete: async () => {},
+		});
+		const hold = async ({ signal }: { signal: AbortSignal }) => {
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			return "done";
+		};
+
+		const firstJobId = manager.register("bash", "first", hold);
+		expect(() => manager.register("bash", "second", hold)).toThrow(/Background job limit reached/);
+
+		manager.setMaxRunningJobs(2);
+		const secondJobId = manager.register("bash", "second", hold);
+		expect(manager.atCapacity).toBe(true);
+		// Lowering below the running count refuses the next admission without
+		// evicting the jobs already running.
+		manager.setMaxRunningJobs(1);
+		expect(() => manager.register("bash", "third", hold)).toThrow(/Background job limit reached/);
+		expect(manager.getJob(secondJobId)?.status).toBe("running");
+
+		manager.cancel(firstJobId);
+		manager.cancel(secondJobId);
+	});
+
 	test("queued jobs do not count toward the cap until markRunning", async () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,

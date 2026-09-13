@@ -1164,6 +1164,61 @@ describe("Settings", () => {
 				unsubscribe();
 			}
 		});
+		// A read-only / in-memory instance still re-reads the project and overlay
+		// files in `#loadReadOnly()`, so a Code Mode partition input can move
+		// there — but `reload()`'s non-persisted branch emitted no signal, so an
+		// `AgentSession` never repartitioned its live tool set and the
+		// reconciliation it awaits was an already-resolved promise.
+		it("signals Code Mode partition inputs on a non-persisted reload", async () => {
+			// An explicit config OVERLAY, not `.omp/config.yml`: the project layer
+			// loads through the process-lifetime capability cache, so a re-read in
+			// the same process serves the cached parse and the merged view cannot
+			// move. `#readConfigOverlays` reads its files directly every time,
+			// which is what makes an edit observable to a pure re-read at all.
+			const overlayPath = tempDir.join("code-mode-overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ providers: { "openai-codex": { codeMode: "off" } } }, null, 2));
+			const settings = await Settings.loadReadOnly({ cwd: projectDir, agentDir, configFiles: [overlayPath] });
+			expect(settings.get("providers.openai-codex.codeMode")).toBe("off");
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				// A byte-identical re-read stays silent.
+				await settings.reload();
+				expect(signalCount).toBe(0);
+
+				await Bun.write(
+					overlayPath,
+					YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
+				);
+				const { changed } = await settings.reload();
+
+				// The merged view moved...
+				expect(changed).toBe(true);
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				// ...so the partition signal must have fired with it.
+				expect(signalCount).toBe(1);
+
+				// `edit.mode` is a partition input too: it renames the direct edit
+				// tool on the wire.
+				await Bun.write(
+					overlayPath,
+					YAML.stringify(
+						{ providers: { "openai-codex": { codeMode: "on" } }, edit: { mode: "apply_patch" } },
+						null,
+						2,
+					),
+				);
+				await settings.reload();
+
+				expect(settings.get("edit.mode")).toBe("apply_patch");
+				expect(signalCount).toBe(2);
+			} finally {
+				unsubscribe();
+			}
+		});
 	});
 
 	describe("get()", () => {

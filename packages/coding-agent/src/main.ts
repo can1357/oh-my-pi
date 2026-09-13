@@ -1335,6 +1335,28 @@ export async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
 	}
+	// Re-resolved after a settings refresh moves `enabledModels`: the scope is
+	// copied out of settings into `ModelControls` at construction, so a reload
+	// alone left Ctrl+P and `/models` on the launch-time allowlist. Declines (by
+	// returning `undefined`) when `--models` pinned the scope for this session —
+	// the invocation outranks config, and the SDK cannot see that flag.
+	options.reconcileScopedModels = parsed.models?.length
+		? undefined
+		: async () => {
+				const patterns = activeSettings.get("enabledModels");
+				// An empty result is a real answer here: the edit CLEARED the scope,
+				// and every available model becomes cyclable again.
+				if (patterns.length === 0) return [];
+				return toSessionScopedModels(
+					await resolveModelScope(
+						patterns,
+						modelRegistry,
+						getModelMatchPreferences(activeSettings),
+						activeSettings,
+					),
+					activeSettings,
+				);
+			};
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)

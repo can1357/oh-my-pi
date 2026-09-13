@@ -240,7 +240,7 @@ export class AsyncJobManager {
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
-	readonly #maxRunningJobs: number;
+	#maxRunningJobs: number;
 	readonly #retentionMs: number;
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
@@ -270,6 +270,15 @@ export class AsyncJobManager {
 			0,
 			Math.floor(options.retainedArtifactsCleanupMaxWaitMs ?? RETAINED_ARTIFACTS_CLEANUP_MAX_WAIT_MS),
 		);
+	}
+
+	/**
+	 * Re-point the running-job cap at a changed `async.maxJobs`. Admission reads
+	 * this field on every `register()`/`atCapacity`, so a live update binds the
+	 * next admission; jobs already running are never retro-evicted.
+	 */
+	setMaxRunningJobs(maxRunningJobs: number): void {
+		this.#maxRunningJobs = Math.max(1, Math.floor(maxRunningJobs));
 	}
 
 	/** True when the running-job count has reached the configured cap. */

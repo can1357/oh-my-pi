@@ -23,15 +23,12 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
-import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
-	$env,
 	$flag,
 	getAgentDir,
 	getModelDbPath,
@@ -80,15 +77,22 @@ import {
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
-import { buildServiceTierByFamily } from "./config/service-tier";
+import {
+	applySettingsTrackedServiceTiers,
+	buildServiceTierByFamily,
+	SERVICE_TIER_FAMILIES,
+} from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { resolveDialect } from "./config/tool-dialect";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
-import { createImageUrlServiceFromSettings } from "./blob-broker/service";
+import { createImageUrlServiceFromSettings, type ImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import { applyMCPEnvironment } from "./mcp/reload";
+import { TtsrManager } from "./export/ttsr";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -158,6 +162,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "./secrets";
+import type { RefreshScope } from "./extensibility/reload";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
@@ -181,7 +186,13 @@ import {
 } from "./session/retry-fallback-chains";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
-import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
+import { reconcileSettingsWorkspaceRoots } from "./session/session-workspace";
+import {
+	collectMountedMCPToolRoutes,
+	isSettingGatedTool,
+	markSettingGatedTool,
+	projectMountedMCPXdevGuidance,
+} from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -370,12 +381,6 @@ function logMCPLoadErrors(errors: MCPLoadResult["errors"]): void {
 	}
 }
 
-function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
-	if (result.exaApiKeys.length > 0 && !$env.EXA_API_KEY) {
-		Bun.env.EXA_API_KEY = result.exaApiKeys[0];
-	}
-}
-
 // Types
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
@@ -434,10 +439,26 @@ export interface CreateAgentSessionOptions {
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * Re-resolve {@link scopedModels} after a settings refresh moved
+	 * `enabledModels`. Supplied by the host, not derived here: an explicit
+	 * `--models` pin outranks the setting for the session's lifetime, and that
+	 * invocation input is not recoverable from settings. A host that omits this
+	 * keeps its launch-time scope, which is what an SDK caller supplying
+	 * `scopedModels` directly wants.
+	 */
+	reconcileScopedModels?: () => Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
+	/**
+	 * Pre-refresh hook for embedded hosts. Awaited as the first statement inside
+	 * {@link AgentSession.refresh}'s critical section, before any config surface
+	 * is re-read, so the host can stage fresh skills/rules/settings/MCP to disk
+	 * and have that refresh pick them up.
+	 */
+	onBeforeRefresh?: (scope: RefreshScope) => void | Promise<void>;
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
@@ -537,6 +558,15 @@ export interface CreateAgentSessionOptions {
 	skills?: Skill[];
 	/** Rules. Default: discovered from multiple locations */
 	rules?: Rule[];
+	/**
+	 * Marks {@link rules} as an INHERITED parent roster rather than an explicit
+	 * restriction. Set by the subagent spawn path, which always forwards the
+	 * parent's `session.rules`; a parent's refresh may replace an inherited
+	 * roster but must never widen an explicit one.
+	 */
+	rulesInherited?: boolean;
+	/** Whether {@link skills} is a forwarded parent roster rather than a caller restriction. */
+	skillsInherited?: boolean;
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
@@ -692,21 +722,9 @@ export interface CreateAgentSessionResult {
 	subagentEventBus?: EventBus;
 }
 
-export type DialectFormat = "auto" | "native" | Dialect;
-
-export function resolveDialect(
-	format: DialectFormat,
-	model: (Pick<Model, "supportsTools"> & Partial<Pick<Model, "id">>) | undefined,
-): Dialect | undefined {
-	if (format === "native") return undefined;
-	if (format === "auto") {
-		if (model?.supportsTools !== false) return undefined;
-		if (!model.id) return "glm";
-		const preferred = preferredDialect(model.id);
-		return preferred === FALLBACK_DIALECT ? "glm" : preferred;
-	}
-	return format;
-}
+// Re-exported from `config/tool-dialect` so the settings reconciliation in
+// `AgentSession` can resolve the same way without importing this entry point.
+export { type DialectFormat, resolveDialect } from "./config/tool-dialect";
 
 // Re-exports
 
@@ -1064,7 +1082,13 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 	const uniqueTools = deduplicateMCPToolsByName(tools);
 	return api => {
 		for (const tool of uniqueTools) {
-			api.registerTool(customToolToDefinition(tool, sourcePaths?.get(tool.name)));
+			const definition = customToolToDefinition(tool, sourcePaths?.get(tool.name));
+			// `customToolToDefinition` builds a fresh object, so carry the
+			// setting-gated marker across: it is what lets a later
+			// `refresh('settings')` disable tell this built-in from an extension
+			// that re-registered the same name.
+			if (isSettingGatedTool(tool)) markSettingGatedTool(definition);
+			api.registerTool(definition);
 		}
 
 		const runOnSession = async (event: CustomToolSessionEvent, ctx: ExtensionContext) => {
@@ -1205,7 +1229,13 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 /** Dependencies used to construct an isolated auto-learn capture agent. */
 export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
-	captureTools: AgentTool[];
+	/**
+	 * Resolved per capture, not captured once: `autolearn.enabled` is reloadable,
+	 * so a session that starts with it off has no capture tools at construction
+	 * and every later capture would hit the empty-list guard below even after a
+	 * refresh built and activated them.
+	 */
+	captureTools: () => AgentTool[];
 	createAgent: (options: AgentOptions) => Agent;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
@@ -1217,7 +1247,8 @@ export function createAutoLearnCaptureRunner(
 	options: AutoLearnCaptureRunnerOptions,
 ): (content: string, signal?: AbortSignal) => Promise<void> {
 	return async (content, signal) => {
-		if (options.captureTools.length === 0 || signal?.aborted) return;
+		const captureTools = options.captureTools();
+		if (captureTools.length === 0 || signal?.aborted) return;
 		const captureModel = options.sourceAgent.state.model;
 		if (!captureModel) return;
 
@@ -1238,7 +1269,7 @@ export function createAutoLearnCaptureRunner(
 				model: captureModel,
 				thinkingLevel: options.sourceAgent.state.thinkingLevel,
 				disableReasoning: options.sourceAgent.state.disableReasoning,
-				tools: options.captureTools,
+				tools: captureTools,
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
@@ -1452,11 +1483,44 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: settings.get("workspace.additionalDirectories");
-	if (configuredDirs.length > 0) {
-		// Merge with any roots restored from the session header (resume/fork), not replace.
-		const existing = sessionManager.getAdditionalDirectories();
-		const merged = [...new Set([...existing, ...configuredDirs])];
-		await sessionManager.setAdditionalDirectories(merged);
+	// The roots the current settings value granted, normalized the same way
+	// SessionManager normalizes them so the live list can be compared by value.
+	// A live re-read reconciles against this set rather than the whole list, so
+	// removing a directory from settings actually revokes it while header and
+	// `/add-dir` roots stay. Empty when `--add-dir` pinned the list: the
+	// listener returns early in that case, so nothing is settings-owned.
+	// Seeded from the roots the HEADER records as settings-derived, not from the
+	// roots current settings configure. On a resume those differ precisely in
+	// the case that matters: a root persisted into the header and then removed
+	// from config while the session was stopped is absent from the live value,
+	// so a settings-derived seed starts empty, the reconcile sees no change, and
+	// the revoked directory stays granted forever. Sessions written before the
+	// header carried provenance report nothing, which keeps their roots manual —
+	// the prior behaviour, and the safe direction.
+	let settingsOwnedRoots = new Set(options.additionalDirectories ? [] : sessionManager.getSettingsOwnedDirectories());
+	if (options.additionalDirectories) {
+		// `--add-dir` pins the list for the session, so nothing is settings-owned
+		// and the reconcile below is skipped entirely. Merge with header roots
+		// (resume/fork) rather than replacing them.
+		if (configuredDirs.length > 0) {
+			const merged = [...new Set([...sessionManager.getAdditionalDirectories(), ...configuredDirs])];
+			await sessionManager.setAdditionalDirectories(merged);
+		}
+	} else {
+		// Through the SAME reconcile the live listener uses, so a config edit made
+		// while the session was stopped lands exactly as one made while it ran.
+		// A merge alone could only ever ADD: with the root removed the live value
+		// is empty, `configuredDirs.length > 0` is false, and the header kept
+		// granting a directory the config no longer names.
+		const { roots, owned } = reconcileSettingsWorkspaceRoots({
+			cwd: sessionManager.getCwd(),
+			live: sessionManager.getAdditionalDirectories(),
+			previouslyOwned: settingsOwnedRoots,
+			configured: configuredDirs,
+		});
+		settingsOwnedRoots = owned;
+		await sessionManager.setAdditionalDirectories(roots);
+		await sessionManager.setSettingsOwnedDirectories([...owned]);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const forkCacheShapeChanged =
@@ -1490,10 +1554,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Load and create secret obfuscator early so resumed session state and prompt warnings
 	// reflect actual loaded secrets, not just the setting toggle.
-	const obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
+	//
+	// `let`, not `const`: `/refresh settings` rebuilds this when `secrets.enabled`
+	// moves, and every closure below reads the LOCAL (not a captured copy), so the
+	// rebuild reaches `convertToLlmFinal`, `transformProviderContext`, and
+	// tool-argument deobfuscation. Frozen, a session that enabled secrets on disk
+	// kept sending the configured values to providers while refresh reported the
+	// privacy setting updated.
+	let obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
 		? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
 		: undefined;
-	const secretsEnabled = obfuscator?.hasSecrets() === true;
+	// `let`, not `const`: the prompt's `<redacted-content>` block explains that
+	// `$$HASH$$` placeholders are intentional opaque values, so it must hold
+	// whenever the obfuscator can MINT one. `/refresh settings` rebuilds that
+	// obfuscator, and `rebuildSystemPrompt` reads this local — frozen, a session
+	// that enabled secrets on disk started emitting placeholders while the prompt
+	// still omitted the instruction, so the model read them as errors and tried
+	// to "fix" them.
+	//
+	// Keyed on `hasSecrets()` rather than the `secrets.enabled` flag: that verdict
+	// is what every minting path already gates on, so the instruction holds
+	// exactly when a placeholder can appear.
+	let secretsEnabled = obfuscator?.hasSecrets() === true;
 
 	// An abnormal process exit after a non-terminal message tail is durable
 	// evidence that the old process can no longer finish that turn. Preserve the
@@ -1518,6 +1600,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? [options.modelPattern.trim()]
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
+	// Whether a thinking level was actually REQUESTED at startup, tracked apart
+	// from whether a model was. `options.thinkingLevel` (CLI `--thinking`, and
+	// the `:level` suffix `main.ts` lifts off an explicit `--model` selector)
+	// starts it; the deferred `modelPattern` path sets it below when the pattern
+	// it resolved carried its own suffix. A model supplied WITHOUT any suffix
+	// says nothing about thinking — the level then came from
+	// `thinking.defaultLevel` or `defaultThinkingLevel`, which must stay
+	// settings-tracking so editing that setting and running `refresh('settings')`
+	// still reaches the session.
+	let explicitThinkingSelector = options.thinkingLevel !== undefined;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = settings.getModelRole("default");
 	let explicitDefaultProviders: Set<string> | undefined;
@@ -1672,27 +1764,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
+	// `rulebookRules`/`alwaysApplyRules` are reassignable so an in-session
+	// `refresh` can swap the roster the `rebuildSystemPrompt` closure renders
+	// from (wired via `applyReloadedRoster` below). Without that, a rules refresh
+	// would rebuild the prompt from this stale launch-time snapshot.
+	let rulebookRules: Rule[];
+	let alwaysApplyRules: Rule[];
+	const {
+		ttsrManager,
+		allRules,
+		rulebookRules: initialRulebookRules,
+		alwaysApplyRules: initialAlwaysApplyRules,
+	} = await logger.time("discoverTtsrRules", async () => {
+		const ttsrSettings = settings.getGroup("ttsr");
+		const ttsrManager = new TtsrManager(ttsrSettings);
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: undefined }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+			agentName: resolvedAgentName,
+		});
+		if (existingSession.injectedTtsrRules.length > 0) {
+			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+		}
+		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+	});
+	rulebookRules = initialRulebookRules;
+	alwaysApplyRules = initialAlwaysApplyRules;
 
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
@@ -1752,6 +1853,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
+	// Whether THIS session constructed the manager above, rather than adopting a
+	// parent's or the pre-existing process singleton. Only the owner may
+	// reconcile process-wide admission limits from its own settings scope.
+	const ownsAsyncJobManager = asyncJobManager !== undefined;
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
@@ -1790,6 +1895,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
+		let settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
+		// Idempotent: the controller subscribes for the session's lifetime and the
+		// reference is intentionally discarded (the listener retains it), so a
+		// second construction would double every nudge.
+		let autoLearnControllerStarted = false;
+		const startAutoLearnController = (): void => {
+			// Both callsites run after construction, but the local is nullable until
+			// then; a guard rather than a cast, so a future earlier call cannot
+			// construct a controller bound to `undefined`.
+			const target = session;
+			if (autoLearnControllerStarted || !target) return;
+			autoLearnControllerStarted = true;
+			new AutoLearnController({
+				session: target,
+				settings,
+				capture: content => target.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
+			});
+		};
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
 			for (const name of names) {
@@ -1802,6 +1925,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
+			// Records what THIS invocation permitted, so a later false->true refresh
+			// can build a gated built-in without widening a restricted tool list.
+			// Captured locally: `createTools` runs long before the session exists,
+			// so this cannot forward straight to it.
+			setSettingGatedBuiltinPermissions: (names: ReadonlySet<string>) => {
+				settingGatedBuiltinPermissions = names;
+			},
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
@@ -1826,6 +1956,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			refresh: scope => session.refresh(scope),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -2050,7 +2181,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								await deferredMCPManager.disconnectAll();
 								return;
 							}
-							applyMCPEnvironment(mcpResult);
+							// Owned by THIS session's manager, so the key this session
+							// installs cannot later be replaced or deleted by a peer
+							// top-level session's own startup or refresh.
+							applyMCPEnvironment(mcpResult, deferredMCPManager);
 							logMCPLoadErrors(mcpResult.errors);
 							// Connected MCP tools are enabled and mounted under xd:// devices.
 							await liveSession.refreshMCPTools(mcpResult.tools);
@@ -2074,7 +2208,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (settings.get("mcp.notifications")) {
 					mcpManager.setNotificationsEnabled(true);
 				}
-				applyMCPEnvironment(mcpResult);
+				applyMCPEnvironment(mcpResult, mcpManager);
 
 				// Log MCP errors
 				for (const { path, error } of mcpResult.errors) {
@@ -2107,11 +2241,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (settings.get("generate_image.enabled") && imageGenRequested) {
 				const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
 				if (imageGenTools.length > 0) {
+					// Mark them as the setting's own built-ins so a later
+					// `refresh('settings')` disable can tell them from an extension
+					// that re-registers the same name (see SETTING_GATED_TOOL_MARKER).
+					for (const tool of imageGenTools) markSettingGatedTool(tool);
 					customTools.push(...(imageGenTools as unknown as CustomTool[]));
 				}
 			}
 
 			if (settings.get("speechgen.enabled")) {
+				markSettingGatedTool(ttsTool);
 				customTools.push(ttsTool as unknown as CustomTool);
 			}
 
@@ -2636,6 +2775,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
+					// The resolved pattern carried its own `:level` suffix (or
+					// inherited the unavailable primary's), so this startup really
+					// did request a thinking level.
+					explicitThinkingSelector = true;
 				}
 				thinkingLevel = pickInitialThinkingLevel(selectedModel);
 				autoThinking = thinkingLevel === AUTO_THINKING;
@@ -3113,11 +3256,50 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `auto` enforces the per-model policy (inline for Gemini, off otherwise);
 		// like the rest of the prune machinery this is fixed for the session, so a
 		// mid-session model switch keeps the start-time decision.
-		const inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
-		const eagerTasks = settings.get("task.eager") !== "default";
-		const eagerTasksAlways = settings.get("task.eager") === "always";
-		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
-		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		// Read live, per render, for the same reason as `liveIntentField` above:
+		// `/refresh settings` can move either on disk, and a value captured here
+		// left `rebuildSystemPrompt` rendering the retired tool catalog and
+		// eager-task policy until restart. The model id comes from the live agent
+		// state so a model swap in the same refresh is reflected too.
+		const liveInlineToolDescriptors = (): boolean =>
+			shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), agent?.state.model?.id ?? model?.id);
+		const liveEagerTasks = (): boolean => settings.get("task.eager") !== "default";
+		const liveEagerTasksAlways = (): boolean => settings.get("task.eager") === "always";
+		const inlineToolDescriptors = liveInlineToolDescriptors();
+		// Read live, per render, for the same reason the workspace tree below is:
+		// `tools.intentTracing` decides whether the required intent field is
+		// injected into every tool schema, so a value captured here left both the
+		// prompt guidance and request assembly on the launch-time policy while a
+		// reloaded settings view reported the new one. `PI_INTENT_TRACING` still
+		// overrides the setting, checked on each read so the precedence holds.
+		const liveIntentField = (): string | undefined =>
+			$flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
+		const intentField = liveIntentField();
+		// Read live, per render: `/refresh settings` can flip this on disk, and a
+		// value captured here would leave the prompt reporting a refresh while the
+		// model kept seeing (or kept missing) the tree. The tree itself follows:
+		// `liveWorkspaceTree()` reuses a scan while the flag stays on and rescans
+		// only when it has nothing valid, so a refresh pays the recursive walk
+		// only when the setting actually asks for one.
+		//
+		// Keyed by the directory it was taken under, not a "have scanned" flag: a
+		// session can move to another project between flips, and a boolean latch
+		// would then serve the previous project's files forever. Comparing the cwd
+		// both invalidates the scan on a move and keeps the flip lazy.
+		let workspaceTreeScan: Promise<WorkspaceTree> = workspaceTreePromise;
+		let workspaceTreeScanCwd: string | undefined =
+			(settings.get("includeWorkspaceTree") ?? false) || options.workspaceTree !== undefined ? cwd : undefined;
+		const liveWorkspaceTree = (enabled: boolean, promptCwd: string): Promise<WorkspaceTree> => {
+			if (!enabled) return workspaceTreeScan;
+			if (workspaceTreeScanCwd !== promptCwd) {
+				workspaceTreeScanCwd = promptCwd;
+				workspaceTreeScan = logger.time("buildWorkspaceTree", () =>
+					buildWorkspaceTree(promptCwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
+				);
+				workspaceTreeScan.catch(() => {});
+			}
+			return workspaceTreeScan;
+		};
 		// Latest memory backend instructions rendered for advisor system prompts.
 		// Populated by the initial rebuildSystemPrompt below (before the session is
 		// constructed) and refreshed on every later rebuild via
@@ -3129,6 +3311,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			const renderWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
@@ -3156,17 +3339,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// completes; the rebuild that `refreshMCPTools` triggers post-discovery
 			// then picks up the mounted routes and any connected-server instructions.
 			const serverInstructions = mcpManager?.getServerInstructions();
-			// Drive guidance off the auto-learn BUILTINS that createTools actually built
-			// (provenance, not just an active name): `builtInToolNames` excludes a
-			// custom/extension tool that merely shares the name, and reflects the
-			// session-start build — so a subagent that filtered them out, a mid-session
-			// enable that never built them, or a same-named custom tool while auto-learn
-			// is off all get no guidance.
+			// Drive guidance off the auto-learn BUILTINS this session currently has
+			// (provenance, not just an active name): a custom/extension tool that
+			// merely shares the name must not earn guidance.
+			//
+			// Read through the session's LIVE provenance rather than the
+			// construction-time `builtInToolNames`, which cannot see the settings
+			// reconcile: an off→on edit builds `manage_skill` and would otherwise
+			// activate it with no standing guidance, and an on→off edit would keep
+			// rendering guidance for tools that are gone. Before the session exists
+			// the array is all there is, and it is accurate then.
+			// Provenance AND activation: `hasBuiltInTool` keeps reporting a name the
+			// disable path removed from the registry (it records what the session
+			// BUILT, which is what keeps a re-enable from being mistaken for a
+			// custom tool), so guidance for a gated-off tool would survive on that
+			// alone.
+			const enabledToolNames = hasSession ? session.getEnabledToolNames() : undefined;
+			const hasAutoLearnBuiltin = (name: string): boolean =>
+				enabledToolNames
+					? session.hasBuiltInTool(name) && enabledToolNames.includes(name)
+					: builtInToolNames.includes(name);
 			const autoLearnInstructions = restrictToolNames
 				? undefined
 				: buildAutoLearnInstructions({
-						manageSkill: builtInToolNames.includes("manage_skill"),
-						learn: builtInToolNames.includes("learn"),
+						manageSkill: hasAutoLearnBuiltin("manage_skill"),
+						learn: hasAutoLearnBuiltin("learn"),
 					});
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
@@ -3205,7 +3402,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const nativeTools = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model) === undefined;
 			const promptTools = projectSystemPromptToolMetadata(
 				tools,
-				nativeTools && !inlineToolDescriptors ? { mode: "compact", toolNames } : { mode: "full" },
+				nativeTools && !liveInlineToolDescriptors() ? { mode: "compact", toolNames } : { mode: "full" },
 			);
 			if (options.appendSystemPrompt) {
 				appendPrompt = appendPrompt
@@ -3229,11 +3426,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
 				skillsSettings: settings.getGroup("skills"),
-				inlineToolDescriptors,
+				inlineToolDescriptors: liveInlineToolDescriptors(),
 				nativeTools,
-				intentField,
-				eagerTasks,
-				eagerTasksAlways,
+				intentField: liveIntentField(),
+				eagerTasks: liveEagerTasks(),
+				eagerTasksAlways: liveEagerTasksAlways(),
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isScoutSpawnable(
@@ -3246,8 +3443,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled,
-				workspaceTree: workspaceTreePromise,
-				includeWorkspaceTree,
+				workspaceTree: liveWorkspaceTree(renderWorkspaceTree, promptCwd),
+				includeWorkspaceTree: renderWorkspaceTree,
 				memoryRootEnabled: memoryBackend?.id === "local",
 				securityEnabled: settings.get("security.enabled"),
 				browserEnabled: getEvalPreludes().some(definition => definition.name === "browser"),
@@ -3466,28 +3663,64 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// URL-mirrored images: providers that fetch image URLs get a broker URL
 		// instead of inline base64. Decoration runs LAST among image transforms so
 		// the served bytes are exactly the bytes that would have shipped inline.
-		const blobBroker = createImageUrlServiceFromSettings(settings, sessionManager.getCwd(), model =>
-			modelRegistry.getApiKey(model, providerSessionId),
-		);
+		// Rebuildable for the same reason as the snapcompact transformer below: the
+		// whole `images.urls.*` group is reloadable, and the request path closes
+		// over this BINDING, so a reload can construct one where there was none
+		// (enabling), drop it (disabling), or replace one whose backends or
+		// credentials moved — instead of leaving the retired instance publishing
+		// through the old configuration.
+		const buildBlobBroker = (): ImageUrlService | undefined =>
+			createImageUrlServiceFromSettings(settings, sessionManager.getCwd(), model =>
+				modelRegistry.getApiKey(model, providerSessionId),
+			);
+		let blobBroker = buildBlobBroker();
 		blobBroker?.prewarm();
 		const dateCwdReminder = new DateCwdReminderInjector();
-		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
-		const snapcompactInline =
-			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
-				? new SnapcompactInlineTransformer(
-						{
-							renderSystemPrompt: snapcompactSystemPromptMode,
-							renderToolResults: settings.get("snapcompact.toolResults"),
-							shape: settings.get("snapcompact.shape"),
-						},
-						// Journal the tokens each imaged tool result keeps off the wire
-						// (frames never reach session.jsonl, so this is their only trace).
-						createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
-						// With a serving blob broker, frames become lazy URLs: rasterized
-						// only when a provider fetches them, never held as pixels here.
-						blobBroker?.frameSink,
-					)
-				: undefined;
+		// Built from settings that `/refresh settings` can change, and the request
+		// path closes over this binding rather than an instance, so a reload can
+		// construct one where there was none (enabling) or drop it (disabling) —
+		// not just update the merged value while the old instance keeps running.
+		const buildSnapcompactInline = (): SnapcompactInlineTransformer | undefined => {
+			const renderSystemPrompt = settings.get("snapcompact.systemPrompt");
+			const renderToolResults = settings.get("snapcompact.toolResults");
+			if (renderSystemPrompt === "none" && !renderToolResults) return undefined;
+			return new SnapcompactInlineTransformer(
+				{ renderSystemPrompt, renderToolResults, shape: settings.get("snapcompact.shape") },
+				// Journal the tokens each imaged tool result keeps off the wire
+				// (frames never reach session.jsonl, so this is their only trace).
+				createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
+				// With a serving blob broker, frames become lazy URLs: rasterized
+				// only when a provider fetches them, never held as pixels here.
+				blobBroker?.frameSink,
+			);
+		};
+		let snapcompactInline = buildSnapcompactInline();
+		// Reconfigure in place when one already exists, so the render caches (and
+		// the savings journal's identity) survive a change that does not retire
+		// the frames they hold.
+		const reloadSnapcompactInline = () => {
+			const renderSystemPrompt = settings.get("snapcompact.systemPrompt");
+			const renderToolResults = settings.get("snapcompact.toolResults");
+			if (renderSystemPrompt === "none" && !renderToolResults) {
+				snapcompactInline = undefined;
+				return;
+			}
+			const next = { renderSystemPrompt, renderToolResults, shape: settings.get("snapcompact.shape") };
+			if (snapcompactInline) snapcompactInline.reconfigure(next);
+			else snapcompactInline = buildSnapcompactInline();
+		};
+		// The frame sink is read off the broker when a transformer is BUILT, so a
+		// broker swap has to rebuild the transformer too — reconfiguring in place
+		// would leave it publishing frames through the retired instance.
+		const reloadBlobBroker = async (): Promise<void> => {
+			const retired = blobBroker;
+			blobBroker = buildBlobBroker();
+			blobBroker?.prewarm();
+			snapcompactInline = buildSnapcompactInline();
+			// Last: the replacement is already serving, so a slow tunnel teardown
+			// never leaves the session without a broker.
+			await retired?.dispose();
+		};
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -3497,7 +3730,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// cases they own (STB WebP), so this stays the backstop for everything
 			// else, and it runs before the blob broker uploads any of these bytes.
 			transformed = await dropUnreadableContextImages(transformed, transformModel);
-			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+			const activeBlobBroker = blobBroker;
+			if (activeBlobBroker) transformed = await activeBlobBroker.decorateContext(transformed, transformModel);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
@@ -3521,7 +3755,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const initialTools = initialToolNames
 			.map(name => toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined);
-		const autoLearnCaptureTools = initialTools.filter(tool => tool.name === "manage_skill" || tool.name === "learn");
+		const AUTO_LEARN_CAPTURE_TOOL_NAMES = ["manage_skill", "learn"];
+		const autoLearnCaptureTools = initialTools.filter(tool => AUTO_LEARN_CAPTURE_TOOL_NAMES.includes(tool.name));
+		// Resolved per capture from the LIVE registry: `autolearn.enabled` moves
+		// mid-session, so a session that started with it off has an empty list
+		// here and would keep hitting the capture runner's empty-list guard after
+		// a refresh built the tools. Falls back to the construction-time list
+		// before the session exists.
+		const liveAutoLearnCaptureTools = (): AgentTool[] => {
+			if (!hasSession) return autoLearnCaptureTools;
+			return AUTO_LEARN_CAPTURE_TOOL_NAMES.map(name => session.getToolByName(name)).filter(
+				(tool): tool is AgentTool => tool !== undefined,
+			);
+		};
 
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
@@ -3532,7 +3778,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
 			(hasServiceTierEntry
-				? (existingSession.serviceTier ?? {})
+				? // A receipt exists, so it wins — EXCEPT for the families it recorded as
+					// still following `tier.*`. Those are re-derived from the live config, so
+					// a `tier.*` edit made while the session was stopped is not overridden by
+					// the value that receipt happened to capture (a stale tier no later
+					// refresh could detect, since `Settings` has already loaded the new one).
+					applySettingsTrackedServiceTiers(
+						existingSession.serviceTier ?? {},
+						existingSession.serviceTierSettingsTrackingFamilies,
+						buildServiceTierByFamily(
+							settings.get("tier.openai"),
+							settings.get("tier.anthropic"),
+							settings.get("tier.google"),
+						),
+					)
 				: buildServiceTierByFamily(
 						settings.get("tier.openai"),
 						settings.get("tier.anthropic"),
@@ -3559,7 +3818,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// slot, preventing the nested-spawn deadlock from issue #3749.
 		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
 			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
-			blobBroker,
+			// Read live, so a broker built or swapped by a settings reload is the one
+			// this request recovers through.
+			() => blobBroker,
 		);
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
@@ -3680,27 +3941,139 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
+		// An EXPLICIT startup model (`options.model` / `options.modelPattern`, incl.
+		// CLI `--model`) is a user pin, exactly like an in-session `/model` pick, and
+		// must be recorded with role `default` on BOTH startup paths. On a resumed
+		// branch whose latest non-ephemeral `model_change` is role-less,
+		// `AgentSession.#hasSessionModelOverride()` would otherwise classify the
+		// explicitly requested model as settings-tracking, and the next
+		// `refresh('settings')` would replace it with the configured default.
+		const explicitStartupModel = hasExplicitModel ? model : undefined;
+		// An EXPLICIT thinking selection — `options.thinkingLevel` (incl. CLI
+		// `--thinking`, which is also where `main.ts` puts an explicit model
+		// selector's `:level` suffix), or a resolved `modelPattern`'s own suffix
+		// — is a session pin a settings reload must not clobber, exactly as an
+		// explicit model is. Hoisted above the branch: BOTH startup paths must
+		// record it, and a settings-DERIVED level stays settings-tracking so a
+		// later `refresh('settings')` may re-derive it.
+		//
+		// A model given WITHOUT a thinking suffix is deliberately NOT enough. It
+		// pins the model only; the level then came from the model's
+		// `thinking.defaultLevel` or the global `defaultThinkingLevel`, and
+		// classifying that as a pin wrote an unflagged receipt that made
+		// `thinkingFollowsSettings()` read `false` forever — so editing
+		// `defaultThinkingLevel` and running `refresh('settings')` left the old
+		// level active with nothing the user could do about it short of an
+		// explicit re-selection.
+		const explicitStartupThinking = explicitThinkingSelector;
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
+			if (explicitStartupModel) {
+				sessionManager.appendModelChange(`${explicitStartupModel.provider}/${explicitStartupModel.id}`, "default");
+			}
+			// An explicit thinking selection needs its pin receipt on the RESUMED
+			// path too. Startup applies `options.thinkingLevel` to the new `Agent`
+			// either way, but with no receipt on the branch
+			// `AgentSession.#thinkingFollowsSettings()` sees only the prior
+			// session's entry (or none) and falls through to its follows-settings
+			// default, so the next unrelated `refresh('settings')` overwrote the
+			// explicitly requested level. Only an EXPLICIT choice writes here: a
+			// settings-derived resume must keep tracking the configured default,
+			// and the level it resolved to is already restored from the branch.
+			if (explicitStartupThinking) {
+				if (autoThinking) {
+					// `configured: auto` so the pin records the SELECTOR, not the
+					// provisional effort — same reason as the new-session branch.
+					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
+				} else {
+					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
+						settingsTracking: false,
+					});
+				}
+			}
 			if (persistInitialServiceTier) {
+				// Provenance travels with this receipt too. Being the LATEST receipt,
+				// it decides what a later resume restores — so omitting the list here
+				// cleared the provenance a prior receipt carried and froze the other
+				// families alongside the intentional OpenAI pin, where no subsequent
+				// refresh could detect an offline `tier.*` edit.
+				//
+				// CARRIED from the restored receipt rather than re-derived: only the
+				// flag's own family changes provenance here, and re-deriving would
+				// hand tracking back to a family an earlier `/fast` or selector had
+				// deliberately pinned.
+				//
+				// A host RESOLVER overrides the carry for the same reason it does on
+				// the fresh-session path: it is evaluated against the final model and
+				// its answer is the intended tier set, so no family may keep
+				// following `tier.*` over it.
+				const carriedTrackingFamilies =
+					resolvedServiceTierByFamily !== undefined
+						? []
+						: (existingSession.serviceTierSettingsTrackingFamilies ?? []).filter(family => family !== "openai");
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					carriedTrackingFamilies,
 				);
 			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				// A settings-derived startup stays role-less (still tracks the
+				// configured default and remains swappable).
+				sessionManager.appendModelChange(
+					`${model.provider}/${model.id}`,
+					explicitStartupModel ? "default" : undefined,
+				);
 			}
 			if (!autoThinking) {
-				// Do not write the `auto` selector before the first turn resolves; auto
-				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
+					settingsTracking: !explicitStartupThinking,
+				});
+			} else if (explicitStartupThinking) {
+				// An EXPLICITLY selected `auto` is a session pin too, and it needs a
+				// receipt to say so. A settings-derived `auto` writes nothing (the
+				// per-turn classifier persists its concrete effort once a real user
+				// turn runs, and an absent entry already reads as follows-settings),
+				// but an explicit one has nowhere else to record the pin: every
+				// classifier receipt is `autoResolved`, which
+				// `AgentSession.#thinkingFollowsSettings()` deliberately walks PAST,
+				// so the branch would hold no selection at all and fall through to
+				// that scan's follows-settings default — letting an unrelated
+				// `refresh('settings')` replace the user's `auto` with the
+				// configured/model fallback. `configured: auto` (not the provisional
+				// effort) so resume restores the selector, not the effort it
+				// happened to show.
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
 			}
 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
+				// Which families still FOLLOW `tier.*`, so a tier edited while this
+				// session is stopped is re-derived on resume instead of being
+				// overridden by the value this receipt captured. Every family here
+				// came from the config above; only `--openai-service-tier` is a real
+				// pin, and it pins openai alone — the others keep their provenance.
+				// EVERY family, not just the ones currently set. A family configured
+				// as `none` has no key in the map, so keying off the map omitted it —
+				// and then adding `tier.google` while the session was stopped could
+				// never be picked up, since restoration replays a map with no Google
+				// provenance and `Settings` already holds the new value. Only the
+				// flag is a real pin, and it pins openai alone.
+				// A host RESOLVER is a pin too, and it speaks for every family: it is
+				// evaluated against the final model and its answer — including an
+				// EMPTY map — is the intended tier set, not a config reading. Marking
+				// those families settings-tracking made a revival re-derive
+				// `tier.*` over them, so a spawn that deliberately resolved to no
+				// tier came back carrying the config's.
+				const settingsTrackingFamilies =
+					resolvedServiceTierByFamily !== undefined
+						? []
+						: SERVICE_TIER_FAMILIES.filter(
+								family => !(family === "openai" && options.openAIServiceTier !== undefined),
+							);
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					settingsTrackingFamilies,
 				);
 			}
 		}
@@ -3784,6 +4157,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,
+			onBeforeRefresh: options.onBeforeRefresh,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
@@ -3803,6 +4177,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			ownedAsyncJobManager: asyncJobManager,
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
+			reconcileScopedModels: options.reconcileScopedModels
+				? async () => {
+						const next = await options.reconcileScopedModels?.();
+						// `undefined` means the host declines (an explicit `--models`
+						// pin); an empty array is a real result — the edit CLEARED the
+						// scope, and every model becomes available again.
+						if (next) session.setScopedModels(next);
+					}
+				: undefined,
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
@@ -3812,9 +4195,47 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: settings.getGroup("skills"),
+			// Only the caller-supplied rule policy (SDK `rules` / `--no-rules`), not
+			// the disk-discovered set: present, an in-session refresh re-buckets it
+			// instead of re-scanning disk, so it cannot re-enable ambient rules the
+			// session excluded. `undefined` keeps the roster-editing disk re-scan.
+			rules: options.rules,
+			// Whether that policy is the parent's INHERITED roster (the subagent
+			// spawn path always forwards `session.rules`) rather than a caller
+			// restriction. A parent refresh may replace the former in a running
+			// child; the latter it must never widen.
+			rulesInherited: options.rulesInherited,
+			skillsInherited: options.skillsInherited,
+			// The session's initial discovered roster (rulebook + always-apply), so
+			// a settings-only `refresh` re-buckets the COMPLETE set against the
+			// reloaded TTSR gating and drops only newly-gated rules — instead of
+			// re-bucketing from TTSR entries alone (empty non-TTSR set) and wiping
+			// every non-TTSR rule from the published active rules and next prompt.
+			initialRosterRules: [...rulebookRules, ...alwaysApplyRules],
+			// The complete UNGATED discovery output. A settings-only `refresh`
+			// re-buckets THIS set, so toggling `ttsr.disabledRules`/`builtinRules`
+			// applies in both directions: re-bucketing only the gated roster above
+			// could never restore a rule whose disable entry the user reverted.
+			initialSourceRules: allRules,
+			// The same name init bucketed with, so a refresh re-buckets under this
+			// session's agent scope rather than admitting every agent-scoped rule.
+			agentRuleName: resolvedAgentName,
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
+			// Reapplies `enableLsp && lsp.shared` onto the module-level flag in
+			// `lsp/client.ts`. Owned here because `enableLsp` is a construction
+			// input (`--no-tools`, a restricted subagent set) the session cannot
+			// re-derive from settings.
+			reconcileSharedLsp: () => setSharedLspEnabled(enableLsp && settings.get("lsp.shared")),
+			// Off→on for `autolearn.enabled`. The construction-time half
+			// (`restrictToolNames`, task depth) is captured in the closure, so a
+			// settings edit cannot widen it.
+			reconcileAutoLearn: () => {
+				if (restrictToolNames || taskDepth !== 0) return;
+				if (!settings.get("autolearn.enabled")) return;
+				startAutoLearnController();
+			},
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);
@@ -3832,6 +4253,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
+			// Builds one boolean-gated core built-in on demand. Uses the same
+			// factory table and tool session as startup, so the tool binds to this
+			// session's cwd/exec rather than a re-derived context.
+			createBooleanGatedTool: async (name: string) => {
+				const factory = BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS];
+				if (!factory) return null;
+				const built = await factory(toolSession);
+				return built ? wrapToolWithMetaNotice(built) : null;
+			},
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
@@ -3847,6 +4277,50 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			// An in-session `refresh` re-scans the roster and threads the fresh
+			// buckets back here. Reassigning the closure locals `rebuildSystemPrompt`
+			// reads is what makes a rules refresh reach the model prompt — without
+			// it, `refreshBaseSystemPrompt()` would rebuild from the stale
+			// launch-time snapshot. Skills bind a per-session snapshot updated
+			// separately (`applyReloadedSkills`); the prompt reads `session.skills`.
+			applyReloadedRoster: roster => {
+				rulebookRules = roster.rulebookRules;
+				alwaysApplyRules = roster.alwaysApplyRules;
+				// Re-publish the session's OWN rule snapshot too. `rule://`
+				// resolution prefers `context.rules` (this array) over the process
+				// global, so leaving it at the launch-time value serves stale rule
+				// content — and hides a newly added rule — from every tool that
+				// threads `session.activeRules`.
+				//
+				// The TTSR part is the set the refresh already PUBLISHED, never
+				// `ttsrManager.getRules()`: that registry deliberately retains
+				// registrations while TTSR is globally disabled, so re-deriving
+				// from it here re-added rules the published global set omits — a
+				// condition-only rule stayed addressable through `rule://` with no
+				// bucket to justify it, and a described one was listed twice,
+				// while the reported count came from the narrowed set. Both
+				// snapshots must be the rule set a FRESH session under the current
+				// gating would hold, so both read the same answer.
+				toolSession.activeRules = [
+					...roster.rulebookRules,
+					...roster.alwaysApplyRules,
+					...roster.publishedTtsrRules,
+				];
+				// And the SPAWN-facing field, which is a different set: children
+				// receive `rules: session.rules` as `options.rules`, and a defined
+				// `options.rules` is the child's authoritative rule policy (it skips
+				// the disk scan and buckets exactly this list). Left at the
+				// launch-time `allRules`, a rule added or edited before the spawn was
+				// silently absent from the new child's prompt and `rule://` snapshot.
+				//
+				// The UNGATED source roster is the right value: the gated buckets
+				// above are THIS session's applicable set, so forwarding them would
+				// bake this session's `ttsr.disabledRules`/`agents` scoping into the
+				// child as an unrecoverable policy — the child could never restore a
+				// rule whose disable entry the user later reverted, and a rule scoped
+				// to the child's own agent would be missing outright.
+				toolSession.rules = [...roster.sourceRules];
+			},
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
@@ -3860,6 +4334,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.pendingFullWriteDescription = enabled ? true : undefined;
 			},
 			ensureGoalRegistered,
+			// Rebuilds a setting-gated tool set (`generate_image`, `tts`) when its
+			// setting is turned on after construction. Reproduces the SAME startup
+			// gates the initial install applies, so a group this session was never
+			// allowed to have stays absent: `restrictToolNames` installs no custom
+			// tools at all, and an explicit `--no-tools`/tool whitelist that omits
+			// `generate_image` must keep omitting it (issue #5305) — image-gen is
+			// force-activated, so honoring the whitelist here is the only filter.
+			// Returns the raw `CustomTool`s; the session adapts and wraps them
+			// against its own live tool context, exactly as an MCP tool refresh does.
+			createSettingGatedTools: async setting => {
+				if (restrictToolNames) return [];
+				if (setting === "speechgen.enabled") return [ttsTool as unknown as CustomTool];
+				if (options.toolNames && !options.toolNames.includes("generate_image")) return [];
+				const imageGenTools = await getImageGenTools(modelRegistry, agent.state.model ?? model);
+				return imageGenTools as unknown as CustomTool[];
+			},
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();
@@ -3875,10 +4365,55 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				: undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			// The manager THIS session was built with (owned or the parent's), so an
+			// in-session refresh reconnects it rather than the process-global
+			// `MCPManager.instance()` — which, with multiple top-level sessions, may
+			// be a different session's manager.
+			mcpManager,
 			ttsrManager,
 			obfuscator,
+			// Reassigns the closure local, so the rebuild reaches
+			// `convertToLlmFinal`/`transformProviderContext`/tool-argument
+			// deobfuscation — the consumers that read `obfuscator` directly and
+			// which a session-only swap would never touch. The session installs the
+			// returned instance as its own live value.
+			//
+			// It also refreshes the `secretsEnabled` local that `rebuildSystemPrompt`
+			// renders the `<redacted-content>` block from, and reports whether that
+			// verdict MOVED so the caller can rebuild the prompt. Reporting the
+			// move (rather than rebuilding here) keeps the decision with
+			// `#doRefresh`, which already batches every prompt-affecting change into
+			// one rebuild at the end — and keeps a steady-state refresh
+			// byte-identical so provider prompt caching keeps hitting.
+			rebuildObfuscator: async () => {
+				obfuscator = settings.get("secrets.enabled")
+					? // The session's CURRENT directory, like the rest of refresh
+						// (`settings.reload()`, the roster reload, the prompt's repo
+						// context). `/move` and a cross-project resume repoint it, and
+						// the project half of the secret set is `<cwd>/.omp/secrets.yml`
+						// — so rebuilding from the construction-time value read the
+						// ORIGINAL project's file, leaving the destination project's
+						// secrets unobfuscated in provider requests while the source
+						// project's substitutions kept being applied.
+						//
+						// `agentDir`/`options.agentDir` deliberately stay
+						// construction-time: they locate the GLOBAL secrets.yml and the
+						// placeholder-key file, neither of which is project-scoped, and
+						// the key must stay stable for the session's lifetime so
+						// placeholders already minted into the transcript keep
+						// deobfuscating after a move.
+						await buildSecretObfuscator(sessionManager.getCwd(), agentDir, options.agentDir)
+					: undefined;
+				const nextSecretsEnabled = obfuscator?.hasSecrets() === true;
+				const promptStateChanged = nextSecretsEnabled !== secretsEnabled;
+				secretsEnabled = nextSecretsEnabled;
+				return { obfuscator, promptStateChanged };
+			},
 			agentId: resolvedAgentId,
 			agentKind,
+			// Retain the registry this session was created against so refresh's skill
+			// fan-out targets THIS tree's descendants, not a foreign global tree.
+			agentRegistry,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
@@ -3900,6 +4435,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// Hand over what `createTools` recorded: it ran before this session
+		// existed, so the set was parked in a local until now.
+		session.setSettingGatedBuiltinPermissions(settingGatedBuiltinPermissions);
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).
@@ -4012,6 +4550,84 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 		}
+
+		// Both settings are read once at startup into an object that owns the
+		// behaviour from then on, so `/refresh settings` updating the merged value
+		// alone leaves the live session on the launch-time value while reporting
+		// success. Push the new value into the owner instead.
+		const unsubscribeLiveWorkspaceSettings = settings.onEffectiveChange((path, value) => {
+			if (path === "async.maxJobs") {
+				// Owner only. `scopedAsyncJobManager` is the process-wide singleton
+				// when this session inherited it (a structured subagent, which takes
+				// `AsyncJobManager.instance()`), so a child reloading its own
+				// project-scoped `async.maxJobs` would rewrite the PARENT's admission
+				// limit and start rejecting or admitting the parent's jobs.
+				if (ownsAsyncJobManager) {
+					// Same clamp as construction, so a config edit cannot widen the cap
+					// past what a launch-time value could have asked for.
+					scopedAsyncJobManager?.setMaxRunningJobs(Math.min(100, Math.max(1, (value as number) ?? 100)));
+				}
+				return;
+			}
+			if (
+				path === "snapcompact.systemPrompt" ||
+				path === "snapcompact.toolResults" ||
+				path === "snapcompact.shape"
+			) {
+				reloadSnapcompactInline();
+				return;
+			}
+			if (path.startsWith("images.urls.")) {
+				// Matched by PREFIX: every key under the group feeds the service's
+				// construction — enablement, backends, credentials, TTL, the exposure
+				// options — so naming them individually would leave the next one
+				// added silently unreconciled.
+				session.registerHostReconciliation(
+					reloadBlobBroker().catch(error =>
+						logger.warn("Failed to apply refreshed image URL settings", { error: String(error) }),
+					),
+				);
+				return;
+			}
+			if (path !== "workspace.additionalDirectories") return;
+			// An explicit `--add-dir` list owns the roots for the session; a config
+			// edit must not override what the invocation pinned.
+			if (options.additionalDirectories) return;
+			// Reconcile against the roots the PREVIOUS settings value granted, not
+			// against the live list: the live list already contains them, so a union
+			// could never revoke a removed root. See
+			// `reconcileSettingsWorkspaceRoots` for why the origin has to be tracked.
+			//
+			// Resolved against the session's CURRENT directory, not the
+			// construction-time `cwd`: after `/move` or a cross-project resume both
+			// `SessionManager` and `Settings` already point at the destination, so a
+			// relative root like `../shared` would otherwise normalize under the old
+			// project and grant a directory the operator never named.
+			const { roots, owned } = reconcileSettingsWorkspaceRoots({
+				cwd: sessionManager.getCwd(),
+				live: sessionManager.getAdditionalDirectories(),
+				previouslyOwned: settingsOwnedRoots,
+				configured: Array.isArray(value) ? (value as string[]) : [],
+			});
+			settingsOwnedRoots = owned;
+			// Started eagerly, and the handle is registered so `/refresh settings`
+			// joins it: a listener return value is discarded, so without this the
+			// refresh reports completion while the prompt still advertises the
+			// pre-refresh roots.
+			session.registerHostReconciliation(
+				sessionManager
+					.setAdditionalDirectories(roots)
+					// Persisted with the roots themselves, so the next resume
+					// reconciles against what this edit granted rather than the
+					// provenance the session started with.
+					.then(() => sessionManager.setSettingsOwnedDirectories([...owned]))
+					.then(
+						() => session.refreshBaseSystemPrompt(),
+						error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
+					),
+			);
+		});
+		disposeCallbacks.add(unsubscribeLiveWorkspaceSettings);
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
 		});
@@ -4190,7 +4806,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
-			captureTools: autoLearnCaptureTools,
+			captureTools: liveAutoLearnCaptureTools,
 			onPayload,
 			onResponse,
 			createAgent: captureOptions => {
@@ -4209,7 +4825,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = clampProviderContextImages(transformed, transformModel);
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
-						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+						const activeBlobBroker = blobBroker;
+						if (activeBlobBroker)
+							transformed = await activeBlobBroker.decorateContext(transformed, transformModel);
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),
@@ -4226,8 +4844,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					serviceTierResolver: agent.serviceTierResolver,
 					hideThinkingSummary: agent.hideThinkingSummary,
 					maxRetryDelayMs: agent.maxRetryDelayMs,
-					kimiApiFormat,
-					preferWebsockets: preferOpenAICodexWebsockets,
+					// Read from the live agent, like the tuning fields above: a
+					// `providers.kimiApiFormat` change applied by `/refresh settings`
+					// updates `agent.kimiApiFormat`, while the construction-time
+					// constant would pin every later capture to the old wire format.
+					kimiApiFormat: agent.kimiApiFormat,
+					// Live too, for the same reason as `kimiApiFormat` above: a
+					// `providers.openaiWebsockets` change reconciles onto
+					// `agent.preferWebsockets`, and the construction-time constant
+					// would keep every later capture on the old transport.
+					preferWebsockets: agent.preferWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
@@ -4239,8 +4865,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// MCP tool, side effects included. A hallucinated call from here
 					// correctly stays `not found`, and suggesting session devices it
 					// cannot call would only mislead it.
-					intentTracing: !!intentField,
-					pruneToolDescriptions: inlineToolDescriptors,
+					//
+					// Live too, for the same reason as `kimiApiFormat` and
+					// `preferWebsockets` above: an `inlineToolDescriptors` or
+					// `tools.intentTracing` change reconciles onto the primary agent,
+					// and the construction-time constant would pin every later capture
+					// to the launch-time tool-schema policy.
+					intentTracing: agent.intentTracing,
+					pruneToolDescriptions: agent.pruneToolDescriptions,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),
 					abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
 					appendOnlyContext: shouldEnableAppendOnlyContext(
@@ -4263,18 +4895,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `learn`/`manage_skill` registry ONCE at session start and no settings
 		// change rebuilds it, so installing the controller while disabled would let a
 		// mid-session enable fire a nudge pointing at tools the session never built.
-		// Activation is therefore a session-start decision for BOTH the controller
-		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
-		// mid-session DISABLE. The subscription lives for the session's lifetime; the
-		// reference is intentionally discarded (the listener retains it).
+		// The settings reconcile now BUILDS `manage_skill`/`learn` on an off→on
+		// edit (scoped to what this invocation permitted), so the controller starts
+		// then too, through `reconcileAutoLearn`. The fire-time re-check in
+		// `#onAgentEnd` handles the DISABLE direction.
 		if (!restrictToolNames) {
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
-				new AutoLearnController({
-					session,
-					settings,
-					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
-				});
+				startAutoLearnController();
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}

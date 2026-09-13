@@ -23,7 +23,9 @@ export class RuleProtocolHandler implements ProtocolHandler {
 		if (!rule) {
 			const available = rules.map(r => r.name);
 			const availableStr = available.length > 0 ? available.join(", ") : "none";
-			throw new Error(`Unknown rule: ${ruleName}\nAvailable: ${availableStr}`);
+			throw new Error(
+				`Unknown rule: ${ruleName}\nAvailable: ${availableStr}\nIf it was added since this session started, run refresh (or /refresh rules) to re-scan the roster.`,
+			);
 		}
 
 		return {

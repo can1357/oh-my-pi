@@ -3,6 +3,7 @@ import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type BlobBackend, LocalBlobBackend } from "../src/blob-broker/broker";
+import { contextHasImageUrls } from "../src/blob-broker/context-images";
 import { probeExposureHealth } from "../src/blob-broker/exposure";
 import type { BlobBrokerWorkerConfig } from "../src/blob-broker/protocol";
 import type { BlobPublication } from "../src/blob-broker/publication";
@@ -272,6 +273,25 @@ describe("FallbackBlobBackend", () => {
 		);
 		expect(calls).toEqual(["dead", "healthy"]);
 		expect(producerCalls).toBe(0);
+	});
+});
+
+describe("ImageUrlService teardown fence", () => {
+	it("starts no backend for a decoration that arrives after disposal", async () => {
+		// A settings reload retires the service while a provider request is still
+		// inside `decorateContext()`. Clearing the backend map is not a closed
+		// door: the late call found it empty and started a FRESH backend and
+		// callback server after the teardown snapshot, leaving both running with
+		// nothing left to stop them.
+		const broker = service([directConfig()]);
+
+		await broker.dispose();
+
+		const decorated = await broker.decorateContext(imageContext(), model);
+
+		// No destination is reachable, so the context comes back undecorated —
+		// the outcome every call site already handles — and nothing was started.
+		expect(contextHasImageUrls(decorated)).toBe(false);
 	});
 });
 

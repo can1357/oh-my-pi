@@ -72,8 +72,24 @@ export interface SearchParams {
 	 * caller's agent session when available; otherwise omit.
 	 */
 	sessionId?: string;
+	/**
+	 * The calling session's own MCP-discovered Exa key, when it has one.
+	 * `EXA_API_KEY` is process-global and holds whichever top-level session
+	 * injected FIRST, so a later session must authenticate with this instead of
+	 * a peer's credential.
+	 */
+	sessionExaApiKey?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+}
+
+/**
+ * Per-request credentials an availability check must consider alongside
+ * {@link AuthStorage} and the environment.
+ */
+export interface SearchAvailabilityContext {
+	/** Calling session's own MCP-discovered Exa key. */
+	sessionExaApiKey?: string;
 }
 
 /** Base class for web search providers. */
@@ -89,8 +105,14 @@ export abstract class SearchProvider {
 	 * Drives auto-chain admission: providers that return `false` are skipped
 	 * when {@link resolveProviderChain} walks the order. Explicit selection
 	 * uses {@link isExplicitlyAvailable} instead.
+	 *
+	 * `context` carries per-request credentials that are not in `authStorage`
+	 * or the environment — currently a session's own MCP-discovered Exa key.
+	 * A provider that accepts such a credential in {@link search} MUST also
+	 * honor it here, or the auto chain skips a provider the request could
+	 * actually have used.
 	 */
-	abstract isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean;
+	abstract isAvailable(authStorage: AuthStorage, context?: SearchAvailabilityContext): Promise<boolean> | boolean;
 
 	/**
 	 * Returns `true` when this provider should run when the user explicitly
@@ -101,8 +123,8 @@ export abstract class SearchProvider {
 	 *
 	 * Defaults to mirroring {@link isAvailable}.
 	 */
-	isExplicitlyAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
-		return this.isAvailable(authStorage);
+	isExplicitlyAvailable(authStorage: AuthStorage, context?: SearchAvailabilityContext): Promise<boolean> | boolean {
+		return this.isAvailable(authStorage, context);
 	}
 
 	/**

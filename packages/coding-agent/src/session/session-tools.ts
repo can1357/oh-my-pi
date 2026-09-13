@@ -20,6 +20,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import { BOOLEAN_GATED_TOOLS, COMPOUND_GATED_TOOLS, settingGatedToolEnabled } from "../tools";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
@@ -39,6 +40,71 @@ import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } fro
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+/**
+ * Equality over the skill fields that affect the rendered system prompt.
+ * Mirrors the rule-side `ruleIdentityEqual`: an existing SKILL.md whose
+ * `description`/`hide` frontmatter changes without a rename/move must count as
+ * a roster change so the prompt rebuilds. `hide` is normalized so `undefined`
+ * and `false` (both "advertised") compare equal.
+ */
+function skillIdentityEqual(a: Skill, b: Skill): boolean {
+	return (
+		a.name === b.name &&
+		a.filePath === b.filePath &&
+		a.description === b.description &&
+		(a.hide ?? false) === (b.hide ?? false)
+	);
+}
+
+/** A tool set whose very existence is gated on one boolean setting. */
+export interface SettingGatedToolGroup {
+	readonly setting: SettingGatedToolSetting;
+	/**
+	 * Names the group is KNOWN to install, so a disable can drop them even on a
+	 * session whose set was installed by the startup path rather than by a
+	 * reconcile. The factory's actual output is unioned in on top.
+	 */
+	readonly toolNames: readonly string[];
+}
+
+/** The boolean settings that gate a whole tool set's existence. */
+export type SettingGatedToolSetting = "generate_image.enabled" | "speechgen.enabled";
+
+/**
+ * Marks a tool object as the built-in a {@link SETTING_GATED_TOOL_GROUPS} entry
+ * installs, so a later disable can tell it from an extension or SDK tool that
+ * merely re-registered the same name.
+ *
+ * A name is not enough: these reach the registry through the custom-tools
+ * extension, so `builtInToolNames` excludes them exactly as it excludes an
+ * override. The marker rides the tool object, and `applyToolProxy` republishes
+ * own keys onto every wrapper, so it survives adaptation and wrapping.
+ */
+export const SETTING_GATED_TOOL_MARKER: unique symbol = Symbol.for("omp.settingGatedTool");
+
+/** Stamps `tool` as a setting-gated built-in. Idempotent. */
+export function markSettingGatedTool(tool: object): void {
+	Object.defineProperty(tool, SETTING_GATED_TOOL_MARKER, { value: true, enumerable: false, configurable: true });
+}
+
+/** Whether `tool` is a built-in installed by a setting-gated group. */
+export function isSettingGatedTool(tool: unknown): boolean {
+	return (
+		typeof tool === "object" &&
+		tool !== null &&
+		(tool as Record<PropertyKey, unknown>)[SETTING_GATED_TOOL_MARKER] === true
+	);
+}
+
+/**
+ * Tool sets sdk.ts installs at construction from a boolean setting and never
+ * revisits, so `refresh('settings')` has to reconcile them explicitly.
+ */
+export const SETTING_GATED_TOOL_GROUPS: readonly SettingGatedToolGroup[] = [
+	{ setting: "generate_image.enabled", toolNames: ["generate_image"] },
+	{ setting: "speechgen.enabled", toolNames: ["tts"] },
+];
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -50,6 +116,8 @@ export interface SessionToolsHost {
 	extensionRunner(): ExtensionRunner | undefined;
 	clientBridge(): ClientBridge | undefined;
 	agentKind(): "main" | "sub";
+	/** The session's real spawn depth, for re-evaluating the depth-dependent gates. */
+	taskDepth(): number;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	queuedMessageCount(): number;
@@ -82,6 +150,14 @@ interface SessionToolsOptions {
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/**
+	 * Builds one {@link SETTING_GATED_TOOL_GROUPS} entry's tools when its
+	 * setting is enabled after construction. Supplied by sdk.ts, which owns the
+	 * same startup gates (`restrictToolNames`, an explicit `--no-tools`/tool
+	 * whitelist) the initial install honors — so a group the session was never
+	 * allowed to have returns empty here rather than appearing on a refresh.
+	 */
+	createSettingGatedTools?: (setting: SettingGatedToolSetting) => Promise<CustomTool[]>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -90,6 +166,8 @@ interface SessionToolsOptions {
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
+	/** Builds one boolean-gated built-in on demand, for a false->true refresh. */
+	createBooleanGatedTool?: (name: string) => Promise<AgentTool | null>;
 	baseSystemPrompt: string[];
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
@@ -260,6 +338,14 @@ export class SessionTools {
 		localProtocolOptions: this.#host.localProtocolOptions(),
 	});
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
+	#createBooleanGatedTool: SessionToolsOptions["createBooleanGatedTool"];
+	/**
+	 * Boolean-gated built-ins this session's construction PERMITTED, which is not
+	 * the same as those its startup settings enabled. Populated by `createTools`;
+	 * a name absent here was excluded by a restricted tool list or `--no-tools`
+	 * and must never be added by a settings refresh.
+	 */
+	#settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
 	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
@@ -270,6 +356,13 @@ export class SessionTools {
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
+	#createSettingGatedTools: SessionToolsOptions["createSettingGatedTools"];
+	/**
+	 * Tool names this session has installed per setting-gated group, so a later
+	 * disable can drop exactly what an earlier enable added — including a tool
+	 * whose name the static group table does not list.
+	 */
+	#settingGatedToolNames = new Map<SettingGatedToolSetting, Set<string>>();
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
@@ -301,6 +394,7 @@ export class SessionTools {
 		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
+		this.#createSettingGatedTools = options.createSettingGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
@@ -309,6 +403,7 @@ export class SessionTools {
 		}
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
+		this.#createBooleanGatedTool = options.createBooleanGatedTool;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
@@ -370,6 +465,64 @@ export class SessionTools {
 		return this.#skills;
 	}
 
+	/**
+	 * Swap in a freshly reloaded skills snapshot (from an in-session `refresh`)
+	 * and report whether the set actually changed. `skill://` binds this
+	 * per-session snapshot, so a `setActiveSkills` global swap alone does not
+	 * reach it. Positional prompt-identity compare (name, path, description,
+	 * `hide`) mirrors discovery's stable order and the rule-side
+	 * `ruleIdentityEqual`: editing an existing SKILL.md's `description`/`hide`
+	 * frontmatter WITHOUT renaming still counts as a change and rebuilds the
+	 * advertised roster. An unchanged set returns `false` so the prompt rebuild
+	 * is skipped and Anthropic prompt caching keeps hitting.
+	 */
+	applyReloadedSkills(
+		skills: readonly Skill[],
+		skillsSettings?: SkillsSettings,
+		skillWarnings?: readonly SkillWarning[],
+	): boolean {
+		let changed = this.#skills.length !== skills.length;
+		if (!changed) {
+			for (let i = 0; i < skills.length; i++) {
+				if (!skillIdentityEqual(this.#skills[i], skills[i])) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		this.#skills = [...skills];
+		// Refresh the settings snapshot too: `skills.enableSkillCommands` gates
+		// skill slash-command availability (available-commands.ts), so a stale
+		// construction-time snapshot would keep the old command surface after a
+		// config change. Only overwrite when the caller supplies a fresh group.
+		if (skillsSettings !== undefined) this.#skillsSettings = skillsSettings;
+		// Same rule as `refreshSkills`, which replaces both fields: warnings
+		// describe THIS roster. Absent means no discovery ran (a caller-supplied
+		// roster), so the previous diagnostics stand.
+		if (skillWarnings !== undefined) this.#skillWarnings = [...skillWarnings];
+		return changed;
+	}
+
+	/**
+	 * Install a freshly reloaded `skills.*` settings group WITHOUT touching the
+	 * discovered skill roster, and report whether the command-gating flag
+	 * (`skills.enableSkillCommands`) actually moved.
+	 *
+	 * A `settings`-only refresh reloads the live `Settings` but runs no roster
+	 * rediscovery, so it has no `applyReloadedSkills` call to piggyback the
+	 * snapshot on — yet the cached snapshot is exactly what gates the skill
+	 * command surface (available-commands.ts, acp-agent.ts, rpc-mode.ts), so
+	 * leaving it stale keeps those consumers honoring the old flag until an
+	 * unrelated `skills`/`all` refresh. Returning the flag delta lets the caller
+	 * notify command-metadata subscribers only on a real change, so an unchanged
+	 * config stays a no-op.
+	 */
+	applyReloadedSkillsSettings(skillsSettings: SkillsSettings): boolean {
+		const changed = this.#skillsSettings?.enableSkillCommands !== skillsSettings.enableSkillCommands;
+		this.#skillsSettings = skillsSettings;
+		return changed;
+	}
+
 	/** Diagnostics produced while loading the current skills. */
 	get skillWarnings(): SkillWarning[] {
 		return this.#skillWarnings;
@@ -378,6 +531,11 @@ export class SessionTools {
 	/** Settings snapshot used for the current skill discovery. */
 	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
+	}
+
+	/** Whether runtime reloads may rediscover disk-backed skills (false under `--no-skills`/SDK `skills: []`). */
+	get skillsReloadable(): boolean {
+		return this.#skillsReloadable;
 	}
 
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -1479,6 +1637,170 @@ export class SessionTools {
 		});
 	}
 
+	/**
+	 * Reconcile the tool sets whose EXISTENCE is gated on a boolean setting
+	 * (`generate_image.enabled`, `speechgen.enabled`) against the live settings.
+	 *
+	 * sdk.ts pushes both into `customTools` at construction and nothing later
+	 * registers or removes them, so a reload alone left an enable with the tools
+	 * still absent and a disable with them still callable — the same class of
+	 * staleness as the `think` scratchpad above, which is why this mirrors it:
+	 * disabling drops the name from the active set while preserving its registry
+	 * entry, and enabling builds the tools once (via the host factory, which
+	 * owns the startup gates a session-level `--no-tools`/whitelist imposes) and
+	 * re-activates them.
+	 *
+	 * Returns whether the active tool set actually moved, so a caller can skip a
+	 * prompt rebuild when nothing changed.
+	 */
+	reconcileSettingGatedTools(): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			let changed = false;
+			for (const group of SETTING_GATED_TOOL_GROUPS) {
+				if (await this.#applySettingGatedToolGroup(group)) changed = true;
+			}
+			if (await this.#applyBooleanGatedBuiltins()) changed = true;
+			return changed;
+		});
+	}
+
+	/**
+	 * Reconcile the CORE built-ins gated on a plain boolean setting
+	 * ({@link BOOLEAN_GATED_TOOLS}) against the live settings.
+	 *
+	 * `createTools` evaluates those gates once, at construction, and the tools do
+	 * not re-check them per call, so a reload alone left `bash.enabled: false`
+	 * with shell execution still advertised AND callable, and a false->true edit
+	 * with the tool absent until restart.
+	 *
+	 * Enabling BUILDS a tool whose gate was off at startup, because there is no
+	 * registry entry to re-activate in that case. It is scoped by PERMISSION
+	 * rather than by presence: `#settingGatedBuiltinPermissions` records what
+	 * this session's construction allowed, so a name a restricted tool list or
+	 * `--no-tools` excluded is still never added — the two reasons a tool is
+	 * missing have to stay distinguishable.
+	 */
+	async #applyBooleanGatedBuiltins(): Promise<boolean> {
+		const active = this.getEnabledToolNames();
+		const next = new Set(active);
+		// The session's REAL depth. A compound gate mixes an invocation half
+		// (already decided in `#settingGatedBuiltinPermissions`) with a settings
+		// half that is still live, and the settings half reads depth: a depth-1
+		// child whose `task.maxRecursionDepth` drops to 1 can no longer spawn, so
+		// keeping `task` advertised only defers the rejection to execution.
+		// Hard-coding 0 instead is wrong in the other direction — `isIrcEnabled`
+		// deliberately returns true for EVERY subagent, which depth 0 discards.
+		const sessionDepth = this.#host.taskDepth();
+		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...Object.keys(COMPOUND_GATED_TOOLS)]) {
+			// Only what this session's construction permitted. A name absent from
+			// the set was excluded by the INVOCATION — a restricted tool list,
+			// `--no-tools`, a subagent's task depth — and no settings edit may add
+			// it. The two reasons a tool is missing have to stay distinguishable.
+			if (!this.#settingGatedBuiltinPermissions.has(name)) continue;
+			if (settingGatedToolEnabled(name, this.#host.settings, sessionDepth) !== true) {
+				// Filtered by PROVENANCE, exactly as the setting-gated group
+				// reconcile below does: an extension or SDK tool may register over
+				// one of these names, and that entry is marked non-built-in.
+				// Disabling the BUILT-IN's gate must leave it active — a freshly
+				// started session with the same config omits only the native tool and
+				// still offers the custom one. A name with no entry at all is treated
+				// as owned, matching the behaviour before this reconcile existed.
+				const entry = this.#toolRegistry.get(name);
+				if (entry === undefined || this.#builtInToolNames.has(name)) next.delete(name);
+				continue;
+			}
+			// Enabled and permitted. Build it if this session never did: when the
+			// gate was off at startup there is no registry entry to re-activate.
+			if (!this.#toolRegistry.has(name)) {
+				const built = await this.#createBooleanGatedTool?.(name);
+				if (built?.name !== name) continue;
+				const wrapped = this.#wrapRuntimeTool(built);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			next.add(name);
+		}
+		if (next.size === active.length && active.every(name => next.has(name))) return false;
+		await this.#applyActiveToolsByName([...next]);
+		return true;
+	}
+
+	/** Records which boolean-gated built-ins this session's construction allowed. */
+	setSettingGatedBuiltinPermissions(names: ReadonlySet<string>): void {
+		this.#settingGatedBuiltinPermissions = names;
+	}
+
+	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean> {
+		const enabled = this.#host.settings.get(group.setting) === true;
+		const active = this.getEnabledToolNames();
+		// Names this session has ever had installed for the group, so a disable
+		// reaches a set the STARTUP path installed (which this instance never
+		// recorded) as well as one an earlier reconcile built.
+		//
+		// Filtered by PROVENANCE, not just by name: an extension or SDK tool may
+		// re-register `generate_image`/`tts`, replacing the registry entry while
+		// keeping the name. Disabling the built-in feature must leave that tool
+		// active — under the new setting a freshly started session still offers
+		// it. The marker rides the tool object the group installed, so an entry
+		// without it belongs to somebody else. A name with no entry at all is
+		// treated as owned, matching the pre-existing behaviour.
+		const installed = this.#settingGatedToolNames.get(group.setting);
+		const candidates = new Set<string>(group.toolNames);
+		if (installed) for (const name of installed) candidates.add(name);
+		const owned = new Set<string>();
+		for (const name of candidates) {
+			const entry = this.#toolRegistry.get(name);
+			if (entry === undefined || isSettingGatedTool(entry)) owned.add(name);
+		}
+		if (!enabled) {
+			const next = active.filter(name => !owned.has(name));
+			// The registry entry goes too, not just the active name. A retained
+			// inactive entry is indistinguishable from a live tool to the
+			// late-registration path in `sdk.ts`, which sees an existing entry and
+			// declines to install an extension's same-named tool — so a session
+			// that disabled the feature would hide an extension tool that a freshly
+			// started session with the same setting exposes. Only OWNED names are
+			// dropped, so an entry another registrant already replaced survives.
+			for (const name of owned) {
+				if (isSettingGatedTool(this.#toolRegistry.get(name))) this.#toolRegistry.delete(name);
+			}
+			if (next.length === active.length) return false;
+			await this.#applyActiveToolsByName(next);
+			return true;
+		}
+		const create = this.#createSettingGatedTools;
+		if (!create) return false;
+		// Only build what the registry is actually missing: a group disabled and
+		// re-enabled keeps its registry entries, and rebuilding would discard a
+		// later extension re-registration of the same name.
+		if (group.toolNames.some(name => !this.#toolRegistry.has(name))) {
+			const built = await create(group.setting);
+			const names = this.#settingGatedToolNames.get(group.setting) ?? new Set<string>();
+			for (const customTool of built) {
+				names.add(customTool.name);
+				owned.add(customTool.name);
+				if (this.#toolRegistry.has(customTool.name)) continue;
+				// Adapted here rather than by the host, against THIS session's live
+				// tool context — the same binding an MCP tool refresh performs, and
+				// the reason a subagent's copy of these tools reaches its own cwd,
+				// exec, and pending-action queue rather than the parent's.
+				markSettingGatedTool(customTool);
+				const adapted = CustomToolAdapter.wrap(customTool, this.#getCustomToolContext) as AgentTool;
+				const wrapped = this.#wrapRuntimeTool(adapted);
+				// Stamp the registry entry too: `applyToolProxy` republishes own keys,
+				// but only a plain wrap chain guarantees it, and this is the object a
+				// later disable reads.
+				markSettingGatedTool(wrapped);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+			}
+			this.#settingGatedToolNames.set(group.setting, names);
+		}
+		const missing = [...owned].filter(name => this.#toolRegistry.has(name) && !active.includes(name));
+		if (missing.length === 0) return false;
+		await this.#applyActiveToolsByName([...active, ...missing]);
+		return true;
+	}
+
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
 		return this.runToolRegistryMutation(() => this.#refreshBaseSystemPrompt());
@@ -1517,6 +1839,13 @@ export class SessionTools {
 
 	/** Applies one-turn memory prompt injection before an agent run. */
 	async buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+		// Barrier first. A parent's refresh swaps this session's skill/rule
+		// snapshot synchronously but rebuilds the prompt on the mutation tail, so
+		// a child starting a turn in that window read `#baseSystemPrompt` before
+		// the rebuild landed and advertised the retired roster. Joining the tail
+		// here is what makes the parent's fan-out safe without blocking its
+		// refresh on every descendant.
+		await this.#toolRegistryMutationTail;
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
 
@@ -1585,9 +1914,11 @@ export class SessionTools {
 	 *
 	 * Inputs NOT covered: tool input schemas; memory instructions read from disk;
 	 * and SDK-init-time closure constants in `sdk.ts` (`inlineToolDescriptors`,
-	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
-	 * closure-captured ones cannot change at runtime regardless of skip behavior.
-	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
+	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`). Those cannot change at
+	 * runtime regardless of skip behavior. `secretsEnabled` lives in the same
+	 * closure but IS mutable — the obfuscator rebuild moves it — so it drives an
+	 * explicit {@link refreshBaseSystemPrompt} from the refresh instead. For
+	 * everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
 	 *
 	 * The calendar date is deliberately NOT part of the signature: the date/cwd

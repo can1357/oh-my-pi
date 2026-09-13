@@ -716,6 +716,32 @@ export class Settings {
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
 
+	/**
+	 * Effective values of {@link EFFECTIVE_CHANGE_NOTIFIED_PATHS}, in order.
+	 * Captured before a persisted-layer re-read or write-back so
+	 * {@link #fireNotifiedSettingChanges} can emit only the paths that moved.
+	 */
+	#notifiedSettingSnapshot(): unknown[] {
+		return EFFECTIVE_CHANGE_NOTIFIED_PATHS.map(path => this.get(path));
+	}
+
+	/**
+	 * Emit an effective-change notification for each
+	 * {@link EFFECTIVE_CHANGE_NOTIFIED_PATHS} entry whose value moved since
+	 * `previous`. Deep-compares, because several of these paths hold objects or
+	 * arrays the reload rebuilds — `#fireEffectiveSettingChanged`'s own
+	 * `Object.is` guard would let a structurally identical reload through as a
+	 * change.
+	 */
+	#fireNotifiedSettingChanges(previous: readonly unknown[]): void {
+		for (let i = 0; i < EFFECTIVE_CHANGE_NOTIFIED_PATHS.length; i++) {
+			const path = EFFECTIVE_CHANGE_NOTIFIED_PATHS[i];
+			const next = this.get(path);
+			if (Bun.deepEquals(next, previous[i])) continue;
+			this.#fireEffectiveSettingChanged(path, next, previous[i]);
+		}
+	}
+
 	/** Effective values of every setting that repartitions the Code Mode surface. */
 	#codeModeSignalSnapshot(): unknown[] {
 		return CODE_MODE_SIGNAL_PATHS.map(path => this.get(path));
@@ -799,6 +825,61 @@ export class Settings {
 		}
 	}
 
+	/**
+	 * Re-read every settings layer (global + project + overlays) from disk *in
+	 * place* and rebuild the merged view, WITHOUT writing anything back. This is
+	 * the in-session config-reload counterpart to {@link reloadForCwd}: it picks
+	 * up an on-disk edit to config.yml (a changed default model, a flipped
+	 * setting) that a running session would otherwise not see until restart.
+	 *
+	 * Pure re-READ — it delegates to {@link #loadReadOnly} (no `#load`, no
+	 * migration, no `#queueSave`/`#saveNow`), so config.yml is never rewritten.
+	 * This matters: the write path re-serializes the whole file, so a reload that
+	 * round-tripped through `set()` would reformat config.yml and strip comments
+	 * (the `/model` reformat footgun). Runtime `#overrides` (an in-session
+	 * `/model` pick, etc.) are the highest-precedence layer and survive untouched.
+	 *
+	 * Returns whether the merged view changed, so a caller can skip downstream
+	 * work (model re-resolve, prompt rebuild) on a no-op reload.
+	 */
+	async reload(): Promise<{ changed: boolean }> {
+		const before = JSON.stringify(this.#merged);
+		if (this.#persist) {
+			// Route the persisted re-read through the hardened primitive, which
+			// FLUSHES any pending debounced save first (so a queued `set()` /
+			// `setModelRole()` write lands on disk before the layers are re-read),
+			// serializes concurrent reloads, and retries around mutation
+			// generations. The raw `#loadReadOnly` path used here previously
+			// clobbered `#global`/`#project` with stale disk values while the
+			// changed paths stayed marked modified, so the later `#saveNow` wrote
+			// the OLD disk value back and discarded the user's pending change.
+			await this.reloadFromDisk();
+			return { changed: JSON.stringify(this.#merged) !== before };
+		}
+		// No persisted layers to flush (in-memory instance): keep the pure
+		// re-read. `#loadReadOnly` still picks up project/overlay dirs on disk.
+		const previousNotifiedValues = this.#notifiedSettingSnapshot();
+		// Same reason the persisted re-read captures it: `#loadReadOnly` above
+		// replaces whole layers at once, so a Code Mode path moving inside one of
+		// them reaches no per-path mutator. A `loadReadOnly`/`inMemory` session
+		// therefore updated its merged view while `AgentSession` got no signal,
+		// leaving the live tool partition stale and its awaited reconciliation
+		// handle already resolved.
+		const previousCodeModeValues = this.#codeModeSignalSnapshot();
+		await this.#loadReadOnly();
+		const changed = JSON.stringify(this.#merged) !== before;
+		this.#fireNotifiedSettingChanges(previousNotifiedValues);
+		this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
+		// Only re-sync the setting hooks on a real change. `reload()` is a pure
+		// re-read designed to be broadcast fleet-wide and run repeatedly (the
+		// `refresh` tool); several SETTING_HOOKS entries fire signals
+		// unconditionally (extendedContext, hindsight scope, appendOnlyContext),
+		// so firing them on a byte-identical no-op reload is avoidable churn.
+		// `#fireEffectiveSettingChanged` already self-guards on Object.is.
+		if (changed) this.#fireAllHooks();
+		return { changed };
+	}
+
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		const cloned = new Settings({
 			cwd,
@@ -846,10 +927,7 @@ export class Settings {
 		for (;;) {
 			await this.flush();
 			const mutationGeneration = this.#persistedMutationGeneration;
-			const previousSignaledValues = {
-				modelRoles: this.get("modelRoles"),
-				sessionAccent: this.get("statusLine.sessionAccent"),
-			};
+			const previousNotifiedValues = this.#notifiedSettingSnapshot();
 			const previousCodeModeValues = this.#codeModeSignalSnapshot();
 			const previousHookValues = new Map<SettingPath, unknown>();
 			for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
@@ -875,18 +953,7 @@ export class Settings {
 			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			this.#rebuildMerged();
 
-			const nextModelRoles = this.get("modelRoles");
-			if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles)) {
-				this.#fireEffectiveSettingChanged("modelRoles", nextModelRoles, previousSignaledValues.modelRoles);
-			}
-			const nextSessionAccent = this.get("statusLine.sessionAccent");
-			if (!Bun.deepEquals(nextSessionAccent, previousSignaledValues.sessionAccent)) {
-				this.#fireEffectiveSettingChanged(
-					"statusLine.sessionAccent",
-					nextSessionAccent,
-					previousSignaledValues.sessionAccent,
-				);
-			}
+			this.#fireNotifiedSettingChanges(previousNotifiedValues);
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
@@ -915,14 +982,14 @@ export class Settings {
 		if (normalized === this.#cwd) return;
 		await this.flush();
 		this.#restoreRuntimeModelRoleOverrides();
-		const prevModelRoles = this.get("modelRoles");
+		const previousNotifiedValues = this.#notifiedSettingSnapshot();
 		const prevCodeModeValues = this.#codeModeSignalSnapshot();
 		this.#cwd = normalized;
 		if (this.#persist) {
 			this.#project = await this.#loadProjectSettings();
 		}
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
+		this.#fireNotifiedSettingChanges(previousNotifiedValues);
 		this.#fireCodeModeChangeIfNeeded(prevCodeModeValues);
 		this.#fireAllHooks();
 	}
@@ -1400,18 +1467,33 @@ export class Settings {
 	}
 
 	async #loadReadOnly(): Promise<Settings> {
-		const [globalResult, projectResult] = await Promise.allSettled([
-			this.#loadExistingMainYaml(),
-			this.#loadProjectSettings(),
+		// Non-quarantining readers (`quarantineInvalid = false`), exactly as the
+		// hardened `#reloadPersistedLayers` uses: a pure re-read (startup read-only
+		// load AND the in-session `reload()`/`/refresh settings` path) must never
+		// MOVE a malformed config aside — the startup loaders acquire a write lock
+		// and rename invalid YAML to `.broken-*`, which would let a read reload
+		// relocate the user's file. Malformed files are preserved in place and
+		// surface as a thrown read error instead.
+		const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
+			this.#readExistingMainYaml(false),
+			this.#readProjectSettings(false),
+			this.#readConfigOverlays(false),
 		]);
 		if (globalResult.status === "rejected") throw globalResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
-		if (globalResult.value) {
-			this.#global = globalResult.value;
-		}
+		if (overlayResult.status === "rejected") throw overlayResult.reason;
 
-		this.#project = projectResult.value;
-		this.#configOverlay = await this.#loadConfigOverlays();
+		this.#configPath = globalResult.value.configPath;
+		// Replace the global layer even when the file is absent. If a global
+		// config.yml existed at start and was later deleted or renamed, the read
+		// returns null; the layer must reset to empty rather than retain stale
+		// values, matching `#reloadPersistedLayers` (`?? {}`).
+		this.#global = globalResult.value.settings ?? {};
+		this.#project = projectResult.value.settings;
+		this.#projectFileSettings = projectResult.value.fileSettings;
+		this.#projectShellPathSource = projectResult.value.shellPathSource;
+		this.#configOverlay = overlayResult.value.settings;
+		this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 		this.#rebuildMerged();
 		return this;
 	}
@@ -2738,10 +2820,7 @@ export class Settings {
 		const modifiedPathMutations = new Map(this.#modifiedPathMutations);
 		const modifiedModelRoleMutations = new Map(this.#modifiedGlobalModelRoleMutations);
 		const globalRolesAtStart = this.#modelRolesFromLayer(this.#global);
-		const previousSignaledValues = {
-			modelRoles: this.get("modelRoles"),
-			sessionAccent: this.get("statusLine.sessionAccent"),
-		};
+		const previousNotifiedValues = this.#notifiedSettingSnapshot();
 		const previousCodeModeValues = this.#codeModeSignalSnapshot();
 		const previousHookValues = new Map<SettingPath, unknown>();
 		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
@@ -2890,18 +2969,7 @@ export class Settings {
 		}
 
 		this.#rebuildMerged();
-		const nextModelRoles = this.get("modelRoles");
-		if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles)) {
-			this.#fireEffectiveSettingChanged("modelRoles", nextModelRoles, previousSignaledValues.modelRoles);
-		}
-		const nextSessionAccent = this.get("statusLine.sessionAccent");
-		if (!Bun.deepEquals(nextSessionAccent, previousSignaledValues.sessionAccent)) {
-			this.#fireEffectiveSettingChanged(
-				"statusLine.sessionAccent",
-				nextSessionAccent,
-				previousSignaledValues.sessionAccent,
-			);
-		}
+		this.#fireNotifiedSettingChanges(previousNotifiedValues);
 		this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 		for (const [key, previous] of previousHookValues) {
 			const next = this.get(key);
@@ -3161,6 +3229,72 @@ const CODE_MODE_SIGNAL_PATHS: readonly SettingPath[] = [
 	"providers.openai-codex.codeModeDirectTools",
 	"eval.js",
 	"edit.mode",
+];
+
+/**
+ * Settings whose effective value must reach `onEffectiveChange` listeners when
+ * it moves during a persisted-layer re-read (`reloadFromDisk`, and so
+ * `/refresh settings`) or a write-back (`#saveNow`) — the paths where the
+ * listener performs live reconciliation that a bare merged-view swap cannot do
+ * for itself.
+ *
+ * The `set`/`override`/`clearOverride` mutators notify per-path already; these
+ * two paths replace whole layers at once, so without this registry a listener
+ * only ever hears about a path someone happened to hard-code here. Add a path
+ * when a listener must run on a config-file edit; omitting one is a silent
+ * bug where `/refresh settings` reports success and the surface stays stale.
+ *
+ *   - `modelRoles` / `statusLine.sessionAccent` also fan out to their own
+ *     process-wide signals inside `#fireEffectiveSettingChanged`.
+ *   - `browser.enabled` / `computer.enabled` gate the eval preludes. Their
+ *     `AgentSession` listener rebuilds the system prompt (the prompt states
+ *     which preludes are callable) and, for browser, reconciles the browser-MCP
+ *     server filter. Neither is a `SETTING_HOOKS` entry — those are
+ *     process-global side effects (theme, symbols, redaction), while these need
+ *     the per-session instance — so the reload reached no listener at all and a
+ *     persisted `browser.enabled` edit never took effect.
+ */
+const EFFECTIVE_CHANGE_NOTIFIED_PATHS: readonly SettingPath[] = [
+	"modelRoles",
+	"statusLine.sessionAccent",
+	"browser.enabled",
+	"computer.enabled",
+	// Its listener cancels and re-arms the per-owner idle-close deadline, which
+	// is state already armed on live tabs rather than something read at next
+	// use. Omitted, a persisted edit updated the merged value while existing
+	// tabs kept closing on the old schedule — most visibly on a change to `0`,
+	// where an armed timer still closed tabs after idle closing was disabled.
+	"browser.idleCloseSec",
+	// Both are copied OUT of settings at startup into a live object that owns
+	// the behaviour afterwards — the workspace roots into `SessionManager`, the
+	// job cap into `AsyncJobManager` — so re-reading the merged value
+	// reconciles nothing on its own and the listener must push the new value in.
+	"workspace.additionalDirectories",
+	"async.maxJobs",
+	// The request path closes over a `SnapcompactInlineTransformer` built at
+	// construction, so re-reading the merged value alone left the live session
+	// rendering under the launch-time configuration: enabling stayed inactive,
+	// disabling kept rasterizing, and a shape change kept the retired variant —
+	// all while `/context` estimates read the new values.
+	"snapcompact.systemPrompt",
+	"snapcompact.toolResults",
+	"snapcompact.shape",
+	// Same shape as the transformer above, one service over: the request path
+	// closes over an `ImageUrlService` built at construction, so a reload alone
+	// left the retired instance publishing through the old backends and
+	// credentials — and an enable never started serving at all. Every key here
+	// feeds its construction, so they are all listed rather than just the
+	// enablement flag.
+	"images.urls.enabled",
+	"images.urls.backends",
+	"images.urls.options",
+	"images.urls.credentials",
+	"images.urls.command",
+	"images.urls.publicBaseUrl",
+	"images.urls.ttlHours",
+	"images.urls.bindHost",
+	"images.urls.sshTarget",
+	"images.urls.sshRemotePort",
 ];
 
 /** Subscribe to Code Mode setting changes. Returns an unsubscribe function. */

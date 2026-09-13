@@ -510,6 +510,71 @@ describe("SnapcompactInlineTransformer", () => {
 			spy.mockRestore();
 		}
 	});
+
+	it("reconfigure stops rendering tool results a reload turned off", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const model = makeModel();
+		expect(imageCount(await transformer.transform(makeContext(), model))).toBeGreaterThan(0);
+
+		transformer.reconfigure(withTestShape({ renderSystemPrompt: "none", renderToolResults: false }));
+		expect(imageCount(await transformer.transform(makeContext(), model))).toBe(0);
+	});
+
+	it("reconfigure starts rendering a surface a reload turned on", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: false }),
+		);
+		const model = makeModel();
+		expect(imageCount(await transformer.transform(makeContext(), model))).toBe(0);
+
+		transformer.reconfigure(withTestShape({ renderSystemPrompt: "none", renderToolResults: true }));
+		expect(imageCount(await transformer.transform(makeContext(), model))).toBeGreaterThan(0);
+	});
+
+	it("reconfigure re-rasterizes under a new shape instead of serving retired frames", async () => {
+		// The render caches key on content hash, so identical text hits the cache
+		// and would keep serving frames rendered under the OLD shape.
+		const spy = spyOn(snapcompact, "renderMany");
+		try {
+			const transformer = new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+			);
+			const model = makeModel();
+			await transformer.transform(makeContext(), model);
+			const callsAfterFirst = spy.mock.calls.length;
+			expect(callsAfterFirst).toBeGreaterThan(0);
+
+			transformer.reconfigure({ renderSystemPrompt: "none", renderToolResults: true, shape: "5x8-sent" });
+			await transformer.transform(makeContext(), model);
+			expect(spy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("reconfigure keeps the render caches when the shape is unchanged", async () => {
+		// The negative control for the cache drop: a surface-only change must not
+		// pay to re-rasterize frames that are still valid.
+		const spy = spyOn(snapcompact, "renderMany");
+		try {
+			const transformer = new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+			);
+			const model = makeModel();
+			await transformer.transform(makeContext(), model);
+			const callsAfterFirst = spy.mock.calls.length;
+
+			transformer.reconfigure(withTestShape({ renderSystemPrompt: "all", renderToolResults: true }));
+			await transformer.transform(makeContext(), model);
+			// The newly-enabled system prompt renders; the tool-result frames do not.
+			const toolResultRerenders = spy.mock.calls.length - callsAfterFirst;
+			expect(toolResultRerenders).toBeLessThan(callsAfterFirst);
+		} finally {
+			spy.mockRestore();
+		}
+	});
 });
 
 describe("planInlineSwaps", () => {

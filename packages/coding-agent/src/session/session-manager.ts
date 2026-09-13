@@ -478,6 +478,12 @@ export class SessionManager {
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
+	/**
+	 * Header roots that came from `workspace.additionalDirectories`. Tracked
+	 * separately so a resume can revoke a root whose config entry was removed
+	 * while the session was stopped.
+	 */
+	#settingsOwnedDirectories: string[] = [];
 	#fallbackRuntimeOnly = false;
 	#sessionDir: string;
 	readonly #persist: boolean;
@@ -1131,6 +1137,7 @@ export class SessionManager {
 			directories: options?.additionalDirectories ?? [],
 		});
 		this.#additionalDirectories = additionalWorkspaceDirectories(workspace);
+		this.#settingsOwnedDirectories = [];
 		if (this.#additionalDirectories.length > 0) {
 			this.#header.additionalDirectories = [...this.#additionalDirectories];
 		}
@@ -1359,6 +1366,7 @@ export class SessionManager {
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
+		this.#settingsOwnedDirectories = snapshot.header.settingsOwnedDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
 
 		this.#titleSource = snapshot.titleSource;
@@ -1465,6 +1473,7 @@ export class SessionManager {
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
 		this.#additionalDirectories = header.additionalDirectories ?? [];
+		this.#settingsOwnedDirectories = header.settingsOwnedDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
@@ -1524,6 +1533,8 @@ export class SessionManager {
 			timestamp,
 			cwd: this.#cwd,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
+			settingsOwnedDirectories:
+				this.#settingsOwnedDirectories.length > 0 ? [...this.#settingsOwnedDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
 		};
@@ -1976,6 +1987,29 @@ export class SessionManager {
 	}
 
 	/**
+	 * Header roots derived from `workspace.additionalDirectories`, as recorded
+	 * when they were added. Empty on a session written before this was tracked,
+	 * where every root is treated as manual.
+	 */
+	getSettingsOwnedDirectories(): string[] {
+		return [...this.#settingsOwnedDirectories];
+	}
+
+	/** Records which of the current roots settings own; persisted in the header. */
+	async setSettingsOwnedDirectories(directories: readonly string[]): Promise<void> {
+		const next = [...new Set(directories)].filter(dir => this.#additionalDirectories.includes(dir));
+		if (
+			next.length === this.#settingsOwnedDirectories.length &&
+			next.every((dir, index) => dir === this.#settingsOwnedDirectories[index])
+		) {
+			return;
+		}
+		this.#settingsOwnedDirectories = next;
+		this.#header.settingsOwnedDirectories = next.length > 0 ? [...next] : undefined;
+		await this.#persistWorkspaceDirectoriesChange();
+	}
+
+	/**
 	 * Persist a workspace-directory change to the session header. Respects the
 	 * lazy-persistence gate: a session with no durable output yet keeps the
 	 * change in memory (the header lands with the first real write), so seeding
@@ -2049,11 +2083,16 @@ export class SessionManager {
 			return;
 		}
 		this.#additionalDirectories = next;
+		// A root that is gone cannot still be settings-owned; leaving the name
+		// behind would re-revoke a directory a later `/add-dir` re-adds manually.
+		this.#settingsOwnedDirectories = this.#settingsOwnedDirectories.filter(dir => next.includes(dir));
 		if (this.#additionalDirectories.length > 0) {
 			this.#header.additionalDirectories = this.#additionalDirectories;
 		} else {
 			this.#header.additionalDirectories = undefined;
 		}
+		this.#header.settingsOwnedDirectories =
+			this.#settingsOwnedDirectories.length > 0 ? [...this.#settingsOwnedDirectories] : undefined;
 		await this.#persistWorkspaceDirectoriesChange();
 	}
 
@@ -2356,20 +2395,40 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
-	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
+	/**
+	 * Append a thinking level change as child of current leaf, then advance leaf. Returns entry id.
+	 * @param options.settingsTracking Marks a settings-derived application (not an explicit session choice), leaving it replaceable by a later `/refresh settings`.
+	 * @param options.autoResolved Marks a per-turn `auto` classification receipt rather than a selection, so tracking classification walks past it.
+	 */
+	appendThinkingLevelChange(
+		thinkingLevel?: string,
+		configured?: string,
+		options?: { settingsTracking?: boolean; autoResolved?: boolean },
+	): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
 			configured: configured ?? null,
+			...(options?.settingsTracking ? { settingsTracking: true } : {}),
+			...(options?.autoResolved ? { autoResolved: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}
 
-	appendServiceTierChange(serviceTier: ServiceTierByFamily | null): string {
-		const entry: ServiceTierChangeEntry = { type: "service_tier_change", ...this.#freshEntryFields(), serviceTier };
+	appendServiceTierChange(
+		serviceTier: ServiceTierByFamily | null,
+		settingsTrackingFamilies?: ReadonlyArray<keyof ServiceTierByFamily>,
+	): string {
+		const entry: ServiceTierChangeEntry = {
+			type: "service_tier_change",
+			...this.#freshEntryFields(),
+			serviceTier,
+			// Omitted when empty so a receipt with no config-following family is
+			// byte-identical to one written before this field existed.
+			...(settingsTrackingFamilies?.length ? { settingsTrackingFamilies } : {}),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2385,14 +2444,21 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param options.settingsTracking Marks a settings-tracking auto-swap (not a user pin), leaving `role` free for a real user role.
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(
+		model: string,
+		role?: string,
+		resolvedModelIsFallback = false,
+		options?: { settingsTracking?: boolean },
+	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
 			resolvedModelIsFallback,
+			...(options?.settingsTracking ? { settingsTracking: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;

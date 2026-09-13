@@ -18,10 +18,22 @@ function imageSource(context: Context): ImageSource {
 	return contextHasImageUrls(context) ? "url" : "inline";
 }
 
-/** Wrap `base` with provider-file then URL then inline recovery. */
-export function wrapStreamFnWithBlobUrlFallback(base: StreamFn, broker: ImageUrlService | undefined): StreamFn {
-	if (!broker) return base;
+/**
+ * Wrap `base` with provider-file then URL then inline recovery.
+ *
+ * The broker is resolved PER REQUEST, not captured: it is rebuilt when its
+ * settings move, so a captured value meant this wrapper stayed the unwrapped
+ * base stream after serving was enabled at runtime, and afterwards called a
+ * retired, disposed instance — which cannot identify URLs the replacement
+ * produced, turning lazy frames into "render source expired" text.
+ */
+export function wrapStreamFnWithBlobUrlFallback(
+	base: StreamFn,
+	resolveBroker: () => ImageUrlService | undefined,
+): StreamFn {
 	return (model, context, options) => {
+		const broker = resolveBroker();
+		if (!broker) return base(model, context, options);
 		if (!contextHasProviderFiles(context) && !contextHasImageUrls(context)) return base(model, context, options);
 
 		const outer = new AssistantMessageEventStream();
