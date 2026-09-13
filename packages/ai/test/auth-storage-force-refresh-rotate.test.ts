@@ -1002,34 +1002,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 	test("modelEntitlementError stays silent for errors that are not an exact model-policy denial, or that no stored credential served", async () => {
 		if (!authStorage) throw new Error("test setup failed");
-		expect(await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, authError())).toBeUndefined();
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
 		expect(
-			await authStorage.modelEntitlementError(
-				CODEX_PROVIDER,
-				"gpt-5.3-codex",
-				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
-			),
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, authError(), { apiKey: "any" }),
 		).toBeUndefined();
 		expect(
-			await authStorage.modelEntitlementError(
-				CODEX_PROVIDER,
-				undefined,
-				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
-			),
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, "gpt-5.3-codex", denial, { apiKey: "any" }),
 		).toBeUndefined();
+		expect(
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, undefined, denial, { apiKey: "any" }),
+		).toBeUndefined();
+		expect(await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
 		// A request that ran on a pinned runtime key never rotated through the
-		// stored pool, so no credential carries the model-scope block and the
-		// pool has nothing to explain.
+		// stored pool: the failed bearer resolves to no stored credential, so
+		// the pool has nothing to explain — even when an earlier stored-account
+		// request left every row blocked for the model.
 		await authStorage.set(CODEX_PROVIDER, [
-			{ type: "oauth", access: "untouched", refresh: "ref-U", expires: farExpiry(), email: "u@example.com" },
+			{ type: "oauth", access: "blocked-earlier", refresh: "ref-U", expires: farExpiry(), email: "u@example.com" },
 		]);
-		authStorage.setRuntimeApiKey(CODEX_PROVIDER, "sk-pinned");
+		expect(await authStorage.getApiKey(CODEX_PROVIDER, "earlier", { modelId: DAYBREAK_MODEL })).toBe(
+			"blocked-earlier",
+		);
 		expect(
-			await authStorage.modelEntitlementError(
-				CODEX_PROVIDER,
-				DAYBREAK_MODEL,
-				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
-			),
+			await authStorage.rotateSessionCredential(CODEX_PROVIDER, "earlier", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "blocked-earlier",
+			}),
+		).toBe(false);
+		authStorage.setRuntimeApiKey(CODEX_PROVIDER, "sk-pinned");
+		expect(await authStorage.getApiKey(CODEX_PROVIDER, "pinned", { modelId: DAYBREAK_MODEL })).toBe("sk-pinned");
+		expect(
+			await authStorage.rotateSessionCredential(CODEX_PROVIDER, "pinned", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "sk-pinned",
+			}),
+		).toBe(false);
+		expect(
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "sk-pinned" }),
 		).toBeUndefined();
 	});
 
@@ -1060,7 +1071,9 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			}),
 		).toBe(false);
 
-		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, hostileModel, denial);
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, hostileModel, denial, {
+			apiKey: "only",
+		});
 		if (!verdict) throw new Error("expected a verdict");
 		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
 		expect(verdict.message).toMatch(/^The 'gpt-x red' model is not supported/);
@@ -1092,9 +1105,15 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			}),
 		).toBe(true);
 
-		// A later request whose bearer a peer rotated mid-flight: rotation blocks
-		// nothing, and B is still available — not exhaustion.
-		expect(await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
+		// A later request denied on A again (its bearer handed out by the
+		// blocked-fallback pass) while B is still available — not exhaustion.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "denied-earlier" }),
+		).toBeUndefined();
+		// And a bearer a peer rotated mid-flight resolves to no stored row at all.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "rotated-away" }),
+		).toBeUndefined();
 	});
 
 	test("the verdict is withheld when the stored accounts are parked by an unrelated backoff, not denied the model", async () => {
@@ -1118,10 +1137,57 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, { error: authError(), apiKey });
 		}
 
-		// A denial whose bearer no longer matches storage blocks nothing; neither
-		// parked account was ever denied this model, so there is no verdict.
+		// A parked account was never denied this model, so there is no verdict.
 		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
-		expect(await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "parked-a" }),
+		).toBeUndefined();
+
+		// Once A is actually denied the model, the verdict names B as parked, not denied.
+		await codexStorage.rotateSessionCredential(CODEX_PROVIDER, "parked-1", {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: "parked-a",
+		});
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "parked-a",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).toMatch(/a@example\.com denied, b@example\.com unavailable for \S+\./);
+	});
+
+	test("the verdict judges exhaustion within the failed credential's type: an unblocked stored API key does not save an OAuth pool", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "chatgpt-only", refresh: "ref-C", expires: farExpiry(), email: "c@example.com" },
+			{ type: "api_key", key: "sk-stored" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-mixed-pool";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("chatgpt-only");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "chatgpt-only",
+			}),
+		).toBe(false);
+		// Re-resolution hands the denied OAuth bearer back (blocked-fallback pass)
+		// rather than falling through to the stored API key.
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("chatgpt-only");
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "chatgpt-only",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).toContain("c@example.com denied.");
+		expect(verdict.message).not.toContain("API key");
 	});
 
 	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
@@ -1145,8 +1211,9 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
 		const sessionId = "daybreak-large-pool";
 		// Every account gets the denial in turn until rotation has nowhere left to go.
+		let bearer: string | undefined;
 		for (let attempt = 0; attempt < 11; attempt += 1) {
-			const bearer = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
+			bearer = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
 			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
 				error: denial,
 				modelId: DAYBREAK_MODEL,
@@ -1154,7 +1221,9 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			});
 		}
 
-		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial);
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: bearer,
+		});
 		if (!verdict) throw new Error("expected a verdict");
 		expect(verdict.message).toContain("member7@example.com denied, and 3 more.");
 		expect((verdict.message.match(/@example\.com denied/g) ?? []).length).toBe(8);
@@ -1195,7 +1264,9 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			return promise;
 		});
 		const startedAt = Date.now();
-		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial);
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "hostile",
+		});
 		expect(Date.now() - startedAt).toBeLessThan(5_000);
 		if (!verdict) throw new Error("expected a verdict");
 		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);

@@ -69,7 +69,10 @@ export function createApiKeyResolver(
 			if (!switched) {
 				// A model no account is entitled to is terminal for this request:
 				// re-resolving would only hand back an already-denied bearer.
-				const exhausted = await registry.authStorage.modelEntitlementError(provider, modelId, error, signal);
+				const exhausted = await registry.authStorage.modelEntitlementError(provider, modelId, error, {
+					apiKey: previousKey,
+					signal,
+				});
 				if (exhausted) throw exhausted;
 				const status = AIError.status(error);
 				const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;

@@ -7007,29 +7007,51 @@ export class AuthStorage {
 	 * blocked for the model. Names the accounts that were denied or are parked
 	 * for another reason, the accounts torn down recently, and the way back in,
 	 * so the user is not left with the provider's bare sentence after a silent
-	 * fall-through to whichever sibling account remained. `undefined` for any
-	 * other error, when no request model is known, or when no stored credential
-	 * carries the model-scope block (the request never rotated through the pool).
+	 * fall-through to whichever sibling account remained.
+	 *
+	 * `undefined` for any other error, when no request model is known, and
+	 * whenever the stored pool is not proven exhausted: the failed bearer
+	 * (`options.apiKey`) must resolve to a stored credential that carries the
+	 * model-scope block — a runtime/config override, an env key, or a bearer a
+	 * peer has since refreshed resolves to nothing, and a credential parked by
+	 * an unrelated backoff was never denied this model — and no credential of
+	 * the same type may remain unblocked, since that is the pool
+	 * re-resolution rotates within (an OAuth pool is never abandoned for a
+	 * stored API key).
 	 *
 	 * The verdict becomes an assistant `errorMessage`, so every part a provider
 	 * controls — identities, disable causes, the raw Cursor sentence — is
 	 * sanitized and bounded here. The tombstone lookup is best-effort and
-	 * bounded by `signal` plus a short budget: an unreachable broker must not
-	 * delay an error we already know.
+	 * bounded by `options.signal` plus a short budget: an unreachable broker
+	 * must not delay an error we already know.
 	 */
 	async modelEntitlementError(
 		provider: string,
 		modelId: string | undefined,
 		error: unknown,
-		signal?: AbortSignal,
+		options?: { apiKey?: string; signal?: AbortSignal },
 	): Promise<AIError.ModelEntitlementError | undefined> {
-		if (typeof modelId !== "string") return undefined;
+		if (typeof modelId !== "string" || options?.apiKey === undefined) return undefined;
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
 		const exactCodexModelPolicy =
 			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, modelId);
 		if (!exactCodexModelPolicy && !AIError.isCursorPlanAccountPolicyError(error, provider)) return undefined;
 		const modelPolicyScope = modelAccountPolicyBlockScope(provider, modelId);
 		if (modelPolicyScope === undefined) return undefined;
+
+		// Evidence that this request ran on the stored pool and was refused
+		// there: the failed bearer resolves to a stored credential blocked for
+		// exactly this model. The folding lookup would also accept an unrelated
+		// global backoff, which is not a denial.
+		const failed = await this.#resolveCredentialTarget(provider, undefined, { apiKey: options.apiKey });
+		if (!failed) return undefined;
+		const failedProviderKey = this.#getProviderTypeKey(provider, failed.type);
+		if (
+			this.#getScopedCredentialBlockedUntil(provider, failedProviderKey, failed.index, modelPolicyScope) ===
+			undefined
+		) {
+			return undefined;
+		}
 
 		const rawMessage = error instanceof Error ? error.message : typeof error === "string" ? error : "";
 		// The provider's own sentence leads so text classification keeps matching;
@@ -7043,39 +7065,35 @@ export class AuthStorage {
 			: boundedDiagnostic(rawMessage, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX).replace(/[.\s]*$/, ".");
 
 		const nowMs = Date.now();
-		let deniedCount = 0;
-		let available = 0;
 		const tried: string[] = [];
 		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
+			// Rotation and re-resolution stay within the failed credential's type.
+			if (credential.type !== failed.type) continue;
 			const label =
 				credential.type === "oauth"
 					? boundedDiagnostic(credentialAccountLabel(credential), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX)
 					: "API key";
-			const providerKey = this.#getProviderTypeKey(provider, credential.type);
-			// Only a block written under the model-policy scope is a denial of this
-			// model; the folding lookup would also count an unrelated global backoff.
-			if (this.#getScopedCredentialBlockedUntil(provider, providerKey, index, modelPolicyScope) !== undefined) {
-				deniedCount += 1;
+			if (
+				this.#getScopedCredentialBlockedUntil(provider, failedProviderKey, index, modelPolicyScope) !== undefined
+			) {
 				tried.push(`${label} denied`);
 				continue;
 			}
 			// Rotation also skips siblings parked by a usage limit or backoff.
 			const routing = this.#credentialBlockRouting(provider, credential.type, modelId, modelPolicyScope);
-			const blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, routing.siblingBlockScopes);
-			if (blockedUntil !== undefined) {
-				tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
-				continue;
+			const blockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				failedProviderKey,
+				index,
+				routing.siblingBlockScopes,
+			);
+			if (blockedUntil === undefined) {
+				// An untried sibling is still reachable: a mid-flight peer rotation
+				// may have left nothing blocked this time, but this is not exhaustion.
+				return undefined;
 			}
-			available += 1;
+			tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
 		}
-		// Rotation records the denial as a model-scoped block on the stored
-		// credential it served. Without one, the request did not run on this
-		// pool (a pinned runtime/config key, say) and the denial is not ours to
-		// explain. And while any eligible credential is still unblocked — the
-		// failed bearer was rotated by a peer mid-request, so nothing was blocked
-		// this time, but an older block exists on a sibling — re-resolution can
-		// still reach it, so this is not exhaustion either.
-		if (deniedCount === 0 || available > 0) return undefined;
 		const named = tried.slice(0, ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX);
 		const unnamed = tried.length - named.length;
 		const parts = [
@@ -7086,7 +7104,7 @@ export class AuthStorage {
 		let recentlySignedOut: string[] = [];
 		try {
 			const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
-			const lookupSignal = signal ? AbortSignal.any([signal, budget]) : budget;
+			const lookupSignal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
 			recentlySignedOut = (await this.listActionableDisabledCredentials(provider, lookupSignal))
 				.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
 				.slice(0, 3)
@@ -7295,7 +7313,10 @@ export class AuthStorage {
 				if (!switched) {
 					// A model no account is entitled to is terminal for this request:
 					// re-resolving would only hand back an already-denied bearer.
-					const exhausted = await this.modelEntitlementError(provider, modelId, error, signal);
+					const exhausted = await this.modelEntitlementError(provider, modelId, error, {
+						apiKey: previousKey,
+						signal,
+					});
 					if (exhausted) throw exhausted;
 					const status = AIError.status(error);
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
