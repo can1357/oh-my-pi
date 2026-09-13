@@ -986,6 +986,32 @@ export class MCPManager {
 	}
 
 	/**
+	 * Wait for every in-flight connect, tool load, and reconnect to settle.
+	 *
+	 * One-shot callers (e.g. `omp read <mcp-resource>`) discover servers and read
+	 * immediately; a server whose handshake outlasts the {@link connectServers}
+	 * startup race is still tracked in {@link #pendingConnections} /
+	 * {@link #pendingToolLoads} and therefore invisible to
+	 * {@link getConnectedServers}. Awaiting the pending work lets those callers
+	 * observe the final attached/failed state instead of racing mid-handshake.
+	 * Rejections are swallowed — the caller re-reads state afterwards.
+	 */
+	async waitForPendingConnections(): Promise<void> {
+		// A settling tool load can arm a reconnect (startup-timeout retry), so
+		// drain in passes until no work remains. Bounded so a reconnect storm
+		// cannot spin this forever.
+		for (let pass = 0; pass < 8; pass++) {
+			const pending: Promise<unknown>[] = [
+				...this.#pendingConnections.values(),
+				...this.#pendingToolLoads.values(),
+				...this.#pendingReconnections.values(),
+			];
+			if (pending.length === 0) return;
+			await Promise.allSettled(pending);
+		}
+	}
+
+	/**
 	 * Resolve auth and shell-command substitutions in config before connecting.
 	 * Pass `oauth: false` to skip OAuth credential injection (used by reauth's
 	 * unauthenticated probe, which must observe the server's bare 401).
