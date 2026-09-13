@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, redactSecrets, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
@@ -331,10 +331,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// (or was signed out of) an entitlement shows up in the model list;
 			// say so instead of letting the model vanish from the picker.
 			const retained = new Set(models.map(model => model.id));
-			const dropped = usableCachedModels.filter(model => !retained.has(model.id)).map(model => model.id);
+			const dropped = usableCachedModels
+				.filter(model => !retained.has(model.id))
+				.map(model => redactSecrets(redactUrlSecrets(model.id)));
 			if (dropped.length > 0) {
 				logger.warn("Model discovery dropped models the previous catalog advertised", {
-					provider: options.providerId,
+					provider: redactUrlSecrets(options.providerId),
 					dropped,
 				});
 			}

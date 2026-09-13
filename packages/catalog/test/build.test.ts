@@ -1236,16 +1236,21 @@ describe("model cache spec round trip", () => {
 		}
 	});
 
-	it("warns when an authoritative discovery drops a model the previous catalog advertised", async () => {
+	it("warns with redacted identities when an authoritative discovery drops previously advertised models", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-dropped-discovery-"));
 		const dbPath = path.join(tempDir, "models.db");
-		const keptModel = completionsSpec({ id: "kept-model", provider: "dropped-discovery-test" });
-		const entitledModel = completionsSpec({ id: "entitled-model", provider: "dropped-discovery-test" });
-		let discoveredModels: readonly ModelSpec<"openai-completions">[] = [keptModel, entitledModel];
+		const provider = "https://provider.example/v1?apiKey=provider-secret&ref=keep";
+		const keptModel = completionsSpec({ id: "https://models.example/model?token=kept-secret&ref=keep", provider });
+		const entitledModel = completionsSpec({
+			id: "https://models.example/model?token=dropped-secret&ref=keep",
+			provider,
+		});
+		const labelledModel = completionsSpec({ id: "family apiKey=labelled-secret", provider });
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] = [keptModel, entitledModel, labelledModel];
 		let currentTime = 1_000_000;
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const options = {
-			providerId: "dropped-discovery-test",
+			providerId: provider,
 			staticModels: [],
 			dynamicModelsAuthoritative: true,
 			cacheDbPath: dbPath,
@@ -1262,9 +1267,10 @@ describe("model cache spec round trip", () => {
 			currentTime += 3 * 60 * 60 * 1_000;
 			const shrunk = await resolveProviderModels(options, "online");
 			expect(shrunk.models.map(model => model.id)).toEqual([keptModel.id]);
-			expect(warnSpy).toHaveBeenCalledWith("Model discovery dropped models the previous catalog advertised", {
-				provider: options.providerId,
-				dropped: [entitledModel.id],
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0]?.[1]).toEqual({
+				provider: "https://provider.example/v1?apiKey=[redacted]&ref=keep",
+				dropped: ["https://models.example/model?token=[redacted]&ref=keep", "family apiKey=[redacted]"],
 			});
 
 			// A stable catalog is not news.
