@@ -1671,7 +1671,9 @@ export default function (pi) {
 			const skillVisibleAtCallTime: boolean[] = [];
 			const mock = createMockModel({
 				handler: () => {
-					skillVisibleAtCallTime.push(session?.skills.some(skill => skill.name === "startup-discovered-skill") ?? false);
+					skillVisibleAtCallTime.push(
+						session?.skills.some(skill => skill.name === "startup-discovered-skill") ?? false,
+					);
 					return { content: ["ack"] };
 				},
 			});
