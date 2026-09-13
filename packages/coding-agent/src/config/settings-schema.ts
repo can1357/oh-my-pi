@@ -2517,6 +2517,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"collab.autoStart": {
+		type: "enum",
+		values: ["off", "view", "control"] as const,
+		default: "off",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Auto Start",
+			description:
+				"Host every interactive session via collab.relayUrl as it starts and publish it to the local registry (omp collab list); rooms rotate on session switch",
+			options: [
+				{ value: "off", label: "Off", description: "Share only when /collab is run" },
+				{
+					value: "view",
+					label: "View",
+					description: "Auto-host; the registry hands out view-only links (omp collab link --view)",
+				},
+				{
+					value: "control",
+					label: "Control",
+					description: "Auto-host; the registry hands out control links that can prompt the session",
+				},
+			],
+		},
+	},
+
 	"share.serverUrl": {
 		type: "string",
 		default: DEFAULT_SHARE_URL,

@@ -9,7 +9,7 @@
  * and incremental subagent-transcript reads.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -43,6 +43,13 @@ import {
 	generateRoomId,
 	parseCollabLink,
 } from "./protocol";
+import {
+	type CollabAccess,
+	type CollabHostPublication,
+	type CollabHostRegistrySource,
+	type CollabHostSnapshot,
+	publishCollabHost,
+} from "./registry";
 import { CollabSocket } from "./relay-client";
 import { shrinkForReplication } from "./replication-shrink";
 
@@ -121,6 +128,45 @@ const MAX_PENDING_UI_REQUESTS = 64;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+interface PendingCollabUiRequest {
+	request: CollabUiRequest;
+	promise: Promise<CollabGuestUiResult>;
+	settle(result: CollabGuestUiResult): void;
+	responsePending?: boolean;
+}
+
+/**
+ * Identity a host publishes to the local registry. The controller that owns
+ * hosting supplies a process-lifetime `instanceId` and bumps `generation` for
+ * every room it starts; `access` caps what the registry hands out for this
+ * room (the room itself always carries a write token for its own links).
+ */
+export interface CollabHostOptions {
+	instanceId?: string;
+	generation?: number;
+	access?: CollabAccess;
+	/**
+	 * Whether guests may drive the session yet: prompts, interrupts, and agent
+	 * commands are refused with an error frame while this returns false. Joins,
+	 * transcript fetches, and dialog answers are always accepted, so a writer
+	 * can still answer a question raised while the session is starting up.
+	 * Defaults to always ready.
+	 */
+	guestActionsReady?: () => boolean;
+}
+
+/**
+ * `start()` rejects with this when `stop()` deliberately ends the room while it
+ * is still connecting (session switch, access upgrade, `/collab stop`,
+ * shutdown), as opposed to a relay failure.
+ */
+export class CollabHostStoppedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CollabHostStoppedError";
+	}
+}
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -129,21 +175,90 @@ export class CollabHost {
 	#viewLink = "";
 	#webViewLink = "";
 	#writeToken: Uint8Array | null = null;
-	#sessionId = "";
+	#sessionId: string;
+	#startedAt = 0;
+	readonly #instanceId: string;
+	readonly #generation: number;
+	readonly #guestActionsReady: () => boolean;
+	readonly #access: CollabAccess;
+	#relayConnected = false;
+	#registryPublication: CollabHostPublication | null = null;
+	/** Publication still being created; teardown awaits and withdraws it. */
+	#pendingPublication: Promise<CollabHostPublication | null> | null = null;
+	/** Set by the first teardown (explicit stop or fatal relay close); every later stop() awaits it. */
+	#teardownDone: Promise<void> | null = null;
+	/** Rejects the in-flight first-open wait when `stop()` overtakes `start()`. */
+	#abortStart: ((reason: Error) => void) | null = null;
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
 	#uiReqSeq = 0;
-	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
+	#pendingUi = new Map<number, PendingCollabUiRequest>();
 	#lastStateJson = "";
 	#stateDebounce: Timer | null = null;
 	#streamingInterval: Timer | null = null;
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	/** Set the moment `stop()` begins; `#stopped` follows once teardown has run. */
+	#stopping = false;
+	/** The in-flight or finished `stop()`; concurrent callers share it. */
+	#stopDone: Promise<void> | undefined;
 	#stopped = false;
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
+		this.#instanceId = options.instanceId ?? randomBytes(8).toString("hex");
+		this.#generation = options.generation ?? 1;
+		this.#access = options.access ?? "control";
+		this.#guestActionsReady = options.guestActionsReady ?? (() => true);
+		// The room mirrors the session that is active when it is created; the
+		// frame guard and the registry snapshot compare against this from then on.
+		this.#sessionId = ctx.sessionManager.getSessionId();
+	}
+
+	/** Registry identity shared by every room this process hosts. */
+	get instanceId(): string {
+		return this.#instanceId;
+	}
+
+	/** Registry generation of this room; a later room in the same process has a higher one. */
+	get generation(): number {
+		return this.#generation;
+	}
+
+	/** Highest access the registry hands out for this room. */
+	get access(): CollabAccess {
+		return this.#access;
+	}
+
+	/** Session this room mirrors; fixed at `start()`. */
+	get sessionId(): string {
+		return this.#sessionId;
+	}
+
+	get stopped(): boolean {
+		return this.#stopped;
+	}
+
+	/**
+	 * The room is ending or gone. Checked before any guest action or mirrored
+	 * frame: `stop()` drains the goodbye and awaits registry withdrawal before
+	 * the socket closes, and no guest prompt, abort, answer, or join may reach
+	 * the session — nor may any frame reach guests — once it has begun. The
+	 * controller treats an ending room as absent, so `/collab` starts a new
+	 * room instead of re-printing one that is about to close.
+	 */
+	get ending(): boolean {
+		return this.#stopping || this.#stopped;
+	}
+
+	/** True while a host-side question is retained for (or shown to) a writable guest. */
+	get inputRequired(): boolean {
+		return this.#pendingUi.size > 0;
+	}
+
+	get relayConnected(): boolean {
+		return this.#relayConnected;
 	}
 
 	get link(): string {
@@ -173,8 +288,20 @@ export class CollabHost {
 		return list;
 	}
 
+	/**
+	 * Mirror a host-side question to writable guests. Accepted from
+	 * construction until teardown — including while the relay connection is
+	 * still being established — so a dialog raised by an extension's
+	 * `session_start` hook is retained for the first writer that joins.
+	 *
+	 * Refused, and the room ended, once the active session is no longer the
+	 * one this room mirrors: `/resume` runs the new session's `session_switch`
+	 * hooks before the session-change callbacks fire, so a dialog raised there
+	 * must stay local rather than reach the previous session's guests.
+	 */
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (!this.#socket || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
+		if (!this.#guestTrafficAllowed() || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS)
+			return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -189,7 +316,7 @@ export class CollabHost {
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
-		this.#pendingUi.set(reqId, { request: fullRequest, settle });
+		this.#pendingUi.set(reqId, { request: fullRequest, promise, settle });
 		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
 		return promise;
 	}
@@ -198,11 +325,12 @@ export class CollabHost {
 		const socket = this.#socket;
 		if (!socket) return;
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) socket.send(frame, peerId);
+			if (peer.canWrite) this.#send(frame, peerId);
 		}
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
+		if (this.ending) throw new CollabHostStoppedError("collab host already stopped");
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
@@ -213,15 +341,20 @@ export class CollabHost {
 		this.#webViewLink = formatCollabWebLink(relayUrl, roomId, rawKey, undefined, webUrl);
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
+		const firstOpen = Promise.withResolvers<void>();
+		// stop() may reject this before start() reaches its await (during key
+		// import); mark the rejection handled so it can only surface at the await.
+		firstOpen.promise.catch(() => {});
+		this.#abortStart = firstOpen.reject;
 		const key = await importRoomKey(rawKey);
+		if (this.ending) throw new CollabHostStoppedError("collab host stopped before connecting");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
-		this.#sessionId = this.#ctx.sessionManager.getSessionId();
 
-		const firstOpen = Promise.withResolvers<void>();
 		let opened = false;
 		socket.onOpen = () => {
+			this.#relayConnected = true;
 			if (!opened) {
 				opened = true;
 				firstOpen.resolve();
@@ -232,6 +365,7 @@ export class CollabHost {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
 		};
 		socket.onClose = (reason, willReconnect) => {
+			this.#relayConnected = false;
 			if (this.#stopped) return;
 			if (!opened) {
 				firstOpen.reject(new Error(reason));
@@ -256,13 +390,22 @@ export class CollabHost {
 			this.#stopped = true;
 			socket.close();
 			this.#socket = null;
+			// A question retained while connecting has no room to reach anymore.
+			for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+			this.#pendingUi.clear();
 			throw err;
 		} finally {
 			clearTimeout(timeout);
+			this.#abortStart = null;
 		}
 
+		this.#startedAt = Date.now();
+		// Mirror from the moment the relay is open. A guest can join as soon as
+		// the link is visible (auto-start installs the room before this
+		// resolves), and anything that happens after its welcome snapshot must
+		// reach it; the local registry work below is independent of that.
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
+			if (isWireAgentEvent(event)) this.#send({ t: "event", event: shrinkForReplication(event) });
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -272,31 +415,102 @@ export class CollabHost {
 		const observabilityBus = this.#ctx.subagentEventBus ?? this.#ctx.eventBus;
 		if (observabilityBus) {
 			for (const channel of COLLAB_BUS_CHANNELS) {
-				this.#busUnsubscribers.push(
-					observabilityBus.on(channel, data => this.#broadcast({ t: "bus", channel, data })),
-				);
+				this.#busUnsubscribers.push(observabilityBus.on(channel, data => this.#send({ t: "bus", channel, data })));
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
-			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
+			if (isWireSessionEntry(entry)) this.#send({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+
+		// Publish to the local host registry only after the relay connection
+		// succeeded. Publication failure warns but never breaks hosting (#6099).
+		// The in-flight task is tracked so a stop() that overtakes it withdraws
+		// the result before resolving: a successor room reuses this endpoint.
+		const publishing = publishCollabHost(this.#registrySource(), { instanceId: this.#instanceId }).then(
+			publication => publication,
+			err => {
+				logger.warn("Collab host registry publication failed", { error: String(err) });
+				this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
+					dim: true,
+				});
+				return null;
+			},
+		);
+		this.#pendingPublication = publishing;
+		const publication = await publishing;
+		this.#pendingPublication = null;
+		if (this.ending) {
+			// stop() began, or the relay closed fatally, while publication was in
+			// flight: withdraw it here too (close is idempotent) and refuse to
+			// finish startup instead of installing a dead host that stays discoverable.
+			if (publication) {
+				await publication
+					.close()
+					.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+			}
+			if (this.#stopping) throw new CollabHostStoppedError("collab host stopped during startup");
+			throw new Error("relay connection closed during startup");
+		}
+		this.#registryPublication = publication;
 	}
 
-	/** Broadcast a goodbye, detach all taps, and close the socket. */
+	/**
+	 * Broadcast a goodbye, detach all taps, withdraw the registry entry, and
+	 * close the socket. Resolves once the room is fully gone — including a
+	 * teardown the room started on its own after a fatal relay close — so a
+	 * successor can safely reuse this instance's registry endpoint.
+	 */
 	async stop(reason: string): Promise<void> {
+		if (this.#teardownDone) return this.#teardownDone;
 		if (this.#stopped) return;
-		this.#socket?.send({ t: "bye", reason });
+		this.#stopDone ??= this.#runStop(reason);
+		return this.#stopDone;
+	}
+
+	async #runStop(reason: string): Promise<void> {
+		this.#stopping = true;
+		// Leave the public slot at once: `/collab` must not re-print, and `/join`
+		// must not see as hosting, a room that already refuses frames.
+		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
+		this.#abortStart?.(new CollabHostStoppedError(`collab host stopped: ${reason}`));
+		const socket = this.#socket;
+		if (socket) {
+			// Revocation drops queued application data; only the goodbye may drain.
+			socket.discardPendingSends();
+			// Sealing is asynchronous; without the flush the goodbye would still be
+			// in the send chain when #teardown closes the socket and drops it.
+			socket.send({ t: "bye", reason });
+			await socket.flush();
+		}
 		await this.#teardown();
 	}
 
-	async #teardown(): Promise<void> {
+	#teardown(): Promise<void> {
+		this.#teardownDone ??= this.#runTeardown();
+		return this.#teardownDone;
+	}
+
+	async #runTeardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		// A room that ended on its own (fatal relay close) reaches here without
+		// `#runStop`: leave the public slot before the first await as well.
+		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
+		const publication = this.#registryPublication;
+		this.#registryPublication = null;
+		if (publication) {
+			// close() removes discovery metadata synchronously before awaiting the
+			// server shutdown, so a stopped room disappears from lists immediately;
+			// awaiting it lets a successor room reuse the same instance endpoint.
+			await publication
+				.close()
+				.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+		}
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
@@ -315,37 +529,110 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
+		// A publication still being created when the room ended is withdrawn
+		// before stop() resolves: a successor room reuses this instance
+		// endpoint, and this room's late cleanup must never unlink the winner.
+		const pending = this.#pendingPublication;
+		this.#pendingPublication = null;
+		const late = pending ? await pending : null;
+		if (late) {
+			await late.close().catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+		}
 	}
 
-	#broadcast(frame: CollabFrame): void {
-		if (this.#stopped || !this.#socket) return;
-		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
-			void this.stop("session switched");
-			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
-			return;
-		}
-		this.#socket.send(frame);
+	/**
+	 * The session this room mirrors is still the active one. Every path that
+	 * reads or mutates session state on a guest's behalf (broadcasts, joins,
+	 * prompts, registry queries) checks this first and refuses on a mismatch:
+	 * the room mirrors nothing, welcomes nobody, and is absent from discovery
+	 * while another session is active. It is suspended rather than ended
+	 * because `switchSession()` adopts the target id before it commits and a
+	 * failed switch restores the previous id without notifying anyone; only
+	 * the committed change, delivered to the controller through the
+	 * session-change callback, stops the room. A rolled-back switch simply
+	 * finds the room current again.
+	 */
+	#sessionStillCurrent(): boolean {
+		return this.#ctx.sessionManager.getSessionId() === this.#sessionId;
+	}
+
+	/** Live metadata and capability lookups served over the registry IPC. */
+	#registrySource(): CollabHostRegistrySource {
+		return {
+			snapshot: () => this.#registrySnapshot(),
+			link: access => (access === "view" ? this.#webViewLink : this.#webLink),
+		};
+	}
+
+	/**
+	 * Non-capability snapshot; URLs are only ever returned by `link`. A host
+	 * that is ending, or whose session is not the active one, answers
+	 * `snapshot_unavailable` to every registry op (the link op reads the
+	 * snapshot first), so a listing omits it — without pruning — and no link
+	 * is handed out for a room that already refuses joins.
+	 */
+	#registrySnapshot(): CollabHostSnapshot {
+		if (!this.#guestTrafficAllowed()) throw new Error("collab room unavailable");
+		if (this.#ctx.session.isSessionTransitioning) throw new Error("session transition in progress");
+		const model = this.#ctx.session.model;
+		return {
+			instanceId: this.#instanceId,
+			generation: this.#generation,
+			pid: process.pid,
+			sessionId: this.#sessionId,
+			sessionName: this.#ctx.session.sessionName ?? null,
+			cwd: this.#ctx.sessionManager.getCwd(),
+			model: model ? { provider: model.provider, id: model.id } : null,
+			startedAt: this.#startedAt,
+			participants: this.participants.length,
+			relayConnected: this.#relayConnected,
+			inputRequired: this.inputRequired,
+			access: this.#access,
+		};
+	}
+
+	/** Shared liveness and session-identity gate for guest traffic and deferred actions. */
+	#guestTrafficAllowed(): boolean {
+		return !this.ending && this.#sessionStillCurrent();
+	}
+
+	/** Only outbound path; stop() deliberately bypasses it for the final goodbye. */
+	#send(frame: CollabFrame, toPeer = 0): void {
+		// Ending an existing dialog contains only its old-room request ID, never
+		// current-session data. Do not strand guests if it settles during a
+		// provisional /resume that later rolls back. All other traffic stays gated.
+		if (this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end")) return;
+		this.#socket?.send(frame, toPeer);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		// An old-room answer may wait for rollback, but cannot settle against
+		// another session. The response handler owns that bounded deferral.
+		if (frame.t === "ui-response") {
+			this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
+			return;
+		}
+		// Inbound frames act on the mirrored session (join snapshots, prompts,
+		// aborts, agent control); none may reach a session this room never
+		// shared, or one whose room is already ending.
+		if (!this.#guestTrafficAllowed()) return;
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
 				break;
 			case "prompt":
+				if (this.#rejectWhileStarting("prompting", fromPeer)) break;
 				this.#handlePrompt(frame.text, frame.images, fromPeer);
 				break;
 			case "abort":
+				if (this.#rejectWhileStarting("interrupting", fromPeer)) break;
 				this.#handleAbort(fromPeer);
 				break;
 			case "agent-cmd":
+				if (this.#rejectWhileStarting("agent control", fromPeer)) break;
 				this.#handleAgentCmd(frame.cmd, frame.agentId, frame.text, fromPeer);
-				break;
-			case "ui-response":
-				this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
 				break;
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
@@ -365,12 +652,30 @@ export class CollabHost {
 
 	/** Reject a mutating frame from a read-only peer with a targeted error. */
 	#rejectReadOnly(action: string, fromPeer: number): void {
-		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+		this.#send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+	}
+
+	/**
+	 * Guests must not drive the session while it is still starting up (an
+	 * auto-started room is live before the session's startup hooks finish):
+	 * refuse with a targeted error instead of running an agent turn beside them.
+	 */
+	#rejectWhileStarting(action: string, fromPeer: number): boolean {
+		if (this.#guestActionsReady()) return false;
+		const ready = this.#ctx.session.isSessionTransitioning
+			? "the session transition completes"
+			: "the host finishes starting up";
+		this.#send({ t: "error", message: `${action} is unavailable until ${ready}` }, fromPeer);
+		return true;
 	}
 
 	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+		if (this.#ctx.session.isSessionTransitioning) {
+			this.#send({ t: "error", message: "Session transition in progress; join again when it completes" }, fromPeer);
+			return;
+		}
 		if (proto !== COLLAB_PROTO) {
-			this.#socket?.send(
+			this.#send(
 				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
 				fromPeer,
 			);
@@ -395,7 +700,7 @@ export class CollabHost {
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
-		socket.send(
+		this.#send(
 			{
 				t: "welcome",
 				proto: COLLAB_PROTO,
@@ -410,7 +715,7 @@ export class CollabHost {
 		this.#sendSnapshotChunks(entries, fromPeer);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
-				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
+				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
 		this.#ctx.session.emitNotice(
@@ -436,7 +741,7 @@ export class CollabHost {
 		const socket = this.#socket;
 		if (!socket) return;
 		if (entries.length === 0) {
-			socket.send({ t: "snapshot-chunk", entries: [], final: true }, fromPeer);
+			this.#send({ t: "snapshot-chunk", entries: [], final: true }, fromPeer);
 			return;
 		}
 		let i = 0;
@@ -453,11 +758,13 @@ export class CollabHost {
 				batchBytes += entryBytes;
 				i++;
 			}
-			socket.send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
+			this.#send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
 		}
 	}
 
 	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
+		const suspended = !this.#guestTrafficAllowed();
+		if (suspended && (this.ending || !this.#ctx.session.isSessionTransitioning)) return;
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("responding to ask", fromPeer);
@@ -465,13 +772,47 @@ export class CollabHost {
 		}
 		const pending = this.#pendingUi.get(reqId);
 		if (pending) {
+			if (pending.responsePending) return;
+			if (suspended) {
+				void this.#settleUiAfterTransition(pending, value, fromPeer);
+				return;
+			}
 			pending.settle({ kind: "answered", value });
 			return;
 		}
 		// The request already settled (or never existed for this peer). A writer that
 		// reconnected after the broadcast `ui-request-end` resends its answer and would
 		// otherwise wait forever, so acknowledge it directly.
-		this.#socket?.send({ t: "ui-request-end", reqId }, fromPeer);
+		this.#send({ t: "ui-request-end", reqId }, fromPeer);
+	}
+
+	async #settleUiAfterTransition(
+		pending: PendingCollabUiRequest,
+		value: CollabUiResponseValue,
+		fromPeer: number,
+	): Promise<void> {
+		// At most one answer per existing request; stop/local cancellation wakes
+		// the wait even if a session hook never finishes.
+		pending.responsePending = true;
+		const { reqId } = pending.request;
+		try {
+			do {
+				await Promise.race([this.#ctx.session.waitForSessionTransition(), pending.promise]);
+			} while (
+				this.#pendingUi.get(reqId) === pending &&
+				!this.ending &&
+				!this.#sessionStillCurrent() &&
+				this.#ctx.session.isSessionTransitioning
+			);
+			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
+			if (this.#peers.get(fromPeer)?.canWrite) pending.settle({ kind: "answered", value });
+			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
+		} catch (error) {
+			logger.warn("Collab UI response could not await session transition", { error: String(error) });
+			pending.settle({ kind: "unavailable" });
+		} finally {
+			pending.responsePending = false;
+		}
 	}
 
 	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
@@ -500,10 +841,30 @@ export class CollabHost {
 				},
 				{ streamingBehavior: "steer", queueChipText: text },
 			)
+			.then(dispatched => {
+				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);
+			})
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
-				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
 			});
+	}
+
+	async #notifyPromptDropped(fromPeer: number): Promise<void> {
+		while (!this.ending && this.#ctx.session.isSessionTransitioning) {
+			await this.#ctx.session.waitForSessionTransition();
+		}
+		if (this.ending) return;
+		if (!this.#sessionStillCurrent()) {
+			await this.stop(
+				"session changed before a guest prompt was submitted. Rejoin and resend any prompt not shown in the conversation",
+			);
+			return;
+		}
+		this.#send(
+			{ t: "error", message: "Prompt was not submitted. Please resend it when the host is ready." },
+			fromPeer,
+		);
 	}
 
 	#handleAbort(fromPeer: number): void {
@@ -515,13 +876,18 @@ export class CollabHost {
 		const name = peer.name;
 		void this.#ctx.session
 			.abort({ reason: USER_INTERRUPT_LABEL })
-			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
+			.then(() => {
+				if (!this.#guestTrafficAllowed()) return;
+				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
+			})
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
 
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		// Relay controls arrive outside the normal frame handler.
+		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
@@ -584,10 +950,10 @@ export class CollabHost {
 	}
 
 	#scheduleAgentsBroadcast(): void {
-		if (this.#stopped || this.#agentsDebounce) return;
+		if (this.ending || this.#agentsDebounce) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() });
+			this.#send({ t: "agents", agents: this.#snapshotAgents() });
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
@@ -599,34 +965,38 @@ export class CollabHost {
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
 		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {
 			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			this.#send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
 				const trimmed = text?.trim();
 				if (!trimmed) {
-					this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
+					this.#send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
 				AgentLifecycleManager.global()
 					.ensureLive(agentId)
-					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
+					.then(session => {
+						if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
+						return session.prompt(trimmed, { streamingBehavior: "steer" });
+					})
 					.catch(fail);
 				break;
 			}
 			case "kill": {
 				const kill = async () => {
 					const ref = AgentRegistry.global().get(agentId);
-					if (!ref) return;
+					if (!ref || !this.#guestTrafficAllowed()) return;
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
+					if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
 					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
 				};
 				kill().catch(fail);
@@ -641,7 +1011,7 @@ export class CollabHost {
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
-			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
+			this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
 		const file = AgentRegistry.global().get(agentId)?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
@@ -681,14 +1051,14 @@ export class CollabHost {
 	}
 
 	#scheduleStateBroadcast(): void {
-		if (this.#stopped || this.#stateDebounce) return;
+		if (this.ending || this.#stateDebounce) return;
 		this.#stateDebounce = setTimeout(() => {
 			this.#stateDebounce = null;
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
 			this.#lastStateJson = json;
-			this.#broadcast({ t: "state", state });
+			this.#send({ t: "state", state });
 		}, STATE_DEBOUNCE_MS);
 	}
 
