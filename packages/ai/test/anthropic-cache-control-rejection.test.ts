@@ -712,17 +712,31 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(false);
 	});
 
-	it("keeps caching enabled when a 400 rejects a cache_control value rather than the field", () => {
-		// The field is accepted here; only the retention value is refused. Dropping
-		// every breakpoint for the rest of the session is not the remedy, so the
-		// unknown-member negations require a schema-member noun ("field",
-		// "parameter", "key", …) and never fire on "not a valid value".
+	// A member named UNDER `cache_control` means the endpoint took the field and
+	// refused one nested option, so its ordinary 5m caching still works. The
+	// fallback would strip every breakpoint and latch `cacheControlUnsupported`
+	// for the session, disabling caching that the endpoint supports; a refused
+	// `ttl: "1h"` is the extended-cache-ttl beta's problem instead. Each row
+	// pairs a different bare rejection wording with a different path shape — the
+	// last reuses the exact wording of the field-level 400 above, so only the
+	// trailing segment separates it from a true positive.
+	it.each([
+		["an unsupported ttl value", `messages.0.content.0.cache_control.ttl: unsupported value "1h"`],
+		["an unrecognized scope value", `cache_control.scope: unrecognized value "global"`],
+		["a bracketed ttl path", `cache_control["ttl"]: "1h" is not allowed on this endpoint`],
+		["an extra-input ttl member", "messages.0.content.0.cache_control.ttl: Extra inputs are not permitted"],
+	])("keeps caching enabled when a 400 refuses %s under cache_control", (_shape, message) => {
+		expect(isCacheControlUnsupported(makeStatusError(400, `400 invalid_request_error: ${message}`))).toBe(false);
+	});
+
+	it("keeps caching enabled when a 400 refuses a cache_control value while naming the field itself", () => {
+		// No trailing segment to key on: the named member is the field, and only
+		// its value is refused. The unknown-member negations require a
+		// schema-member noun ("field", "parameter", "key", …), so "not a valid
+		// value" never reaches the fallback.
 		expect(
 			isCacheControlUnsupported(
-				makeStatusError(
-					400,
-					`400 invalid_request_error: messages.0.content.0.cache_control.ttl: "2h" is not a valid value`,
-				),
+				makeStatusError(400, `400 invalid_request_error: cache_control: "2h" is not a valid value`),
 			),
 		).toBe(false);
 	});
