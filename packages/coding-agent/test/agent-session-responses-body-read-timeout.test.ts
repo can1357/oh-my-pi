@@ -60,7 +60,7 @@ type SessionHarnessOptions = {
 
 type SessionHarness = {
 	requests: string[];
-	server: ReturnType<typeof Bun.serve>;
+	server: Bun.Server<undefined>;
 	tempDir: TempDir;
 	authStorage: AuthStorage;
 	sessionManager: SessionManager;
