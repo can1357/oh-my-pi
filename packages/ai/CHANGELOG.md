@@ -7,6 +7,7 @@
 - Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity. Actionable summaries use canonical claims and fresh recovery state, respect broker account pools, and redact diagnostic causes while protected forensic data remains intact ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - Fixed automatic OAuth credential disables through the auth broker and local invalidated-token rotation removing credentials refreshed by a peer; disables now compare the failed credential before removing the row.
+- An automatic OAuth disable sent through the auth broker no longer tears down a credential a peer already rotated: the client names the bearer that failed and the broker refuses the disable when its row has moved on ([#11912](https://github.com/can1357/oh-my-pi/pull/11912) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.19] - 2026-09-12
 

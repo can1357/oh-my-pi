@@ -17,9 +17,11 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { serializeCredential } from "../src/auth/sqlite-credential-store";
 import { removeWithRetries } from "../../utils/src/temp";
+import { withEnv } from "./helpers";
 
-const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
-const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
+/** Ambient Anthropic keys would short-circuit `getApiKey` past the stored OAuth row under test. */
+const withoutAmbientAnthropicKeys = (fn: () => Promise<void>): Promise<void> =>
+	withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, fn);
 
 function mintOAuthCredential(): OAuthCredential {
 	return {
@@ -53,10 +55,6 @@ describe("credential disable bearer CAS", () => {
 	let peer: AuthStorage | undefined;
 
 	beforeEach(async () => {
-		for (const key of ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-cas-disable-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		credential = mintOAuthCredential();
@@ -77,42 +75,40 @@ describe("credential disable bearer CAS", () => {
 		storage?.close();
 		store?.close();
 		await removeWithRetries(tempDir);
-		for (const key of ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
-	test("local invalidated-token rotation keeps the row another process rotated", async () => {
-		expect(await storage.getApiKey("anthropic", "s1")).toBe("access-a");
-		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		try {
-			peerStore.updateAuthCredential(id, rotated);
-			expect(
-				await storage.rotateSessionCredential("anthropic", "s1", {
-					error: new Error("401 invalidated oauth token"),
-				}),
-			).toBe(false);
-			expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
-			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
-		} finally {
-			peerStore.close();
-		}
-	});
+	test("local invalidated-token rotation keeps the row another process rotated", () =>
+		withoutAmbientAnthropicKeys(async () => {
+			expect(await storage.getApiKey("anthropic", "s1")).toBe("access-a");
+			const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+			try {
+				peerStore.updateAuthCredential(id, rotated);
+				expect(
+					await storage.rotateSessionCredential("anthropic", "s1", {
+						error: new Error("401 invalidated oauth token"),
+					}),
+				).toBe(false);
+				expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
+				expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
+			} finally {
+				peerStore.close();
+			}
+		}));
 
-	test("local invalidated-token rotation disables the failed bearer and emits its cause", async () => {
-		const causes: string[] = [];
-		storage.onCredentialDisabled(event => {
-			causes.push(event.disabledCause);
-		});
-		const error = new Error("401 invalidated oauth token");
-		expect(await storage.rotateSessionCredential("anthropic", "s1", { error, apiKey: credential.access })).toBe(
-			false,
-		);
-		expect(store.listAuthCredentials("anthropic")).toEqual([]);
-		expect(await store.listDisabledCredentials("anthropic")).toMatchObject([{ id, cause: error.message }]);
-		expect(causes).toEqual([error.message]);
-	});
+	test("local invalidated-token rotation disables the failed bearer and emits its cause", () =>
+		withoutAmbientAnthropicKeys(async () => {
+			const causes: string[] = [];
+			storage.onCredentialDisabled(event => {
+				causes.push(event.disabledCause);
+			});
+			const error = new Error("401 invalidated oauth token");
+			expect(await storage.rotateSessionCredential("anthropic", "s1", { error, apiKey: credential.access })).toBe(
+				false,
+			);
+			expect(store.listAuthCredentials("anthropic")).toEqual([]);
+			expect(await store.listDisabledCredentials("anthropic")).toMatchObject([{ id, cause: error.message }]);
+			expect(causes).toEqual([error.message]);
+		}));
 
 	describe("auth broker", () => {
 		let client: AuthBrokerClient;
@@ -227,20 +223,27 @@ describe("credential disable bearer CAS", () => {
 			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
 		});
 
-		test("a stale broker-backed AuthStorage cannot disable a peer-rotated invalidated bearer", async () => {
-			const remoteStore = await openRemote();
-			peer = new AuthStorage(remoteStore);
-			await peer.reload();
-			storage.upsertCredential("anthropic", rotated);
-			expect(
-				await peer.rotateSessionCredential("anthropic", "s1", {
-					error: new Error("401 invalidated oauth token"),
-					apiKey: credential.access,
-				}),
-			).toBe(false);
-			expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
-			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
-		});
+		test("a stale broker-backed AuthStorage cannot disable a peer-rotated invalidated bearer", () =>
+			withoutAmbientAnthropicKeys(async () => {
+				const remoteStore = await openRemote();
+				peer = new AuthStorage(remoteStore);
+				await peer.reload();
+				storage.upsertCredential("anthropic", rotated);
+				expect(
+					await peer.rotateSessionCredential("anthropic", "s1", {
+						error: new Error("401 invalidated oauth token"),
+						apiKey: credential.access,
+					}),
+				).toBe(false);
+				expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
+				expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
+				// The rejected disable already reconciled the peer: its next resolve
+				// serves the rotated bearer, not the one the broker just refused.
+				expect(remoteStore.listAuthCredentials("anthropic")).toMatchObject([
+					{ id, credential: { access: "access-a2" } },
+				]);
+				expect(await peer.getApiKey("anthropic", "s1")).toBe("access-a2");
+			}));
 
 		test("stored refresh failures await remote bearer CAS instead of accepting an optimistic disable", async () => {
 			const remoteStore = await openRemote();
@@ -257,6 +260,8 @@ describe("credential disable bearer CAS", () => {
 				isDefinitiveFailure: error => error instanceof Error && error.message === "invalid_grant",
 			});
 			expect(result.removed).toBe(false);
+			// CAS loss hands back the row the peer rotated, not the dead bearer we attempted.
+			expect(result.credential).toMatchObject({ access: "access-a2" });
 			expect(store.listAuthCredentials("anthropic")).toMatchObject([{ id, credential: rotated }]);
 			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
 		});

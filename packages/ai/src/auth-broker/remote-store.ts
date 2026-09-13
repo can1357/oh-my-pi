@@ -738,7 +738,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Await the broker disable, conditional on the bearer when a fingerprint is
-	 * supplied. A peer rotation returns false without removing the local entry.
+	 * supplied. A peer rotation (412) returns false without removing the local
+	 * entry, after re-fetching the snapshot so the caller's follow-up `reload()`
+	 * already sees the rotated row instead of the stale bearer it attempted.
 	 */
 	async deleteAuthCredentialRemote(
 		id: number,
@@ -752,8 +754,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			await this.#client.disableCredential(id, disabledCause, { expectedAccessFingerprint });
 		} catch (error) {
 			if (error instanceof AuthBrokerError && error.status === 412) {
-				this.#maybeRefreshSnapshot("disable rejected");
 				logger.debug("auth-broker disable rejected: bearer rotated", { id });
+				await this.#reconcileAfterRejectedDisable();
 				return false;
 			}
 			throw error;
@@ -761,6 +763,20 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#removeCredentialById(id);
 		this.#maybeRefreshSnapshot("delete credential");
 		return true;
+	}
+
+	/**
+	 * The broker refused to disable because its row moved on; nothing changed
+	 * server-side, so no stream push is coming — fetch the current snapshot
+	 * explicitly. Failure keeps the loaded snapshot rather than masking the
+	 * CAS-loss result.
+	 */
+	async #reconcileAfterRejectedDisable(): Promise<void> {
+		try {
+			await this.refreshSnapshot();
+		} catch (error) {
+			logger.debug("auth-broker snapshot refresh after rejected disable failed", { error: String(error) });
+		}
 	}
 
 	/**
@@ -779,7 +795,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#client.disableCredential(id, disabledCause, { expectedAccessFingerprint }).catch(error => {
 			if (error instanceof AuthBrokerError && error.status === 412) {
 				logger.debug("auth-broker disable rejected: bearer rotated", { id });
-				this.#maybeRefreshSnapshot("disable rejected");
+				void this.#reconcileAfterRejectedDisable();
 				return;
 			}
 			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });

@@ -333,20 +333,27 @@ export class AuthBrokerClient {
 		});
 	}
 
+	/**
+	 * `POST /v1/credential/:id/disable`. With `expectedAccessFingerprint` the
+	 * disable is conditional (`If-Match`), and a broker that finds a different
+	 * bearer answers 412. The bare `AbortSignal` form predates the options
+	 * object and is still honoured.
+	 */
 	async disableCredential(
 		id: number,
 		cause: string,
-		opts: { signal?: AbortSignal; expectedAccessFingerprint?: string } = {},
+		opts: AbortSignal | { signal?: AbortSignal; expectedAccessFingerprint?: string } = {},
 	): Promise<CredentialDisableResponse> {
+		const options = opts instanceof AbortSignal ? { signal: opts } : opts;
 		const body: CredentialDisableRequest = { cause };
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: "credentialDisableResponseSchema",
 			headers:
-				opts.expectedAccessFingerprint !== undefined
-					? { "If-Match": `"${opts.expectedAccessFingerprint}"` }
+				options.expectedAccessFingerprint !== undefined
+					? { "If-Match": `"${options.expectedAccessFingerprint}"` }
 					: undefined,
-			signal: opts.signal,
+			signal: options.signal,
 		});
 	}
 
