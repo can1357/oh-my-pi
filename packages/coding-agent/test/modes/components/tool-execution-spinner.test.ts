@@ -841,6 +841,13 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				// #finalizeSnapshot folded the real displaceable tracker into its
 				// orphan accounting.
 				expect(takeDisplaceableComponents).toHaveBeenCalledTimes(1);
+				// The tracker actually cleared its private fields, not merely handed
+				// back the card once: a regression that returns the card without
+				// clearing #displaceablePollComponent/#displaceableTodoComponent would
+				// still pass every assertion above (the card is sealed and its timer
+				// stopped once) while leaving EventController holding a stale
+				// reference across the failed resync.
+				expect(controller.takeDisplaceableComponents()).toEqual([]);
 				// The block was stopped in place, not disposed from the tree: its
 				// rendered row survives the failed resync untouched.
 				expect(chatContainer.children).toContain(displaceableBlock);
