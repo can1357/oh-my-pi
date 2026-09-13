@@ -1635,6 +1635,11 @@ export class InputController {
 			return;
 		}
 
+		// Below, `clearDraft(text)` records the text it is handed, and this path reaches it for
+		// every command the dispatcher left unconsumed — the same set the guest branch refuses on
+		// submit. Hand it nothing for those, so a refused command stays out of history here too.
+		const recordable = this.#guestRefusesSlash(text) ? undefined : text;
+
 		// Hand the message back on dispatch failure (model/API-key validation,
 		// queue rejection): restore both text AND pending images so an image-only
 		// or text+image draft can be retried, mirroring the main submit error path.
@@ -1650,7 +1655,7 @@ export class InputController {
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.clearDraft(text);
+			this.ctx.editor.clearDraft(recordable);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -1666,7 +1671,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.clearDraft(text);
+		this.ctx.editor.clearDraft(recordable);
 		try {
 			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
 				imageCount: images?.length ?? 0,

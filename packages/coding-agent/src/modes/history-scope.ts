@@ -1,6 +1,7 @@
 import { normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
 	HISTORY_SCOPE_KINDS,
+	type HistoryEntry,
 	type HistoryScope,
 	type HistoryScopeKind,
 	type HistoryStorage,
@@ -73,12 +74,14 @@ export function historyScopeRing(start: HistoryScopeKind, context: HistoryScopeC
 }
 
 /**
- * Storage shape a history editor consumes: scoped reads, and writes that carry only the project
- * directory. A prompt's conversation stays with the storage's own session resolver, so an adapter
- * advertising `sessionId` would compile while silently dropping it.
+ * Storage shape a history editor consumes: reads resolved by the bound scope, and writes that
+ * carry only the project directory. A prompt's conversation stays with the storage's own session
+ * resolver, and a read's scope with the binding installed here — an adapter advertising either
+ * would compile while silently ignoring what it was handed.
  */
-export type ScopedHistoryStorage = Pick<HistoryStorage, "getRecent"> & {
+export type ScopedHistoryStorage = {
 	add(prompt: string, cwd?: string): Promise<void>;
+	getRecent(limit: number): HistoryEntry[];
 };
 
 /**

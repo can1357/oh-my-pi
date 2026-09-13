@@ -294,10 +294,19 @@ describe("input controller — collab guest history", () => {
 	});
 
 	it("applies the same guard on the follow-up path", async () => {
-		const refused = guestCtx();
-		refused.editor.setText("/new");
-		await refused.controller.handleFollowUp();
-		expect(refused.addToHistory).not.toHaveBeenCalled();
+		// `/new` is consumed and refused by the allowlist; the rest are left unconsumed by the
+		// dispatcher and reach `clearDraft`, which would record them.
+		const refused = ["/new", "/model opus", "/hotkeys extra", "/not-a-builtin do something", "/"];
+		const recorded: string[] = [];
+
+		for (const command of refused) {
+			const { editor, addToHistory, controller } = guestCtx();
+			editor.setText(command);
+			await controller.handleFollowUp();
+			if (addToHistory.mock.calls.length > 0) recorded.push(command);
+		}
+
+		expect(recorded).toEqual([]);
 
 		const allowed = guestCtx();
 		allowed.editor.setText("/hotkeys");

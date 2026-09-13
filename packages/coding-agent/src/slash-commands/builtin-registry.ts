@@ -176,11 +176,12 @@ export async function executeBuiltinSlashCommand(
  * applied by {@link executeBuiltinSlashCommand}, then the guest branch that rejects whatever the
  * dispatcher left unhandled. The input controller records a command before dispatch and must not
  * remember one a guest cannot run, so this mirrors the two gates here — one place to follow when
- * either changes.
+ * either changes. Text that is not a slash invocation is never refused by these gates.
  */
 export function guestRefusesSlashCommand(text: string): boolean {
+	if (!text.startsWith("/")) return false;
 	const parsed = parseSlashCommand(text);
-	// Callers only ask about text starting with "/", so an unparsable body is the bare "/".
+	// The caller asked about a slash invocation, so an unparsable body is the bare "/".
 	if (!parsed) return true;
 	// Unknown names, skills and extension commands fall through the dispatcher unconsumed.
 	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
