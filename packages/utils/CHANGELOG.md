@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `redactUrlSecrets()`, which redacts credential-bearing query parameters in a URL or in an identifier that embeds one, for log lines and user-facing text ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

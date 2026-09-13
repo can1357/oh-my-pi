@@ -4,31 +4,10 @@
  * Lightweight utilities for calling MCP servers directly via HTTP
  * without maintaining persistent connections.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
-
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
-
-/**
- * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
- * requests never write secrets to the persistent log file, and a signed-out
- * server's URL can be shown to the user. The placeholder stays readable
- * rather than percent-encoded.
- */
-export function redactUrlForLog(url: string): string {
-	try {
-		const parsed = new URL(url);
-		for (const name of parsed.searchParams.keys()) {
-			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
-		}
-		return parsed.toString().replaceAll("%5Bredacted%5D", "[redacted]");
-	} catch {
-		// Unparseable URL — drop the query string entirely rather than risk leaking it.
-		return url.split("?")[0];
-	}
-}
 
 /** Parse SSE response format (lines starting with "data: ") */
 export function parseSSE(text: string): unknown {
@@ -104,7 +83,7 @@ export async function callMCP<T = unknown>(
 
 	if (!response.ok) {
 		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
-		logger.error(errorMsg, { url: redactUrlForLog(url), method, params });
+		logger.error(errorMsg, { url: redactUrlSecrets(url), method, params });
 		throw new Error(errorMsg);
 	}
 
@@ -113,7 +92,7 @@ export async function callMCP<T = unknown>(
 
 	if (!result) {
 		logger.error("Failed to parse MCP response", {
-			url: redactUrlForLog(url),
+			url: redactUrlSecrets(url),
 			method,
 			responseText: text.slice(0, 500),
 		});

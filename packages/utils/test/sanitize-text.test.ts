@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
+import { redactUrlSecrets, sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 
 describe("sanitizeText", () => {
 	it("strips ANSI CSI and removes C0/C1 control chars while keeping tab + LF", () => {
@@ -49,5 +49,21 @@ describe("sanitizeText", () => {
 
 	it("strips DEL and normalizes lone CR", () => {
 		expect(sanitizeText("a\x7fb\rc")).toBe("abc");
+	});
+});
+
+describe("redactUrlSecrets", () => {
+	it("redacts credential-bearing query params but keeps the rest verbatim", () => {
+		expect(redactUrlSecrets("https://mcp.exa.ai/mcp?exaApiKey=sk-secret-123&foo=bar#frag")).toBe(
+			"https://mcp.exa.ai/mcp?exaApiKey=[redacted]&foo=bar#frag",
+		);
+		expect(redactUrlSecrets("https://mcp.exa.ai/mcp")).toBe("https://mcp.exa.ai/mcp");
+	});
+
+	it("redacts inside identifiers that embed a URL, which the URL parser rejects", () => {
+		expect(redactUrlSecrets("mcp_oauth:profile:default:https://host/mcp?ref=1&token=zzz")).toBe(
+			"mcp_oauth:profile:default:https://host/mcp?ref=1&token=[redacted]",
+		);
+		expect(redactUrlSecrets("not a url?apiKey=zzz")).toBe("not a url?apiKey=[redacted]");
 	});
 });

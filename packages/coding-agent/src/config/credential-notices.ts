@@ -20,8 +20,7 @@ import {
 	summarizeDisableCause,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, pluralize } from "@oh-my-pi/pi-utils";
-import { redactUrlForLog } from "../mcp/json-rpc";
+import { formatDuration, logger, pluralize, redactUrlSecrets } from "@oh-my-pi/pi-utils";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { PREVIEW_LIMITS, sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
@@ -63,7 +62,7 @@ function loginRemedy(provider: string): string {
  * is stored under its own `mcp_oauth:*` id rather than a `/login` provider:
  * it is named by its server and recovered through `/mcp reauth`. The id keeps
  * the server URL's full query string, which can carry a key or token, so the
- * displayed URL goes through the same redaction as MCP request logging.
+ * displayed URL goes through the same redaction as the auth and MCP logs.
  */
 function subjectAndRemedy(
 	provider: string,
@@ -74,7 +73,7 @@ function subjectAndRemedy(
 		const serverUrl = mcpOAuthServerUrlFromCredentialId(provider);
 		return {
 			subject: serverUrl
-				? `MCP server ${truncateToWidth(redactUrlForLog(serverUrl), TRUNCATE_LENGTHS.TITLE)}`
+				? `MCP server ${truncateToWidth(redactUrlSecrets(serverUrl), TRUNCATE_LENGTHS.TITLE)}`
 				: "an MCP server",
 			remedy: "Reauthorize it with /mcp reauth <name>.",
 		};

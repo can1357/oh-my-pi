@@ -449,6 +449,36 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect(disableLogs).toEqual([["Auth credential disabled", expected]]);
 		});
 
+		test("a managed MCP credential id is redacted in the log line but not in the event", async () => {
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			// The id keeps the server URL's complete query string, secret included.
+			const provider = "mcp_oauth:profile:default:https://mcp.example.com/mcp?ref=1&apiKey=sk-secret";
+			await authStorage.set(provider, [
+				{ ...expiredOAuth(), email: undefined, orgId: undefined, orgName: undefined },
+			]);
+			failOAuthRefresh();
+
+			await authStorage.getApiKey(provider, "session-mcp");
+
+			expect(events.map(event => event.provider)).toEqual([provider]);
+			const disableLogs = warnSpy.mock.calls.filter(([message]) => message === "Auth credential disabled");
+			expect(disableLogs).toEqual([
+				[
+					"Auth credential disabled",
+					expect.objectContaining({
+						provider: "mcp_oauth:profile:default:https://mcp.example.com/mcp?ref=1&apiKey=[redacted]",
+					}),
+				],
+			]);
+			expect(JSON.stringify(disableLogs)).not.toContain("sk-secret");
+		});
+
 		test("a broker-issued disable by id carries the same identity", async () => {
 			const events: CredentialDisabledEvent[] = [];
 			const authStorage = openStorage({

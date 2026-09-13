@@ -94,3 +94,24 @@ export function escapeXmlAttribute(input: string): string {
 	}
 	return output;
 }
+
+const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
+
+/**
+ * Redact credential-bearing query parameters (`apiKey`, `token`, `secret`,
+ * `auth`, …) in a URL, or in any identifier that embeds one — a managed MCP
+ * credential id keeps its server URL's complete query string — so the text can
+ * be logged or shown. Everything outside the query is left verbatim; the
+ * placeholder stays readable rather than percent-encoded.
+ */
+export function redactUrlSecrets(text: string): string {
+	const queryStart = text.indexOf("?");
+	if (queryStart === -1) return text;
+	const fragmentStart = text.indexOf("#", queryStart);
+	const params = new URLSearchParams(text.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart));
+	for (const name of params.keys()) {
+		if (SENSITIVE_QUERY_PARAM.test(name)) params.set(name, "[redacted]");
+	}
+	const query = params.toString().replaceAll("%5Bredacted%5D", "[redacted]");
+	return `${text.slice(0, queryStart + 1)}${query}${fragmentStart === -1 ? "" : text.slice(fragmentStart)}`;
+}

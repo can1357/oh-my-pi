@@ -9,7 +9,15 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$envExact,
+	extractRetryHint,
+	getAgentDbPath,
+	logger,
+	redactUrlSecrets,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import {
 	isAutomaticDisableCause,
 	isSqliteCorruptionError,
@@ -2630,8 +2638,9 @@ export class AuthStorage {
 		// The only log line any automatic teardown produces in a plain session:
 		// extension handlers are optional and the broker daemon is the only
 		// built-in subscriber, so without this an account can vanish from the
-		// pool with no trace in ~/.omp/logs.
-		logger.warn("Auth credential disabled", { ...event });
+		// pool with no trace in ~/.omp/logs. A managed MCP credential's id embeds
+		// its server URL, query string included, so the id is redacted first.
+		logger.warn("Auth credential disabled", { ...event, provider: redactUrlSecrets(event.provider) });
 		if (this.#credentialDisabledListeners.size === 0) {
 			// No subscribers — buffer for later replay. Cap the backlog so a process that runs
 			// without subscribers for a long time can't grow memory unboundedly; drop oldest
