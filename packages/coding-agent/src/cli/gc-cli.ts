@@ -23,7 +23,7 @@ import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
-import { FileSessionStorage } from "../session/session-storage";
+import { defaultSessionStorage } from "../session/session-storage";
 import {
 	cfgGcArchive,
 	cfgGcBlobs,
@@ -475,7 +475,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 		throw error;
 	}
 
-	const storage = new FileSessionStorage();
+	const storage = defaultSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
@@ -488,7 +488,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
 	const files = await collectJsonlFiles(artifactsRoot);
 	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
+	const storage = defaultSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
