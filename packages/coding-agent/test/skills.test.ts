@@ -1460,6 +1460,92 @@ export default function (pi) {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("gives a session_start-triggered turn visibility into skills a resources_discover handler contributes (regression: PR #9379 review, runtime-init.ts ordering)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-start-turn-discovery-"));
+		const authStorage = createInMemoryAuthStorage();
+		// `AgentSession.prompt` preflights a provider key through the registry; the
+		// session_start-triggered turn below must not depend on the developer's env.
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		let session: AgentSession | undefined;
+		try {
+			await writeStartupSkill(tempDir);
+
+			// A `session_start` handler that triggers a turn (mirrors a real
+			// extension announcing itself at startup) alongside a
+			// `resources_discover` handler that contributes a skill directory.
+			// Pre-fix, `runtime-init.ts` drained the session_start-triggered
+			// turn to completion before running `discoverStartupSkillPaths()`,
+			// so the turn's own model call always ran before the skill entered
+			// `session.skills` — the ask this regresses.
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "session-start-turn-observer.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("session_start", () => {
+		pi.sendUserMessage("hello");
+	});
+	pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(tempDir)}] }));
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			// Recorded from inside the handler, not asserted after the fact: this
+			// is the exact state the model call actually saw, not a state read
+			// racing the assertion.
+			const skillVisibleAtCallTime: boolean[] = [];
+			const mock = createMockModel({
+				handler: () => {
+					skillVisibleAtCallTime.push(session?.skills.some(skill => skill.name === "startup-discovered-skill") ?? false);
+					return { content: ["ack"] };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+
+			expect(runtimeErrors).toEqual([]);
+			expect(skillVisibleAtCallTime).toEqual([true]);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 });
 
 describe("collision handling", () => {
