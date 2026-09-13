@@ -274,6 +274,8 @@ export interface AgentSessionConfig {
 	agentKind?: "main" | "sub";
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
+	/** Session affinity used to resolve account metadata when credentials are inherited. */
+	credentialSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */

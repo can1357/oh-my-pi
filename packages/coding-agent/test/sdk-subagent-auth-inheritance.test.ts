@@ -33,6 +33,22 @@ function oauthCredential(suffix: string): OAuthCredential {
 	};
 }
 
+function metadataUserId(metadata: Record<string, unknown> | undefined): {
+	session_id: unknown;
+	account_uuid: unknown;
+} {
+	const encoded = metadata?.user_id;
+	if (typeof encoded !== "string") throw new Error("Expected encoded user metadata");
+	const decoded: unknown = JSON.parse(encoded);
+	if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+		throw new Error("Expected user metadata object");
+	}
+	return {
+		session_id: "session_id" in decoded ? decoded.session_id : undefined,
+		account_uuid: "account_uuid" in decoded ? decoded.account_uuid : undefined,
+	};
+}
+
 function subprocessResult(id: string): SingleResult {
 	return {
 		index: 0,
@@ -58,7 +74,7 @@ afterEach(() => {
 });
 
 describe("task subagent OAuth pin inheritance", () => {
-	it("uses the parent's default session-affine resolver for parallel and nested children", async () => {
+	it("keeps inherited credentials and metadata on the parent's account affinity", async () => {
 		const tempDir = TempDir.createSync("@pi-subagent-auth-pin-");
 		const authStorage = createInMemoryAuthStorage();
 		const sessions: AgentSession[] = [];
@@ -122,6 +138,8 @@ describe("task subagent OAuth pin inheritance", () => {
 			}
 			const inheritedGetApiKey = dispatched[0]?.getApiKey;
 			if (!inheritedGetApiKey) throw new Error("Expected first child credential resolver");
+			const inheritedCredentialSessionId = dispatched[0]?.credentialSessionId;
+			expect(inheritedCredentialSessionId).toBe(parentProviderSessionId);
 			expect(await resolveApiKeyOnce(await inheritedGetApiKey(otherProviderModel))).toBe("openai-key");
 
 			const { session: child } = await createAgentSession({
@@ -134,10 +152,15 @@ describe("task subagent OAuth pin inheritance", () => {
 				model,
 				providerSessionId: "child-provider-session",
 				getApiKey: inheritedGetApiKey,
+				credentialSessionId: inheritedCredentialSessionId,
 				toolNames: ["task"],
 				disableExtensionDiscovery: true,
 			});
 			sessions.push(child);
+			expect(metadataUserId(child.agent.metadataForProvider("anthropic"))).toMatchObject({
+				session_id: "child-provider-session",
+				account_uuid: "account-b",
+			});
 			const childTask = child.getToolByName("task");
 			if (!childTask) throw new Error("Expected child task tool");
 			await childTask.execute("nested-task-call", {
@@ -148,6 +171,7 @@ describe("task subagent OAuth pin inheritance", () => {
 			expect(dispatched).toHaveLength(3);
 			const nestedGetApiKey = dispatched[2]?.getApiKey;
 			if (!nestedGetApiKey) throw new Error("Expected nested credential resolver");
+			expect(dispatched[2]?.credentialSessionId).toBe(parentProviderSessionId);
 			expect(await resolveApiKeyOnce(await nestedGetApiKey(model))).toBe("access-b");
 		} finally {
 			for (const session of sessions.reverse()) await session.dispose();

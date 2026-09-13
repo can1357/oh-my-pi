@@ -398,6 +398,11 @@ export interface CreateAgentSessionOptions {
 	 * provider routing.
 	 */
 	getApiKey?: AgentOptions["getApiKey"];
+	/**
+	 * Session affinity used by {@link getApiKey} for credential metadata lookups.
+	 * @internal
+	 */
+	credentialSessionId?: string;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -1808,6 +1813,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			getApiKey: effectiveGetApiKey,
+			getCredentialSessionId: () => options.credentialSessionId ?? agent.sessionId,
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
@@ -3882,6 +3888,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
+			credentialSessionId: options.credentialSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
