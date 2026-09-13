@@ -168,6 +168,22 @@ export type FallbackBlockParam = {
 	to: { model: string };
 };
 
+/** Beta enabling server-side compaction (`compact_20260112` edit, `compaction` blocks). */
+export const COMPACTION_BETA = "compact-2026-01-12";
+
+/**
+ * Server-side compaction summary (compact-2026-01-12). Returned at the start
+ * of the assistant response that crossed the trigger; on replay the API drops
+ * every block that precedes it, so it may open the messages array. The
+ * `encrypted_content` is opaque provider state, round-tripped verbatim.
+ */
+export type CompactionBlockParam = {
+	type: "compaction";
+	content: string;
+	encrypted_content?: string | null;
+	cache_control?: CacheControlEphemeral | null;
+};
+
 export type ContentBlockParam =
 	| TextBlockParam
 	| ImageBlockParam
@@ -180,7 +196,8 @@ export type ContentBlockParam =
 	| ToolRemovalBlockParam
 	| ThinkingBlockParam
 	| RedactedThinkingBlockParam
-	| FallbackBlockParam;
+	| FallbackBlockParam
+	| CompactionBlockParam;
 
 /**
  * A single conversation turn.
@@ -276,9 +293,19 @@ export type FallbackParam = {
 	speed?: "fast";
 };
 
+/** Server-side compaction edit (compact-2026-01-12). */
+export type CompactionEdit = {
+	type: "compact_20260112";
+	/** `input_tokens` is the only trigger; `value` must be at least 50,000. */
+	trigger?: { type: "input_tokens"; value: number };
+	pause_after_compaction?: boolean;
+	/** Replaces the API's default summarization prompt entirely. */
+	instructions?: string;
+};
+
 /** Claude Code context-management beta payload. */
 export type ContextManagement = {
-	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" }>;
+	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" } | CompactionEdit>;
 };
 
 export type MessageCreateParams = {
@@ -322,7 +349,8 @@ export type StopReason =
 	| "pause_turn"
 	| "refusal"
 	| "sensitive"
-	| "model_context_window_exceeded";
+	| "model_context_window_exceeded"
+	| "compaction";
 
 export type CacheCreation = {
 	ephemeral_5m_input_tokens?: number | null;
@@ -336,12 +364,15 @@ export type ServerToolUsage = {
 
 /**
  * Per-attempt token accounting inside a multi-run turn
- * (server-side-fallback-2026-06-01). Populated whenever a fallback chain
- * ran, including sticky-served turns with no `fallback` content block.
- * A `fallback_message` entry is the definitive "served by fallback" signal.
+ * (server-side-fallback-2026-06-01, compact-2026-01-12). Populated whenever
+ * a fallback chain ran, including sticky-served turns with no `fallback`
+ * content block, and whenever the compaction beta is active. A
+ * `fallback_message` entry is the definitive "served by fallback" signal; a
+ * `compaction` entry is the summarization sampling the top-level usage
+ * excludes.
  */
 export type UsageIteration = {
-	type?: "message" | "fallback_message" | string;
+	type?: "message" | "fallback_message" | "compaction" | string;
 	model?: string | null;
 	input_tokens?: number | null;
 	output_tokens?: number | null;
@@ -401,13 +432,15 @@ export type ResponseContentBlock =
 	| ServerToolUseBlockParam
 	| WebSearchToolResultBlockParam
 	| ToolSearchToolResultBlockParam
-	| { type: "fallback"; from: { model: string }; to: { model: string } };
+	| { type: "fallback"; from: { model: string }; to: { model: string } }
+	| { type: "compaction"; content?: string | null; encrypted_content?: string | null };
 
 export type ContentBlockDelta =
 	| { type: "text_delta"; text: string }
 	| { type: "input_json_delta"; partial_json: string }
 	| { type: "thinking_delta"; thinking: string }
-	| { type: "signature_delta"; signature: string };
+	| { type: "signature_delta"; signature: string }
+	| { type: "compaction_delta"; content?: string | null; encrypted_content?: string | null };
 
 export type StopDetails = {
 	type: string;

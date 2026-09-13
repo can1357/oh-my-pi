@@ -108,7 +108,7 @@ export function extractQuoteBlocks(text: string): QuoteBlock[] {
 
 /** A hyperlink found in assistant markdown: inline `[text](href)`, `<autolink>`, bare URL, or reference link. */
 export interface LinkTarget {
-	/** Visible link text; equals `href` for autolinks and bare URLs. */
+	/** Visible link label flattened to one display row; falls back to `href` when empty. */
 	text: string;
 	/** Absolute http(s) URL as marked resolved it. */
 	href: string;

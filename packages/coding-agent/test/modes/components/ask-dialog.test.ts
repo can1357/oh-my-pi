@@ -595,28 +595,63 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
 	});
 
-	it("shows selected multi-select options together with custom input on Submit", async () => {
-		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom detail"));
+	it("saves multi-select choices and custom input, then advances exactly one question", async () => {
+		const onPrompt = vi.fn().mockResolvedValue("custom detail");
 		const onSubmit = vi.fn();
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Choose multiple?",
-				options: [{ label: "Option A" }, { label: "Option B" }],
-				multi: true,
-			},
-			{
-				id: "q2",
-				question: "Second question?",
-				options: [{ label: "Option C" }],
-			},
-		];
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+				{
+					id: "q2",
+					question: "Second question?",
+					options: [{ label: "Option C" }, { label: "Option D" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
 
-		const component = new AskDialogComponent(questions, {
-			onSubmit,
-			onCancel: vi.fn(),
-			onPrompt,
-		});
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("Second question?");
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput(ENTER);
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results).toMatchObject([
+			{ id: "q1", selectedOptions: ["Option A", "Option B"], customInput: "custom detail" },
+			{ id: "q2", selectedOptions: ["Option D"] },
+		]);
+	});
+
+	it("reviews a single multi-select custom answer and lets the user go back to edit it", async () => {
+		const onPrompt = vi.fn().mockResolvedValueOnce("first draft").mockResolvedValueOnce("revised answer");
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
 
 		component.handleInput(SPACE);
 		component.handleInput(DOWN);
@@ -624,20 +659,23 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
 
-		// Multi questions do not auto-advance after the Other prompt: still on
-		// q1, so Tab twice (q2, then Submit) to reach the review.
-		component.handleInput(TAB);
-		component.handleInput(TAB);
-		const review = render(component);
-		expect(review).toContain("Option A");
-		expect(review).toContain("custom detail");
-
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(UP);
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
 		component.handleInput(ENTER);
 
+		expect(onPrompt).toHaveBeenCalledTimes(2);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
-		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("custom detail");
+		expect(onSubmit.mock.calls[0][0].results).toMatchObject([
+			{ id: "q1", selectedOptions: ["Option A", "Option B"], customInput: "revised answer" },
+		]);
 	});
 
 	it("multi-question, multi-select: Enter on a plain option advances, does not submit", () => {
@@ -1560,13 +1598,13 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		expect(render(component)).toContain("my custom answer");
 
-		// Reopen Other (prefilled with the current answer) and submit an
-		// empty value: the custom answer is unselected.
+		// Return from review to edit the saved custom answer.
+		component.handleInput(SHIFT_TAB);
 		onPrompt.mockReturnValueOnce(Promise.resolve(""));
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
-		expect(onPrompt).toHaveBeenNthCalledWith(2, expect.any(String), "my custom answer");
+		expect(onSubmit).not.toHaveBeenCalled();
 		expect(render(component)).not.toContain("my custom answer");
 
 		// Submitting confirms nothing was kept.
@@ -1596,5 +1634,167 @@ describe("AskDialogComponent", () => {
 		const result = onSubmit.mock.calls[0][0].results[0];
 		expect(result.question).toBe("");
 		expect(result.selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("sanitizes carriage-return runs so degenerate model args render as prose", () => {
+		// GLM-via-OpenRouter degeneration: `\r` runs injected between words in
+		// JSON string values. CommonMark treats a lone `\r` as a line ending, so
+		// an unsanitized description/preview used to splatter one word per row.
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q3a",
+					question: "Q3\r\rA\r\r —\r\r Fallback\r\r path\r\r.\r\r What\r\r happens\r\r?",
+					header: "Fallback\r\r path",
+					options: [
+						{
+							label: "Abort\r\r \r\r+\r\r log",
+							description: "The\r\r worker\r\r pool\r\r sees\r\r nothing\r\r.",
+							preview: 'idle\r\r loop\r\r:\r\n\r\r \r\r if\r\r "done"\r\r in\r\r state',
+						},
+						{ label: "Continue\r\r anyway" },
+					],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rendered = render(component);
+		expect(rendered).not.toContain("\r");
+		expect(rendered).toContain("Q3 A  —  Fallback  path .  What  happens ?");
+		expect(rendered).toContain("Abort   +  log");
+		expect(rendered).toContain("The  worker  pool  sees  nothing .");
+		expect(rendered).toContain("idle  loop :");
+		expect(rendered).toContain('if  "done"  in  state');
+	});
+
+	it("sanitizes carriage returns in question ids used as tab labels", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q\r\r3a",
+					question: "Pick one?",
+					options: [{ label: "Alpha" }, { label: "Beta" }],
+				},
+				{
+					id: "q3b",
+					question: "Pick another?",
+					options: [{ label: "Gamma" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rendered = render(component);
+		expect(rendered).not.toContain("\r");
+		expect(rendered).toContain("q 3a");
+		expect(rendered).toContain("q3b");
+	});
+
+	it("echoes extension-supplied question ids verbatim in results", () => {
+		// The id is a caller correlation key: display sanitizes it (tab
+		// labels), but submitted results must carry the original value or
+		// code indexing the response by request id will miss.
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q\r\r3a", question: "Pick one?", options: [{ label: "Alpha" }, { label: "Beta" }] }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		expect(render(component)).not.toContain("\r");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].id).toBe("q\r\r3a");
+	});
+
+	it("echoes extension-supplied option labels verbatim in results", () => {
+		// Option labels are caller correlation keys like ids: the guest path
+		// returns them verbatim, so the local dialog must too — display
+		// sanitizes, results echo the original, or extension code comparing
+		// selectedOptions against supplied labels misses on \r-laden input.
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Pick one?", options: [{ label: "Retry\rnow" }, { label: "Retry now" }] }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		expect(render(component)).not.toContain("\r");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		const result = onSubmit.mock.calls[0][0].results[0];
+		expect(result.options).toEqual(["Retry\rnow", "Retry now"]);
+		expect(result.selectedOptions).toEqual(["Retry\rnow"]);
+	});
+
+	it("echoes the extension-supplied question verbatim in results", () => {
+		// The question text is echoed in results like ids and labels: the
+		// guest path returns it verbatim, so the local dialog must too —
+		// display sanitizes (title rows), results echo the original.
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Pick\rnow?", options: [{ label: "Alpha" }, { label: "Beta" }] }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rendered = render(component);
+		expect(rendered).not.toContain("\r");
+		expect(rendered).toContain("Pick now?");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].question).toBe("Pick\rnow?");
+	});
+
+	it("disambiguates local rows that sanitize alike, echoing originals", () => {
+		// Same display contract as the guest selector: colliding rows take a
+		// numeric suffix and sentinel matches never mimic the action row —
+		// results still echo the original correlation values.
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Pick?",
+					options: [{ label: "Retry\rnow" }, { label: "Retry now" }, { label: "Chat\rabout this" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rendered = render(component);
+		expect(rendered).not.toContain("\r");
+		expect(rendered).toContain("Retry now (2)");
+		expect(rendered).toContain("Chat about this (2)");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		const result = onSubmit.mock.calls[0][0].results[0];
+		expect(result.options).toEqual(["Retry\rnow", "Retry now", "Chat\rabout this"]);
+		expect(result.selectedOptions).toEqual(["Retry\rnow"]);
+	});
+
+	it("disambiguates rows the recommendation badge collides", () => {
+		// Badging happens before disambiguation: a recommended `Retry\rnow`
+		// and a literal `Retry now (Recommended)` would otherwise render two
+		// identical rows with different result values.
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Pick?",
+					options: [{ label: "Retry\rnow" }, { label: "Retry now (Recommended)" }],
+					recommended: 0,
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rendered = render(component);
+		expect(rendered).not.toContain("\r");
+		const rows = rendered.split("\n").filter(line => line.includes("Retry now (Recommended)"));
+		expect(rows).toHaveLength(2);
+		expect(rows[1]).toContain("Retry now (Recommended) (2)");
 	});
 });

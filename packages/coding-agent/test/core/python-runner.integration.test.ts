@@ -7,7 +7,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllKernelSessions, executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import {
+	disposeAllKernelSessions,
+	executePython,
+	executePythonWithKernel,
+} from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { filterEnv, resolvePythonRuntime } from "@oh-my-pi/pi-coding-agent/eval/py/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -42,6 +46,35 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
 		await disposeAllKernelSessions();
 	});
+
+	it("does not replay a crashed cell's file write and accepts the next cell in a fresh kernel", async () => {
+		using tempDir = TempDir.createSync("@python-runner-crash-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: "crash-recovery",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+		};
+		const result = await executePython(
+			[
+				"import os",
+				"with open('effects.txt', 'a') as effects:",
+				"    effects.write('once\\n')",
+				"print('before crash', flush=True)",
+				"os._exit(17)",
+			].join("\n"),
+			options,
+		);
+		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("before crash");
+		expect(result.output).toContain("completion is uncertain");
+
+		const next = await executePython("print(21 * 2)", options);
+		expect(next.exitCode).toBe(0);
+		expect(next.output.trim()).toBe("42");
+		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
+	}, 30_000);
 
 	it("streams stdout chunks as they are produced", async () => {
 		using tempDir = TempDir.createSync("@python-runner-stream-");
@@ -196,6 +229,149 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("preserves awaited arguments in calls named like speculative bridge operations", async () => {
+		using tempDir = TempDir.createSync("@python-runner-call-site-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				[
+					"async def resolve_value():",
+					"    return 'preserved'",
+					"completion = lambda value: value",
+					"completion(await resolve_value())",
+				].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("preserved");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("captures a JSON-safe retained namespace without running another cell", async () => {
+		using tempDir = TempDir.createSync("@python-runner-shadow-snapshot-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "shadow_snapshot_value = {'nested': ['safe']}");
+			const snapshot = await kernel.snapshotUserNamespace();
+			expect(snapshot?.values.shadow_snapshot_value).toEqual({ nested: ["safe"] });
+			expect(snapshot?.revision).toBeGreaterThan(0);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("atomically rejects stale Python snapshots without executing the cell", async () => {
+		using tempDir = TempDir.createSync("@python-runner-shadow-admission-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "atomic_stale_guard = 1");
+			const snapshot = await kernel.snapshotUserNamespace();
+			if (!snapshot) throw new Error("expected retained Python snapshot");
+			await executePythonWithKernel(kernel, "atomic_stale_guard = 2");
+			await expect(kernel.executeIfSnapshotMatches("atomic_stale_guard = 3", snapshot)).resolves.toBeNull();
+			expect((await kernel.snapshotUserNamespace())?.values.atomic_stale_guard).toBe(2);
+
+			const current = await kernel.snapshotUserNamespace();
+			if (!current) throw new Error("expected current Python snapshot");
+			await expect(kernel.executeIfSnapshotMatches("atomic_stale_guard = 4", current)).resolves.toMatchObject({
+				status: "ok",
+			});
+			expect((await kernel.snapshotUserNamespace())?.values.atomic_stale_guard).toBe(4);
+
+			const racingSnapshot = await kernel.snapshotUserNamespace();
+			if (!racingSnapshot) throw new Error("expected racing Python snapshot");
+			const normalRun = kernel.execute(
+				["import asyncio", "await asyncio.sleep(0.05)", "atomic_race_guard = 1"].join("\n"),
+			);
+			await expect(kernel.executeIfSnapshotMatches("atomic_race_guard = 2", racingSnapshot)).resolves.toBeNull();
+			expect((await normalRun).status).toBe("ok");
+			expect((await kernel.snapshotUserNamespace())?.values.atomic_race_guard).toBe(1);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("projects source-stable Python operations without executing candidate code", async () => {
+		using tempDir = TempDir.createSync("@python-runner-shadow-plan-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await expect(kernel.shadowPlan('tool.read({"path": "src/a.py"})')).resolves.toMatchObject({
+				operations: [
+					{
+						kind: "tool",
+						call: {
+							id: "py:0::0",
+							siteId: "py:0",
+							name: "read",
+							args: {
+								kind: "object",
+								entries: [{ key: "path", value: { kind: "literal", value: "src/a.py" } }],
+							},
+							dependencies: [],
+						},
+					},
+				],
+			});
+			await expect(kernel.shadowPlan("tool.read({'path': str(True)})")).resolves.toMatchObject({
+				operations: [
+					{
+						call: {
+							args: {
+								kind: "object",
+								entries: [
+									{
+										key: "path",
+										value: {
+											kind: "transform",
+											name: "Python.str",
+											input: { kind: "literal", value: true },
+										},
+									},
+								],
+							},
+						},
+					},
+				],
+			});
+			const mappingAttribute = await kernel.shadowPlan(
+				['cfg = {"path": "secret.txt"}', 'tool.read({"path": cfg.path})'].join("\n"),
+			);
+			expect(mappingAttribute?.operations).toEqual([]);
+			expect(mappingAttribute?.barrier?.reason).toBe("unsupported Python statement");
+			const jsonDumps = await kernel.shadowPlan('tool.read({"path": json.dumps({"a": 1})})');
+			expect(jsonDumps?.operations).toEqual([]);
+			expect(jsonDumps?.barrier?.reason).toBe("unsupported Python statement");
+			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    tool.read({'path': 'wrong'})");
+			expect(ambiguousAddition?.operations).toEqual([]);
+			expect(ambiguousAddition?.barrier?.reason).toBe("unsupported Python condition");
+			const stringAddition = await kernel.shadowPlan("tool.read({'path': 'src/' + 'a.py'})");
+			expect(stringAddition?.barrier).toBeUndefined();
+			expect(stringAddition?.operations).toHaveLength(1);
+			const invalidJoin = await kernel.shadowPlan("tool.read({'path': ''.join(['secret', 1, '.txt'])})");
+			expect(invalidJoin?.operations).toEqual([]);
+			expect(invalidJoin?.barrier?.reason).toBe("unsupported Python statement");
+			const formattedValue = await kernel.shadowPlan('tool.read({"path": f"{\'secret\'!r}"})');
+			expect(formattedValue?.operations).toEqual([]);
+			expect(formattedValue?.barrier?.reason).toBe("unsupported Python statement");
+			const completion = await kernel.shadowPlan("completion('constant')");
+			expect(completion?.operations).toEqual([]);
+			expect(completion?.barrier?.reason).toBe("unsupported Python statement");
+			const loop = await kernel.shadowPlan(
+				["for path in ['a', 'b']:", "    await tool.read({'path': path})"].join("\n"),
+			);
+			expect(loop?.operations.map(operation => operation.call.dynamicPath)).toEqual([["loop:0"], ["loop:1"]]);
+			expect(loop?.controls).toEqual([expect.objectContaining({ kind: "loop", iterations: 2 })]);
+			const parallel = await kernel.shadowPlan(
+				'parallel([lambda: tool.read({"path": "a"}), lambda: tool.read({"path": "b"})])',
+			);
+			expect(parallel?.operations).toEqual([]);
+			expect(parallel?.barrier?.reason).toBe("unsupported Python statement");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
 	it("emits an error frame when user code raises", async () => {
 		using tempDir = TempDir.createSync("@python-runner-error-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

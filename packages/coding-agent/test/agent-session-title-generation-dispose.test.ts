@@ -202,7 +202,7 @@ describe("AgentSession title generation disposal", () => {
 		expect(completeSimple).toHaveBeenCalledTimes(2);
 
 		firstResponse.resolve(createAssistantMessage("<title>old skill</title>"));
-		expect(await generateTitle.mock.results[0]?.value).toBe("old skill");
+		expect(await generateTitle.mock.results[0]?.value).toBeNull();
 		await Promise.resolve();
 		expect(setSessionName).not.toHaveBeenCalled();
 		expect(session.sessionName).toBeUndefined();

@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
@@ -239,6 +239,88 @@ describe("libkitty end-to-end", () => {
 		// The retired history was cleared and replayed hidden — the marker is gone
 		// from scrollback and viewport alike — while the live editor stays mounted.
 		expect(plainRows(term.getScrollBuffer()).some(row => row.includes(THINK))).toBe(false);
+		expect(plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
+	});
+	it("hides tool activity already retired to native scrollback when the real shortcut toggles", async () => {
+		const usage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const TOOL_MARKER = "RETIRED_TOOL_ACTIVITY_MARKER";
+		const callId = "retired-tool-call";
+		const toolCall: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: `printf ${TOOL_MARKER}` } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: callId,
+			toolName: "bash",
+			content: [{ type: "text", text: TOOL_MARKER }],
+			isError: false,
+			timestamp: 2,
+		};
+		const assistantText = (text: string): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage,
+			stopReason: "stop",
+			timestamp: 3,
+		});
+
+		term = new VirtualTerminal(120, 10);
+		const composer = new Composer({ terminal: term });
+		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, undefined, composer);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+
+		mode.keybindings.setUserBindings({ "app.tools.toggleVisibility": "alt+o" });
+		mode.editor.setActionKeys("app.tools.toggleVisibility", mode.keybindings.getKeys("app.tools.toggleVisibility"));
+		mode.renderSessionContext({
+			messages: [
+				toolCall,
+				toolResult,
+				...Array.from({ length: 12 }, (_, i) =>
+					assistantText(`Filler answer number ${i} occupying a transcript row.`),
+				),
+			],
+			models: {},
+			injectedTtsrRules: [],
+			mode: "none",
+		});
+
+		const committedRows = () => {
+			const { baseY } = term.getBufferPosition();
+			return plainRows(term.getScrollBuffer()).slice(0, baseY);
+		};
+		for (let i = 0; i < 20 && !committedRows().some(row => row.includes(TOOL_MARKER)); i++) {
+			mode.ui.requestRender(true);
+			await term.waitForRender();
+		}
+		expect(committedRows().some(row => row.includes(TOOL_MARKER))).toBe(true);
+
+		term.sendInput("LIVE_EDITOR_DRAFT");
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT")));
+
+		// Alt+O is the configured app.tools.toggleVisibility binding from this test's keybinding manager.
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => !plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_MARKER)));
+		expect(mode.hideToolActivity).toBe(true);
+		expect(plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_MARKER))).toBe(false);
 		expect(plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
 	});
 });

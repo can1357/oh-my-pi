@@ -174,6 +174,26 @@ describe("legacy-pi @(scope)/pi-ai root `Type` remap (issue #1437)", () => {
 		expect(loaded.quota).toBe(false);
 		expect(loaded.ok).toBe(false);
 	});
+
+	it("exports getSupportedThinkingLevels for legacy thinking menus (issue #10800)", async () => {
+		// `@earendil-works/pi-ai` exports getSupportedThinkingLevels from its
+		// package root (models.ts). Plugins such as `@companion-ai/feynman`
+		// import it to build their `/thinking` level menu, so a missing shim
+		// export surfaced as a plain
+		// `Export named 'getSupportedThinkingLevels' not found` at load time.
+		const loaded = (await loadLegacyPiModule(
+			await writeFixtureExtension(
+				[
+					'import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";',
+					"export const reasoning = getSupportedThinkingLevels({ reasoning: true, thinking: { efforts: ['low', 'high', 'max'] } });",
+					"export const nonReasoning = getSupportedThinkingLevels({ reasoning: false });",
+				].join("\n"),
+			),
+		)) as { reasoning: string[]; nonReasoning: string[] };
+
+		expect(loaded.reasoning).toEqual(["off", "low", "high", "max"]);
+		expect(loaded.nonReasoning).toEqual(["off"]);
+	});
 });
 
 describe("legacy pi package root remaps (issue #1474)", () => {

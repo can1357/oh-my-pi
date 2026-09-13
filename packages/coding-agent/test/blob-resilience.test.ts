@@ -134,7 +134,10 @@ describe("public exposure health", () => {
 		let calls = 0;
 		const fetch = injectedFetch(async (input, init) => {
 			urls.push(String(input));
-			expect(init?.cache).toBe("no-store");
+			// `cache` is absent from older undici RequestInit types; read it
+			// through an intersection so the assertion compiles on both.
+			const initWithCache: RequestInit & { cache?: unknown } = init ?? {};
+			expect(initWithCache.cache).toBe("no-store");
 			calls++;
 			return new Response(null, { status: calls === 3 ? 204 : 503 });
 		});

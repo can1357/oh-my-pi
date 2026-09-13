@@ -1,6 +1,16 @@
 // Provider-wire compat for "opencode-go"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-go" {
+	// The Flash lanes accept images despite their IDs lacking a vision suffix;
+	// verified against the gateway (unguessable pixel-rendered text read back
+	// verbatim). Mirrors the OpenRouter carve-out for deepseek-v4.1-flash.
+	// The modality is declared here as well: live gateway discovery seeds
+	// `input: ["text"]`, and the wire guard requires the declared modality, so
+	// clearing `strip-image-input` alone would leave the lane text-only.
+	models "deepseek-flash" "deepseek-v4.1-flash" {
+		input-modalities "text" "image"
+		strip-image-input #false
+	}
 	// Replaces the OpenCode reasoning-model whenThinking fallback object.
 	when-thinking {
 		requires-reasoning-content-for-tool-calls #true
@@ -34,6 +44,18 @@ provider "opencode-go" {
 	}
 	class "kimi" {
 		thinking-mode "effort"
+	}
+	// The Go gateway proxies Muse Spark's Responses lane to Meta but cannot
+	// round-trip encrypted reasoning: the upstream issues `encrypted_content`
+	// bound to the gateway's own caller, so replaying it on a later step 400s
+	// with "reasoning `encrypted_content` was not issued to this caller"
+	// (#11928). Stop requesting it and drop native reasoning items from replay
+	// so multi-step tool-call turns stop failing.
+	class "meta" {
+		family "muse-spark" {
+			include-encrypted-reasoning #false
+			filter-reasoning-history #true
+		}
 	}
 	class "mimo" {
 		family "v2" {

@@ -568,6 +568,9 @@ export class UiHelpers {
 							this.ctx.pendingTools.set(content.id, readGroup);
 							if (assistantComponent) {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
+								if (this.ctx.viewSession.isStreaming) {
+									this.ctx.eventController?.inheritReadToolAssistant(content.id, assistantComponent);
+								}
 							}
 						} else {
 							const normalizedArgs = normalizeToolArgs(content.arguments);
@@ -652,6 +655,9 @@ export class UiHelpers {
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
+					if (this.ctx.viewSession.isStreaming) {
+						this.ctx.eventController?.inheritReadToolAssistant(message.toolCallId, undefined);
+					}
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
@@ -659,6 +665,10 @@ export class UiHelpers {
 						assistantComponent.setToolResultImages(message.toolCallId, images);
 						const hasText = message.content.some(c => c.type === "text");
 						if (!hasText && settings.get("terminal.showImages")) {
+							if (pendingReadComponent) {
+								pendingReadComponent.updateResult(message, false, message.toolCallId);
+								this.ctx.pendingTools.delete(message.toolCallId);
+							}
 							readToolCallArgs.delete(message.toolCallId);
 							readToolCallAssistantComponents.delete(message.toolCallId);
 							continue;
@@ -1034,7 +1044,8 @@ export class UiHelpers {
 	}
 
 	clearEditor(): void {
-		this.ctx.editor.clearDraft();
+		if (this.ctx.settings.get("composer.recallClearedDrafts")) this.ctx.editor.clearDraftForRecall();
+		else this.ctx.editor.clearDraft();
 		this.ctx.ui.requestRender();
 	}
 
@@ -1111,6 +1122,15 @@ export class UiHelpers {
 		);
 	}
 
+	/**
+	 * Park the loop when drain dispatch consumes the armed body locally (void
+	 * custom command) instead of starting a turn. The drain otherwise discards
+	 * prompt()'s result, and the next idle tick would resubmit a local action.
+	 */
+	#parkLoopOnLocalConsume(text: string, forwarded: boolean): void {
+		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
+	}
+
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
 		if (
 			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
@@ -1122,7 +1142,8 @@ export class UiHelpers {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
-			await this.ctx.session.prompt(message.text);
+			const forwarded = await this.ctx.session.prompt(message.text);
+			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
 		await this.ctx.withLocalSubmission(
@@ -1192,7 +1213,8 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.ctx.session.prompt(message.text);
+					const forwarded = await this.ctx.session.prompt(message.text);
+					this.#parkLoopOnLocalConsume(message.text, forwarded);
 				}
 				return;
 			}

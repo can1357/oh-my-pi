@@ -43,9 +43,16 @@ function unescapeHtml(raw: string): string {
 }
 function safeHref(href: string): string | null {
 	const trimmed = href.trim();
-	if (/^(?:https?:|mailto:)/i.test(trimmed)) return trimmed;
-	if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null; // unknown scheme (javascript:, data:, …)
-	return trimmed; // relative / fragment
+	let protocol: string;
+	try {
+		// Resolve the scheme exactly as the browser will: the URL parser strips leading
+		// C0 controls and embedded tab/newline that a text check would carry through.
+		({ protocol } = new URL(trimmed, "https://relative.invalid/"));
+	} catch {
+		return null;
+	}
+	if (protocol === "https:" || protocol === "http:" || protocol === "mailto:") return trimmed;
+	return null; // unknown scheme (javascript:, data:, …)
 }
 
 const md = new Marked({

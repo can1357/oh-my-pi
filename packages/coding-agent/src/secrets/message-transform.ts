@@ -1,5 +1,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AnthropicCompactionPayload,
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
@@ -196,6 +203,24 @@ function obfuscateAssistantContentForReplay(
 	return changed ? result : content;
 }
 
+/**
+ * Harness file metadata riding on a natively-replayed compaction summary.
+ * The provider converter emits it after the verbatim block, so it must pass
+ * the same outbound boundary as the summary text it was split from. The
+ * verbatim block content itself stays untouched: it must match the opaque
+ * provider state replayed beside it.
+ */
+function anthropicCompactionPayload(message: Message): AnthropicCompactionPayload | undefined {
+	if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") return undefined;
+	const payload = message.providerPayload;
+	return payload?.type === "anthropicCompaction" ? payload : undefined;
+}
+
+function anthropicCompactionFilesText(message: Message): string | undefined {
+	const filesText = anthropicCompactionPayload(message)?.filesText;
+	return typeof filesText === "string" && filesText.length > 0 ? filesText : undefined;
+}
+
 function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): Set<string> {
 	const values = new Set<string>();
 	const addText = (text: string | undefined): void => {
@@ -205,6 +230,11 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 		}
 	};
 	for (const message of messages) {
+		// File metadata replayed beside a native compaction block carries the
+		// same harness paths as the summary text, so its regex-secret values
+		// join the shared set.
+		const compactionFiles = anthropicCompactionFilesText(message);
+		if (compactionFiles !== undefined) addText(compactionFiles);
 		if (message.role === "assistant") {
 			for (const block of message.content) {
 				if (block.type === "text") addText(block.text);
@@ -250,26 +280,36 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
-			if (message.role !== "assistant") return message;
-			const content = obfuscateAssistantContentForReplay(obfuscator, message.content, sharedRegexSecretValues);
-			if (content === message.content) return message;
-			changed = true;
-			return { ...message, content };
+		let current = message;
+		const compactionPayload = anthropicCompactionPayload(current);
+		const compactionFiles = anthropicCompactionFilesText(current);
+		if (compactionPayload !== undefined && compactionFiles !== undefined) {
+			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
+			if (filesText !== compactionFiles) {
+				current = { ...current, providerPayload: { ...compactionPayload, filesText } } as Message;
+				changed = true;
+			}
 		}
-		const target = message as UserFacingMessage;
+		if (
+			current.role !== "user" &&
+			current.role !== "toolResult" &&
+			!(current.role === "developer" && current.attribution === "user")
+		) {
+			if (current.role !== "assistant") return current;
+			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
+			if (content === current.content) return current;
+			changed = true;
+			return { ...current, content };
+		}
+		const target = current as UserFacingMessage;
 		if (typeof target.content === "string") {
 			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
-			if (content === target.content) return message;
+			if (content === target.content) return current;
 			changed = true;
 			return { ...target, content } as Message;
 		}
 		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
-		if (content === target.content) return message;
+		if (content === target.content) return current;
 		changed = true;
 		return { ...target, content } as Message;
 	});

@@ -311,12 +311,16 @@ export interface AgentSessionConfig {
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */
 	advisorSharedInstructions?: string;
+	/** Shared advisor max notes per update loaded from WATCHDOG.yml. */
+	advisorSharedMaxNotesPerUpdate?: number;
 	/** Project context rendered for advisor sessions. */
 	advisorContextPrompt?: string;
 	/** Memory backend developer instructions rendered for advisor sessions. */
 	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
+	/** Config problems collected during WATCHDOG.yml discovery. */
+	advisorConfigWarnings?: string[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */

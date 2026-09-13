@@ -255,7 +255,9 @@ Later project files sit closer to the end of the advisor prompt, so narrower dir
 
 ## WATCHDOG.yml
 
-`WATCHDOG.yml` (or `WATCHDOG.yaml`) is the advisor roster. Where `WATCHDOG.md` supplies review priorities, `WATCHDOG.yml` declares the advisors themselves — one entry per name, each with its own enable flag, model, tool grant, and specialization prompt. The interactive `/advisor configure` overlay edits this file in place. Files that fail to parse or fail schema validation are logged and skipped so one bad project config cannot kill the session.
+`WATCHDOG.yml` (or `WATCHDOG.yaml`) is the advisor roster. Each named entry can set its own enabled state, model, tools, and specialization prompt; `WATCHDOG.md` supplies shared review guidance.
+
+Discovery and `/advisor configure` use the same per-entry validation: malformed entries are skipped with named warnings while healthy advisors remain usable. Invalid YAML or a non-mapping document is skipped with a file warning. Problems appear in an aggregated startup/editor warning and remain visible inside the editor after switching project/user scope. Saving the editor document writes only valid entries.
 
 Example:
 

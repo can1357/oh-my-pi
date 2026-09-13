@@ -9,8 +9,13 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@oh-my-pi/pi-ai";
+import {
+	accumulateToolCallArgumentsDelta,
+	finalizeToolCallArgumentsDone,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
@@ -1655,6 +1660,243 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(text).toContain('rule="no-unwrap"');
 		expect(text).toContain("Do not use .unwrap()");
 		expect(text.indexOf("<system-reminder")).toBeLessThan(text.indexOf("edit applied"));
+	});
+
+	it("matches finalized write arguments regardless of streaming chunk boundaries", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected bundled Codex test model to exist");
+
+		const serializedArguments = JSON.stringify({ path: "probe.cpp", content: "// TTSR_PROBE\n" });
+		const rule: Rule = {
+			name: "stream-probe",
+			path: "/tmp/stream-probe.md",
+			content: "Report that the probe rule matched.",
+			condition: ["TTSR_PROBE"],
+			scope: ["tool:write"],
+			globs: ["**/*.cpp"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "/tmp/stream-probe.md", level: "project" },
+		};
+
+		class SnapshotStream extends AssistantMessageEventStream {
+			override push(event: AssistantMessageEvent): void {
+				super.push(structuredClone(event));
+			}
+		}
+
+		async function runDelivery(chunkSize: number): Promise<{ reminder: string; persistedInjections: number }> {
+			const ttsrManager = new TtsrManager({
+				enabled: true,
+				contextMode: "discard",
+				interruptMode: "never",
+				repeatMode: "once",
+				repeatGap: 10,
+			});
+			ttsrManager.addRule(rule);
+
+			const writeTool: AgentTool = {
+				name: "write",
+				label: "Write",
+				description: "Write a file",
+				parameters: type({ path: "string", content: "string" }),
+				execute: async () => ({ content: [{ type: "text" as const, text: "write applied" }] }),
+				matcherDigest: args => {
+					if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+					return typeof args.content === "string" ? args.content : undefined;
+				},
+			};
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `call_stream_${chunkSize}`,
+				name: "write",
+				arguments: {},
+				[kStreamingPartialJson]: "",
+			};
+			const makeToolCallMessage = (): AssistantMessage => ({
+				role: "assistant",
+				content: [toolCall],
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			});
+			let streamCallCount = 0;
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [writeTool] },
+				streamFn: () => {
+					streamCallCount++;
+					const stream = new SnapshotStream();
+					queueMicrotask(() => {
+						if (streamCallCount > 1) {
+							const done = makeMsg("ok");
+							stream.push({ type: "start", partial: done });
+							stream.push({ type: "done", reason: "stop", message: done });
+							return;
+						}
+
+						const partial = makeToolCallMessage();
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						for (let offset = 0; offset < serializedArguments.length; offset += chunkSize) {
+							accumulateToolCallArgumentsDelta(
+								toolCall,
+								serializedArguments.slice(offset, offset + chunkSize),
+								stream,
+								partial,
+								0,
+							);
+						}
+						finalizeToolCallArgumentsDone(toolCall, serializedArguments);
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+						stream.push({ type: "done", reason: "toolUse", message: partial });
+					});
+					return stream;
+				},
+			});
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry: sharedModelRegistry,
+				ttsrManager,
+			});
+
+			await session.prompt("Write the probe");
+			const result = agent.state.messages.find(
+				(message): message is Extract<typeof message, { role: "toolResult" }> =>
+					message.role === "toolResult" && message.toolCallId === toolCall.id,
+			);
+			const reminder = Array.isArray(result?.content)
+				? result.content
+						.filter((content): content is { type: "text"; text: string } => content.type === "text")
+						.map(content => content.text)
+						.join("\n")
+				: "";
+			const persistedInjections = sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "ttsr_injection" && entry.injectedRules.includes(rule.name)).length;
+			await session.dispose();
+			return { reminder, persistedInjections };
+		}
+
+		const oneChunk = await runDelivery(serializedArguments.length);
+		const throttledChunks = await runDelivery(12);
+
+		for (const delivery of [oneChunk, throttledChunks]) {
+			expect(delivery.reminder).toContain('rule="stream-probe"');
+			expect(delivery.persistedInjections).toBe(1);
+		}
+	});
+
+	it("matches finalized arguments for end-only tool calls without matcher hooks", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const rule: Rule = {
+			name: "probe-args",
+			path: "/tmp/probe-args.md",
+			content: "Report that the probe rule matched.",
+			condition: ["TTSR_PROBE"],
+			scope: ["tool:probe_tool"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "/tmp/probe-args.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(rule);
+
+		// No matcherDigest/matcherEntries: the finalized arguments are the only
+		// content TTSR can see when the provider skips intermediate deltas.
+		const probeTool: AgentTool = {
+			name: "probe_tool",
+			label: "Probe",
+			description: "A tool without matcher hooks",
+			parameters: type({ marker: "string" }),
+			execute: async () => ({ content: [{ type: "text" as const, text: "probe ran" }] }),
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call_end_only",
+			name: "probe_tool",
+			arguments: { marker: "TTSR_PROBE" },
+		};
+		const makeToolCallMessage = (): AssistantMessage => ({
+			role: "assistant",
+			content: [toolCall],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [probeTool] },
+			streamFn: () => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (streamCallCount > 1) {
+						const done = makeMsg("ok");
+						stream.push({ type: "start", partial: done });
+						stream.push({ type: "done", reason: "stop", message: done });
+						return;
+					}
+					const partial = makeToolCallMessage();
+					stream.push({ type: "start", partial });
+					// start -> end with no intermediate toolcall_delta.
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({ type: "done", reason: "toolUse", message: partial });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Run the probe");
+		const result = agent.state.messages.find(
+			(message): message is Extract<typeof message, { role: "toolResult" }> =>
+				message.role === "toolResult" && message.toolCallId === toolCall.id,
+		);
+		const reminder = Array.isArray(result?.content)
+			? result.content
+					.filter((content): content is { type: "text"; text: string } => content.type === "text")
+					.map(content => content.text)
+					.join("\n")
+			: "";
+		expect(reminder).toContain('rule="probe-args"');
+		expect(reminder.indexOf("<system-reminder")).toBeLessThan(reminder.indexOf("probe ran"));
 	});
 
 	it("interruptMode never deduplicates the reminder across sibling tool calls in one batch", async () => {
