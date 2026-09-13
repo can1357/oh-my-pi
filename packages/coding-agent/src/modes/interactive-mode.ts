@@ -848,7 +848,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 	/** Owns hosting: manual `/collab`, `collab.autoStart`, and room rotation on session switch. */
 	readonly collabController: CollabController;
-	/** Live room, installed by {@link collabController} (guest-UI mirroring reads it). */
+	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
 

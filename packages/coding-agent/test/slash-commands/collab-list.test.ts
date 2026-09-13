@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import type { CollabHostSnapshot } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -47,6 +48,7 @@ function createHarness() {
 		showError,
 		settings: { get: () => "" },
 	} as unknown as InteractiveModeContext;
+	ctx.collabController = new CollabController(ctx);
 	return { ctx, setText, showStatus, showError, runtime: { ctx } as BuiltinSlashCommandRuntime };
 }
 

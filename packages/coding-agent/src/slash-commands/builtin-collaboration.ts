@@ -294,8 +294,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.collabHost) {
-				return `Collab: hosting (${Math.max(0, runtime.ctx.collabHost.participants.length - 1)} guests)`;
+			const host = runtime.ctx.collabController.host;
+			if (host) {
+				return `Collab: hosting (${Math.max(0, host.participants.length - 1)} guests)`;
 			}
 			if (runtime.ctx.collabGuest?.readOnly) return "Collab: read-only guest";
 			if (runtime.ctx.collabGuest) return "Collab: guest";
@@ -312,11 +313,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (verb === "status") {
-				if (ctx.collabHost) {
-					const names = ctx.collabHost.participants.map(p =>
+				const host = ctx.collabController.host;
+				if (host) {
+					const names = host.participants.map(p =>
 						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
 					);
-					const link = ctx.collabHost.access === "view" ? ctx.collabHost.webViewLink : ctx.collabHost.webLink;
+					const link = host.access === "view" ? host.webViewLink : host.webLink;
 					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(link)}`);
 				} else if (ctx.collabGuest) {
 					ctx.showStatus(
@@ -394,13 +396,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const knownStartVerb = verb === "start" || verb === "view";
 			const view = verb === "view";
 			const access = view ? "view" : "control";
-			const existing = ctx.collabHost;
-			// Re-print the current room unless control was asked of a room the
-			// registry publishes as view-only: that request replaces the room.
-			if (existing && (existing.access === "control" || view)) {
-				showCollabLink(ctx, existing, view ? "Read-only collab session active" : "Collab session active", view);
-				return;
-			}
+			const existing = ctx.collabController.host;
 			let host: CollabHost;
 			try {
 				host = await ctx.collabController.start({ access, relay: knownStartVerb ? rest : args });
@@ -408,12 +404,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				ctx.showError(`Failed to start collab session: ${errorMessage(err)}`);
 				return;
 			}
-			showCollabLink(
-				ctx,
-				host,
-				existing ? "Collab session restarted with control access" : "Collab session started!",
-				view,
-			);
+			let heading = existing ? "Collab session restarted with control access" : "Collab session started!";
+			if (host === existing) heading = view ? "Read-only collab session active" : "Collab session active";
+			showCollabLink(ctx, host, heading, view);
 		},
 	},
 	{

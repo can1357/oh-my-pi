@@ -285,6 +285,40 @@ describe("interactive collaboration startup", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
 	});
 
+	it("/collab recovers a real session whose persistence failed before notifying observers", async () => {
+		mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: new VirtualTerminal(200, 60) }),
+		);
+		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		await mode.init({ suppressWelcomeIntro: true });
+		await executeBuiltinSlashCommand("/collab", { ctx: mode });
+		const first = mode.collabHost;
+		if (!first) throw new Error("slash command did not start a host");
+		const persistence = spyOn(testSession.sessionManager, "ensureOnDisk").mockRejectedValueOnce(
+			new Error("injected persistence failure"),
+		);
+		await expect(testSession.session.newSession()).rejects.toThrow("injected persistence failure");
+		persistence.mockRestore();
+		expect(testSession.sessionManager.getSessionId()).not.toBe(first.sessionId);
+		await executeBuiltinSlashCommand("/collab", { ctx: mode });
+		const replacement = mode.collabHost;
+		expect(replacement).not.toBe(first);
+		expect(first.stopped).toBe(true);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ sessionId: testSession.sessionManager.getSessionId(), generation: 2 },
+		]);
+		if (!replacement) throw new Error("slash command did not replace the stale host");
+		expect(mode.ui.render(200).join("\n")).toContain(replacement.webLink);
+		await joinAsWriter(replacement);
+	});
+
 	it("restores the local session and saved hosting policy after dedicated CLI join activation fails", async () => {
 		const finished = new Error("finished observing failed join");
 		testSession.sessionManager.appendMessage({ role: "user", content: "dedicated local transcript", timestamp: 0 });
