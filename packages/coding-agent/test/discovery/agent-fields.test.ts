@@ -98,6 +98,16 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
+	test("treats a malformed tools value as absent rather than an empty toolset", () => {
+		// Only the `[]` literal means "present but empty". A blank CSV or an
+		// array holding no strings carries no tool names, so it must degrade to
+		// the absent-field default (unrestricted); parsing it as `[]` would
+		// silently strip every tool down to `yield`.
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "" })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "   " })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [1, 2] })?.tools).toBeUndefined();
+	});
+
 	test("maps legacy search and find tool names", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
@@ -149,6 +159,73 @@ describe("parseAgentFields", () => {
 
 		expect(fields).toBeDefined();
 		expect(fields?.autoloadSkills).toBeUndefined();
+	});
+
+	test("parses skills allowlist from array frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: ["alpha", "beta-*"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("parses skills allowlist from CSV string", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "alpha, beta-*",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("keeps empty skills allowlist as an empty array", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: [],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("treats skills none as an empty allowlist", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "none",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("returns undefined skills when field absent", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toBeUndefined();
+	});
+
+	test("parses hideSkills and unhideSkills from frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			hideSkills: ["internal-*"],
+			unhideSkills: ["internal-tools"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.hideSkills).toEqual(["internal-*"]);
+		expect(fields?.unhideSkills).toEqual(["internal-tools"]);
 	});
 
 	test("parses readSummarize from boolean frontmatter", () => {

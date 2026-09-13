@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-role skill visibility control for subagents via agent frontmatter: `skills` (allowlist globs; `"none"`/`[]` lists none), `hideSkills` (denylist globs, highest precedence), and `unhideSkills` (re-exposes skills whose `SKILL.md` sets `hide: true`) — see [#4570](https://github.com/can1357/oh-my-pi/issues/4570). Controls the rendered `<skills>` block only; hidden skills remain loadable via `skill://<name>` and `/skill:<name>`.
+
 ### Changed
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
