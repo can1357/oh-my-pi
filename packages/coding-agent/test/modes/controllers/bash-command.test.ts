@@ -18,7 +18,14 @@ function createContainer() {
 }
 
 function createCwdContext(sourceDir: string, isStreaming = false, showImages = true) {
-	const state = { cwd: sourceDir, executedCwds: [] as string[] };
+	const state = {
+		cwd: sourceDir,
+		workspaceCwd: sourceDir,
+		artifactCwd: sourceDir,
+		executedCwds: [] as string[],
+		completedBtwVisible: true,
+		gateHeld: false,
+	};
 	const executeBash = vi.fn(async (command: string): Promise<BashResult> => {
 		state.executedCwds.push(state.cwd);
 		return {
@@ -39,29 +46,47 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		session: {
 			isStreaming,
 			executeBash,
+			moveSession: vi.fn(async (cwd: string) => {
+				state.cwd = cwd;
+				state.artifactCwd = cwd;
+			}),
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,
-			moveTo: vi.fn(async (cwd: string) => {
-				state.cwd = cwd;
-			}),
 			captureState: vi.fn(() => ({ cwd: state.cwd, sessionDir: "/tmp/bash-sessions" })),
 			restoreState: vi.fn((snapshot: { cwd: string }) => {
 				state.cwd = snapshot.cwd;
+			}),
+			rollbackMove: vi.fn(async (snapshot: { cwd: string }) => {
+				state.cwd = snapshot.cwd;
+				state.artifactCwd = snapshot.cwd;
 			}),
 		},
 		chatContainer: createContainer(),
 		pendingMessagesContainer,
 		pendingBashComponents: [],
-		settings: { get: () => showImages },
+		settings: { get: () => showImages, flush: vi.fn(async () => {}) },
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 		present,
 		showError: vi.fn(),
 		showWarning: vi.fn(),
 		applyCwdChange: vi.fn(async (cwd: string) => {
 			expect(state.cwd).toBe(cwd);
+			state.workspaceCwd = cwd;
 			return true;
 		}),
+		withBtwSessionMove: vi.fn(async (operation: () => Promise<boolean>) => {
+			if (state.gateHeld) throw new Error("Nested session move gate");
+			state.gateHeld = true;
+			try {
+				const moved = await operation();
+				if (moved) state.completedBtwVisible = false;
+				return moved;
+			} finally {
+				state.gateHeld = false;
+			}
+		}),
+		shutdown: vi.fn(async () => {}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
 	} as unknown as InteractiveModeContext;
@@ -161,6 +186,11 @@ describe("bash shortcut command", () => {
 			await controller.handleBashCommand("pwd");
 
 			expect(state.cwd).toBe(sourceDir);
+			expect(state.workspaceCwd).toBe(sourceDir);
+			expect(state.artifactCwd).toBe(sourceDir);
+			expect(state.completedBtwVisible).toBe(false);
+			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(1, childDir);
+			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir, childDir, sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(3);
 			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
@@ -218,6 +248,7 @@ describe("bash shortcut command", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(1);
+			expect(ctx.withBtwSessionMove).not.toHaveBeenCalled();
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
 			expect(ctx.reloadTodos).not.toHaveBeenCalled();
@@ -328,8 +359,11 @@ describe("bash shortcut command", () => {
 				outputBytes: 12,
 				workingDir: childDir,
 			}));
-			ctx.applyCwdChange = vi.fn(async () => {
-				throw new Error("refresh failed");
+			ctx.applyCwdChange = vi.fn(async (cwd: string) => {
+				expect(state.gateHeld).toBe(true);
+				if (cwd === childDir) throw new Error("refresh failed");
+				state.workspaceCwd = cwd;
+				return true;
 			});
 			const controller = new CommandController(ctx);
 
@@ -338,8 +372,203 @@ describe("bash shortcut command", () => {
 			const component = present.mock.calls[0]?.[0];
 			expect(component).toBeInstanceOf(BashExecutionComponent);
 			expect((component as BashExecutionComponent).getOutput()).toContain("final output");
+			expect(state.cwd).toBe(sourceDir);
+			expect(state.workspaceCwd).toBe(sourceDir);
+			expect(state.artifactCwd).toBe(sourceDir);
+			expect(state.completedBtwVisible).toBe(true);
+			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("refresh failed"));
+			expect(ctx.shutdown).not.toHaveBeenCalled();
+			await controller.handleBashCommand("pwd");
+			expect(state.executedCwds).toEqual([sourceDir]);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not execute or render a persistent cd when the BTW migration gate refuses", async () => {
+		const { ctx, executeBash, present, state } = createCwdContext("/tmp");
+		ctx.withBtwSessionMove = vi.fn(async () => false);
+
+		await new CommandController(ctx).handleBashCommand("cd /");
+
+		expect(executeBash).not.toHaveBeenCalled();
+		expect(present).not.toHaveBeenCalled();
+		expect(ctx.session.moveSession).not.toHaveBeenCalled();
+		expect(ctx.applyCwdChange).not.toHaveBeenCalled();
+		expect(state.cwd).toBe("/tmp");
+		expect(state.artifactCwd).toBe("/tmp");
+		expect(state.workspaceCwd).toBe("/tmp");
+		expect(state.completedBtwVisible).toBe(true);
+	});
+
+	it("does not execute cd when saving source settings fails", async () => {
+		const { ctx, executeBash, present, state } = createCwdContext("/tmp");
+		ctx.settings.flush = vi.fn(async () => {
+			throw new Error("settings write denied");
+		});
+
+		await new CommandController(ctx).handleBashCommand("cd /");
+
+		expect(executeBash).not.toHaveBeenCalled();
+		expect(present).not.toHaveBeenCalled();
+		expect(ctx.withBtwSessionMove).not.toHaveBeenCalled();
+		expect(state.cwd).toBe("/tmp");
+		expect(state.completedBtwVisible).toBe(true);
+		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("settings write denied"));
+	});
+
+	it("leaves compound cd commands outside persistent cwd migration", async () => {
+		const { ctx, executeBash, state } = createCwdContext("/tmp");
+		executeBash.mockResolvedValueOnce({
+			output: "/",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 1,
+			outputLines: 1,
+			outputBytes: 1,
+			workingDir: "/",
+		});
+
+		await new CommandController(ctx).handleBashCommand("cd / && pwd");
+
+		expect(executeBash).toHaveBeenCalledTimes(1);
+		expect(ctx.withBtwSessionMove).not.toHaveBeenCalled();
+		expect(ctx.session.moveSession).not.toHaveBeenCalled();
+		expect(state.cwd).toBe("/tmp");
+		expect(state.completedBtwVisible).toBe(true);
+	});
+
+	it("holds the same migration gate through shell execution and cwd adoption", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-gate-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		const executionStarted = Promise.withResolvers<void>();
+		const executionResult = Promise.withResolvers<BashResult>();
+		const adoptionStarted = Promise.withResolvers<void>();
+		const adoptionResult = Promise.withResolvers<void>();
+		const result: BashResult = {
+			output: "changed directory",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 17,
+			outputLines: 1,
+			outputBytes: 17,
+			workingDir: childDir,
+		};
+		let pending: Promise<void> | undefined;
+		try {
+			const { ctx, executeBash, state } = createCwdContext(sourceDir);
+			executeBash.mockImplementationOnce(async () => {
+				executionStarted.resolve();
+				return executionResult.promise;
+			});
+			ctx.applyCwdChange = vi.fn(async (cwd: string) => {
+				adoptionStarted.resolve();
+				await adoptionResult.promise;
+				state.workspaceCwd = cwd;
+				return true;
+			});
+			pending = new CommandController(ctx).handleBashCommand("cd child");
+			await executionStarted.promise;
+			expect(state.gateHeld).toBe(true);
+			expect(state.cwd).toBe(sourceDir);
+			expect(state.completedBtwVisible).toBe(true);
+			executionResult.resolve(result);
+			await adoptionStarted.promise;
+			expect(state.gateHeld).toBe(true);
 			expect(state.cwd).toBe(childDir);
-			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("completed, but"));
+			expect(state.artifactCwd).toBe(childDir);
+			expect(state.workspaceCwd).toBe(sourceDir);
+			expect(state.completedBtwVisible).toBe(true);
+			adoptionResult.resolve();
+			await pending;
+			expect(state.gateHeld).toBe(false);
+			expect(state.workspaceCwd).toBe(childDir);
+			expect(state.completedBtwVisible).toBe(false);
+			expect(ctx.withBtwSessionMove).toHaveBeenCalledTimes(1);
+		} finally {
+			executionResult.resolve(result);
+			adoptionResult.resolve();
+			await pending;
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it.each(["failed", "cancelled", "unchanged"] as const)(
+		"retains completed BTW and session cwd after a %s standalone cd",
+		async outcome => {
+			const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-not-moved-"));
+			const childDir = path.join(sourceDir, "child");
+			await fs.mkdir(childDir);
+			try {
+				const { ctx, executeBash, state } = createCwdContext(sourceDir);
+				executeBash.mockResolvedValueOnce({
+					output: outcome === "failed" ? "permission denied" : "",
+					exitCode: outcome === "failed" ? 1 : 0,
+					cancelled: outcome === "cancelled",
+					truncated: false,
+					totalLines: 0,
+					totalBytes: 0,
+					outputLines: 0,
+					outputBytes: 0,
+					workingDir: outcome === "unchanged" ? sourceDir : childDir,
+				});
+
+				await new CommandController(ctx).handleBashCommand(outcome === "unchanged" ? "cd ." : "cd child");
+
+				expect(executeBash).toHaveBeenCalledTimes(1);
+				expect(state.cwd).toBe(sourceDir);
+				expect(state.workspaceCwd).toBe(sourceDir);
+				expect(state.artifactCwd).toBe(sourceDir);
+				expect(state.completedBtwVisible).toBe(true);
+				expect(state.gateHeld).toBe(false);
+				expect(ctx.session.moveSession).not.toHaveBeenCalled();
+				expect(ctx.applyCwdChange).not.toHaveBeenCalled();
+			} finally {
+				await fs.rm(sourceDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("keeps the source session and shell output when session move invariants reject cd adoption", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-move-rejected-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		try {
+			const { ctx, executeBash, present, state } = createCwdContext(sourceDir);
+			executeBash.mockResolvedValueOnce({
+				output: "cd output",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 1,
+				totalBytes: 9,
+				outputLines: 1,
+				outputBytes: 9,
+				workingDir: childDir,
+			});
+			ctx.session.moveSession = vi.fn(async () => {
+				throw new Error("session transition rejected");
+			});
+			const controller = new CommandController(ctx);
+
+			await controller.handleBashCommand("cd child");
+			await controller.handleBashCommand("pwd");
+
+			expect(state.executedCwds).toEqual([sourceDir]);
+			expect(state.cwd).toBe(sourceDir);
+			expect(state.artifactCwd).toBe(sourceDir);
+			expect(state.workspaceCwd).toBe(sourceDir);
+			expect(state.completedBtwVisible).toBe(true);
+			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
+			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("session transition rejected"));
+			const component = present.mock.calls[0]?.[0];
+			if (!(component instanceof BashExecutionComponent)) throw new Error("Expected shell output");
+			expect(component.getOutput()).toContain("cd output");
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}

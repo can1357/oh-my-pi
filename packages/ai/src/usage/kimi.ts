@@ -22,6 +22,7 @@ const USAGE_PATH = "usages";
 interface KimiUsagePayload {
 	usage?: unknown;
 	limits?: unknown;
+	totalQuota?: unknown;
 }
 
 type KimiUsageRow = {
@@ -195,13 +196,22 @@ function parseUsagePayload(payload: unknown, nowMs: number): { rows: KimiUsageRo
 	const rows: KimiUsageRow[] = [];
 
 	if (isRecord(data.usage)) {
-		const summary = buildUsageRow(data.usage, "Total quota", nowMs);
+		const summary = buildUsageRow(data.usage, "Weekly limit", nowMs);
 		if (summary) {
 			// Kimi Code's aggregate quota resets weekly, but the payload carries
 			// only `resetTime` and no duration. Attach the canonical weekly
 			// window explicitly so status-line/ranking consumers recognize it.
 			summary.window = { id: "7d", label: "7 Day", resetsAt: summary.resetsAt };
 			rows.push(summary);
+		}
+	}
+
+	if (isRecord(data.totalQuota)) {
+		const windowData = isRecord(data.totalQuota.window) ? data.totalQuota.window : {};
+		const total = buildUsageRow(data.totalQuota, "Total quota", nowMs);
+		if (total) {
+			total.window = buildWindow(windowData, nowMs);
+			rows.push(total);
 		}
 	}
 

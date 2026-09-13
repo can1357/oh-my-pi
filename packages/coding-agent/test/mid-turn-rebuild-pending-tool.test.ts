@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
@@ -21,6 +22,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const usage = {
@@ -99,6 +101,88 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 		expect(ctx.pendingTools.size).toBe(0);
 	});
+
+	for (const arrival of ["buffered", "live", "persisted", "during-replay"] as const) {
+		it(`keeps replayed read images visible after ${arrival} completion`, async () => {
+			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
+			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
+			const { ctx, helpers, controller, chatContainer } = createFixture({ isStreaming: true });
+			const showImages = ctx.settings.get("terminal.showImages");
+			ctx.settings.set("terminal.showImages", true);
+			try {
+				const assistant: AssistantMessage = {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Inspecting the image." },
+						{ type: "toolCall", id: "image-read", name: "read", arguments: { path: "pixel.png" } },
+						{ type: "text", text: "Continuing after the read." },
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					stopReason: "toolUse",
+					usage,
+					timestamp: 1,
+				};
+				const result: ToolResultMessage = {
+					role: "toolResult",
+					toolCallId: "image-read",
+					toolName: "read",
+					content: [
+						{
+							type: "image",
+							mimeType: "image/png",
+							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+						},
+					],
+					isError: false,
+					timestamp: 2,
+				};
+				ctx.viewSession.agent.getPendingToolResults = () => (arrival === "buffered" ? [result] : []);
+				controller.resetTranscriptAnchors();
+				if (arrival === "during-replay") {
+					let completion: Promise<void> | undefined;
+					const messages: AgentMessage[] = [assistant];
+					for (let i = 0; i < 100; i++) {
+						messages.push({ role: "user", content: `Replay message ${i}`, timestamp: i + 3 });
+					}
+					await helpers.renderSessionContextIncrementally({ messages } as SessionContext, {}, () => {
+						completion ??= controller.handleEvent({
+							type: "tool_execution_end",
+							toolCallId: result.toolCallId,
+							toolName: result.toolName,
+							result: { content: result.content },
+							isError: false,
+						});
+					});
+					await completion;
+				} else {
+					helpers.renderSessionContext({
+						messages: arrival === "persisted" ? [assistant, result] : [assistant],
+					} as SessionContext);
+				}
+				controller.restorePendingToolResults();
+				if (arrival !== "live") {
+					expect(Bun.stripANSI(chatContainer.render(120).join("\n")).match(/\[Image: image\/png\]/g)).toHaveLength(
+						1,
+					);
+					expect(ctx.pendingTools.size).toBe(0);
+				}
+				await controller.handleEvent({
+					type: "tool_execution_end",
+					toolCallId: result.toolCallId,
+					toolName: result.toolName,
+					result: { content: result.content },
+					isError: false,
+				});
+				expect(Bun.stripANSI(chatContainer.render(120).join("\n")).match(/\[Image: image\/png\]/g)).toHaveLength(1);
+				expect(ctx.pendingTools.size).toBe(0);
+			} finally {
+				ctx.settings.set("terminal.showImages", showImages);
+				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
+			}
+		});
+	}
 
 	it("seals dangling toolCalls on idle rebuilds instead of leaving a live spinner", () => {
 		const { ctx, helpers, chatContainer } = createFixture({ isStreaming: false });

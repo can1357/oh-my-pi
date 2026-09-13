@@ -63,6 +63,7 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	type ServiceTierInheritSettingValue,
 } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -403,6 +404,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -1277,6 +1279,17 @@ export const SETTINGS_SCHEMA = {
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
+	"tui.mouse": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Mouse Click-to-Focus",
+			description:
+				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		},
+	},
 	"tui.tight": {
 		type: "boolean",
 		default: false,
@@ -1301,6 +1314,23 @@ export const SETTINGS_SCHEMA = {
 				{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 				{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
 				{ value: "disabled", label: "Disabled", description: "No animation; static muted text" },
+			],
+		},
+	},
+	"display.pinnedAgents": {
+		type: "enum",
+		values: ["off", "collapsed", "full"] as const,
+		default: "collapsed",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Pinned Agents",
+			description:
+				"Pinned live-agent jump list above the editor (off hides it; collapsed shows a few rows with an expander; full lists all)",
+			options: [
+				{ value: "off", label: "Off", description: "Hide the pinned jump list" },
+				{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
+				{ value: "full", label: "Full", description: "Always list every live agent" },
 			],
 		},
 	},
@@ -1946,7 +1976,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Retry Fallback Chains",
 			description:
-				'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix.',
+				'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
 		},
 	},
 	"retry.fallbackRevertPolicy": {
@@ -4723,6 +4753,35 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.speculativeExecution.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Experimental Speculative Execution",
+			description:
+				"Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.",
+		},
+	},
+
+	"tools.speculativeExecution.maxInFlight": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Speculative Execution Concurrency",
+			description: "Maximum number of validated local reads allowed to run before normal dispatch.",
+			options: [
+				{ value: "1", label: "1 operation" },
+				{ value: "2", label: "2 operations" },
+				{ value: "3", label: "3 operations" },
+				{ value: "4", label: "4 operations" },
+			],
+		},
+	},
+
 	"tools.maxTimeout": {
 		type: "number",
 		default: 0,
@@ -5300,6 +5359,10 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
 	},
+	"task.agentServiceTierOverrides": {
+		type: "record",
+		default: EMPTY_AGENT_SERVICE_TIER_OVERRIDES,
+	},
 	"task.agentPrewalk": {
 		type: "record",
 		default: {} as Record<string, string>,
@@ -5860,7 +5923,7 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",

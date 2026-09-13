@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { getAnthropicCompactionPayload } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -457,8 +458,32 @@ export function buildSessionContext(
 			appendMessage(path[i]);
 		}
 	} else if (compaction) {
-		const providerPayload = getOpenAiRemoteCompactionPayload(compaction);
-		const remoteReplacementHistory = providerPayload?.items;
+		const remotePayload = getOpenAiRemoteCompactionPayload(compaction);
+		const remoteReplacementHistory = remotePayload?.items;
+		// Anthropic server compaction persists a plain-text summary plus its
+		// native replay; the kept tail still comes from entries below.
+		const anthropicPayload = getAnthropicCompactionPayload(compaction.preserveData);
+		const providerPayload = remotePayload ?? anthropicPayload;
+
+		// Find compaction index in path
+		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+
+		// A natively replayed summary must not invalidate the retained tail's
+		// bound thinking: stamping it with the entry commit timestamp would
+		// expose that as historyRewriteAt newer than the tail and strip its
+		// signatures on the next request. Predate the marker before the first
+		// retained entry instead (other lanes keep the commit timestamp).
+		let summaryTimestamp = compaction.timestamp;
+		if (anthropicPayload !== undefined) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			const firstRetained =
+				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
+				path[compactionIdx + 1];
+			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
+			if (Number.isFinite(retainedAt)) {
+				summaryTimestamp = new Date(retainedAt - 1).toISOString();
+			}
+		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
@@ -466,7 +491,7 @@ export function buildSessionContext(
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
-			compaction.timestamp,
+			summaryTimestamp,
 			{
 				shortSummary: compaction.shortSummary,
 				providerPayload,
@@ -481,9 +506,6 @@ export function buildSessionContext(
 		if (!options?.transcript) {
 			pushMessage(compactionSummaryMsg);
 		}
-
-		// Find compaction index in path
-		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
 
 		// Notes-backed windows do not summarize a discarded turn prefix. Recover
 		// its latest user request verbatim, independently of the disposable tail.
