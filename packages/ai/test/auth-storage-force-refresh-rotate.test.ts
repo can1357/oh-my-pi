@@ -1245,17 +1245,19 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				expires: farExpiry(),
 				email: `evil\x1b[2J\n${"a".repeat(120)}@example.com`,
 			},
+			// Wide glyphs: 100 code units but 200 terminal columns.
+			{ type: "oauth", access: "wide", refresh: "ref-W", expires: farExpiry(), email: `${"漢".repeat(100)}@例.com` },
 		]);
 		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
 		const sessionId = "daybreak-hostile";
-		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("hostile");
-		expect(
+		for (const bearer of ["hostile", "wide"]) {
+			expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(bearer);
 			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
 				error: denial,
 				modelId: DAYBREAK_MODEL,
-				apiKey: "hostile",
-			}),
-		).toBe(false);
+				apiKey: bearer,
+			});
+		}
 
 		// A broker that never answers the tombstone listing: the verdict must not wait for it.
 		vi.spyOn(codexStorage, "listDisabledCredentials").mockImplementation((_provider, signal) => {
@@ -1272,6 +1274,11 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
 		expect(verdict.message).toContain("evil");
 		expect(verdict.message).not.toContain("a".repeat(120));
+		// Bounded in terminal columns, not code units, and never cut inside a glyph.
+		const wideLabel = verdict.message.match(/漢+…/)?.[0];
+		if (!wideLabel) throw new Error("wide account label missing");
+		expect(Bun.stringWidth(wideLabel)).toBeLessThanOrEqual(60);
+		expect(Bun.stringWidth(wideLabel)).toBeGreaterThan(50);
 		expect(verdict.message).not.toContain("Recently signed out");
 		expect(verdict.message).toMatch(/Sign in with \/login openai-codex using an account entitled to this model\.$/);
 	});

@@ -289,7 +289,7 @@ export function credentialAccountLabel(
 	return `${mask(base)} · ${mask(org)}`;
 }
 
-/** Bounds for provider-controlled text inside a {@link AIError.ModelEntitlementError} message. */
+/** Bounds, in terminal columns, for provider-controlled text inside a {@link AIError.ModelEntitlementError} message. */
 const ENTITLEMENT_DIAGNOSTIC_LABEL_MAX = 60;
 const ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX = 80;
 const ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX = 200;
@@ -298,10 +298,23 @@ const ENTITLEMENT_LOOKUP_BUDGET_MS = 2_000;
 /** Accounts named in a verdict before the rest are counted; large broker pools must not overflow the renderer. */
 const ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX = 8;
 
-/** One line of provider-controlled text, safe for a terminal error renderer and no longer than `max`. */
-function boundedDiagnostic(text: string, max: number): string {
+/**
+ * One line of provider-controlled text, safe for a terminal error renderer and
+ * no wider than `maxColumns`. Measured in display columns (wide CJK glyphs and
+ * emoji count double) and cut at a code point, never inside a surrogate pair.
+ */
+function boundedDiagnostic(text: string, maxColumns: number): string {
 	const clean = sanitizeText(text).replace(/\s+/g, " ").trim();
-	return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+	if (Bun.stringWidth(clean) <= maxColumns) return clean;
+	let kept = "";
+	let width = 0;
+	for (const glyph of clean) {
+		const glyphWidth = Bun.stringWidth(glyph);
+		if (width + glyphWidth > maxColumns - 1) break;
+		kept += glyph;
+		width += glyphWidth;
+	}
+	return `${kept}…`;
 }
 
 /**
