@@ -839,26 +839,44 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 /** Shorten home-prefixed paths inside free text, preserving surrounding
  * punctuation so error strings with embedded paths stay readable. */
 export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
-	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
-	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const homePattern = new RegExp(
-		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
-		windowsStyle ? "gi" : "g",
-	);
-	const textWithShortenedHome =
-		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
-	return textWithShortenedHome
+	if (!homeDir) return text;
+	let shortened = text;
+	const isWindowsPath = homeDir.includes("\\") || /^(?:[A-Za-z]:\/|\/\/)/.test(homeDir);
+	const homePaths = isWindowsPath
+		? [...new Set([homeDir, homeDir.replaceAll("\\", "/"), homeDir.replaceAll("/", "\\")])]
+		: [homeDir];
+	const caseInsensitive = isWindowsPath;
+	const trailingBoundary =
+		"(?=$|[\\\\/]|\\s|\\x1b|&(?:quot|apos|gt);|[\"'`)\\]}>]|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
+	const uriPathContext = /[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s"'`<>()[\]{}]*$/u;
+	for (const homePath of homePaths) {
+		const hasLeadingSeparator = /^[\\/]/.test(homePath);
+		const leadingBoundary = hasLeadingSeparator ? "" : "(?<![\\p{L}\\p{N}_-])";
+		const homePrefix = new RegExp(
+			`${leadingBoundary}${RegExp.escape(homePath)}${trailingBoundary}`,
+			caseInsensitive ? "giu" : "gu",
+		);
+		shortened = shortened.replace(homePrefix, (matchedHome, offset: number) => {
+			const prefix = shortened.slice(0, offset);
+			const schemeConsumesUncHome = /^[A-Za-z][A-Za-z\d+.-]*:$/u.test(prefix) && /^[\\/]{2}/.test(matchedHome);
+			const uriPath = hasLeadingSeparator && (uriPathContext.test(prefix) || schemeConsumesUncHome);
+			if (!uriPath && /[\p{L}\p{N}_-]$/u.test(prefix)) return matchedHome;
+			if (!uriPath) return "~";
+			if (schemeConsumesUncHome) return `${/^file:$/iu.test(prefix) ? "/" : ""}//~`;
+			return `${matchedHome[0]}~`;
+		});
+	}
+	return shortened
 		.split(" ")
 		.map(segment => {
 			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
 			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
 			const end = segment.length - trailing.length;
 			if (leading.length >= end) return segment;
-			const shortened = shortenPath(segment.slice(leading.length, end), homeDir);
-			const normalized = shortened.startsWith("~")
-				? shortened.replaceAll(path.win32.sep, path.posix.sep)
-				: shortened;
+			const shortenedPath = shortenPath(segment.slice(leading.length, end), homeDir);
+			const normalized = shortenedPath.startsWith("~")
+				? shortenedPath.replaceAll(path.win32.sep, path.posix.sep)
+				: shortenedPath;
 			return `${leading}${normalized}${trailing}`;
 		})
 		.join(" ");

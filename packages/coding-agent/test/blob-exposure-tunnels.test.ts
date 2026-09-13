@@ -24,6 +24,7 @@ interface FakeInvocation {
 	runsFile: string;
 	signalsFile: string;
 	restartMarker?: string;
+	restartReadyGate?: string;
 }
 
 function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfig> = {}): ExposureConfig {
@@ -40,7 +41,16 @@ function shellLiteral(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function prepareFake(output: string, options: { exitCode?: number; restartOnce?: boolean } = {}): FakeInvocation {
+function prepareFake(
+	output: string,
+	options: {
+		exitCode?: number;
+		exitDelaySeconds?: number;
+		restartOnce?: boolean;
+		restartReadyDelaySeconds?: number;
+		gateRestartReadiness?: boolean;
+	} = {},
+): FakeInvocation {
 	const suffix = String(invocationSequence++);
 	const invocationDir = path.join(fakeBinDir, suffix);
 	fs.mkdirSync(invocationDir);
@@ -48,6 +58,7 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	const runsFile = path.join(invocationDir, "runs.txt");
 	const signalsFile = path.join(invocationDir, "signals.txt");
 	const restartMarker = options.restartOnce ? path.join(invocationDir, "restart.txt") : undefined;
+	const restartReadyGate = options.gateRestartReadiness ? path.join(invocationDir, "restart-ready") : undefined;
 	const target = path.join(invocationDir, "fake-tunnel");
 	fs.writeFileSync(
 		target,
@@ -57,14 +68,23 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 			`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
 			`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
 			`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
-			`printf '%s\\n' ${shellLiteral(output)}\n` +
 			(restartMarker
 				? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
+					`  printf '%s\\n' ${shellLiteral(output)}\n` +
 					`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
+					(options.exitDelaySeconds === undefined ? "" : `  /bin/sleep ${options.exitDelaySeconds}\n`) +
 					`  exit 23\n` +
 					`fi\n` +
-					`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
+					(options.restartReadyDelaySeconds === undefined
+						? ""
+						: `/bin/sleep ${options.restartReadyDelaySeconds}\n`) +
+					`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n` +
+					(restartReadyGate === undefined
+						? ""
+						: `while [ ! -e ${shellLiteral(restartReadyGate)} ]; do /bin/sleep 0.05; done\n`)
 				: "") +
+			`printf '%s\\n' ${shellLiteral(output)}\n` +
+			(options.exitDelaySeconds === undefined ? "" : `/bin/sleep ${options.exitDelaySeconds}\n`) +
 			(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
 	);
 	fs.chmodSync(target, 0o755);
@@ -72,7 +92,7 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 		fs.symlinkSync(target, path.join(invocationDir, name));
 	}
 	process.env.PATH = invocationDir;
-	return { argsFile, runsFile, signalsFile, restartMarker };
+	return { argsFile, runsFile, signalsFile, restartMarker, restartReadyGate };
 }
 
 async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
@@ -97,10 +117,6 @@ async function waitForFileContent(filePath: string, matches: (text: string) => b
 	}
 }
 
-async function waitForRestart(marker: string): Promise<void> {
-	await waitForFileContent(marker, text => text.includes("restarted"));
-}
-
 function recordedArgs(invocation: FakeInvocation): string[] {
 	const text = fs.readFileSync(invocation.argsFile, "utf8");
 	return text === "" ? [] : text.replace(/\n$/, "").split("\n");
@@ -117,6 +133,41 @@ async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocati
 	expect(fs.readFileSync(invocation.signalsFile, "utf8")).toContain("SIGTERM");
 }
 
+/** Temporary tunnel log directories whose log mentions `banner`. */
+function tunnelLogDirsContaining(banner: string): string[] {
+	return fs
+		.readdirSync(os.tmpdir())
+		.filter(name => name.startsWith("omp-blob-tunnel-"))
+		.map(name => path.join(os.tmpdir(), name))
+		.filter(dir => {
+			try {
+				return fs.readFileSync(path.join(dir, "tunnel.log"), "utf8").includes(banner);
+			} catch {
+				return false;
+			}
+		});
+}
+
+/**
+ * Log removal is scheduled after `exited` settles (and may back off on
+ * transient Windows errors), so wait for the directory to disappear rather
+ * than asserting right after exit.
+ */
+async function waitForRemoval(target: string): Promise<void> {
+	if (!fs.existsSync(target)) return;
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const listener = (): void => {
+		if (!fs.existsSync(target)) resolve();
+	};
+	fs.watchFile(target, { interval: 25, persistent: false }, listener);
+	listener();
+	try {
+		await promise;
+	} finally {
+		fs.unwatchFile(target, listener);
+	}
+}
+
 beforeAll(() => {
 	fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-blob-tunnels-"));
 });
@@ -126,6 +177,7 @@ afterAll(async () => {
 	await Promise.all(activeExposures.map(active => active.exited));
 	if (originalPath === undefined) delete process.env.PATH;
 	else process.env.PATH = originalPath;
+
 	fs.rmSync(fakeBinDir, { recursive: true, force: true });
 });
 
@@ -195,8 +247,44 @@ describe("startExposure tunnel adapters", () => {
 		await stopAndObserve(active, invocation);
 	});
 
+	it("removes its file-backed tunnel log directory after stop completes", async () => {
+		const banner = "cleanup-owl.lhr.life";
+		const invocation = prepareFake(`{"type":"registered","domain":"${banner}"}`);
+		const active = await startExposure(exposure("localhost-run"), PORT);
+		activeExposures.push(active);
+		const createdLogDirs = tunnelLogDirsContaining(banner);
+		expect(createdLogDirs).toHaveLength(1);
+
+		await stopAndObserve(active, invocation);
+		await waitForRemoval(createdLogDirs[0]);
+	});
+
+	it("gives concurrently started tunnels distinct log directories", async () => {
+		// One fake serves both children (prepareFake() owns PATH), so the banner
+		// is shared and only the per-spawn mkdtemp keeps the logs apart.
+		const banner = "twin-owl.lhr.life";
+		const invocation = prepareFake(`{"type":"registered","domain":"${banner}"}`);
+		const started = await Promise.all([
+			startExposure(exposure("localhost-run"), PORT),
+			startExposure(exposure("localhost-run"), PORT),
+		]);
+		activeExposures.push(...started);
+		// readdir entries are distinct by construction: two hits means two directories.
+		const logDirs = tunnelLogDirsContaining(banner);
+		expect(logDirs).toHaveLength(2);
+
+		await Promise.all(started.map(active => stopAndObserve(active, invocation)));
+		await Promise.all(logDirs.map(dir => waitForRemoval(dir)));
+	});
+
 	it("never reconnects a free Pinggy tunnel behind a different published hostname", async () => {
-		const invocation = prepareFake("Tunnel established at https://random-one.a.pinggy.link", { exitCode: 23 });
+		// The delayed exit keeps startup deterministic: free Pinggy is
+		// unsupervised, so a child that dies before its URL is scanned is
+		// rejected rather than recovered from the log after exit.
+		const invocation = prepareFake("Tunnel established at https://random-one.a.pinggy.link", {
+			exitCode: 23,
+			exitDelaySeconds: 1,
+		});
 		const active = await startExposure(exposure("pinggy"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://random-one.a.pinggy.link");
@@ -221,9 +309,20 @@ describe("startExposure tunnel adapters", () => {
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n");
 	});
 
-	it("uses a configured stable Pinggy base with authenticated SSH", async () => {
+	it("rejects an unsupervised Pinggy tunnel that exits after publishing its URL", async () => {
+		const invocation = prepareFake("Tunnel established at https://already-dead.a.pinggy.link", { exitCode: 23 });
+		await expect(startExposure(exposure("pinggy"), PORT)).rejects.toThrow(
+			"exited with code 23 after reporting a tunnel URL",
+		);
+		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n");
+	});
+
+	it("waits for replacement readiness before publishing a configured stable Pinggy base", async () => {
 		const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
 			restartOnce: true,
+			// Keep the replacement unready past the broker's one-second stable-host
+			// probe window. Startup must wait rather than expose that dead window.
+			restartReadyDelaySeconds: 2,
 		});
 		const active = await startExposure(
 			exposure("pinggy", {
@@ -234,12 +333,56 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://stable.example.test");
+		// The restarted marker is written immediately before the replacement URL,
+		// so its presence on return proves startup waited for replacement readiness.
+		expect(fs.readFileSync(invocation.restartMarker!, "utf8")).toBe("first\nrestarted\n");
 		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
-		await waitForRestart(invocation.restartMarker!);
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
-		expect(active.baseUrl).toBe("https://stable.example.test");
 		await stopAndObserve(active, invocation);
 	});
+
+	it("cancels an authenticated Pinggy restart that has not published readiness", async () => {
+		const invocation = prepareFake("Tunnel established at https://gated-random.a.pinggy.link", {
+			restartOnce: true,
+			exitDelaySeconds: 1,
+			gateRestartReadiness: true,
+		});
+		const active = await startExposure(
+			exposure("pinggy", {
+				publicBaseUrl: "https://stable.example.test/",
+				credentials: { token: "fake-pinggy-token" },
+			}),
+			PORT,
+		);
+		activeExposures.push(active);
+		await waitForFileContent(invocation.restartMarker!, text => text.includes("restarted"));
+		expect(fs.existsSync(invocation.restartReadyGate!)).toBe(false);
+
+		await stopAndObserve(active, invocation);
+		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
+		expect(fs.existsSync(invocation.restartReadyGate!)).toBe(false);
+	});
+
+	it("backs off and gives up on a stable Pinggy tunnel that keeps dying after publishing its URL", async () => {
+		// Every run prints a URL and exits immediately, mimicking a persistent
+		// auth failure. Without backoff the supervisor would hot-loop respawns
+		// and `exited` would never settle.
+		const invocation = prepareFake("Tunnel established at https://doomed-random.a.pinggy.link", { exitCode: 23 });
+		const startedAt = Date.now();
+		await expect(
+			startExposure(
+				exposure("pinggy", {
+					publicBaseUrl: "https://stable.example.test/",
+					credentials: { token: "fake-pinggy-token" },
+				}),
+				PORT,
+			),
+		).rejects.toThrow("keeps exiting right after startup");
+		// Bounded: exactly the quick-exit budget of runs, never a hot loop.
+		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n".repeat(5));
+		// Delayed: respawns sit behind 250/500/1000/2000ms backoff sleeps.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(3_500);
+	}, 20_000);
 
 	it("starts devtunnel and zrok with public HTTP argv", async () => {
 		const devInvocation = prepareFake(`Hosting port ${PORT} at https://blue-${PORT}.use2.devtunnels.ms/`);

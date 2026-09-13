@@ -6,9 +6,10 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobType } from "../../async";
 import type { DaemonSnapshot } from "../../launch/protocol";
+import { ASYNC_PROGRESS_MESSAGE_TYPE } from "../../session/async-job-delivery";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -16,13 +17,28 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
 import { theme } from "../theme/theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
+
+/**
+ * Build the display-only copy of an async progress message. The persisted/model
+ * payload remains byte-identical; both transcript surfaces pass this copy to the
+ * existing custom-message renderer.
+ */
+export function buildAsyncProgressDisplayMessage(message: CustomOrHookMessage): CustomOrHookMessage {
+	if (message.customType !== ASYNC_PROGRESS_MESSAGE_TYPE || typeof message.content !== "string") return message;
+	const content = shortenEmbeddedPaths(replaceTabs(message.content))
+		.split("\n")
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE))
+		.join("\n");
+	return content === message.content ? message : { ...message, content };
+}
+
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
 /**
@@ -82,6 +98,10 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 		block.addChild(new Text(theme.fg("dim", `${theme.status.done} ${message.content}`), 1, 0));
 	}
 	for (const daemon of daemons) {
+		const normalizedName = shortenEmbeddedPaths(
+			replaceTabs(sanitizeText(daemon.name.replace(/[\r\n]+/g, " "))),
+		).trim();
+		const displayName = truncateToWidth(normalizedName || "unnamed", TRUNCATE_LENGTHS.TITLE);
 		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
 		const duration =
 			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
@@ -91,7 +111,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			failed
 				? theme.fg("error", `${theme.status.error} Supervised process failed`)
 				: theme.fg("success", `${theme.status.done} Supervised process completed`),
-			theme.fg("accent", daemon.name),
+			theme.fg("accent", displayName),
 			daemon.exitCode !== undefined ? theme.fg("dim", `(exit ${daemon.exitCode})`) : undefined,
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
 		]
