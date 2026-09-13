@@ -904,8 +904,10 @@ describe("isCacheControlUnsupported", () => {
 	//
 	// Nesting is keyed on the member name, not on the punctuation joining it to
 	// the field, so every validator's path syntax collapses to one rule. Rows
-	// span the three `CacheControlEphemeral` members and each distinct joiner
-	// width the rule admits, up to the four-character pretty-printed maximum.
+	// span the three `CacheControlEphemeral` members, each separator width the
+	// rule admits up to its three-character maximum, and each position a
+	// pretty-printer can put unbounded whitespace in: between two separator
+	// characters, and between the last separator and the member name.
 	it.each([
 		["an unsupported ttl value", `messages.0.content.0.cache_control.ttl: unsupported value "1h"`],
 		["a bracketed ttl path", `cache_control["ttl"]: "1h" is not allowed on this endpoint`],
@@ -914,14 +916,18 @@ describe("isCacheControlUnsupported", () => {
 			`{"loc":["body","messages",0,"content",0,"cache_control","ttl"],"msg":"Extra inputs are not permitted"}`,
 		],
 		[
-			"a pretty-printed location array naming ttl",
-			`{ "loc": [ "cache_control", "ttl" ], "msg": "Extra inputs are not permitted" }`,
+			"a multi-line location array naming ttl",
+			'{\n  "loc": [\n    "cache_control",\n    "ttl"\n  ],\n  "msg": "Extra inputs are not permitted"\n}',
 		],
 		[
 			"a JSON Pointer naming scope",
 			`{"pointer":"/messages/0/content/0/cache_control/scope","detail":"unrecognized member"}`,
 		],
 		["a bracketed-symbol path naming type", "Unpermitted parameter: cache_control[:type]"],
+		[
+			"a tab-indented field listing naming ttl",
+			"request validation failed:\n\tbody:\n\t\tmessages.0.content.0.cache_control:\n\t\t\tttl: unknown field",
+		],
 	])("keeps caching enabled when a 400 refuses %s under cache_control", (_shape, message) => {
 		expect(isCacheControlUnsupported(makeStatusError(400, `400 invalid_request_error: ${message}`))).toBe(false);
 	});

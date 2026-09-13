@@ -296,13 +296,22 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 //
 // Nesting is decided by the member name that follows, never by the punctuation
 // that joins them: validators serialize the same path as `.ttl`, `["ttl"]`,
-// `/ttl`, `[:ttl]`, `","ttl"` or `", "ttl"`, and that set of syntaxes is
-// unbounded while `CacheControlEphemeral`'s members are not (`type`, `ttl`,
-// `scope` — see `anthropic-wire.ts`). Four non-alphanumeric characters is the
-// widest joiner any of those shapes needs (a pretty-printed JSON location
-// array's `", "`); a wider budget only grows the window in which an unrelated
-// word could be mistaken for a member.
-const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?![^A-Za-z0-9]{0,4}(?:type|ttl|scope)\b)/i;
+// `/ttl`, `[:ttl]` or `","ttl"`, and that set of syntaxes is unbounded while
+// `CacheControlEphemeral`'s members are not (`type`, `ttl`, `scope` — see
+// `anthropic-wire.ts`). The budget therefore counts separator characters only:
+// three is the widest real joiner (a JSON location array's `","`), and the
+// whitespace around each of them is unbounded because a pretty-printer may put
+// any indentation — or a newline — inside the very same joiner.
+//
+// Letters and digits are excluded from the separator class, so an intervening
+// word still ends the joiner and no later sentence can supply the member name.
+// What unbounded whitespace does admit is a member name that is the next token
+// after `cache_control` across a line break — an error body serializing
+// `"param": "cache_control"` next to a sibling `"type"` member. That false
+// veto is accepted: it costs one failed turn, whereas a false field-level
+// match latches `cacheControlUnsupported` through a *succeeding* replay and
+// suppresses supported 5m caching for the rest of the session.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?!\s*(?:[^\sA-Za-z0-9]\s*){1,3}(?:type|ttl|scope)\b)/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
 	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
 // Strict JSON decoders and OpenAI-compatible validators express the same schema
