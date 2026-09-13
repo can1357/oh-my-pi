@@ -40,11 +40,11 @@ export interface EditorComponent extends Component {
 	// =========================================================================
 
 	/**
-	 * Add text to history for up/down navigation. `origin` pins the conversation and directory
-	 * the prompt was submitted from, so a command that switches sessions or moves the working
-	 * directory still files it under the context it was typed in.
+	 * Add text to history for up/down navigation. Records under the context active at the call,
+	 * so a host that dispatches a command able to switch the conversation or move the working
+	 * directory calls this before dispatch.
 	 */
-	addToHistory?(text: string, origin?: { sessionId?: string; cwd?: string }): void;
+	addToHistory?(text: string): void;
 
 	// =========================================================================
 	// Advanced text manipulation (optional)

@@ -8,7 +8,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { getProjectDir, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "../../modes/components/ask-dialog";
@@ -929,19 +929,19 @@ export class InputController {
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
 				// Commands such as /new, /resume, /fork and /move switch the conversation or the
-				// working directory while they run, so both are captured before dispatch: the
-				// command belongs where it was typed, not where it moved to.
-				const submittedIn = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
+				// working directory while they run. Recording before dispatch files the command
+				// under the context it was typed in — in the database *and* in the editor's local
+				// list, which is still the one that context seeded. Recording after dispatch put
+				// the command in the destination's list, where the next Up would recall it.
+				if (text.startsWith("/") && !shouldSkipHistory(text)) {
+					this.ctx.editor.addToHistory(text);
+				}
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls
-					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 					text = slashResult;
 				}
 			}
@@ -1608,18 +1608,18 @@ export class InputController {
 
 		if (text) {
 			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
-			// Same reason as the submit path: capture the conversation and directory before a
-			// command that switches either runs, so the recorded text is filed where it was typed.
-			const submittedIn = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
+			// Same reason as the submit path: record before dispatch files the command under the
+			// context it was typed in — in the database and in the editor's local list, which is
+			// still the one that context seeded.
+			if (text.startsWith("/") && !shouldSkipHistory(text)) {
+				this.ctx.editor.addToHistory(text);
+			}
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
 			if (slashResult === true) {
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 				return;
 			}
 			if (typeof slashResult === "string") {
 				// Command handled but returned remaining text to use as prompt.
-				// Record the original slash command text so Up Arrow recalls it.
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, submittedIn);
 				text = slashResult;
 			}
 		}

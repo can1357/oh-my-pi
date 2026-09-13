@@ -206,6 +206,29 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("persisted in A");
 		});
 
+		it("carries a canceled draft across a context change, keeping its payload expandable", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "persisted from the first context" }],
+				second: [{ prompt: "persisted from the second context" }],
+			};
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+			const payload = "canceled payload ".repeat(120).trim();
+
+			// Ctrl+C keeps a draft for recall until the process exits, so a context change must
+			// not take it (with its paste payload) away.
+			editor.handleInput("\x1b[200~" + payload + "\x1b[201~");
+			editor.rememberDraft();
+			editor.setText("");
+			key = "second";
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getExpandedText()).toBe(payload);
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted from the second context");
+		});
+
 		it("re-seeds from storage when the host's source key changes", () => {
 			const byKey: Record<string, { prompt: string }[]> = {
 				first: [{ prompt: "prompt from the first context" }],

@@ -23,6 +23,7 @@ function makeCtx(isStreaming = false) {
 	const editor = {
 		onSubmit: undefined as undefined | ((t: string) => Promise<void>),
 		getText: () => text,
+		getExpandedText: () => text,
 		setText: (t: string) => {
 			text = t;
 		},
@@ -106,33 +107,60 @@ describe("input controller — slash command history (#3148)", () => {
 
 		await editor.onSubmit?.("/hotkeys");
 
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys", expect.objectContaining({ sessionId: DEFAULT_SESSION_ID }));
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
 	});
 
-	it("files a switching command under the conversation and directory it was typed in", async () => {
+	it("records a switching command before it moves the context, keeping it in the source list", async () => {
 		const moved = TempDir.createSync("@omp-slash-origin-");
 		const origin = getProjectDir();
 		let sessionId = "source-session";
-		const { ctx, editor, addToHistory } = makeCtx();
+		const { ctx, editor } = makeCtx();
 		ctx.sessionManager = {
 			getSessionId: () => sessionId,
 		} as unknown as InteractiveModeContext["sessionManager"];
 		// `/hotkeys` rides the shared dispatch path; its handler stands in for `/new`,
-		// `/resume` or `/move`, which switch the conversation and the directory before the
-		// controller records the command.
+		// `/resume` or `/move`, which switch the conversation and the directory while they run.
 		ctx.handleHotkeysCommand = () => {
 			sessionId = "destination-session";
 			setProjectDir(moved.path());
 		};
+		// The editor files an entry in the list of the scope active at the call and stamps the
+		// database write with the context live at the call, so both are observed while recording.
+		const recorded: Array<{ text: string; session: string; cwd: string }> = [];
+		editor.addToHistory = vi.fn((text: string) => {
+			recorded.push({ text, session: sessionId, cwd: getProjectDir() });
+		});
 		controllerFor(ctx);
 
 		try {
 			await editor.onSubmit?.("/hotkeys");
-			expect(addToHistory).toHaveBeenCalledWith("/hotkeys", { sessionId: "source-session", cwd: origin });
+			// Exactly one record, made while the source context was still the live one.
+			expect(recorded).toEqual([{ text: "/hotkeys", session: "source-session", cwd: origin }]);
 		} finally {
 			setProjectDir(origin);
 			await moved.remove().catch(() => {});
 		}
+	});
+
+	it("records a switching follow-up command before it moves the context too", async () => {
+		let sessionId = "source-session";
+		const { ctx, editor } = makeCtx();
+		ctx.sessionManager = {
+			getSessionId: () => sessionId,
+		} as unknown as InteractiveModeContext["sessionManager"];
+		ctx.handleHotkeysCommand = () => {
+			sessionId = "destination-session";
+		};
+		const recorded: Array<{ text: string; session: string }> = [];
+		editor.setText("/hotkeys");
+		editor.addToHistory = vi.fn((text: string) => {
+			recorded.push({ text, session: sessionId });
+		});
+		const controller = controllerFor(ctx);
+
+		await controller.handleFollowUp();
+
+		expect(recorded).toEqual([{ text: "/hotkeys", session: "source-session" }]);
 	});
 
 	it("records a non-secret /mcp subcommand", async () => {
@@ -142,10 +170,7 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/mcp list");
 
 		expect(handleMCPCommand).toHaveBeenCalledWith("/mcp list");
-		expect(addToHistory).toHaveBeenCalledWith(
-			"/mcp list",
-			expect.objectContaining({ sessionId: DEFAULT_SESSION_ID }),
-		);
+		expect(addToHistory).toHaveBeenCalledWith("/mcp list");
 	});
 
 	it("does NOT record /mcp add with a --token (would leak the bearer token)", async () => {
@@ -190,10 +215,7 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/queue inspect the final result");
 
 		expect(followUp).toHaveBeenCalledWith("inspect the final result", undefined);
-		expect(addToHistory).toHaveBeenCalledWith(
-			"/queue inspect the final result",
-			expect.objectContaining({ sessionId: DEFAULT_SESSION_ID }),
-		);
+		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result");
 		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 

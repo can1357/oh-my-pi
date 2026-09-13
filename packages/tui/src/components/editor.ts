@@ -51,6 +51,9 @@ import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectL
 
 const PASSTHROUGH_COLOR = (text: string): string => text;
 
+/** Prompt-history capacity: entries kept for Up/Down, and the window loaded from storage. */
+const HISTORY_LIMIT = 100;
+
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
 };
@@ -869,9 +872,10 @@ export class Editor implements Component, Focusable {
 
 	/**
 	 * Re-seed the persistent list when the host's data set changed. A no-op while the key
-	 * holds, so the common case costs nothing and locally remembered drafts survive; a real
-	 * change replaces the list and restarts browsing, since the old entries belong to a
-	 * context the user has left.
+	 * holds, so the common case costs nothing. A real change replaces the persistent entries
+	 * — the old ones belong to a context the user has left — and restarts browsing, but the
+	 * editor's own drafts (`Ctrl+C`) are carried over: they were never part of the data set
+	 * that changed, and the editor promises to recall them until the process exits.
 	 */
 	#rehydrateHistory(): void {
 		const key = this.#historySourceKey?.() ?? "";
@@ -880,17 +884,25 @@ export class Editor implements Component, Focusable {
 		const storage = this.#historyStorage;
 		// Without persistent storage the list is the editor's own: never drop it.
 		if (!storage) return;
-		this.#history = storage.getRecent(100).map(entry => ({ text: entry.prompt }));
+		const drafts = this.#history.filter(entry => entry.draft !== undefined);
+		// Recalled draft payloads live in the editor, not in the list; with no draft carried
+		// over there is nothing left to restore, so the flag must not survive the re-seed.
+		if (drafts.length === 0) this.#historyDraftActive = false;
+		this.#history = [...drafts, ...storage.getRecent(HISTORY_LIMIT).map(entry => ({ text: entry.prompt }))].slice(
+			0,
+			HISTORY_LIMIT,
+		);
 		this.#historyIndex = -1;
 	}
 
 	/**
 	 * Add a prompt to history for up/down arrow navigation.
-	 * Called after successful submission. `origin` pins where the prompt was typed: a command
-	 * can switch the conversation or move the working directory while it runs, and the prompt
-	 * belongs to the context that was active when it was submitted.
+	 *
+	 * Records under the context active at the call: a host that dispatches a command able to
+	 * switch the conversation or move the working directory calls this before dispatch, so the
+	 * entry is filed — in storage and in this list — where the prompt was typed.
 	 */
-	addToHistory(text: string, origin?: { sessionId?: string; cwd?: string }): void {
+	addToHistory(text: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 
@@ -902,7 +914,7 @@ export class Editor implements Component, Focusable {
 
 		const stor = this.#historyStorage;
 		if (stor) {
-			stor.add(trimmed, origin?.cwd ?? getProjectDir(), origin?.sessionId).catch(error => {
+			stor.add(trimmed, getProjectDir()).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}
@@ -952,7 +964,7 @@ export class Editor implements Component, Focusable {
 
 	#pushHistory(entry: LocalHistoryEntry): void {
 		this.#history.unshift(entry);
-		if (this.#history.length > 100) this.#history.pop();
+		if (this.#history.length > HISTORY_LIMIT) this.#history.pop();
 	}
 
 	#isEditorEmpty(): boolean {

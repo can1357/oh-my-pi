@@ -142,25 +142,4 @@ describe("scoped prompt recall", () => {
 		state.setting = "repo";
 		expect(recall(editor)).toBe("SUBMITTED_FROM_EDITOR");
 	});
-
-	it("stores a prompt under the origin the editor hands it", async () => {
-		const dir = tempDir!;
-		const repo = path.join(dir.path(), "repo");
-		fs.mkdirSync(repo, { recursive: true });
-		runGit(repo, "init", "--quiet");
-		const storage = HistoryStorage.open(dir.join("history.db"));
-		const state: { setting: HistoryScopeKind; context: HistoryScopeContext } = {
-			setting: "global",
-			context: { sessionId: "current-session", cwd: dir.path() },
-		};
-		const editor = bindEditor(storage, state);
-
-		// A command that switched sessions and moved the working directory passes the context it
-		// was typed in; the adapter must forward both halves, not fall back to the live one.
-		editor.addToHistory("COMMAND_FROM_ORIGIN", { sessionId: "origin-session", cwd: repo });
-
-		const [row] = storage.getRecent(10, { kind: "cwd", value: repo });
-		expect(row?.prompt).toBe("COMMAND_FROM_ORIGIN");
-		expect(row?.sessionId).toBe("origin-session");
-	});
 });
