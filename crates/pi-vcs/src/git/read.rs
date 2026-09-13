@@ -474,14 +474,19 @@ impl GitRepo {
 		let repo = self.gix()?;
 		// `^{commit}` peels annotated tags: an upstream configured through
 		// `refs/tags/*` resolves to the tag object, which the walker rejects.
+		// A tip that doesn't peel to a commit (a tag on a blob or tree, or a
+		// missing object) has no divergence to report: git shows such an
+		// upstream as `[gone]` and keeps the file status, so degrade to `None`
+		// like the reftable path does when `rev-list` fails.
 		let parse = |sha: &str| {
 			repo
 				.rev_parse_single(format!("{sha}^{{commit}}").as_str())
 				.map(|id| id.detach())
-				.map_err(|err| Error::backend("git rev-list", err))
+				.ok()
 		};
-		let head_id = parse(head)?;
-		let upstream_id = parse(upstream)?;
+		let (Some(head_id), Some(upstream_id)) = (parse(head), parse(upstream)) else {
+			return Ok(None);
+		};
 		let count = |tips: gix::ObjectId, hidden: gix::ObjectId| -> Result<u32> {
 			let mut n = 0u32;
 			for item in repo
@@ -1844,6 +1849,19 @@ mod tests {
 		git(root, &["tag", "-a", "v2", "-m", "v2"])?;
 		git(root, &["config", "branch.main.merge", "refs/tags/v2"])?;
 		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		// A tag on a blob peels to no commit at all. git fails the symmetric
+		// difference but still reports file status (the upstream shows as
+		// `[gone]`); divergence must go absent instead of failing the summary.
+		let blob = git(root, &["rev-parse", "HEAD:base"])?;
+		git(root, &["tag", "-a", "blob-tag", "-m", "blob", blob.trim()])?;
+		git(root, &["config", "branch.main.merge", "refs/tags/blob-tag"])?;
+		assert!(git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).is_err());
+		fs::write(root.join("untracked"), "u\n")?;
+		assert_eq!(repo.ahead_behind()?, None);
+		let summary = repo.status_summary()?;
+		assert_eq!((summary.ahead, summary.behind), (None, None));
+		assert_eq!(summary.untracked, 1);
 		Ok(())
 	}
 
