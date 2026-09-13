@@ -252,6 +252,7 @@ type UsageLimitOutcome = {
 	switchedCredential: boolean;
 	retryAfterMs: number;
 	retryAtMs: number | undefined;
+	retryAtTimed: boolean | undefined;
 	blockedUntilMs: number | undefined;
 	priorBlockedUntilMs: number | undefined;
 	priorBlockedUntilTimed: boolean | undefined;
@@ -628,6 +629,7 @@ export class TurnRecovery {
 					switchedCredential: outcome.switched,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
+					retryAtTimed: outcome.retryAtTimed,
 					blockedUntilMs: outcome.blockedUntilMs,
 					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
 					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
@@ -2152,6 +2154,14 @@ export class TurnRecovery {
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		// Provenance of the eventual `delayMs`: true only while the winning wait
+		// traces to timing the provider actually stated — a parsed error-text
+		// hint, a complete usage-report reset, or a block an earlier
+		// provider-timed response persisted. The capped exponential backoff and
+		// the hintless QUOTA_EXHAUSTED heuristic are OMP guesses, so the
+		// fail-fast message must not report `delayMs` as provider-requested
+		// (issue #11689: a guessed 30-minute fallback read as a stated quota).
+		let delayProviderTimed = false;
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -2172,6 +2182,12 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		// Whether {@link usageLimitWaitMs} currently traces to provider-stated
+		// timing. `markUsageLimitReached` is handed a `retryAfterMs` that is the
+		// parsed hint OR the hintless classifier heuristic (30 minutes for
+		// QUOTA_EXHAUSTED), so its echoed `retryAfterMs` alone cannot carry
+		// provenance — the call site knows which one it sent.
+		let usageLimitWaitTimed = parsedRetryAfterMs !== undefined;
 		const siblingAvailabilityWaitMs =
 			recordedUsageLimitOutcome?.retryAtMs === undefined
 				? undefined
@@ -2215,6 +2231,7 @@ export class TurnRecovery {
 					// past a shorter reported reset overshoots, and vice
 					// versa.
 					usageLimitWaitMs = Math.max(0, recordedUsageLimitOutcome.reportResetAtMs - Date.now());
+					usageLimitWaitTimed = true;
 				}
 				if (
 					recordedUsageLimitOutcome.priorBlockedUntilMs !== undefined &&
@@ -2230,7 +2247,10 @@ export class TurnRecovery {
 					// carries no such authority and must not extend the wait
 					// past an authoritative report window.
 					const priorRemainingMs = Math.max(0, recordedUsageLimitOutcome.priorBlockedUntilMs - Date.now());
-					if (priorRemainingMs > usageLimitWaitMs) usageLimitWaitMs = priorRemainingMs;
+					if (priorRemainingMs > usageLimitWaitMs) {
+						usageLimitWaitMs = priorRemainingMs;
+						usageLimitWaitTimed = true;
+					}
 				}
 				if (recordedUsageLimitOutcome.blockedUntilMs !== undefined) {
 					// The stored deadline merges every mark call for this
@@ -2245,14 +2265,30 @@ export class TurnRecovery {
 					const requestedBlockedUntilMs = Date.now() + (recordedUsageLimitOutcome.retryAfterMs ?? 0);
 					if (recordedUsageLimitOutcome.blockedUntilMs > requestedBlockedUntilMs) {
 						const blockedRemainingMs = Math.max(0, recordedUsageLimitOutcome.blockedUntilMs - Date.now());
-						if (blockedRemainingMs > usageLimitWaitMs) usageLimitWaitMs = blockedRemainingMs;
+						if (blockedRemainingMs > usageLimitWaitMs) {
+							usageLimitWaitMs = blockedRemainingMs;
+							// This branch is reached only when the pre-existing deadline
+							// outlasts this call's own request. A provider-timed
+							// in-memory block at that deadline would already have been
+							// adopted by the `priorBlockedUntilTimed` branch above
+							// (same deadline, same read), so what wins here is a block
+							// the persisted store held across a restart — and those
+							// carry no provenance. Never inherit this call's heuristic
+							// contribution and report it as a provider claim.
+							usageLimitWaitTimed = false;
+						}
 					}
 				}
 				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
 					usageLimitWaitMs = siblingAvailabilityWaitMs;
+					// The sibling's unblock deadline is OMP's own block
+					// bookkeeping; it counts as provider timing only when
+					// AuthStorage reports the block itself was provider-parked.
+					usageLimitWaitTimed = recordedUsageLimitOutcome.retryAtTimed === true;
 				}
 				if (usageLimitWaitMs > delayMs) {
 					delayMs = usageLimitWaitMs;
+					delayProviderTimed = usageLimitWaitTimed;
 				}
 			}
 		}
@@ -2330,6 +2366,7 @@ export class TurnRecovery {
 				delayMs = 0;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;
+				delayProviderTimed = true;
 			}
 		}
 
@@ -2437,7 +2474,15 @@ export class TurnRecovery {
 				type: "auto_retry_end",
 				success: false,
 				attempt,
-				finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+				// Name the provenance: only a parsed provider hint (or a
+				// complete usage-report reset) is a wait the provider asked
+				// for. The capped backoff and the hintless QUOTA_EXHAUSTED
+				// heuristic are OMP estimates, and reporting those as
+				// "Provider requested …" sent operators chasing a quota the
+				// provider never stated (issue #11689).
+				finalError: delayProviderTimed
+					? `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`
+					: `OMP-estimated ${Math.ceil(delayMs)}ms wait exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 			});
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();
