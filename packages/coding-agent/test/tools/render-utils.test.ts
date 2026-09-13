@@ -207,6 +207,12 @@ describe("formatScreenshot", () => {
 		expect(shortenPath(sibling, home)).toBe(sibling);
 	});
 
+	it("shortens closing-delimited homes without matching longer path components", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+	});
+
 	it("formats non-home path without tilde", () => {
 		const filePath = path.join(path.parse(os.homedir()).root, "omp-render-utils", "capture.png");
 		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
