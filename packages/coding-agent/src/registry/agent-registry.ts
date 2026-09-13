@@ -273,6 +273,23 @@ export class AgentRegistry {
 	}
 
 	/**
+	 * Walk parent links nearest-first up to "Main", excluding "Main" and `selfAgentId`,
+	 * terminated against cycles.
+	 */
+	resolveParentChain(parentAgentId?: string, selfAgentId?: string): string[] {
+		const chain: string[] = [];
+		const seen = new Set<string>();
+		if (selfAgentId !== undefined) seen.add(selfAgentId);
+		let cursor = parentAgentId;
+		while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
+			chain.push(cursor);
+			seen.add(cursor);
+			cursor = this.#refs.get(cursor)?.parentId;
+		}
+		return chain;
+	}
+
+	/**
 	 * Returns every alive agent (running | idle) except the caller. Advisor refs
 	 * are observability-only transcripts, never peers, so they are excluded.
 	 * Flat namespace: every other agent is visible.

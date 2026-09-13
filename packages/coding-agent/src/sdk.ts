@@ -2811,6 +2811,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
 		// is unreachable; unconditional runner construction keeps that invariant explicit and
 		// prevents future optional extensions from silently re-opening the hole.)
+		// Parent chain resolved eagerly at construction: the parent's registry
+		// entry exists before this session is created, so identity is fixed at
+		// session creation — no first-access timing, no mutable-registry
+		// coupling inside the runner. Walk stops at "Main", is self-seeded
+		// (a registry cycle looping back through this agent ends before the
+		// self id enters the chain), and reports nearest-first.
+		const agentParentChain = agentRegistry.resolveParentChain(options.parentAgentId, resolvedAgentId);
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -2821,6 +2828,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			{
+				depth: taskDepth,
+				kind: agentKind,
+				agentId: resolvedAgentId,
+				displayName: resolvedAgentDisplayName,
+				parentId: options.parentAgentId,
+				parentChain: agentParentChain,
+			},
 		);
 
 		credentialDisabledTarget = extensionRunner;
