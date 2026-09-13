@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added `/mcp refresh` to re-fetch tools from connected MCP servers without reconnecting ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Fixed MCP tools staying empty for the whole session when a server listed no tools during its warmup window, stale tools surviving after a server retired them, and an out-of-order `tools/list` response — or one from a process whose clock predates a backward system-time correction — caching a retired tool list for up to 30 days ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

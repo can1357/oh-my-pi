@@ -828,6 +828,19 @@ ON CONFLICT(model_key) DO UPDATE SET
 	}
 
 	/**
+	 * Sets a cached value only while the currently visible value is still
+	 * `expectedValue` (`null` meaning no visible row); returns whether it wrote.
+	 *
+	 * For callers whose write depends on what they read: several CLI processes
+	 * share one agent.db, so a peer can replace the row between a `getCache` and
+	 * the `setCache` it informs. Returns `false` without writing when the
+	 * underlying store cannot make the check part of the write.
+	 */
+	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
+		return this.#authStore.setCacheIfMatches?.(key, expectedValue, value, expiresAtSec) ?? false;
+	}
+
+	/**
 	 * Deletes expired cache entries. Call periodically for cleanup.
 	 */
 	cleanExpiredCache(): void {

@@ -4290,7 +4290,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//     `extensionRunner` so extensions loaded in that session receive frames.
 		//     Guarded only by `mcpManager` (see the second `if` below).
 		if (mcpManager && !options.mcpManager) {
-			mcpManager.setOnToolsChanged(async tools => {
+			// The install-time reconcile is awaited: `setOnToolsChanged` fires the
+			// handler against whatever the manager holds right now, and MCP
+			// discovery ran far enough upstream that a recovery re-list can already
+			// have replaced the snapshot this session was built from. Rebinding is
+			// asynchronous (registry swap plus a system-prompt rebuild), so
+			// returning before it settles would expose a session whose first prompt
+			// still carries the pre-recovery roster and prompt. Errors are already
+			// swallowed inside the handler, so this only orders startup.
+			await mcpManager.setOnToolsChanged(async tools => {
 				try {
 					await session.refreshMCPTools(tools);
 				} catch (error) {
@@ -4362,10 +4370,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// subsequent turns would expose the full direct tool surface and omit
 		// `tool_namespaces_info` until an unrelated model/setting/tool-selection
 		// change reconciled.
+		//
+		// Held open across the await: a connection-time `tools/list` can complete
+		// after `setOnToolsChanged`'s own window closed, and that firing's promise
+		// is discarded at its callsite. Its `refreshMCPTools` then queues behind
+		// Code Mode's registry mutation, so returning here could release the
+		// session — and admit a first prompt — while a completed listing's roster
+		// was still waiting its turn. Draining before release closes that window.
+		const codeModeReconcile = mcpManager?.openToolsChangedReconcile();
 		try {
 			await session.initializeCodeMode();
 		} catch (error) {
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
+		} finally {
+			try {
+				await codeModeReconcile?.drain();
+			} catch (error) {
+				logger.warn("MCP tool reconcile during Code Mode startup failed", { error: String(error) });
+			} finally {
+				codeModeReconcile?.close();
+			}
 		}
 
 		return {

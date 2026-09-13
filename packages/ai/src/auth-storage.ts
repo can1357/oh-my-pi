@@ -428,6 +428,20 @@ export interface AuthCredentialStore {
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void;
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null;
 	setCache(key: string, value: string, expiresAtSec: number): void;
+	/**
+	 * Compare-and-set on a cache row: writes only when the currently visible
+	 * value is still `expectedValue` (`null` meaning no visible row), and
+	 * reports whether it wrote.
+	 *
+	 * `getCache` + `setCache` are two statements, so a caller that decides what
+	 * to write from what it read can be overtaken between them by a writer in
+	 * another process sharing the same database. Folding the expectation into
+	 * the write makes that decision hold at write time.
+	 *
+	 * Optional: stores whose cache is private to one process have no such
+	 * window, and callers fall back to a plain read-then-`setCache`.
+	 */
+	setCacheIfMatches?(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean;
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix?(prefix: string): void;
 	cleanExpiredCache(): void;

@@ -213,7 +213,11 @@ describe("MCPManager notification listeners", () => {
 			// path #handleServerNotification takes for tools/list_changed.
 			const { promise: hold2, resolve: release2 } = Promise.withResolvers<void>();
 			let cbState: "started" | "ended" | undefined;
-			manager.setOnToolsChanged(async () => {
+			// Installing on a manager that already listed tools reconciles
+			// immediately, and this handler parks on `hold2` — so the install
+			// promise is deliberately not awaited here. `release2()` below settles
+			// it along with the refresh firing.
+			void manager.setOnToolsChanged(async () => {
 				cbState = "started";
 				await hold2;
 				cbState = "ended";

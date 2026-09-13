@@ -2677,7 +2677,11 @@ export class AcpAgent implements Agent {
 			});
 			return run;
 		};
-		manager.setOnToolsChanged(() => {
+		// Awaited for the install-time reconcile, which is a no-op here: the
+		// manager is brand new, so nothing has been listed yet and the connect
+		// below is what first registers tools. The explicit await keeps this
+		// caller correct if the install ever moves past a connect.
+		await manager.setOnToolsChanged(() => {
 			// Failures are logged once via the stored chain's catch above.
 			enqueueMcpToolsRefresh().catch(() => {});
 		});

@@ -995,6 +995,17 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#cache.set(key, { value, expiresAtSec });
 	}
 
+	/**
+	 * Compare-and-set. This cache lives in this process's heap and JS runs the
+	 * check and the write without interruption, so the guard is exact rather
+	 * than a best effort.
+	 */
+	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
+		if (this.getCache(key) !== expectedValue) return false;
+		this.#cache.set(key, { value, expiresAtSec });
+		return true;
+	}
+
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix(prefix: string): void {
 		for (const key of this.#cache.keys()) {

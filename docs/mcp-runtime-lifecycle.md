@@ -163,7 +163,7 @@ Both return structured tool output and convert remaining transport/tool errors i
 3. calls `mcpManager.discoverAndConnect()` with the same project/Exa/browser filters as startup,
 4. calls `session.refreshMCPTools(mcpManager.getTools())`.
 
-`session.refreshMCPTools()` (`src/session/agent-session.ts`) removes all `mcp__` tools, re-wraps the latest MCP tools, and re-activates the tool set so changes apply without restarting. The owning SDK session also installs `setOnToolsChanged`, so late initial connections, server `tools/list_changed` notifications, reconnects, and disconnects can trigger the same rebinding. Explicit `/mcp reconnect <name>` performs one final refresh after the manager reconnect completes.
+`session.refreshMCPTools()` (`src/session/agent-session.ts`) removes all `mcp__` tools, re-wraps the latest MCP tools, and re-activates the tool set so changes apply without restarting. The owning SDK session also installs `setOnToolsChanged`, so late initial connections, server `tools/list_changed` notifications, reconnects, and disconnects can trigger the same rebinding. Installing the listener reconciles immediately against the manager's current toolset (a change can land between discovery and the session existing), and `setOnToolsChanged` returns a promise for that one install-time firing which `sdk.ts` awaits before exposing the session — so the first prompt cannot carry a pre-reconcile roster or system prompt. Ongoing firings keep their per-callsite ordering. Explicit `/mcp reconnect <name>` performs one final refresh after the manager reconnect completes.
 
 ## Server-initiated notifications
 

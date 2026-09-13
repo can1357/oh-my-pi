@@ -364,6 +364,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#getCacheStmt: Statement;
 	#getCacheIncludingExpiredStmt: Statement;
 	#upsertCacheStmt: Statement;
+	#casCacheStmt: Statement;
+	#casCacheAbsentStmt: Statement;
 	#deleteCachePrefixStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
 	#updateIfMatchesWithLeaseStmt: Statement;
@@ -450,6 +452,23 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#getCacheIncludingExpiredStmt = this.#db.prepare("SELECT value FROM cache WHERE key = ?");
 		this.#upsertCacheStmt = this.#db.prepare(
 			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
+		);
+		// Conditional upserts: the guard is a subquery inside the same statement
+		// as the write, so no other connection can slip a row in between the two.
+		// Both apply the `expires_at > now` visibility filter `getCache` uses, so
+		// an expired row counts as absent — and the `ON CONFLICT` clause still
+		// overwrites its physical row.
+		this.#casCacheStmt = this.#db.prepare(
+			`INSERT INTO cache (key, value, expires_at)
+			SELECT ?, ?, ?
+			WHERE EXISTS (SELECT 1 FROM cache WHERE key = ? AND value = ? AND expires_at > ${SQLITE_NOW_EPOCH})
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at`,
+		);
+		this.#casCacheAbsentStmt = this.#db.prepare(
+			`INSERT INTO cache (key, value, expires_at)
+			SELECT ?, ?, ?
+			WHERE NOT EXISTS (SELECT 1 FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH})
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at`,
 		);
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
@@ -1518,6 +1537,25 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	/**
+	 * Compare-and-set: writes only when the visible value for `key` is still
+	 * `expectedValue` (`null` meaning no visible row). One statement, so a peer
+	 * connection cannot land between the check and the write. Returns whether
+	 * the row was written; a failure to write means someone else got there
+	 * first, which is information the caller acts on rather than an error.
+	 */
+	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
+		try {
+			const result =
+				expectedValue === null
+					? this.#casCacheAbsentStmt.run(key, value, expiresAtSec, key)
+					: this.#casCacheStmt.run(key, value, expiresAtSec, key, expectedValue);
+			return result.changes > 0;
+		} catch {
+			return false;
+		}
+	}
+
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix(prefix: string): void {
 		try {
@@ -1999,6 +2037,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#getCacheStmt.finalize();
 		this.#getCacheIncludingExpiredStmt.finalize();
 		this.#upsertCacheStmt.finalize();
+		this.#casCacheStmt.finalize();
+		this.#casCacheAbsentStmt.finalize();
 		this.#deleteExpiredCacheStmt.finalize();
 		this.#getCredentialBlockStmt.finalize();
 		this.#listCredentialBlocksByCredentialStmt.finalize();
