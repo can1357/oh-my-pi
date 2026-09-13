@@ -105,10 +105,17 @@ export function createPersistedSubagentReviverFactory(
 		let parentId = ref.parentId;
 		const seen = new Set<string>();
 		while (parentId && parentId !== MAIN_AGENT_ID && parentId !== rootAgentId && !seen.has(parentId)) {
-			const parentRef = registry.get(parentId);
-			if (!parentRef) break;
 			seen.add(parentId);
 			taskDepth++;
+			const parentRef = registry.get(parentId);
+			// An unresolved non-root parentId is a real ancestor generation the
+			// persisted scan chose not to register (an incomplete mid-spawn stub
+			// it recursed past without adding — see
+			// registerPersistedSubagentsFromDir's `metadata.incomplete` branch),
+			// not the family root: count it before giving up, or a descendant
+			// beneath that gap undercounts its true depth and can out-spawn
+			// `task.maxRecursionDepth`.
+			if (!parentRef) break;
 			parentId = parentRef.parentId;
 		}
 		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =

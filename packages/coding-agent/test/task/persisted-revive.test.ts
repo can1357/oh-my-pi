@@ -787,6 +787,45 @@ describe("persisted subagent revival", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	it("counts an unregistered intermediate parent toward revive depth instead of treating it as the root", async () => {
+		// A parent whose own persisted scan skipped registering it (an
+		// incomplete mid-spawn stub the scan recurses past without adding to
+		// the registry — see registerPersistedSubagentsFromDir's
+		// `metadata.incomplete` branch) still occupied a real generation in
+		// the family tree. `registry.get(parentId)` returning nothing for
+		// that id must not be conflated with reaching the family root the
+		// way an ACP top-level id correctly is: the walk has to count that
+		// gap before giving up, or a descendant beneath a never-registered
+		// stub silently skips a depth level and can out-spawn
+		// `task.maxRecursionDepth`.
+		AgentRegistry.resetGlobalForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [TASK_AGENT], projectAgentsDir: null });
+		const cwd = makeTempDir("@pi-revive-missing-parent-depth-");
+		const grandchildFile = await createPersistedSession(cwd);
+		const capturedDepths: Record<string, number> = {};
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedDepths[options?.agentId ?? "?"] = options?.taskDepth ?? -1;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const rootId = "acp:missing-parent-root";
+		// "UnregisteredStub" is never registered: it stands in for the
+		// incomplete session file the scan skipped, unlike the sibling test's
+		// `acpChildRef`, which IS registered.
+		const grandchildRef: AgentRef = { ...createRef(grandchildFile), id: "Grandchild", parentId: "UnregisteredStub" };
+		const factory = createFactory(cwd, undefined, rootId);
+		const reviver = await factory(grandchildRef);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(grandchildRef);
+
+		// 1 (self) + 1 for the unregistered stub the walk must still count,
+		// not 1: the old depth-1 result is exactly what let a revived agent
+		// below a mid-spawn stub spawn one level deeper than its real
+		// position in the persisted tree allows.
+		expect(capturedDepths.Grandchild).toBe(2);
+		AgentRegistry.resetGlobalForTests();
+	});
+
 	it("strips the collision-disambiguating owner qualifier from parentTaskPrefix while keeping the registry key qualified", async () => {
 		const cwd = makeTempDir("@pi-revive-qualified-prefix-");
 		const sessionFile = await createPersistedSession(cwd);
