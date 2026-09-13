@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity image generation now uses the connected account's advertised image model instead of silently falling back after a stale-model 404 ([#11107](https://github.com/can1357/oh-my-pi/pull/11107) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
