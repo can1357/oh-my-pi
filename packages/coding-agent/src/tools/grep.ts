@@ -56,6 +56,7 @@ import {
 	type LineRange,
 	parseLineRanges,
 	pathTargetsSsh,
+	probeLiteralPathExists,
 	type ResolvedSearchTarget,
 	resolveReadPath,
 	resolveToolSearchScope,
@@ -196,7 +197,7 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 					`path entry "${entry}" — only line-range selectors like ":50-100" are supported (no ":raw"/":conflicts")`,
 				);
 			}
-			if (hasGlobPathChars(split.path)) {
+			if (hasGlobPathChars(split.path) && (await probeLiteralPathExists(split.path, cwd)) === "missing") {
 				throw new ToolError(`Line-range selector requires a single file, not a glob: ${entry}`);
 			}
 			clean = split.path;

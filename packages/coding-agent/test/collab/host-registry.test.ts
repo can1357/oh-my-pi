@@ -1,0 +1,952 @@
+/**
+ * Contract: the CollabHost wires its lifetime to the local host registry
+ * (#6099). It publishes exactly once — and only after the relay connection
+ * succeeds — serves metadata without links, hands out a link only for its
+ * current generation and published access, withdraws on every teardown path
+ * (explicit stop, terminal relay close), suspends without withdrawing while
+ * another session is provisionally active, keeps hosting when publication
+ * fails, and guests joining through the relay never add an entry.
+ *
+ * The in-memory relay harness (./helpers/in-memory-relay) replaces the real
+ * WebSocket so a real CollabHost/CollabSocket run unchanged; a per-test spy on
+ * the `publishCollabHost` export redirects discovery metadata into a temp dir,
+ * so the registry's real Unix-socket IPC is exercised without touching ~/.omp.
+ */
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { type CollabGuestUiResult, CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
+import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+
+const RELAY_URL = "ws://localhost:8788";
+const WEB_URL = "https://collab.example";
+
+/** Mutable, observable surface of a host context fixture. */
+interface HostContextState {
+	sessionId: string;
+	transition?: Promise<void>;
+	showStatus: string[];
+	/** Guest prompts the host forwarded into the session. */
+	prompts: string[];
+	subscribed: ((event: { type: string; [k: string]: unknown }) => void) | null;
+	/** Invoked on every `getSessionId()` read, i.e. each time the host checks the session it mirrors. */
+	onSessionIdRead: (() => void) | undefined;
+	/** Resolves when the host clears its status-line segment, i.e. tore down. */
+	tornDown: PromiseWithResolvers<void>;
+}
+
+/**
+ * Minimal InteractiveModeContext the host needs to `start()` and serve a
+ * registry snapshot, plus the handles a test drives: the mutable session id,
+ * captured `showStatus` messages, and the session-event subscriber callback.
+ */
+function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextState } {
+	const state: HostContextState = {
+		sessionId: `sess-${crypto.randomUUID()}`,
+		showStatus: [],
+		prompts: [],
+		subscribed: null,
+		onSessionIdRead: undefined,
+		tornDown: Promise.withResolvers<void>(),
+	};
+	const ctx = {
+		settings: { get: () => "" },
+		sessionManager: {
+			getSessionId: () => {
+				state.onSessionIdRead?.();
+				return state.sessionId;
+			},
+			getCwd: () => "/tmp/collab-registry-test",
+			snapshotForReplication: () => ({
+				header: {
+					type: "session",
+					id: state.sessionId,
+					timestamp: "2026-07-20T00:00:00Z",
+					cwd: "/tmp/collab-registry-test",
+				},
+				entries: [],
+			}),
+			onEntryAppended: undefined,
+		},
+		session: {
+			get isSessionTransitioning() {
+				return state.transition !== undefined;
+			},
+			waitForSessionTransition: async () => {
+				await state.transition;
+			},
+			isStreaming: false,
+			queuedMessageCount: 0,
+			sessionName: "registry-test",
+			model: undefined,
+			thinkingLevel: undefined,
+			subscribe: (cb: HostContextState["subscribed"]) => {
+				state.subscribed = cb;
+				return () => {};
+			},
+			emitNotice: () => {},
+			promptCustomMessage: (message: { content: unknown }) => {
+				state.prompts.push(String(message.content));
+				return Promise.resolve();
+			},
+			abort: () => Promise.resolve(),
+		},
+		eventBus: undefined,
+		statusLine: {
+			setCollabStatus: (status: unknown) => {
+				if (status === null) state.tornDown.resolve();
+			},
+			invalidate: () => {},
+			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+		},
+		ui: { requestRender: () => {} },
+		showStatus: (message: string) => {
+			state.showStatus.push(message);
+		},
+		collabHost: undefined,
+	};
+	return { ctx: ctx as unknown as InteractiveModeContext, state };
+}
+
+let tmp: string;
+let publishSpy: Mock<typeof registry.publishCollabHost>;
+let capturedSockets: FakeWebSocket[] = [];
+let host: CollabHost | undefined;
+const guestCleanups: (() => void)[] = [];
+
+beforeEach(async () => {
+	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hostreg-"));
+	installInMemoryRelay();
+	// Record every fake socket the host/guests construct so a test can drive a
+	// terminal close on the host's transport directly.
+	capturedSockets = [];
+	const Capturing = class extends FakeWebSocket {
+		constructor(url: string) {
+			super(url);
+			capturedSockets.push(this);
+		}
+	};
+	globalThis.WebSocket = Capturing as unknown as typeof WebSocket;
+	// Redirect publication into the temp dir. Captured before the spy so the
+	// implementation calls the genuine registry (real Unix-socket IPC).
+	const real = registry.publishCollabHost;
+	publishSpy = spyOn(registry, "publishCollabHost").mockImplementation((source, options) =>
+		real(source, { ...options, dir: tmp }),
+	);
+	host = undefined;
+});
+
+afterEach(async () => {
+	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
+	if (host) await host.stop("test cleanup").catch(() => {});
+	uninstallInMemoryRelay();
+	publishSpy?.mockRestore();
+	await fs.rm(tmp, { recursive: true, force: true });
+});
+
+describe("collab host registry lifecycle (#6099)", () => {
+	it.each(["navigateTree", "fork"] as const)(
+		"notifies the submitting guest when %s discards an admitted prompt",
+		async transition => {
+			const auth = await AuthStorage.create(":memory:");
+			auth.setRuntimeApiKey("anthropic", "test-key");
+			const models = new ModelRegistry(auth);
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Test model missing");
+			const manager = SessionManager.create(tmp, tmp);
+			manager.appendMessage({ role: "user", content: "Retained", timestamp: 1 });
+			const abandoned = manager.appendMessage({ role: "user", content: "Abandoned", timestamp: 2 });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: manager.buildSessionContext().messages,
+				},
+				streamFn: createMockModel({ responses: [{ content: ["Must not run"] }] }).stream,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: manager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: models,
+			});
+			const { ctx } = makeHostContext();
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const completed = Promise.withResolvers<boolean>();
+			const getApiKey = models.getApiKey.bind(models);
+			const keyLookup = spyOn(models, "getApiKey").mockImplementation(async (...args) => {
+				reached.resolve();
+				await release.promise;
+				return getApiKey(...args);
+			});
+			const prompt = session.promptCustomMessage.bind(session);
+			const submission = spyOn(session, "promptCustomMessage").mockImplementation(async (...args) => {
+				const result = await prompt(...args);
+				completed.resolve(result);
+				return result;
+			});
+			try {
+				host = new CollabHost({ ...ctx, session, sessionManager: manager });
+				await host.start(RELAY_URL, WEB_URL);
+				const parsed = parseCollabLink(host.link);
+				if ("error" in parsed || !parsed.writeToken) throw new Error("Control link missing");
+				const guest = new CollabSocket({
+					wsUrl: parsed.wsUrl,
+					role: "guest",
+					key: await importRoomKey(parsed.key),
+				});
+				guestCleanups.push(() => guest.close());
+				const welcomed = Promise.withResolvers<void>();
+				const rejected = Promise.withResolvers<CollabFrame>();
+				guest.onFrame = frame => {
+					if (frame.t === "welcome") welcomed.resolve();
+					if (frame.t === "error" || frame.t === "bye") rejected.resolve(frame);
+				};
+				guest.onOpen = () =>
+					guest.send({
+						t: "hello",
+						proto: COLLAB_PROTO,
+						name: "writer",
+						writeToken: Buffer.from(parsed.writeToken!).toString("base64url"),
+					});
+				guest.connect();
+				await welcomed.promise;
+				guest.send({ t: "prompt", text: "Admitted on the abandoned branch" });
+				await reached.promise;
+				if (transition === "fork") expect(await session.fork()).toBe(true);
+				else expect((await session.navigateTree(abandoned)).cancelled).toBe(false);
+				release.resolve();
+				expect(await completed.promise).toBe(false);
+				expect((await rejected.promise).t).toBe(transition === "fork" ? "bye" : "error");
+				expect(
+					manager
+						.getEntries()
+						.some(entry => entry.type === "custom_message" && entry.customType === "collab-prompt"),
+				).toBe(false);
+			} finally {
+				release.resolve();
+				await host?.stop("test cleanup");
+				keyLookup.mockRestore();
+				submission.mockRestore();
+				await session.dispose();
+				auth.close();
+			}
+		},
+	);
+	for (const completion of ["rollback", "commit", "stop", "writer-left"] as const) {
+		it("handles an old-room answer during provisional suspension followed by " + completion, async () => {
+			const { ctx, state } = makeHostContext();
+			const originalConnect = CollabSocket.prototype.connect;
+			let transport: CollabSocket | undefined;
+			const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+				transport = this;
+				return originalConnect.call(this);
+			});
+			host = new CollabHost(ctx);
+			try {
+				await host.start(RELAY_URL, WEB_URL);
+			} finally {
+				capture.mockRestore();
+			}
+			if (!transport) throw new Error("host transport missing");
+			const parsed = parseCollabLink(host.link);
+			if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+			transport.onFrame!(
+				{
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: "writer",
+					writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+				},
+				1,
+			);
+			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "reader" }, 2);
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] });
+			if (!answer) throw new Error("host did not retain the dialog");
+			let outcome: CollabGuestUiResult | undefined;
+			void answer.then(result => {
+				outcome = result;
+			});
+			const original = state.sessionId;
+			const transition = Promise.withResolvers<void>();
+			state.transition = transition.promise;
+			state.sessionId = "provisional";
+			try {
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
+				await setImmediate();
+				expect(outcome).toBeUndefined();
+				if (completion === "stop") {
+					await host.stop("stopped during transition");
+				} else {
+					if (completion === "rollback" || completion === "writer-left") state.sessionId = original;
+					if (completion === "writer-left") transport.onControl?.({ t: "peer-left", peer: 1 });
+					state.transition = undefined;
+					transition.resolve();
+					await setImmediate();
+					if (completion === "writer-left") {
+						expect(outcome).toBeUndefined();
+						transport.onFrame!(
+							{
+								t: "hello",
+								proto: COLLAB_PROTO,
+								name: "replacement writer",
+								writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+							},
+							2,
+						);
+						transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
+					}
+					if (completion === "commit") {
+						expect(outcome).toBeUndefined();
+						await host.stop("session switched");
+					}
+				}
+				await setImmediate();
+				expect(outcome).toEqual(
+					completion === "rollback"
+						? { kind: "answered", value: "Yes" }
+						: completion === "writer-left"
+							? { kind: "answered", value: "No" }
+							: { kind: "unavailable" },
+				);
+			} finally {
+				state.transition = undefined;
+				transition.resolve();
+			}
+		});
+	}
+
+	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
+		const { ctx, state } = makeHostContext();
+		const originalConnect = CollabSocket.prototype.connect;
+		let transport: CollabSocket | undefined;
+		const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			transport = this;
+			return originalConnect.call(this);
+		});
+		host = new CollabHost(ctx);
+		try {
+			await host.start(RELAY_URL, WEB_URL);
+		} finally {
+			capture.mockRestore();
+		}
+		if (!transport) throw new Error("host transport missing");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+		transport.onFrame!(
+			{
+				t: "hello",
+				proto: COLLAB_PROTO,
+				name: "writer",
+				writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+			},
+			1,
+		);
+		const send = spyOn(transport, "send");
+		try {
+			const abort = new AbortController();
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
+			expect(send.mock.calls.filter(([frame]) => frame.t === "ui-request")).toHaveLength(1);
+			const original = state.sessionId;
+			state.sessionId = "provisional";
+			send.mockClear();
+			abort.abort();
+			expect(await answer).toEqual({ kind: "unavailable" });
+			expect(send.mock.calls).toEqual([[{ t: "ui-request-end", reqId: 1 }, 1]]);
+			state.sessionId = original;
+			expect((await registry.listCollabHosts({ dir: tmp }))[0]?.inputRequired).toBe(false);
+		} finally {
+			send.mockRestore();
+		}
+	});
+	for (const transition of ["suspend", "stop", "fatal close"] as const) {
+		it(`closes guest traffic and deferred replies on ${transition}`, async () => {
+			const { ctx, state } = makeHostContext();
+			const originalConnect = CollabSocket.prototype.connect;
+			let transport: CollabSocket | undefined;
+			const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+				transport = this;
+				return originalConnect.call(this);
+			});
+			host = new CollabHost(ctx);
+			try {
+				await host.start(RELAY_URL, WEB_URL);
+			} finally {
+				capture.mockRestore();
+			}
+			if (!transport) throw new Error("host transport missing");
+			const parsed = parseCollabLink(host.link);
+			if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+			const receive = transport.onFrame!;
+			receive(
+				{
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: "writer",
+					writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+				},
+				1,
+			);
+			const pendingPrompt = Promise.withResolvers<boolean>();
+			const prompt = spyOn(ctx.session, "promptCustomMessage").mockImplementation(() => pendingPrompt.promise);
+			const abort = spyOn(ctx.session, "abort").mockResolvedValue(undefined);
+			const notice = spyOn(ctx.session, "emitNotice");
+			receive({ t: "prompt", text: "accepted before transition" }, 1);
+			expect(prompt).toHaveBeenCalledTimes(1);
+			const cancel = new AbortController();
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, cancel.signal);
+			const drain = Promise.withResolvers<void>();
+			const flush = spyOn(transport, "flush").mockImplementation(() => drain.promise);
+			let stopping: Promise<void> | undefined;
+			if (transition === "suspend") state.sessionId = "another-session";
+			else if (transition === "stop") stopping = host.stop("test stop");
+			else transport.onClose?.("room closed", false);
+			const send = spyOn(transport, "send");
+			notice.mockClear();
+			try {
+				receive({ t: "hello", proto: COLLAB_PROTO, name: "late writer" }, 2);
+				receive({ t: "prompt", text: "must not run" }, 1);
+				receive({ t: "abort" }, 1);
+				receive({ t: "agent-cmd", cmd: "chat", agentId: "missing-agent", text: "" }, 1);
+				receive({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+				receive({ t: "fetch-transcript", reqId: 1, agentId: "missing-agent", fromByte: 0 }, 1);
+				state.subscribed?.({ type: "notice", level: "info", message: "must not mirror", source: "test" });
+				transport.onControl?.({ t: "peer-left", peer: 1 });
+				cancel.abort();
+				pendingPrompt.reject(new Error("late failure"));
+				await pendingPrompt.promise.catch(() => {});
+				expect(await answer).toEqual({ kind: "unavailable" });
+				expect(prompt).toHaveBeenCalledTimes(1);
+				expect(abort).not.toHaveBeenCalled();
+				expect(notice).not.toHaveBeenCalled();
+				expect(send).not.toHaveBeenCalled();
+				expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+			} finally {
+				drain.resolve();
+				flush.mockRestore();
+				send.mockRestore();
+				prompt.mockRestore();
+				abort.mockRestore();
+				notice.mockRestore();
+				await stopping;
+			}
+		});
+	}
+	it("publishes metadata after the relay connects and hands out links per access", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx, { instanceId: "host-under-test", generation: 3, access: "control" });
+
+		// Constructing the host publishes nothing; the registry is empty.
+		expect(publishSpy).toHaveBeenCalledTimes(0);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+
+		await host.start(RELAY_URL, WEB_URL);
+
+		// Sanity: the spy on the same module host.ts resolves was actually hit,
+		// exactly once, by the host after the relay connected.
+		expect(publishSpy).toHaveBeenCalledTimes(1);
+
+		const hosts = await registry.listCollabHosts({ dir: tmp });
+		expect(hosts).toHaveLength(1);
+		const [snapshot] = hosts;
+		expect(snapshot).toMatchObject({
+			instanceId: "host-under-test",
+			generation: 3,
+			pid: process.pid,
+			sessionId: state.sessionId,
+			access: "control",
+			relayConnected: true,
+			inputRequired: false,
+		});
+		expect(snapshot!.participants).toBeGreaterThanOrEqual(1);
+		// A listing never carries a link in any field.
+		expect(JSON.stringify(snapshot)).not.toContain(WEB_URL);
+
+		// Links come only from an explicit, generation-bound request.
+		const control = await registry.resolveCollabHostLink("host-under-test", "control", { dir: tmp });
+		expect(control).toEqual({ instanceId: "host-under-test", generation: 3, access: "control", url: host.webLink });
+		const view = await registry.resolveCollabHostLink("host-under-test", "view", { dir: tmp });
+		expect(view.url).toBe(host.webViewLink);
+	});
+
+	it("refuses a control link for a room published with view access", async () => {
+		const { ctx } = makeHostContext();
+		host = new CollabHost(ctx, { instanceId: "view-only-host", access: "view" });
+		await host.start(RELAY_URL, WEB_URL);
+
+		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
+		expect(snapshot!.access).toBe("view");
+		await expect(registry.resolveCollabHostLink("view-only-host", "control", { dir: tmp })).rejects.toMatchObject({
+			code: "access_unavailable",
+		});
+		const view = await registry.resolveCollabHostLink("view-only-host", "view", { dir: tmp });
+		expect(view.url).toBe(host.webViewLink);
+	});
+
+	it("reports inputRequired while a guest UI request is retained", async () => {
+		const { ctx } = makeHostContext();
+		host = new CollabHost(ctx, { instanceId: "attention-host" });
+		await host.start(RELAY_URL, WEB_URL);
+
+		const abort = new AbortController();
+		const pending = host.requestGuestUi(
+			{ kind: "select", title: "Deploy?", options: [{ label: "Yes" }, { label: "No" }] },
+			abort.signal,
+		);
+		if (!pending) throw new Error("host refused the guest UI request");
+		expect((await registry.listCollabHosts({ dir: tmp }))[0]!.inputRequired).toBe(true);
+
+		abort.abort();
+		expect(await pending).toEqual({ kind: "unavailable" });
+		expect((await registry.listCollabHosts({ dir: tmp }))[0]!.inputRequired).toBe(false);
+	});
+
+	it("retains a guest UI request raised before the relay connects", async () => {
+		const { ctx } = makeHostContext();
+		host = new CollabHost(ctx);
+		const started = host.start(RELAY_URL, WEB_URL);
+		// Issued synchronously after start(): the relay socket does not exist yet.
+		const pending = host.requestGuestUi({
+			kind: "select",
+			title: "Early question",
+			options: [{ label: "Yes" }, { label: "No" }],
+		});
+		if (!pending) throw new Error("host dropped a request raised during startup");
+		await started;
+
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => socket.close());
+		const replayed = Promise.withResolvers<number>();
+		socket.onFrame = frame => {
+			if (frame.t === "ui-request") replayed.resolve(frame.request.reqId);
+		};
+		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name: "writer", writeToken });
+		socket.connect();
+
+		// The first writer to join receives the retained question and can answer it.
+		const reqId = await replayed.promise;
+		socket.send({ t: "ui-response", reqId, value: "Yes" });
+		expect(await pending).toEqual({ kind: "answered", value: "Yes" });
+	});
+
+	it("withdraws from the registry on explicit stop", async () => {
+		const { ctx } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
+
+		await host.stop("host stopped");
+
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
+	it("suspends mirroring and discovery while another session is active and resumes when the switch rolls back", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+		const original = state.sessionId;
+		if (!state.subscribed) throw new Error("host never subscribed to session events");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const key = await importRoomKey(parsed.key);
+
+		// A guest already in the room records every notice it is shown.
+		const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		guestCleanups.push(() => guest.close());
+		const welcomed = Promise.withResolvers<void>();
+		const seen: string[] = [];
+		const restored = Promise.withResolvers<void>();
+		guest.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "event" && frame.event.type === "notice") {
+				seen.push(frame.event.message);
+				if (frame.event.message === "restored") restored.resolve();
+			}
+		};
+		guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "viewer" });
+		guest.connect();
+		await welcomed.promise;
+
+		// `switchSession()` adopted the target id but has not committed: whatever
+		// the other session emits stays out of this room, and the room is not
+		// listed — yet its entry is left in place and the room is not ended.
+		state.sessionId = `sess-provisional-${Date.now()}`;
+		state.subscribed({ type: "notice", level: "info", message: "from the other session", source: "test" });
+		expect(host.requestGuestUi({ kind: "select", title: "Other session's hook", options: ["Yes"] })).toBeNull();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		expect((await fs.readdir(tmp)).filter(name => name.endsWith(".json"))).toHaveLength(1);
+		expect(host.stopped).toBe(false);
+
+		// The switch failed and the previous id was restored without any
+		// callback: the room is current again, mirrors again, and is listed again.
+		state.sessionId = original;
+		state.subscribed({ type: "notice", level: "info", message: "restored", source: "test" });
+		await restored.promise;
+		expect(seen).toEqual(["restored"]);
+		const pending = host.requestGuestUi({ kind: "select", title: "After rollback", options: ["Yes"] });
+		expect(pending).not.toBeNull();
+		expect((await registry.listCollabHosts({ dir: tmp })).map(h => h.sessionId)).toEqual([original]);
+	});
+
+	it("never welcomes a guest while another session is active, and welcomes one after the switch rolls back", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+		const original = state.sessionId;
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const key = await importRoomKey(parsed.key);
+		const join = (name: string): { welcomed: Promise<void>; saw: () => boolean } => {
+			const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+			guestCleanups.push(() => socket.close());
+			let welcomed = false;
+			const done = Promise.withResolvers<void>();
+			socket.onFrame = frame => {
+				if (frame.t === "welcome") {
+					welcomed = true;
+					done.resolve();
+				}
+			};
+			socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name });
+			socket.connect();
+			return { welcomed: done.promise, saw: () => welcomed };
+		};
+
+		// A guest holding the old link joins during the uncommitted switch: a
+		// welcome would snapshot the *other* session, so none is sent. The
+		// host's check of the session id is the moment its hello was refused.
+		state.sessionId = `sess-provisional-${Date.now()}`;
+		const helloRefused = Promise.withResolvers<void>();
+		state.onSessionIdRead = () => helloRefused.resolve();
+		const early = join("early-guest");
+		await helloRefused.promise;
+		state.onSessionIdRead = undefined;
+
+		// After the rollback the room serves joins again.
+		state.sessionId = original;
+		const late = join("late-guest");
+		await late.welcomed;
+		expect(early.saw()).toBe(false);
+		expect(late.saw()).toBe(true);
+	});
+
+	it("revokes application frames queued, sealing, and awaiting sealing before sending goodbye", async () => {
+		const { ctx, state } = makeHostContext();
+		const originalConnect = CollabSocket.prototype.connect;
+		let transport: CollabSocket | undefined;
+		const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			transport = this;
+			return originalConnect.call(this);
+		});
+		host = new CollabHost(ctx);
+		try {
+			await host.start(RELAY_URL, WEB_URL);
+		} finally {
+			capture.mockRestore();
+		}
+		if (!transport) throw new Error("Host transport was not captured");
+		const hostWire = capturedSockets.find(socket => socket.role === "host");
+		if (!hostWire) throw new Error("Host WebSocket was not created");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const reader = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => reader.close());
+		const welcomed = Promise.withResolvers<void>();
+		const goodbye = Promise.withResolvers<void>();
+		const received: CollabFrame[] = [];
+		reader.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "event" || frame.t === "bye") received.push(frame);
+			if (frame.t === "bye") goodbye.resolve();
+		};
+		reader.onOpen = () => reader.send({ t: "hello", proto: COLLAB_PROTO, name: "reader" });
+		reader.connect();
+		await welcomed.promise;
+		await transport.flush();
+		hostWire.bufferedAmount = 64 * 1024;
+		state.subscribed?.({ type: "message_start", message: { role: "user", content: "already encrypted" } });
+		await transport.flush();
+
+		const sealing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const originalEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+		let held = false;
+		const encrypt = spyOn(crypto.subtle, "encrypt").mockImplementation(async (algorithm, key, data) => {
+			if (!held) {
+				held = true;
+				sealing.resolve();
+				await release.promise;
+			}
+			return originalEncrypt(algorithm, key, data);
+		});
+		try {
+			state.subscribed?.({ type: "message_start", message: { role: "user", content: "sealing" } });
+			state.subscribed?.({ type: "message_start", message: { role: "user", content: "not yet encrypted" } });
+			await sealing.promise;
+			const stopping = host.stop("revoked");
+			release.resolve();
+			await stopping;
+			await goodbye.promise;
+			expect(received).toEqual([{ t: "bye", reason: "revoked" }]);
+		} finally {
+			release.resolve();
+			encrypt.mockRestore();
+		}
+	});
+
+	it("refuses guest actions and discovery from the moment stop() begins, while the goodbye is still draining", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx, { instanceId: "stopping-host" });
+		await host.start(RELAY_URL, WEB_URL);
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+		const writer = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => writer.close());
+		const welcomed = Promise.withResolvers<void>();
+		writer.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+		};
+		writer.onOpen = () => writer.send({ t: "hello", proto: COLLAB_PROTO, name: "writer", writeToken });
+		writer.connect();
+		await welcomed.promise;
+
+		// Hold the goodbye drain open: stop() has begun but has not torn the
+		// room down, and the relay socket is still up — the window under test.
+		const drain = Promise.withResolvers<void>();
+		let hostSocket: CollabSocket | undefined;
+		const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(function (this: CollabSocket) {
+			hostSocket = this;
+			return drain.promise;
+		});
+		const stopping = host.stop("host stopped");
+		if (!hostSocket) throw new Error("stop() did not reach the goodbye flush");
+		const handled = Promise.withResolvers<void>();
+		const deliver = hostSocket.onFrame;
+		hostSocket.onFrame = (frame, fromPeer) => {
+			deliver?.(frame, fromPeer);
+			if (frame.t === "prompt") handled.resolve();
+		};
+
+		// A writable guest prompts inside that window: the host must not forward it.
+		writer.send({ t: "prompt", text: "after stop began" });
+		await handled.promise;
+		// Nor may discovery still offer the room: it is omitted (not pruned —
+		// teardown withdraws it) and no link is handed out.
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		await expect(registry.resolveCollabHostLink("stopping-host", "control", { dir: tmp })).rejects.toMatchObject({
+			code: "not_found",
+		});
+		flush.mockRestore();
+		drain.resolve();
+		await stopping;
+
+		expect(state.prompts).toEqual([]);
+		expect(host.stopped).toBe(true);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
+	it("withdraws on a terminal (non-reconnecting) relay close", async () => {
+		const { ctx } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+		// The controller installs a live room here; `/collab` and `/join` read it.
+		ctx.collabHost = host;
+		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
+
+		const hostSocket = capturedSockets.find(s => s.role === "host");
+		if (!hostSocket) throw new Error("host transport socket was never created");
+		// Code 4001 ("room closed") is classified fatal/non-reconnecting by
+		// relay-client, so the host tears down instead of retrying. The public
+		// slot is left at once — before registry withdrawal is awaited — so a
+		// concurrent `/collab` cannot re-print the dead room's link.
+		hostSocket.onclose?.({ code: 4001, reason: "room closed" });
+		expect(ctx.collabHost).toBeUndefined();
+
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
+	it("withdraws a publication that completes after a fatal relay close during startup", async () => {
+		const { ctx } = makeHostContext();
+		// Hold publication open so the relay can die while start() awaits it;
+		// `publishing` resolves once the host actually entered that await.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const publishing = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		publishSpy.mockImplementation(async provider => {
+			publishing.resolve();
+			await gate.promise;
+			return redirected(provider);
+		});
+		host = new CollabHost(ctx);
+		const started = host.start(RELAY_URL, WEB_URL);
+		await publishing.promise;
+
+		const hostSocket = capturedSockets.find(s => s.role === "host");
+		if (!hostSocket) throw new Error("host transport socket was never created");
+		hostSocket.onclose?.({ code: 4001, reason: "room closed" });
+		gate.resolve();
+
+		// Startup fails instead of handing back a dead host, and the late
+		// publication is withdrawn rather than left discoverable.
+		await expect(started).rejects.toThrow(/closed during startup/);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
+	it("mirrors activity to a guest who joined while registry publication was still pending", async () => {
+		const { ctx, state } = makeHostContext();
+		// Hold publication open: the relay is up and the link is visible (an
+		// auto-started room is installed before start() resolves), so a guest
+		// can join now and must not miss what happens before publication lands.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const publishing = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		publishSpy.mockImplementation(async (source, options) => {
+			publishing.resolve();
+			await gate.promise;
+			return redirected(source, options);
+		});
+		host = new CollabHost(ctx);
+		const started = host.start(RELAY_URL, WEB_URL);
+		await publishing.promise;
+
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		guestCleanups.push(() => guest.close());
+		const welcomed = Promise.withResolvers<void>();
+		const seen: string[] = [];
+		const after = Promise.withResolvers<void>();
+		guest.onFrame = frame => {
+			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "event" && frame.event.type === "notice") {
+				seen.push(frame.event.message);
+				if (frame.event.message === "after publication") after.resolve();
+			}
+		};
+		guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "early-guest" });
+		guest.connect();
+		await welcomed.promise;
+
+		// Session activity during the pending publication …
+		state.subscribed?.({ type: "notice", level: "info", message: "during publication", source: "test" });
+		gate.resolve();
+		await started;
+		// … and after it; frames arrive in send order, so if the first one had
+		// been mirrored at all it precedes the second.
+		state.subscribed?.({ type: "notice", level: "info", message: "after publication", source: "test" });
+		await after.promise;
+
+		expect(seen).toEqual(["during publication", "after publication"]);
+	});
+
+	it("stop() resolves only after a publication still in flight has been withdrawn", async () => {
+		const { ctx, state } = makeHostContext();
+		// Model production timing: the room is stopped (session switch) while the
+		// registry work is still ahead of it. The gate opens from the host's own
+		// teardown, so publication completes strictly after the room ended.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const events: string[] = [];
+		const publishing = Promise.withResolvers<void>();
+		publishSpy.mockImplementation(async (source, options) => {
+			publishing.resolve();
+			await state.tornDown.promise;
+			const publication = await redirected(source, options);
+			const close = publication.close.bind(publication);
+			publication.close = () => {
+				// close() is idempotent and both teardown and the aborted start call it.
+				if (!events.includes("withdrawn")) events.push("withdrawn");
+				return close();
+			};
+			return publication;
+		});
+		host = new CollabHost(ctx, { instanceId: "reused-endpoint" });
+		const started = host.start(RELAY_URL, WEB_URL);
+		await publishing.promise;
+
+		await host.stop("session switched").then(() => events.push("stopped"));
+		await started.catch(() => {});
+
+		// The successor room (same instance id, same endpoint path) can only be
+		// started safely if the withdrawal happened before stop() resolved.
+		expect(events).toEqual(["withdrawn", "stopped"]);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		const successor = new CollabHost(ctx, { instanceId: "reused-endpoint", generation: 2 });
+		await successor.start(RELAY_URL, WEB_URL);
+		expect((await registry.listCollabHosts({ dir: tmp })).map(h => h.generation)).toEqual([2]);
+		await successor.stop("done");
+	});
+
+	it("keeps hosting when publication fails, surfacing a discovery warning", async () => {
+		const { ctx, state } = makeHostContext();
+		// Publication rejects; start() must still resolve and hosting continue.
+		publishSpy.mockImplementation(() => Promise.reject(new Error("registry write failed")));
+		host = new CollabHost(ctx);
+
+		await host.start(RELAY_URL, WEB_URL);
+
+		expect(host.link.length).toBeGreaterThan(0);
+		expect(host.webLink.length).toBeGreaterThan(0);
+		expect(host.participants.length).toBeGreaterThanOrEqual(1);
+		// The failure is surfaced to the user via the fixture-observable seam.
+		expect(state.showStatus.some(m => /discovery unavailable/i.test(m))).toBe(true);
+
+		// Teardown is still clean even though nothing was published.
+		await host.stop("done");
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
+	it("never publishes for guests joining through the relay", async () => {
+		const { ctx } = makeHostContext();
+		host = new CollabHost(ctx);
+		await host.start(RELAY_URL, WEB_URL);
+
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+		const key = await importRoomKey(parsed.key);
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		guestCleanups.push(() => socket.close());
+
+		const joined = Promise.withResolvers<void>();
+		socket.onFrame = frame => {
+			if (frame.t === "welcome") joined.resolve();
+		};
+		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name: "guest", writeToken });
+		socket.connect();
+		await joined.promise;
+
+		// The guest is a real relay peer, but joining published nothing extra:
+		// only the host's single entry exists.
+		expect(host.participants.length).toBeGreaterThanOrEqual(2);
+		expect(publishSpy).toHaveBeenCalledTimes(1);
+		const jsonFiles = (await fs.readdir(tmp)).filter(name => name.endsWith(".json"));
+		expect(jsonFiles).toHaveLength(1);
+	});
+});
