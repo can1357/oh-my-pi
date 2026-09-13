@@ -531,15 +531,16 @@ impl GitRepo {
 			return Ok(None);
 		};
 		// `branch.<name>.merge` may hold several values (octopus pull); git's
-		// upstream is the first one, not the last-wins scalar.
+		// upstream is the first one — not the last-wins scalar, and not the
+		// first non-empty one: an empty first value means no upstream.
 		let Some(merge) = config
 			.plumbing()
 			.raw_values(format!("branch.{branch}.merge").as_str())
 			.ok()
 			.and_then(|values| {
 				values
-					.into_iter()
-					.find_map(|v| nonempty(v.to_str_lossy().trim()))
+					.first()
+					.and_then(|v| nonempty(v.to_str_lossy().trim()))
 			})
 		else {
 			return Ok(None);
@@ -1802,6 +1803,17 @@ mod tests {
 		git(root, &["config", "branch.feat.remote", "origin"])?;
 		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/one");
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// An empty first value is authoritative for git: no upstream, even
+		// though a usable ref follows it.
+		git(root, &["config", "--unset-all", "branch.feat.merge"])?;
+		git(root, &["config", "branch.feat.merge", ""])?;
+		git(root, &["config", "--add", "branch.feat.merge", "refs/heads/one"])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["config", "branch.feat.remote", "."])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
 		Ok(())
 	}
 

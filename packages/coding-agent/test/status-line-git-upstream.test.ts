@@ -10,15 +10,20 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getSymbolPresetOverride, initTheme, type SymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+
+// Test files share this process and the theme is process-global: remember the
+// symbol preset that was active on entry and put it back on exit, rather than
+// forcing a fixed preset on whatever runs next.
+let priorPreset: SymbolPreset | undefined;
 
 beforeAll(async () => {
+	priorPreset = getSymbolPresetOverride();
 	await initTheme(false, "unicode");
 });
 
 afterAll(async () => {
-	// Other test files share this process; restore the default symbol preset.
-	await initTheme(false, "unicode");
+	await initTheme(false, priorPreset);
 });
 
 type GitStatus = NonNullable<SegmentContext["git"]["status"]>;
@@ -65,11 +70,15 @@ describe("git segment upstream indicators", () => {
 	});
 
 	it("falls back to ASCII arrows under the ascii symbol preset", async () => {
-		await initTheme(false, "ascii");
-		const text = plain({ staged: 0, unstaged: 0, untracked: 0, ahead: 2, behind: 1 });
-		expect(text).toContain("^2");
-		expect(text).toContain("v1");
-		expect(text).not.toContain("⇡");
-		await initTheme(false, "unicode");
+		// The finally restores the suite's preset even when an assertion fails.
+		try {
+			await initTheme(false, "ascii");
+			const text = plain({ staged: 0, unstaged: 0, untracked: 0, ahead: 2, behind: 1 });
+			expect(text).toContain("^2");
+			expect(text).toContain("v1");
+			expect(text).not.toContain("⇡");
+		} finally {
+			await initTheme(false, "unicode");
+		}
 	});
 });
