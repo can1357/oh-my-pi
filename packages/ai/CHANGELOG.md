@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fixed Anthropic's many-image downscale growing a request it was meant to shrink: re-encoding an efficiently compressed image (e.g. a WebP screenshot) as PNG/JPEG could add ~15% base64 and bust the image-byte budget already enforced against the original, causing the request-size (413) error the budget prevents. The resize now steps down JPEG quality until it costs no more than the original ([#10286](https://github.com/can1357/oh-my-pi/pull/10286) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Fixed a many-image request being rejected for an over-size image when no re-encode came out smaller than the source: an image only just over the 2000 px cap sheds almost no pixels on the way down, so every rendition stayed heavier and the resize handed back the original — sending a 2001 px image that Anthropic refuses outright. The dimension cap is now always enforced, and the quality ladder extends to q5 so such an image still has a rendition that fits the byte budget ([#10286](https://github.com/can1357/oh-my-pi/pull/10286) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Fixed the many-image downscale still growing a payload no JPEG quality could rescue: a wide, shallow, low-detail image (a uniform 2001x100 frame is ~460 bytes as WebP) sheds almost no pixels at the 2000 px cap, and every JPEG rung down to q5 pays more fixed format overhead than the whole source costs — measured 2.26x. Because the cap is mandatory, the resize shipped that growth and could bust the image-byte budget already enforced against the original, causing the request-size (413) error the budget prevents. WebP renditions are now tried as a second pass when the JPEG ladder cannot get under the source bytes ([#10286](https://github.com/can1357/oh-my-pi/pull/10286) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.19] - 2026-09-12
 
 ### Added

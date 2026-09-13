@@ -248,6 +248,41 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 	return state;
 }
 
+/**
+ * Whether a Responses turn's native `providerPayload` will be replayed on the
+ * NEXT request for `model`.
+ *
+ * The first request after restoring a session has not warmed its replay state,
+ * so `buildParams` sends no native history at all. A caller accounting for the
+ * bytes a request will carry has to ask: a payload that will not be sent is
+ * dead weight, and charging it lets a stale generation result evict a live user
+ * image that IS being sent.
+ *
+ * Absent state means an unmanaged session, which always replays — the same
+ * default `buildParams` takes.
+ */
+export function willReplayOpenAIResponsesNativeHistory(
+	model: Model,
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+): boolean {
+	// Only the Responses transport gates replay on warmed session state. The Codex
+	// transport replays every matching payload unconditionally
+	// (`openai-codex-responses.ts` `convertCodexMessages()`), so its history always
+	// travels and must always be charged.
+	if (model.api !== "openai-responses") return true;
+	// No MAP at all is an unmanaged session, which always replays — the default
+	// `buildParams` takes. A managed map with no entry is the opposite: the state
+	// has simply not been created yet, and `createOpenAIResponsesProviderSessionState`
+	// will create it `nativeHistoryReplayWarmed: false`. That is exactly the
+	// first-request case this exists for, and the provider-context transform runs
+	// BEFORE `streamOpenAIResponses` creates the entry — so an absent entry must
+	// read as cold, not as warm.
+	if (!providerSessionState) return true;
+	const key = `${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`;
+	const existing = providerSessionState.get(key) as OpenAIResponsesProviderSessionState | undefined;
+	return existing?.nativeHistoryReplayWarmed ?? false;
+}
+
 function getOpenAIResponsesProviderSessionState(
 	model: Model<"openai-responses">,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,

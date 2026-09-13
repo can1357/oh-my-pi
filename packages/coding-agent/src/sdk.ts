@@ -23,6 +23,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
@@ -172,7 +173,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
-import { clampProviderContextImages, dropUnreadableContextImages } from "./session/provider-image-budget";
+import { applyProviderImagePipeline } from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -3286,9 +3287,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		) {
 			explicitlyRequestedToolNames.push("yield");
 		}
-		// Session-managed builtins may be force-included by createTools. Keep the
-		// active set consistent with that registry decision, using built-in
-		// provenance so same-named extension tools are never force-activated.
+		// Builtins `createTools` force-includes into the registry for enabled
+		// top-level sessions (tools/index.ts), but which — like `yield` above — an
+		// explicit `toolNames` list would otherwise drop from the ACTIVE set,
+		// leaving guidance pointing at tools the model cannot call:
+		//
+		//   manage_skill/learn  the auto-learn nudge
+		//   context_notes/new_context  the rollover reminder, added together when
+		//     `compaction.experimentalContextManagement` is on and both `read` and
+		//     `grep` are present
+		//
+		// Activate exactly the builtins createTools built (`builtInToolNames` —
+		// provenance, so a same-named custom/extension tool is never
+		// force-activated when the feature is off) to keep guidance, controller,
+		// and the active set consistent.
 		if (!restrictToolNames && explicitlyRequestedToolNames) {
 			for (const name of ["manage_skill", "learn", "context_notes", "new_context"]) {
 				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
@@ -3491,13 +3503,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
-			transformed = clampProviderContextImages(transformed, transformModel);
-			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-			// After the model-specific normalizers: they carry better wording for the
-			// cases they own (STB WebP), so this stays the backstop for everything
-			// else, and it runs before the blob broker uploads any of these bytes.
-			transformed = await dropUnreadableContextImages(transformed, transformModel);
-			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+			// Count cap, normalization, unreadable backstop, then the byte budget
+			// over final sizes — the order is documented on the pipeline, and it
+			// runs before the blob broker uploads any of these bytes.
+			transformed = await applyProviderImagePipeline(
+				transformed,
+				transformModel,
+				normalizeProviderContextImagesForModel,
+				// A restored session has not warmed its Responses replay state, so the
+				// first request sends no native history — charging those bytes would
+				// evict a live user image for a payload that is not travelling.
+				willReplayOpenAIResponsesNativeHistory(transformModel, session?.providerSessionState),
+				// Inside the pipeline so the byte budget runs over the payload that
+				// actually travels: an uploaded image leaves as a reference and puts
+				// no bytes on the wire.
+				blobBroker
+					? (decorating, decoratingModel) => blobBroker.decorateContext(decorating, decoratingModel)
+					: undefined,
+			);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
@@ -4206,10 +4229,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
 						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						transformed = clampProviderContextImages(transformed, transformModel);
-						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-						transformed = await dropUnreadableContextImages(transformed, transformModel);
-						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+						transformed = await applyProviderImagePipeline(
+							transformed,
+							transformModel,
+							normalizeProviderContextImagesForModel,
+							willReplayOpenAIResponsesNativeHistory(transformModel, captureOptions.providerSessionState),
+							blobBroker
+								? (decorating, decoratingModel) => blobBroker.decorateContext(decorating, decoratingModel)
+								: undefined,
+						);
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),
