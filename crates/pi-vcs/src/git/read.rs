@@ -438,10 +438,12 @@ impl GitRepo {
 		// (gix 0.85 collects replacements only when `core.useReplaceRefs` is
 		// false — the check is inverted), so their presence forces the
 		// `rev-list` fallback, which honors them like git does.
-		let replacements = if self.is_reftable() {
-			None
-		} else {
-			self.replace_refs()?
+		let replacements = self.replace_refs()?;
+		// Toggling `core.useReplaceRefs` changes reachability without changing
+		// the fingerprint, so enablement joins the key while replacements exist.
+		let use_replace_refs = match &replacements {
+			Some(_) => self.config_get("core.usereplacerefs")?,
+			None => None,
 		};
 		let mut cache = self
 			.divergence
@@ -452,12 +454,20 @@ impl GitRepo {
 			&& cached.upstream == upstream
 			&& cached.shallow == shallow
 			&& cached.replacements == replacements
+			&& cached.use_replace_refs == use_replace_refs
 		{
 			return Ok(Some(cached.counts));
 		}
 		let counts = self.count_ahead_behind(&head, &upstream, replacements.as_deref())?;
 		if let Some(counts) = counts {
-			*cache = Some(DivergenceCache { head, upstream, shallow, replacements, counts });
+			*cache = Some(DivergenceCache {
+				head,
+				upstream,
+				shallow,
+				replacements,
+				use_replace_refs,
+				counts,
+			});
 		}
 		Ok(counts)
 	}
@@ -467,6 +477,15 @@ impl GitRepo {
 	/// call: replacements change reachability without moving HEAD, the
 	/// upstream ref, or the shallow file.
 	fn replace_refs(&self) -> Result<Option<Vec<u8>>> {
+		if self.is_reftable() {
+			// Replace refs live inside the table; only the CLI can see them.
+			return Ok(cli_try(self.root(), &[
+				"for-each-ref",
+				"--format=%(refname)=%(objectname)",
+				"refs/replace/",
+			])?
+			.map(String::into_bytes));
+		}
 		let mut names = Vec::new();
 		if let Ok(entries) = std::fs::read_dir(self.info().common_dir.join("refs/replace")) {
 			for entry in entries.flatten() {
@@ -518,8 +537,17 @@ impl GitRepo {
 	) -> Result<Option<(u32, u32)>> {
 		if self.is_reftable() || replacements.is_some() {
 			let spec = format!("{head}...{upstream}");
-			let Some(counts) = cli_try(self.root(), &["rev-list", "--left-right", "--count", &spec])?
-			else {
+			let counts = match cli_try(self.root(), &["rev-list", "--left-right", "--count", &spec]) {
+				Ok(counts) => counts,
+				// The replacements fallback needs a git binary; without one the
+				// count is simply unavailable, not a reason to drop the file
+				// status that was already computed.
+				Err(err) if replacements.is_some() && is_git_spawn(&err) => {
+					return Ok(None);
+				},
+				Err(err) => return Err(err),
+			};
+			let Some(counts) = counts else {
 				return Ok(None);
 			};
 			let Some((ahead, behind)) = counts.split_once('\t') else {
@@ -1294,6 +1322,10 @@ fn set_worktree(
 		.or_insert((' ', code, None));
 }
 
+fn is_git_spawn(err: &Error) -> bool {
+	matches!(err, Error::Backend { context: "git spawn", .. })
+}
+
 fn cli_try(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
 	let owned: Vec<_> = args.iter().map(|v| (*v).to_owned()).collect();
 	let out = super::cli::run_sync(cwd, &owned, super::cli::SYNC_TIMEOUT)?;
@@ -1972,6 +2004,15 @@ mod tests {
 		// Removing the replacement restores the original counts.
 		git(root, &["replace", "-d", "HEAD"])?;
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Toggling `core.useReplaceRefs` changes reachability without touching
+		// the fingerprint, so it must invalidate the cache on its own.
+		git(root, &["replace", "--graft", "HEAD", side.trim()])?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
+		git(root, &["config", "core.useReplaceRefs", "false"])?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		git(root, &["config", "core.useReplaceRefs", "true"])?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
 		Ok(())
 	}
 
