@@ -677,15 +677,10 @@ impl GitRepo {
 				Err(err) => return Err(Error::backend("git config", err)),
 			}));
 		}
-		// Remote-tracking upstreams match the fetch refspecs by full name only:
-		// git leaves a shorthand `branch.<name>.merge` unexpanded (`%(upstream)`
-		// is empty), whereas gix would assume `refs/heads/`.
-		if !merge.starts_with("refs/") {
-			return Ok(None);
-		}
-		let Ok(merge_name) = <&gix::refs::FullNameRef>::try_from(&merge) else {
-			return Ok(None);
-		};
+		// Remote-tracking upstreams match fetch refspec sources verbatim: git
+		// leaves a shorthand `branch.<name>.merge` unexpanded (`main` never
+		// matches `refs/heads/*`, so `%(upstream)` is empty), yet an
+		// unqualified value still matches an exact source like `+HEAD:…`.
 		// Mirrors gix's `branch_remote_tracking_ref_name`, which we can't use
 		// directly because it reads the merge ref as a last-wins scalar.
 		let remote = match repo.try_find_remote(remote.as_str()) {
@@ -709,7 +704,7 @@ impl GitRepo {
 		let null = repo.object_hash().null();
 		let matched = gix::refspec::MatchGroup { specs }.match_lhs(std::iter::once(
 			gix::refspec::match_group::Item {
-				full_ref_name: merge_name.as_bstr(),
+				full_ref_name: gix::bstr::BStr::new(merge.as_str()),
 				target:        &null,
 				object:        None,
 			},
@@ -1998,6 +1993,27 @@ mod tests {
 		let summary = repo.status_summary()?;
 		assert_eq!((summary.ahead, summary.behind), (None, None));
 		assert_eq!(summary.untracked, 1);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_matches_unqualified_merge_refspec() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		// An exact non-glob fetch source matches an unqualified merge value.
+		git(root, &["config", "remote.origin.url", "."])?;
+		git(root, &["config", "remote.origin.fetch", "+HEAD:refs/remotes/origin/tip"])?;
+		git(root, &["config", "branch.main.remote", "origin"])?;
+		git(root, &["config", "branch.main.merge", "HEAD"])?;
+		git(root, &["update-ref", "refs/remotes/origin/tip", "HEAD"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// A shorthand merge value still doesn't expand to `refs/heads/*`.
+		git(root, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"])?;
+		git(root, &["config", "branch.main.merge", "main"])?;
+		assert_eq!(repo.ahead_behind()?, None);
 		Ok(())
 	}
 
