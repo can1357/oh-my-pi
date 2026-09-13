@@ -19,6 +19,7 @@ function model(provider: string, id: string, options: { text?: boolean; tools?: 
 		name: id,
 		input: options.text === false ? ["image"] : ["text"],
 		supportsTools: options.tools,
+		reasoning: true,
 		thinking: { mode: "openai", efforts: ["low", "high"] },
 	} as unknown as Model;
 }
