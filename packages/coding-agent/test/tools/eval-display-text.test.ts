@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -177,5 +178,30 @@ describe("EvalTool display() text surfacing", () => {
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
 		expect(text).toContain("ch elided");
 		expect(text.length).toBeLessThan(20000);
+	});
+
+	it("keeps oversized display details bounded and spills the full value to the artifact", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-display-");
+		const artifactPath = tempDir.join("eval.log");
+		const huge = `start-${"x".repeat(100_000)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		const tool = new EvalTool({
+			...makeSession(),
+			allocateOutputArtifact: async () => ({ id: "large-display", path: artifactPath }),
+		});
+		const result = await tool.execute("call-huge-details", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(Buffer.byteLength(JSON.stringify(result.details), "utf-8")).toBeLessThan(20_000);
+		expect(await Bun.file(artifactPath).text()).toContain(huge);
+		expect(result.details?.meta?.truncation?.artifactId).toBe("large-display");
 	});
 });

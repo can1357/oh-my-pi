@@ -890,22 +890,29 @@ export class OutputSink {
 	/**
 	 * Push a chunk of output. The buffer management and onChunk callback run
 	 * synchronously. File sink writes are deferred and serialized internally.
+	 *
+	 * `inline` substitutes a bounded representation for the in-memory buffer and
+	 * live preview while the complete chunk is mirrored to the artifact.
+	 * `emitInline: false` keeps that representation out of the live callback.
 	 */
-	push(chunk: string): void {
+	push(chunk: string, options?: { inline?: string; emitInline?: boolean }): void {
 		if (this.#finalized) return;
 		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#normalizeCarriageReturns(text)));
+		const inline = options?.inline;
+		const substituted = inline !== undefined;
+		const inlineChunk = inline === undefined ? chunk : sanitizeText(inline);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
 		// final pending chunk when the process exits before that timer fires.
-		// Live preview gets the raw (pre-cap) chunk so the TUI never lags behind
-		// what reached the sink — the column cap is for the persisted LLM view.
-		if (this.#onChunk) {
+		// Live preview gets the inline (pre-cap) chunk so the TUI never lags behind
+		// what reached the in-memory sink — the column cap is for the persisted LLM view.
+		if (this.#onChunk && options?.emitInline !== false && inlineChunk.length > 0) {
 			const now = Date.now();
 			if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
-				this.#emitPendingChunkWith(chunk, now);
+				this.#emitPendingChunkWith(inlineChunk, now);
 			} else {
-				this.#pendingChunk += chunk;
+				this.#pendingChunk += inlineChunk;
 				this.#schedulePendingChunkFlush();
 			}
 		}
@@ -918,20 +925,24 @@ export class OutputSink {
 			this.#totalLines += countNewlines(chunk);
 		}
 
+		const inlineBytes = substituted ? Buffer.byteLength(inlineChunk, "utf-8") : rawBytes;
 		// Per-line column cap. State persists across chunks so a mid-line split
-		// still respects the budget. Operates on the sanitized chunk; the cap is
-		// applied before head/tail accounting but after artifact mirroring decides.
-		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(chunk) : chunk;
-		const cappedBytes = capped === chunk ? rawBytes : Buffer.byteLength(capped, "utf-8");
-		const cappedThisChunk = cappedBytes < rawBytes;
+		// still respects the budget. Operates on the inline chunk; the complete
+		// chunk is mirrored to the artifact before any cap is applied.
+		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(inlineChunk) : inlineChunk;
+		const cappedBytes = capped === inlineChunk ? inlineBytes : Buffer.byteLength(capped, "utf-8");
+		const cappedThisChunk = cappedBytes < inlineBytes;
+		if (substituted) this.#truncated = true;
 
-		// Mirror RAW chunk to the artifact file so the on-disk record is the full
-		// uncapped stream. Mirror triggers on: in-memory overflow OR this chunk's
-		// column cap dropped bytes (otherwise we'd lose data) OR file already open.
-		if (this.#artifactPath && (this.#file != null || cappedThisChunk || this.#willOverflow(cappedBytes))) {
+		// Mirror the complete chunk to the artifact file whenever the inline
+		// representation differs, overflows memory, hits the column cap, or a
+		// prior chunk already opened the artifact.
+		if (
+			this.#artifactPath &&
+			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
+		) {
 			this.#writeToFile(chunk);
 		}
-
 		if (cappedBytes === 0) return;
 
 		// Head retention: drain the (capped) chunk into #head until the budget is
