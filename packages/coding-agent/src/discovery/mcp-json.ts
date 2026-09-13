@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseMcpBooleanField, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -24,7 +24,8 @@ interface MCPConfigFile {
 	mcpServers?: Record<
 		string,
 		{
-			enabled?: boolean;
+			enabled?: boolean | string;
+			lazy?: boolean | string;
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
 			command?: string;
@@ -60,14 +61,25 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 	const servers: MCPServer[] = [];
 
 	if (config.mcpServers) {
-		for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+		// Expand env vars across the whole server config before any field coercion runs, so
+		// placeholders like `"lazy": "${MCP_LAZY}"` resolve to their real value before
+		// parseMcpBooleanField sees them (mirrors builtin.ts's discovery provider).
+		const expanded = expandEnvVarsDeep(config.mcpServers);
+		for (const [name, serverConfig] of Object.entries(expanded)) {
 			// Runtime type validation for user-controlled JSON values
 			let enabled: boolean | undefined;
 			if (serverConfig.enabled !== undefined) {
-				if (typeof serverConfig.enabled === "boolean") {
-					enabled = serverConfig.enabled;
-				} else {
+				enabled = parseMcpBooleanField(serverConfig.enabled);
+				if (enabled === undefined) {
 					logger.warn("MCP server has invalid 'enabled' value, ignoring", { name, value: serverConfig.enabled });
+				}
+			}
+
+			let lazy: boolean | undefined;
+			if (serverConfig.lazy !== undefined) {
+				lazy = parseMcpBooleanField(serverConfig.lazy);
+				if (lazy === undefined) {
+					logger.warn("MCP server has invalid 'lazy' value, ignoring", { name, value: serverConfig.lazy });
 				}
 			}
 
@@ -92,9 +104,10 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
-			const server: MCPServer = {
+			servers.push({
 				name,
 				enabled,
+				lazy,
 				timeout,
 				requestIdFormat,
 				command: serverConfig.command,
@@ -107,18 +120,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				oauth: serverConfig.oauth,
 				transport: serverConfig.type,
 				_source: source,
-			};
-
-			// Expand environment variables
-			if (server.command) server.command = expandEnvVarsDeep(server.command);
-			if (server.args) server.args = expandEnvVarsDeep(server.args);
-			if (server.env) server.env = expandEnvVarsDeep(server.env);
-			if (server.cwd) server.cwd = expandEnvVarsDeep(server.cwd);
-			if (server.url) server.url = expandEnvVarsDeep(server.url);
-			if (server.headers) server.headers = expandEnvVarsDeep(server.headers);
-			if (server.auth) server.auth = expandEnvVarsDeep(server.auth);
-			if (server.oauth) server.oauth = expandEnvVarsDeep(server.oauth);
-			servers.push(server);
+			});
 		}
 	}
 

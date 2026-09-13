@@ -10,6 +10,7 @@ import {
 	inferMcpTransport,
 	isDiscoveredMcpServer,
 	type MCPRuntimeSource,
+	mcpServerNeedsProviderTeardown,
 	snapshotMcpRuntime,
 	visibleMcpTools,
 } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
@@ -301,5 +302,89 @@ describe("applyMcpToggleRuntime", () => {
 			},
 		]);
 		expect(connected).toEqual([]);
+	});
+});
+
+describe("mcpServerNeedsProviderTeardown", () => {
+	test("regression: a dormant lazy server with cached tools still needs teardown", () => {
+		// `getConnectionStatus` intentionally stays "disconnected" for a lazy
+		// server whose tools came from a cache hit — connection status alone
+		// must not be read as "nothing to tear down" here.
+		const deferredTool = { ...stubCustomTool("lazy_tool"), mcpServerName: "lazyserver" };
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [deferredTool],
+				getServerConfig: () => undefined,
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"lazyserver",
+		);
+		expect(needsTeardown).toBe(true);
+	});
+
+	test("a disconnected, config-less server with no registered tools needs no teardown", () => {
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [],
+				getServerConfig: () => undefined,
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"neverconnected",
+		);
+		expect(needsTeardown).toBe(false);
+	});
+
+	test("a live connection needs teardown even without registered tools yet", () => {
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "connecting",
+				getTools: () => [],
+				getServerConfig: () => undefined,
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"connecting-server",
+		);
+		expect(needsTeardown).toBe(true);
+	});
+
+	test("an unrelated server's tools do not force teardown", () => {
+		const otherTool = { ...stubCustomTool("other_tool"), mcpServerName: "other" };
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [otherTool],
+				getServerConfig: () => undefined,
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"lazyserver",
+		);
+		expect(needsTeardown).toBe(false);
+	});
+
+	// PR #9793 review (Codex, modes/components/extensions/mcp-runtime.ts:148):
+	// a lazy server with no cached tools yet is dormant (disconnected, no
+	// tools) exactly like a server the manager never touched — but the
+	// manager still preserves its config in `#serverConfigs` for a later
+	// `/mcp reconnect`. Without checking that config, a provider-level
+	// disable skipped it entirely, so `/mcp reconnect <name>` could still
+	// start the server after its provider was disabled.
+	test("regression: a lazy server with a preserved config but no tools yet still needs teardown", () => {
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [],
+				getServerConfig: () => ({ command: "lazy-cmd" }),
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"lazyserver",
+		);
+		expect(needsTeardown).toBe(true);
 	});
 });

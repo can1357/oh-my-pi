@@ -1318,7 +1318,37 @@ export class MCPCommandController {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
 		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
-		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
+		// A *lazy* server never connects through `connectServers`: with no
+		// cache it stays tool-less (dormant until `/mcp reconnect`), and with a
+		// cache it serves the LAST connect's catalog — which the test just
+		// proved stale when the server's tools changed. Either way the user
+		// explicitly exercised this server, so spend one forced connect through
+		// the documented seeding path: it registers the live catalog and
+		// rewrites the cache for future startups.
+		if (config.lazy) {
+			try {
+				// `/mcp test` is an explicit user-driven retry, exactly like
+				// `/mcp reconnect` — it must reset the crash-burst window too, or
+				// a server that already tripped the reconnect breaker reports a
+				// successful test while this seeding call silently no-ops
+				// (`reconnectServer` returns `null` under an open breaker) and
+				// the server stays cache-less and tool-less.
+				await this.ctx.mcpManager.reconnectServer(name, { manual: true });
+			} catch {
+				// The direct test connection succeeded but the manager-side seed
+				// failed; keep the test's own verdict and leave seeding to
+				// `/mcp reconnect`.
+			}
+		}
+		// A lazy server keeps status "disconnected" by design even after
+		// `connectServers` installed its cached tools as deferred entries (and
+		// after the seeding reconnect above). Gate the session refresh on tools
+		// actually held for this server — not on the connection status alone —
+		// or a cache-hit lazy test mounts nothing until a session reload.
+		if (
+			this.ctx.mcpManager.getConnectionStatus(name) === "connected" ||
+			this.ctx.mcpManager.getTools().some(tool => tool.mcpServerName === name)
+		) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
 	}
@@ -1721,6 +1751,17 @@ export class MCPCommandController {
 			}
 
 			lines.push("");
+			if (connection) {
+				// Close this temporary test connection before seeding through the
+				// manager: a server that permits only one active client (or holds
+				// a singleton lock) would otherwise see it still open while
+				// `#syncManagerConnection`'s reconnect competes for the same slot,
+				// and every retry in its ladder can fail — reporting success while
+				// leaving a cache-less lazy server tool-less.
+				const testConnection = connection;
+				connection = undefined;
+				await disconnectServer(testConnection);
+			}
 			await this.#syncManagerConnection(name, config);
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {

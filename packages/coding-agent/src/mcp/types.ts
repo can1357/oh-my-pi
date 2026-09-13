@@ -66,6 +66,12 @@ export type MCPRequestIdFormat = "string" | "number";
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/**
+	 * Connect on first use instead of at startup (default: false). Startup
+	 * registers the tool definitions cached from the last successful connect;
+	 * the first tool invocation (or `/mcp reconnect`) connects for real.
+	 */
+	lazy?: boolean;
 	/** MCP request timeout in milliseconds (default: 30000, 0 to disable) */
 	timeout?: number;
 	/**

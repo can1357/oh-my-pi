@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `lazy: true` for MCP servers in `mcp.json`: the server is not spawned at session startup — its tools are served from the tool cache and the first invocation (or `/mcp reconnect`) connects on demand. Useful for servers whose launch has side effects, such as credential prompts or approval flows. ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
