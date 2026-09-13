@@ -472,6 +472,10 @@
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
 - Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
 
+### Fixed
+
+- Completed asynchronous jobs now show their terminal result text in the TUI, including failures.
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

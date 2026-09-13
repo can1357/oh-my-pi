@@ -14,6 +14,7 @@ import {
 	ASYNC_PROGRESS_MESSAGE_TYPE,
 	type AsyncProgressDetails,
 	type AsyncResultDetails,
+	type AsyncResultJobDetails,
 } from "../../session/async-job-delivery";
 import {
 	type CustomMessage,
@@ -88,6 +89,16 @@ function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" 
 	return truncateToWidth(normalized || fallback, TRUNCATE_LENGTHS.TITLE);
 }
 
+/**
+ * Remove the model-facing task envelope before showing settled task output in
+ * the human transcript. Bash/process results do not use this wrapper.
+ */
+function stripTaskResultEnvelope(text: string): string {
+	if (!text.startsWith("<task-result")) return text;
+	const body = /<(output|preview)(?:\s[^>]*)?>\n?([\s\S]*?)\n?<\/\1>/.exec(text)?.[2];
+	return body?.trim() || text;
+}
+
 function formatBackgroundWorkReason(reason: string | undefined): string | undefined {
 	const normalized = displayExitReason(reason);
 	return normalized ? truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE) : undefined;
@@ -120,47 +131,93 @@ function backgroundWorkCompletionRow(options: {
 }
 
 /**
+ * Render one async-result completion row and its bounded terminal output.
+ */
+class AsyncResultMessageComponent extends TranscriptBlock {
+	constructor(private readonly job: AsyncResultJobDetails) {
+		super();
+		this.#rebuild();
+	}
+
+	#rebuild(): void {
+		this.clear();
+		const failed =
+			this.job.status === "failed" ||
+			this.job.timedOut === true ||
+			(this.job.exitCode !== undefined && this.job.exitCode !== 0);
+		const preview = stripTaskResultEnvelope(
+			this.job.terminalTruncated && (this.job.terminalHead !== undefined || this.job.terminalTail !== undefined)
+				? [this.job.terminalHead, "[…result truncated…]", this.job.terminalTail]
+						.filter(part => part !== undefined)
+						.join("\n")
+				: (this.job.terminalText ?? ""),
+		);
+		const outputLines = preview.split("\n").filter(line => line.trim().length > 0);
+		const rendered = outputLines.map(line =>
+			theme.fg("dim", `  ${shortenEmbeddedPaths(replaceTabs(sanitizeText(line)))}`),
+		);
+		const visibleLines = capPreviewLines(rendered, theme, {
+			max: DEFAULT_TERMINAL_PREVIEW_LINES,
+			maxBytes: PREVIEW_LIMITS.PROGRESS_COLLAPSED_BYTES,
+			expandHint: false,
+			prefix: "  ",
+		});
+		this.addChild(
+			backgroundWorkCompletionRow({
+				failed,
+				noun: `Background ${backgroundWorkNoun(this.job.type)}`,
+				name: formatBackgroundWorkName(this.job.jobId, "unknown"),
+				exitCode: this.job.exitCode,
+				timedOut: this.job.timedOut,
+				durationMs: this.job.durationMs,
+			}),
+		);
+		// An incomplete capture is part of the completion's meaning, so the notice
+		// travels with the row. The delivered result text already carries it, so
+		// only add a dedicated row when the bounded preview does not show it.
+		const notice = this.job.meta?.artifactError ? formatArtifactErrorNotice(this.job.meta.artifactError) : undefined;
+		if (notice !== undefined && !visibleLines.some(line => line.includes(notice))) {
+			this.addChild(new Text(theme.fg("warning", notice), 1, 0));
+		}
+		for (const line of visibleLines) {
+			this.addChild(new TruncatedText(line, 1, 0));
+		}
+	}
+}
+
+/**
  * Render an `async-result` custom message as one terminal background-work row
- * per job, with failure state and Bash exit code when available. Failed rows
- * stay visible while tool activity is hidden.
+ * per job, with failure state, Bash exit code, and terminal output when
+ * available. Failed rows and their output stay visible while tool activity is
+ * hidden.
  */
 export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivityContainer {
 	const details = (message as CustomMessage<AsyncResultDetails & Partial<AsyncResultDetails["jobs"][number]>>).details;
-	const jobs =
+	const jobs: AsyncResultJobDetails[] =
 		details?.jobs && details.jobs.length > 0
 			? details.jobs
 			: [
 					{
-						jobId: details?.jobId,
+						jobId: details?.jobId ?? "unknown",
 						type: details?.type,
 						label: details?.label,
 						durationMs: details?.durationMs,
 						status: details?.status,
 						exitCode: details?.exitCode,
 						timedOut: details?.timedOut,
+						terminalText: details?.terminalText,
+						terminalHead: details?.terminalHead,
+						terminalTail: details?.terminalTail,
+						terminalTruncated: details?.terminalTruncated,
 					},
 				];
 	const container = new ToolActivityContainer([]);
 	for (const job of jobs) {
 		const failed =
 			job.status === "failed" || job.timedOut === true || (job.exitCode !== undefined && job.exitCode !== 0);
-		const row = backgroundWorkCompletionRow({
-			failed,
-			noun: `Background ${backgroundWorkNoun(job.type)}`,
-			name: formatBackgroundWorkName(job.jobId, "unknown"),
-			exitCode: job.exitCode,
-			timedOut: job.timedOut,
-			durationMs: job.durationMs,
-		});
-		if (failed) container.pin(row);
-		else container.addChild(row);
-		if (job.meta?.artifactError) {
-			// An incomplete capture is part of the completion's meaning: keep the
-			// notice with its row, pinned when the row itself is pinned.
-			const notice = new Text(theme.fg("warning", formatArtifactErrorNotice(job.meta.artifactError)), 1, 0);
-			if (failed) container.pin(notice);
-			else container.addChild(notice);
-		}
+		const component = new AsyncResultMessageComponent(job);
+		if (failed) container.pin(component);
+		else container.addChild(component);
 	}
 	if (details?.meta?.artifactError) {
 		container.addChild(new Text(theme.fg("warning", formatArtifactErrorNotice(details.meta.artifactError)), 1, 0));
