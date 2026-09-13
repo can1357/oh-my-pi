@@ -12,7 +12,11 @@
  */
 import { describe, expect, it } from "bun:test";
 import { isCacheControlUnsupported } from "@oh-my-pi/pi-ai/error";
-import { buildAnthropicClientOptions, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import {
+	buildAnthropicClientOptions,
+	clearAnthropicFastModeFallback,
+	streamAnthropic,
+} from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
@@ -61,6 +65,23 @@ function cacheControlRejectionResponse(): Response {
 			error: {
 				type: "invalid_request_error",
 				message: "messages.0.content.0.cache_control: Extra inputs are not permitted",
+			},
+		}),
+		{ status: 400, headers: { "Content-Type": "application/json" } },
+	);
+}
+
+/**
+ * Shape Anthropic returns for a model or account that cannot serve fast mode:
+ * a 400 refusing the `speed` parameter itself.
+ */
+function fastModeRejectionResponse(): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: `'${MODEL.id}' does not support the \`speed\` parameter.`,
 			},
 		}),
 		{ status: 400, headers: { "Content-Type": "application/json" } },
@@ -144,6 +165,39 @@ function createBreakpointRejectingFetch(capture: Capture, failBreakpointFreeAtte
 		}
 		return successResponse();
 	};
+}
+
+/**
+ * A proxy that refuses fast mode the way Anthropic refuses it for a model or
+ * account without the entitlement: a 400 naming the `speed` parameter. With
+ * `alsoRejectBreakpoints` it refuses prompt-cache breakpoints as well, so one
+ * client can learn both fallbacks and a fast-mode re-arm has something to be
+ * precise about.
+ */
+function createFastModeRejectingFetch(capture: Capture, alsoRejectBreakpoints = false): FetchImpl {
+	return async (input, init) => {
+		const raw = init?.body;
+		const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
+		const body = JSON.parse(text) as MessageCreateParams;
+		capture.bodies.push(body);
+		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+		capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
+		if (body.speed !== undefined) return fastModeRejectionResponse();
+		if (alsoRejectBreakpoints && countBreakpoints(body) > 0) return cacheControlRejectionResponse();
+		return successResponse();
+	};
+}
+
+/** A turn that asks for fast mode through a caller-owned client. */
+function runPriorityTurn(
+	client: AnthropicMessagesClientLike,
+	states: Map<string, ProviderSessionState>,
+): Promise<AssistantMessage> {
+	return streamAnthropic(MODEL, CONTEXT, {
+		client,
+		serviceTier: "priority",
+		providerSessionState: states,
+	}).result();
 }
 
 function runTurn(fetchImpl: FetchImpl, states: Map<string, ProviderSessionState>): Promise<AssistantMessage> {
@@ -706,6 +760,71 @@ describe("Anthropic cache_control rejection fallback", () => {
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(CUSTOM_BETA);
+	});
+});
+
+/**
+ * Residual of the opaque-client anchor, reported on review: such a client's
+ * state lives in a `WeakMap` that `clearAnthropicFastModeFallback` cannot walk,
+ * so a `/fast on` re-arm used to leave the client silently demoted for the rest
+ * of the session — the user toggled it and nothing happened. The anchor now
+ * carries a re-arm generation the state picks up on its next request.
+ *
+ * The endpoint-keyed side of the same re-arm is covered by
+ * `anthropic-fast-mode.test.ts` ("flips fastModeDisabled back to false without
+ * touching unrelated flags", plus the no-op-without-an-entry row that pins the
+ * sweep to materializing nothing) and by `fast-mode-scope.test.ts` ("keeps
+ * Anthropic priority enabled while an exact-model provider fallback makes it
+ * inactive").
+ */
+describe("Anthropic fast-mode re-arm through an opaque injected client", () => {
+	it("asks for fast mode again on the next request after a re-arm", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const client = createOpaqueClient("https://opaque-fast.example/v1", createFastModeRejectingFetch(capture));
+
+		await runPriorityTurn(client, states);
+		// `/fast on` after the turn above auto-disabled it. The sweep cannot reach
+		// this client's state, so only something the next request consults can
+		// carry the toggle through to the wire.
+		clearAnthropicFastModeFallback(states);
+		const after = await runPriorityTurn(client, states);
+
+		expect(after.stopReason).toBe("stop");
+		// First turn: asked for fast mode, was refused, replayed without `speed`.
+		expect(capture.bodies[0].speed).toBe("fast");
+		expect(capture.bodies[1].speed).toBeUndefined();
+		// Second turn asks again rather than honoring a fallback the user revoked.
+		expect(capture.bodies[2].speed).toBe("fast");
+		expect(capture.bodies).toHaveLength(4);
+	});
+
+	it("re-arms fast mode without clearing the same client's cache_control learning", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const client = createOpaqueClient(
+			"https://opaque-fast-and-cache.example/v1",
+			createFastModeRejectingFetch(capture, true),
+		);
+
+		// Three attempts to learn both fallbacks: `speed` refused, then the
+		// breakpoints, then a request the proxy accepts.
+		await runPriorityTurn(client, states);
+		expect(capture.bodies).toHaveLength(3);
+
+		clearAnthropicFastModeFallback(states);
+		const after = await runPriorityTurn(client, states);
+
+		expect(after.stopReason).toBe("stop");
+		// The re-arm reached `fastModeDisabled` …
+		expect(capture.bodies[3].speed).toBe("fast");
+		// … and nothing else. Had it discarded the client's store wholesale, this
+		// first attempt would carry breakpoints again and pay a second
+		// `cache_control` 400 as the price of a fast-mode toggle.
+		expect(countBreakpoints(capture.bodies[3])).toBe(0);
+		// Which is what keeps the second turn at two attempts: `speed` refused
+		// once more, then the replay succeeds.
+		expect(capture.bodies).toHaveLength(5);
 	});
 });
 
