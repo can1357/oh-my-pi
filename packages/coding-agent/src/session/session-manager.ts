@@ -14,6 +14,7 @@ import {
 	getProjectDir,
 	getSessionsDir,
 	isEnoent,
+	isEnotdir,
 	logger,
 	stringifyJson,
 	toError,
@@ -447,6 +448,17 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
 		this.name = "SessionPersistenceIndeterminateError";
 		this.operationError = operationError;
 		this.recoveryErrors = [...recoveryErrors];
+	}
+}
+/**
+ * Thrown by {@link SessionManager.forkFrom} when the fork source is missing.
+ * The CLI maps this to a clean session-resolution failure at its own boundary
+ * (this module must not import `main.ts`, where `SessionResolutionError` lives).
+ */
+export class ForkSourceNotFoundError extends Error {
+	constructor(sourcePath: string) {
+		super(`Session "${sourcePath}" not found.`);
+		this.name = "ForkSourceNotFoundError";
 	}
 }
 
@@ -2869,7 +2881,17 @@ export class SessionManager {
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
-		const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
+		// A missing source must fail instead of forking an empty parentless session:
+		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
+		let sourceEntries: FileEntry[];
+		try {
+			sourceEntries = structuredClone(
+				await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true }),
+			) as FileEntry[];
+		} catch (err) {
+			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
+			throw err;
+		}
 		migrateToCurrentVersion(sourceEntries);
 		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 

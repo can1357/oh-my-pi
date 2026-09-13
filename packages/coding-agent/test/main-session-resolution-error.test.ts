@@ -13,7 +13,8 @@ import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, SessionResolutionError, writeStartupNotice } from "@oh-my-pi/pi-coding-agent/main";
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ForkSourceNotFoundError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 function buildResumeArgs(resume: string, sessionDir?: string): Args {
 	return {
@@ -36,11 +37,11 @@ function buildContinueArgs(message: string, sessionDir?: string): Args {
 		unrecognizedFlags: [],
 	};
 }
-
-function buildForkArgs(fork: string, noSession = false): Args {
+function buildForkArgs(fork: string, noSession = false, sessionDir?: string): Args {
 	return {
 		fork,
 		noSession: noSession || undefined,
+		sessionDir,
 		messages: [],
 		fileArgs: [],
 		unknownFlags: new Map(),
@@ -195,5 +196,116 @@ describe("createSessionManager — missing session (#2084)", () => {
 			message: "--fork requires session persistence",
 			hint: undefined,
 		});
+	});
+	it("rejects --fork with missing path without writing a session (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(missingPath, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${missingPath}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("forkFrom rejects a missing source without writing a session (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		try {
+			const caught = await SessionManager.forkFrom(missingPath, cwd, sessionDir).catch((err: unknown) => err);
+			expect(caught).toBeInstanceOf(ForkSourceNotFoundError);
+			expect(caught).toMatchObject({
+				message: `Session "${missingPath}" not found.`,
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("forkFrom rejects a vanished source on the streaming path (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		const storage = new FileSessionStorage();
+		const realStatSync = storage.statSync.bind(storage);
+		vi.spyOn(storage, "statSync").mockImplementation(((filePath: string) =>
+			filePath === missingPath
+				? { size: 8 * 1024 * 1024, mtimeMs: Date.now(), mtime: new Date() }
+				: realStatSync(filePath)) as typeof storage.statSync);
+		try {
+			const caught = await SessionManager.forkFrom(missingPath, cwd, sessionDir, storage).catch(
+				(err: unknown) => err,
+			);
+			expect(caught).toBeInstanceOf(ForkSourceNotFoundError);
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects --fork <id> when resolved session vanished before forkFrom reads it (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-vanished-id-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const vanishedPath = path.join(cwd, "vanished.jsonl");
+		const forkId = "019ea530-0000-7000-0000-000000000000";
+		const session: sessionListingModule.SessionInfo = {
+			id: forkId,
+			path: vanishedPath,
+			cwd,
+			title: "vanished",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			size: 0,
+			firstMessage: "",
+			allMessagesText: "",
+		};
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue({
+			session,
+			scope: "local",
+		});
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(forkId, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${forkId}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects --fork with ENOTDIR path without writing a session (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-enotdir-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const regularFile = path.join(cwd, "file.txt");
+		await fsp.writeFile(regularFile, "not a directory");
+		const enotdirChild = path.join(regularFile, "child.jsonl");
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(enotdirChild, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${enotdirChild}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
 	});
 });
