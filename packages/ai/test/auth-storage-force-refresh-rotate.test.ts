@@ -1190,6 +1190,52 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(verdict.message).not.toContain("API key");
 	});
 
+	test("a failed snapshot refresh cannot certify cached exhaustion", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await storage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref", expires: farExpiry(), email: "only@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		await storage.rotateSessionCredential(CODEX_PROVIDER, "freshness-failure", {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: "only",
+		});
+		vi.spyOn(storage, "revalidateCredentials").mockRejectedValue(new Error("broker unavailable"));
+		expect(
+			await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+		).toBeUndefined();
+	});
+
+	test("a login during diagnostic lookup is observed before certifying exhaustion", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		const storage = new AuthStorage(sqlite, { usageProviderResolver: () => undefined });
+		await storage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref", expires: farExpiry(), email: "only@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		await storage.rotateSessionCredential(CODEX_PROVIDER, "lookup-login", {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: "only",
+		});
+		vi.spyOn(storage, "listDisabledCredentials").mockImplementation(async () => {
+			sqlite.upsertAuthCredentialForProvider(CODEX_PROVIDER, {
+				type: "oauth",
+				access: "fresh",
+				refresh: "ref-fresh",
+				expires: farExpiry(),
+				email: "fresh@example.com",
+			});
+			return [];
+		});
+		expect(
+			await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+		).toBeUndefined();
+	});
+
 	test("the verdict is judged against a refreshed broker snapshot, not the cached pool", async () => {
 		if (!store) throw new Error("test setup failed");
 		const sqlite = store;
@@ -1242,6 +1288,32 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(
 			"fresh-sibling",
 		);
+	});
+
+	test("a reordered snapshot keeps the session on the same unblocked credential", async () => {
+		if (!store) throw new Error("test setup failed");
+		registerProvider();
+		let reversed = false;
+		const brokerLike = new Proxy(store, {
+			get(target, property) {
+				if (property === "listAuthCredentials")
+					return (provider?: string) => {
+						const rows = target.listAuthCredentials(provider);
+						return reversed ? rows.toReversed() : rows;
+					};
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const storage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		await storage.set(PROVIDER, [
+			{ type: "oauth", access: "sticky-a", refresh: "ref-a", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "sticky-b", refresh: "ref-b", expires: farExpiry(), email: "b@example.com" },
+		]);
+		expect(await storage.getApiKey(PROVIDER, "sticky-reorder")).toBe("sticky-a");
+		reversed = true;
+		await storage.reload();
+		expect(await storage.getApiKey(PROVIDER, "sticky-reorder")).toBe("sticky-a");
 	});
 
 	test("a reordered snapshot keeps each model denial on its own account", async () => {

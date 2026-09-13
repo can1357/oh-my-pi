@@ -1823,7 +1823,7 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
-		this.#remapIndexedBackoff(provider, current, credentials);
+		this.#remapIndexedCredentialState(provider, current, credentials);
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -1843,7 +1843,7 @@ export class AuthStorage {
 	}
 
 	/**
-	 * In-memory backoff is keyed by a credential's position in the provider
+	 * In-memory backoff and session stickiness use a credential's position in the provider
 	 * array. A reload that removes or reorders rows — a refreshed broker
 	 * snapshot, a sibling process's login — would otherwise leave every block
 	 * attached to whichever credential now occupies its old index, and an
@@ -1851,7 +1851,7 @@ export class AuthStorage {
 	 * sibling. Carry each entry over by credential id and drop the ones whose
 	 * row is gone; persisted blocks are keyed by id already.
 	 */
-	#remapIndexedBackoff(
+	#remapIndexedCredentialState(
 		provider: string,
 		previous: readonly StoredCredential[],
 		next: readonly StoredCredential[],
@@ -1880,6 +1880,16 @@ export class AuthStorage {
 		remap(this.#credentialBackoff);
 		remap(this.#credentialBackoffProviderTimed);
 		remap(this.#credentialBackoffProbeAfter);
+		const sessions = this.#sessionLastCredential.get(provider);
+		if (sessions) {
+			for (const [sessionId, value] of sessions) {
+				const id = previous[value.index]?.id;
+				const index = id === undefined ? undefined : nextIndexById.get(id);
+				if (index === undefined || next[index]?.credential.type !== value.type) sessions.delete(sessionId);
+				else value.index = index;
+			}
+			if (sessions.size === 0) this.#sessionLastCredential.delete(provider);
+		}
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -7096,19 +7106,26 @@ export class AuthStorage {
 		// The verdict is terminal, so it is judged against the pool as it is now,
 		// not a broker client's cached snapshot: another client may have signed in
 		// or unblocked a sibling since. One bounded budget covers this and the
-		// tombstone lookup below; a refresh that fails scans what is loaded.
+		// tombstone lookup. Failure to refresh cannot prove exhaustion.
 		const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
 		const lookupSignal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
+		let disabled: DisabledCredentialSummary[] = [];
+		try {
+			disabled = await this.listDisabledCredentials(provider, lookupSignal);
+		} catch (listError) {
+			logger.debug("Disabled credential lookup skipped while explaining a model denial", {
+				provider,
+				error: redactSecrets(String(listError)),
+			});
+		}
 		try {
 			await this.revalidateCredentials(lookupSignal);
 		} catch (revalidateError) {
-			logger.debug(
-				"Credential snapshot revalidation failed before the entitlement verdict; scanning the loaded pool",
-				{
-					provider,
-					error: String(revalidateError),
-				},
-			);
+			logger.debug("Credential snapshot revalidation failed; withholding the entitlement verdict", {
+				provider,
+				error: redactSecrets(String(revalidateError)),
+			});
+			return undefined;
 		}
 
 		// Evidence that this request ran on the stored pool and was refused
@@ -7173,23 +7190,21 @@ export class AuthStorage {
 			`No other signed-in ${provider} account can serve it: ${named.join(", ")}${unnamed > 0 ? `, and ${unnamed} more` : ""}.`,
 		];
 
-		let recentlySignedOut: string[] = [];
-		try {
-			recentlySignedOut = (await this.listActionableDisabledCredentials(provider, lookupSignal))
-				.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
-				.slice(0, 3)
-				.map(summary => {
-					const ago =
-						summary.disabledAtMs !== undefined ? `, ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
-					const label = boundedDiagnostic(credentialAccountLabel(summary), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX);
-					return `${label} (${boundedDiagnostic(summarizeDisableCause(summary.cause), ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX)}${ago})`;
-				});
-		} catch (listError) {
-			logger.debug("Disabled credential lookup skipped while explaining a model denial", {
-				provider,
-				error: String(listError),
+		// No await follows the refreshed pool scan: diagnostic lookup cannot reload it.
+		const activeAccounts =
+			disabled.length === 0
+				? []
+				: this.#getCredentialsForProvider(provider).map(credential => ({ ...credential, provider }));
+		const recentlySignedOut = disabled
+			.filter(summary => isActionableCredentialDisable(summary, activeAccounts))
+			.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
+			.slice(0, 3)
+			.map(summary => {
+				const ago =
+					summary.disabledAtMs !== undefined ? `, ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+				const label = boundedDiagnostic(credentialAccountLabel(summary), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX);
+				return `${label} (${boundedDiagnostic(summarizeDisableCause(summary.cause), ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX)}${ago})`;
 			});
-		}
 		if (recentlySignedOut.length > 0) parts.push(`Recently signed out: ${recentlySignedOut.join(", ")}.`);
 		parts.push(`Sign in with /login ${provider} using an account entitled to this model.`);
 		return new AIError.ModelEntitlementError(parts.join(" "), provider, modelId);
