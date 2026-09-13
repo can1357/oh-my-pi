@@ -65,7 +65,7 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
  * usage embedded in completed `task` tool results, so using it for a parent
  * row would double-count child rows in the aggregate.
  */
-function readSessionMetrics(session: NonNullable<AgentRef["session"]>): AgentMetrics | undefined {
+export function readSessionMetrics(session: NonNullable<AgentRef["session"]>): AgentMetrics | undefined {
 	try {
 		const stats = session.getSessionStats();
 		const messages = session.agent?.state?.messages;
@@ -89,9 +89,16 @@ function readSessionMetrics(session: NonNullable<AgentRef["session"]>): AgentMet
 		for (const message of messages) {
 			if (message.role !== "assistant") continue;
 			requests++;
-			tokens += message.usage.input + message.usage.output + message.usage.cacheWrite;
+			// Persisted and imported transcripts can predate usage metadata despite
+			// the current message type, the same case `getSessionStats` skips.
+			// Dereferencing it threw, and the catch below turned one legacy entry
+			// into no metrics at all for the whole session.
+			const usage = message.usage;
+			if (usage) {
+				tokens += usage.input + usage.output + usage.cacheWrite;
+				cost += usage.cost.total;
+			}
 			tools += message.content.filter(content => content.type === "toolCall").length;
-			cost += message.usage.cost.total;
 		}
 		return {
 			tokens,

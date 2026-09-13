@@ -349,6 +349,64 @@ describe("launch broker protocol compatibility", () => {
 		expect(preservedPending).toBe(true);
 	});
 
+	it("delivers a broker completion after a provider-only session reset", async () => {
+		const projectDir = process.cwd();
+		const owner = "owner-session";
+		const queued: DaemonCompletionNotification[] = [];
+		let deliver: ((notification: DaemonCompletionNotification) => void) | undefined;
+		let sessionChange: (() => void) | undefined;
+		const completion = {
+			event: "daemon-completed",
+			completionId: "completion-id",
+			owner,
+			daemon: {
+				name: "web",
+				id: "daemon-id",
+				state: "exited",
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				exitCode: 0,
+				restartCount: 0,
+				outputBytes: 0,
+				owner,
+				persist: false,
+				detached: false,
+			},
+		} satisfies DaemonCompletionNotification;
+		const client = {
+			projectDir,
+			onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void) => {
+				deliver = sink;
+				return () => {
+					deliver = undefined;
+				};
+			},
+			request: async () => ({ op: "start", daemon: completion.daemon, readyTimedOut: false }) as const,
+			close() {},
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+
+		await executeLaunch(
+			{
+				cwd: projectDir,
+				getSessionId: () => owner,
+				isDisposed: () => false,
+				queueLaunchCompletion: (notification: DaemonCompletionNotification) => queued.push(notification),
+				registerSessionChangeCallback: (callback: () => void) => {
+					sessionChange = callback;
+				},
+			} as unknown as ToolSession,
+			{ op: "start", name: "web", application: process.execPath, args: [] },
+		);
+
+		// Provider-only reset does not fire session change callbacks while manager ID is unchanged
+		expect(sessionChange).toBeDefined();
+		expect(deliver).toBeDefined();
+		deliver?.(completion);
+		expect(queued).toEqual([completion]);
+	});
+
 	it("keeps the completion sink when start delivery is indeterminate", async () => {
 		const projectDir = process.cwd();
 		let unregisters = 0;
