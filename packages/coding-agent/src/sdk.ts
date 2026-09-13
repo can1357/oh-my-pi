@@ -82,7 +82,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
-import { CursorExecHandlers, type CursorMcpResourceAdapter, mcpServerScopedIn } from "./cursor";
+import { CursorExecHandlers, type CursorMcpResourceAdapter, mcpServerResourcesAllowed } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
 import { createImageUrlServiceFromSettings } from "./blob-broker/service";
@@ -3182,8 +3182,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
 			);
 		const serverResourcesAllowed = (name: string): boolean =>
-			mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) ||
-			(!ownsAnyTool(name) && resourceOnlyServerAllowed(name));
+			mcpServerResourcesAllowed(
+				// Both live sources, read per call. Extension-owned MCP tools live only
+				// in the registry; a server whose public name lost the registry's
+				// deduplication lives only in the manager's list. Reading just the
+				// registry makes that loser look resource-only, so an exact disallow of
+				// the shared name would strip the winner's resources while the loser's
+				// — whose only tool the same disallow matches — stayed listable and
+				// readable.
+				[toolRegistry.values(), mcpManager?.getTools() ?? []],
+				cursorScopeAllows,
+				resourceOnlyServerAllowed,
+				name,
+			);
 		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
 			serverNames: () => mcpManager.getConnectedServers().filter(serverResourcesAllowed),
 			getServerResources: async name => {

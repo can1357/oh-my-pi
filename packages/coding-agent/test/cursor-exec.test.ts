@@ -1085,13 +1085,13 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 
 		// A server owning a gate-rejected tool is stripped, even when the
 		// per-server predicate would allow it.
-		expect(mcpServerResourcesAllowed(tools.values(), gate, allowToolless, "docs")).toBe(false);
+		expect(mcpServerResourcesAllowed([tools.values()], gate, allowToolless, "docs")).toBe(false);
 		// A resource-only server the predicate rejects is stripped.
-		expect(mcpServerResourcesAllowed(tools.values(), gate, allowToolless, "secrets")).toBe(false);
+		expect(mcpServerResourcesAllowed([tools.values()], gate, allowToolless, "secrets")).toBe(false);
 		// A resource-only server the predicate allows survives.
-		expect(mcpServerResourcesAllowed(tools.values(), gate, allowToolless, "notes")).toBe(true);
+		expect(mcpServerResourcesAllowed([tools.values()], gate, allowToolless, "notes")).toBe(true);
 		// No gate configured: unrestricted, everything stays.
-		expect(mcpServerResourcesAllowed(tools.values(), undefined, allowToolless, "docs")).toBe(true);
+		expect(mcpServerResourcesAllowed([tools.values()], undefined, allowToolless, "docs")).toBe(true);
 		// A server owning a gate-accepted tool survives on executability alone,
 		// even when the per-server predicate would reject it: tool
 		// executability is the stronger grant.
@@ -1102,12 +1102,29 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		]);
 		expect(
 			mcpServerResourcesAllowed(
-				toolsWithOpen.values(),
+				[toolsWithOpen.values()],
 				(name): boolean => name === "mcp__issues_list",
 				() => false,
 				"issues",
 			),
 		).toBe(true);
+		// A server whose public tool name lost the registry's deduplication has no
+		// registry entry at all, so it reads as resource-only: an exact disallow of
+		// the shared name would strip the winner's resources while the loser's —
+		// whose only tool the same disallow matches — stayed listable and readable.
+		// Passing the manager's live list alongside the registry closes that.
+		const sharedName = "mcp__collide_bank";
+		const registrySource = [{ name: sharedName, mcpServerName: "winner" }];
+		const managerSource = [
+			{ name: sharedName, mcpServerName: "winner" },
+			{ name: sharedName, mcpServerName: "loser" },
+		];
+		const denyShared = (name: string): boolean => name !== sharedName;
+		expect(mcpServerResourcesAllowed([registrySource], denyShared, () => true, "loser")).toBe(true);
+		expect(mcpServerResourcesAllowed([registrySource, managerSource], denyShared, () => true, "loser")).toBe(false);
+		expect(mcpServerResourcesAllowed([registrySource, managerSource], denyShared, () => true, "winner")).toBe(false);
+		// With no scope naming the shared tool, both servers stay readable.
+		expect(mcpServerResourcesAllowed([registrySource, managerSource], undefined, () => true, "loser")).toBe(true);
 	});
 
 	it("waits for a server's catalog instead of reporting it empty", async () => {
