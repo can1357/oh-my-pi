@@ -2155,7 +2155,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Input",
 			label: "History Search Scope",
-			description: "Scope Ctrl+R history search opens on; Tab and Shift+Tab change it while the panel is open",
+			description:
+				"Which scope Ctrl+R opens on: this session, the current folder, this repository or all projects; Tab and Shift+Tab change it while the panel is open",
 			options: HISTORY_SCOPE_OPTIONS,
 		},
 	},

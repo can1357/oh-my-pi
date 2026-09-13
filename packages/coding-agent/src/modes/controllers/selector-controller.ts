@@ -426,8 +426,9 @@ export class SelectorController {
 	}
 
 	/**
-	 * Scope ring for history search: the configured start scope first, narrowest to
-	 * widest after it. The conversation id comes from the session manager — the
+	 * Scope ring for history search: the resolved start scope first, then the remaining
+	 * scopes in canonical (narrowest-first) order, wrapped — a rotation, not an
+	 * ordering by width. The conversation id comes from the session manager — the
 	 * provider-side `AgentSession.sessionId` is not what prompts are stored under — and
 	 * the directory is the one prompts are written with.
 	 */

@@ -722,7 +722,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `none`.                                                                               |
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
-| `history.scope`        | enum    | `global`        | Which prompts the `Up` arrow recalls: all projects by default; `repo` also spans linked worktrees.      |
+| `history.scope`        | enum    | `global`        | `session`, `cwd`, `repo`, `global`. Which prompts the `Up` arrow recalls; all projects by default, `repo` spans linked worktrees. |
 | `history.searchScope`  | enum    | `global`        | Which scope `Ctrl+R` opens on; `Tab`/`Shift+Tab` change it inside the panel.                            |
 | `composer.recallClearedDrafts` | boolean | `true`          | Keep prompts cleared with `Ctrl+C` in the editor's local Up/Down history until exit.                    |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
