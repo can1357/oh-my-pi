@@ -82,6 +82,9 @@ services:
       ROBOMP_WORKSPACE_ROOT: /data/workspaces
       ROBOMP_SQLITE_PATH: /data/robomp.sqlite
       ROBOMP_LOG_DIR: /data/logs
+      # In-container bind MUST stay 0.0.0.0 — Docker's port forwarder dials the
+      # container's eth0 IP, so a container-loopback bind would be unreachable.
+      # Host-loopback isolation comes from the published-port pin below.
       ROBOMP_BIND_HOST: ${ROBOMP_BIND_HOST:-0.0.0.0}
       ROBOMP_BIND_PORT: ${ROBOMP_BIND_PORT:-8080}
       PI_ROOT: /work/pi
@@ -108,7 +111,7 @@ services:
       - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
       - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
     ports:
-      - "0.0.0.0:6543:8080"
+      - "127.0.0.1:6543:8080"
 
   # ───────────────────────────────────────────────────────────────────────────
   # gh-proxy

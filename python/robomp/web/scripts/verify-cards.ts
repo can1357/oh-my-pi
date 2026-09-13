@@ -845,7 +845,7 @@ async function main(): Promise<void> {
   let html = await resp.text();
   html = html.replace(
     /<script id="robomp-config" type="application\/json">[^<]*<\/script>/,
-    '<script id="robomp-config" type="application/json">{"replayEnabled":false,"replayToken":""}</script>'
+    '<script id="robomp-config" type="application/json">{"replayEnabled":false}</script>'
   );
   customIndexHtml = html;
 
@@ -987,17 +987,23 @@ async function main(): Promise<void> {
   await page.emulateMediaFeatures([]);
 
   // 8. Interactions (clicks).
-  // Serve a replay-enabled index with a KNOWN token so every privileged
-  // request carries an auditable `X-Robomp-Replay-Token: trigger-secret`
-  // header, independent of whatever token the live server was started with.
+  // Serve a replay-enabled index. The SPA no longer reads the token from the
+  // config blob — it resolves the credential via the token-gated
+  // /api/config at boot. Seed sessionStorage with a KNOWN token so every
+  // privileged request carries an auditable
+  // `X-Robomp-Replay-Token: trigger-secret` header, independent of whatever
+  // token the live server was started with.
   const REPLAY_TOKEN = "trigger-secret";
   const replayResp = await fetch(BASE_URL);
   const replayHtml = (await replayResp.text()).replace(
     /<script id="robomp-config" type="application\/json">[^<]*<\/script>/,
-    `<script id="robomp-config" type="application/json">{"replayEnabled":true,"replayToken":"${REPLAY_TOKEN}"}</script>`,
+    '<script id="robomp-config" type="application/json">{"replayEnabled":true}</script>',
   );
   customIndexHtml = replayHtml;
   statusMock = populatedStatus;
+  await page.evaluateOnNewDocument((token: string) => {
+    sessionStorage.setItem("robomp-replay-token", token);
+  }, REPLAY_TOKEN);
   await page.goto(BASE_URL, { waitUntil: "networkidle0" });
   await applyTheme("dark");
 
