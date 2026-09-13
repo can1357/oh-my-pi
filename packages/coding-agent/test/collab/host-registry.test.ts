@@ -503,8 +503,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		const originalEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
 		let held = false;
 		const encrypt = spyOn(crypto.subtle, "encrypt").mockImplementation(async (algorithm, key, data) => {
-			const frame: CollabFrame = JSON.parse(new TextDecoder().decode(data));
-			if (!held && frame.t === "event") {
+			if (!held) {
 				held = true;
 				sealing.resolve();
 				await release.promise;
