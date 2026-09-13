@@ -1,0 +1,10 @@
+auth "exllamav3" {
+	name "ExLlamaV3 (TabbyAPI, Local OpenAI-compatible)"
+	env "EXLLAMAV3_API_KEY"
+	login "api-key" {
+		auth-url "https://github.com/theroyallab/tabbyAPI"
+		instructions "Start TabbyAPI with an ExLlamaV3 model and paste the API key from its api_tokens.yml (default base URL: http://127.0.0.1:5000/v1; set EXLLAMAV3_BASE_URL to customize). Leave empty for local no-auth mode (disable_auth: true in config.yml)."
+		prompt "Paste your TabbyAPI API key (optional for local no-auth)" placeholder="exllamav3-local"
+		empty-fallback "exllamav3-local"
+	}
+}

@@ -20,7 +20,7 @@ describe("models.json local-endpoint leak guard (regression)", () => {
 
 	// Providers whose default endpoint is the local machine. They must never
 	// appear as a top-level key in the bundled catalog.
-	const LOCAL_ONLY_PROVIDERS = ["ollama", "vllm", "lm-studio", "litellm"] as const;
+	const LOCAL_ONLY_PROVIDERS = ["ollama", "vllm", "lm-studio", "litellm", "exllamav3"] as const;
 
 	it("does not bundle any local-only provider block", () => {
 		const leaked = LOCAL_ONLY_PROVIDERS.filter(provider => provider in catalog);

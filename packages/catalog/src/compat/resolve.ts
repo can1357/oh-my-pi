@@ -229,6 +229,7 @@ const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	"lm-studio": true,
 	vllm: true,
 	ollama: true,
+	exllamav3: true,
 };
 const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true };
 function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {

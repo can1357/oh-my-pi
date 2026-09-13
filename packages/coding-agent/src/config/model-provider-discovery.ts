@@ -29,9 +29,14 @@ for (const providerId of [
 export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD);
 
 // Sentinels for local-only OAuth tokens — declared inline to avoid loading
-// provider modules at startup. Must match the llama-cpp, lm-studio, and vllm
-// auth rules in packages/catalog/src/compat/rules/auth/.
-const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
+// provider modules at startup. Must match the llama-cpp, lm-studio, vllm, and
+// exllamav3 auth rules in packages/catalog/src/compat/rules/auth/.
+const LOCAL_PROVIDER_PLACEHOLDERS: Record<string, true> = {
+	"llama-cpp-local": true,
+	"lm-studio-local": true,
+	"vllm-local": true,
+	"exllamav3-local": true,
+};
 
 /**
  * Hard bound for extension-provided fetchDynamicModels to prevent indefinite hangs
@@ -52,7 +57,7 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 }
 
 export function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
-	return isAuthenticated(apiKey) && !LOCAL_PROVIDER_PLACEHOLDERS.has(apiKey);
+	return isAuthenticated(apiKey) && LOCAL_PROVIDER_PLACEHOLDERS[apiKey] !== true;
 }
 
 /**

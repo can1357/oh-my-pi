@@ -18,6 +18,7 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"llama.cpp",
 	"lm-studio",
 	"vllm",
+	"exllamav3",
 	"openai-codex-device",
 	// Public gateway discovery via charmHyperModelManagerOptions: every row,
 	// including its tariff and effort ladder, comes from the live /v1/models

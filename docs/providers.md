@@ -152,6 +152,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
+| `exllamav3`                      | `EXLLAMAV3_API_KEY` (TabbyAPI key from `api_tokens.yml`)                      |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
 | `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
 
