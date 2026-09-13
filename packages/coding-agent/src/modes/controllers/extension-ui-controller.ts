@@ -164,20 +164,61 @@ export class ExtensionUiController {
 			return; // No hooks loaded
 		}
 
+		// session_start and resources_discover handlers share this action context, so
+		// a handler calling sendMessage/sendUserMessage starts an async session send
+		// the action itself never exposes a promise for. Track every such send so it
+		// can be drained before this call returns — mirrors runtime-init.ts's
+		// `pendingExtensionSends` (print/RPC modes) and acp-agent.ts's equivalent
+		// queue; the TUI startup path previously had no tracking at all, so a
+		// session_start-triggered send could still be in flight when the caller
+		// issued the first prompt (PR #9379 review).
+		const pendingExtensionSends: Promise<unknown>[] = [];
+		const drainPendingExtensionSends = async (): Promise<void> => {
+			while (pendingExtensionSends.length > 0) {
+				await Promise.all(pendingExtensionSends.splice(0));
+			}
+		};
+		// A `session_start` handler can call sendMessage/sendUserMessage
+		// synchronously, starting the underlying session call — and, for a
+		// triggered turn, its system prompt read — before
+		// `discoverStartupSkillPaths()` below has folded any extension-contributed
+		// skill directories into the snapshot. Gate every `session_start`-originated
+		// dispatch on discovery completing (mirrors runtime-init.ts's
+		// `discoveryGate`); `resources_discover`'s own handler sends bypass the gate
+		// once discovery is underway, avoiding a self-deadlock.
+		let discoveryInFlight = false;
+		let releaseDiscoveryGate!: () => void;
+		const discoveryGate = new Promise<void>(resolve => {
+			releaseDiscoveryGate = resolve;
+		});
+		const afterDiscovery = <T>(dispatch: () => Promise<T>): Promise<T> =>
+			discoveryInFlight ? dispatch() : discoveryGate.then(dispatch);
+
 		const actions: ExtensionActions = {
 			sendMessage: (message, options) => {
 				const wasStreaming = this.ctx.session.isStreaming;
 				const normalized = normalizeCustomMessagePayload(message);
-				this.ctx.session
-					.sendCustomMessage(normalized, options)
-					.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
-					.catch((err: unknown) => {
-						this.ctx.showError(
-							`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`,
-						);
-					});
+				const sendTask = afterDiscovery(() => this.ctx.session.sendCustomMessage(normalized, options));
+				pendingExtensionSends.push(
+					sendTask
+						.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
+						.catch((err: unknown) => {
+							this.ctx.showError(
+								`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`,
+							);
+						}),
+				);
 			},
-			sendUserMessage: this.#sendExtensionUserMessage,
+			sendUserMessage: (content, options) => {
+				const sendTask = afterDiscovery(() => this.ctx.session.sendUserMessage(content, options));
+				pendingExtensionSends.push(
+					sendTask.catch((err: unknown) => {
+						this.ctx.showError(
+							`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}),
+				);
+			},
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},
@@ -318,8 +359,16 @@ export class ExtensionUiController {
 		// resources_discover fires after `session_start` (extensibility/extensions/types.ts) —
 		// only now are runtime actions and the error listener above wired, so
 		// extension-contributed skill directories are folded into the session's
-		// skill snapshot before the first prompt.
+		// skill snapshot before any session_start-triggered send actually
+		// dispatches (the `discoveryGate` above), and before the first prompt.
+		discoveryInFlight = true;
 		await this.ctx.session.discoverStartupSkillPaths();
+		releaseDiscoveryGate();
+		// A session_start handler's sendMessage/sendUserMessage call, and any
+		// resources_discover handler's own send, share this action context and
+		// never expose their promise to the caller — drain both here so every
+		// extension-triggered send is settled before this call returns.
+		await drainPendingExtensionSends();
 	}
 
 	/**
