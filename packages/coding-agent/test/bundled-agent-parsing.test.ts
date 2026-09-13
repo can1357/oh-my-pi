@@ -54,7 +54,7 @@ describe("bundled agent parsing", () => {
 
 		const agent = getBundledAgent("reviewer");
 		expect(agent?.thinkingLevel).toBeUndefined();
-		const patterns = resolveAgentModelPatterns({ agentModel: agent?.model, settings });
+		const patterns = resolveAgentModelPatterns({ agentModel: agent?.model, settings, availableModels: [gpt55] });
 		const resolved = resolveModelOverride(patterns, registry, settings);
 		expect(resolved.model?.provider).toBe("openai-codex");
 		expect(resolved.model?.id).toBe("gpt-5.5");
@@ -83,7 +83,7 @@ describe("bundled agent parsing", () => {
 			["reviewer", "slow", "codex/sol"],
 		] as const) {
 			const agent = getBundledAgent(name);
-			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings })).toEqual({
+			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings, availableModels: [] })).toEqual({
 				patterns: [model],
 				role,
 			});

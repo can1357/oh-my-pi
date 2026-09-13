@@ -155,6 +155,27 @@ function splitThinkingSuffix(
 	return level ? { base: pattern.slice(0, colonIdx), level } : { base: pattern };
 }
 
+/**
+ * Whether the WHOLE `provider/id` value is a shipped model id.
+ *
+ * Every caller that reads a trailing `:<effort>` as a thinking selector has to
+ * ask this FIRST. A real id can end in an effort name — `nanogpt/coding-router`
+ * ships alongside `nanogpt/coding-router:low` — so splitting the suffix off and
+ * then asking about the stripped base answers a question about a DIFFERENT
+ * model. Answered in that order the check reports `true` for a plain selector
+ * over a shipped model, and the suffix gets read as thinking on an identity the
+ * saved value never named.
+ *
+ * A caller with no catalog predicate gets `false`: it cannot prove the id is
+ * literal, and the suffix stays a selector.
+ */
+function isWholeLiteralModelId(value: string, isLiteralModelId?: (provider: string, id: string) => boolean): boolean {
+	if (isLiteralModelId === undefined) return false;
+	const slashIdx = value.indexOf("/");
+	if (slashIdx <= 0) return false;
+	return isLiteralModelId(value.slice(0, slashIdx), value.slice(slashIdx + 1)) === true;
+}
+
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
 	const glob = new Bun.Glob(pattern.toLowerCase());
 	return availableModels.filter(model => {
@@ -214,17 +235,18 @@ export function parseModelString(
 	if (slashIdx <= 0) return undefined;
 	const id = modelStr.slice(slashIdx + 1);
 	const provider = modelStr.slice(0, slashIdx);
-	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
+	// A literal id can END in an effort name, so a caller that can prove this
+	// whole `provider/id` is shipped settles it before any split: stripping
+	// first would name a different model and invent a thinking level the value
+	// never carried.
+	if (options?.isLiteralModelId?.(provider, id) === true) return { provider, id };
+	// Strip strict thinking level suffixes (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
 	const strict = splitThinkingSuffix(id);
 	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
 	// `max` is a real thinking level, but real model IDs can also end in
-	// `:max`. Context-aware callers pass a literal lookup so those models win.
+	// `:max`. Those already won above, so a `:max` reaching here is a selector.
 	const maxAlias = splitThinkingSuffix(id, -1, options);
-	if (maxAlias.level) {
-		return options?.isLiteralModelId?.(provider, id) === true
-			? { provider, id }
-			: { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
-	}
+	if (maxAlias.level) return { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
 	return { provider, id };
 }
 
@@ -1059,7 +1081,7 @@ export function parseModelPattern(
 	);
 }
 
-const DEFAULT_MODEL_ROLE = "default";
+export const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
 export interface ModelRoleLookup {
@@ -1121,12 +1143,73 @@ export function resolveExplicitModelRole(
 	return undefined;
 }
 
+/**
+ * True when a model selector is a self alias for the default role — the bare
+ * `default` sentinel, or one of its alias spellings (`*`, `@default`,
+ * `pi/default`) optionally carrying a thinking suffix (`*:low`,
+ * `@default:xhigh`). All of them name the default role rather than a model, so
+ * {@link resolveModelRoleValue} resolves them to nothing. Callers deciding
+ * whether `modelRoles.default` actually SETS a model must ask here rather than
+ * re-spelling the list: a second copy is what let `*` and `@default` count as a
+ * configured model while the bare sentinel did not.
+ */
+export function isDefaultModelRoleSelfAlias(value: string): boolean {
+	return parseDefaultModelRoleSelfAlias(value) !== undefined;
+}
+
+/**
+ * Parse a default-role self alias into its base spelling and thinking suffix,
+ * or `undefined` when the value is not a self alias.
+ *
+ * A self alias names no model, but a suffixed one (`*:xhigh`) still names the
+ * THINKING knob — and {@link resolveModelRoleValue} cannot report it, because
+ * the circular selector resolves to no model and so to
+ * `explicitThinkingLevel: false`. Callers applying config per knob read `level`
+ * from here so `--reapply-config` keeps the session's model while adopting the
+ * requested tier.
+ *
+ * The suffix is split off the ALIAS spellings only, with the same prefix-aware
+ * split {@link resolveExplicitModelRole} uses, because the alias parser accepts
+ * a suffixed alias as the default role. Comparing the unsplit value would call
+ * `*:low` a concrete model knob: `--reapply-config` would then take the "config
+ * named a model" path, fail to resolve the circular selector, warn about a
+ * broken default, and drop the requested tier.
+ *
+ * An `inherit` suffix (`*:inherit`) is reported as NO level. `inherit` is the
+ * spelling for "name no thinking knob", so materializing it would make callers
+ * treat it as an explicit selection: the spawned agent's level would be marked
+ * explicit and win over the agent definition's own default, and startup would
+ * then map `inherit` to no provider effort — suppressing the default reasoning
+ * that the selector asked to inherit. Matches `parseCliThinkingLevel`, which
+ * drops an explicit `--thinking inherit` for the same reason.
+ *
+ * The bare `default` sentinel takes no suffix, matching what
+ * {@link resolveModelRoleValue} reserves: only the exact unsuffixed string
+ * short-circuits there, because `default` is also a real model id
+ * (`cursor/default`), so `default:low` resolves as that model at low. Splitting
+ * the suffix off the bare spelling too would call a resolvable selector a
+ * sentinel — `--reapply-config` would retain the session model instead of
+ * adopting the config-resolved one, and an agent definition using the selector
+ * would inherit the parent's model.
+ */
+export function parseDefaultModelRoleSelfAlias(
+	value: string,
+): { base: string; level?: ConfiguredThinkingLevel } | undefined {
+	if (value === DEFAULT_MODEL_ROLE) return { base: value };
+	const prefixLength = modelRoleAliasPrefixLength(value);
+	if (prefixLength === undefined) return undefined;
+	const split = splitThinkingSuffix(value, prefixLength, MAX_THINKING_SUFFIX_OPTIONS);
+	const isAliasSpelling =
+		split.base === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
+		split.base === DEFAULT_MODEL_ROLE_ALIAS ||
+		split.base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}`;
+	if (!isAliasSpelling) return undefined;
+	return split.level === ThinkingLevel.Inherit ? { base: split.base } : split;
+}
+
 function isSessionInheritedAgentPattern(value: string): boolean {
 	return (
-		value === DEFAULT_MODEL_ROLE ||
-		value === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
-		value === DEFAULT_MODEL_ROLE_ALIAS ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}` ||
+		isDefaultModelRoleSelfAlias(value) ||
 		value === formatModelRoleAlias("task") ||
 		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 	);
@@ -1291,11 +1374,72 @@ export interface AgentModelPatternResolutionOptions {
 	settings?: Settings;
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
+	/**
+	 * Catalog used to tell a literal model id from a thinking selector when a
+	 * suffixed self alias re-tiers the inherited pattern.
+	 *
+	 * Required, and deliberately not defaulted: neither answer is safe to guess.
+	 * Assuming "no literal ids" rewrites the suffix of an inherited real id
+	 * (`nanogpt/coding-router:low`), selecting a DIFFERENT model; assuming
+	 * "always literal" suppresses the re-tiering a suffixed alias exists to
+	 * perform. A caller genuinely without a catalog passes `[]`, which reads as
+	 * the explicit choice it is — an omission would silently disable the guard
+	 * on whichever spawn path forgot it.
+	 */
+	availableModels: readonly Model<Api>[];
 }
 
 interface EffectiveAgentModelSelection {
 	source?: string | string[];
 	patterns: string[];
+}
+
+/**
+ * Re-attach an explicitly requested thinking level to already-resolved model
+ * patterns, replacing any selector level the pattern already carried.
+ *
+ * A pattern that is itself a LITERAL model id keeps its suffix and gets the
+ * requested level APPENDED instead. The split below keeps `:max`/`:auto`
+ * attached, but every other effort name is a plain concrete level, so a real id
+ * ending in one (`nanogpt/coding-router:low`) is indistinguishable from a
+ * selector by shape alone. REPLACING its suffix would not re-tier that model —
+ * it would name a DIFFERENT one (the bare `coding-router` at the new level), or
+ * nothing at all when no such id exists. Dropping the level instead preserves
+ * identity but silently discards the tier the suffixed alias exists to request.
+ * Appending keeps both: `nanogpt/coding-router:low:xhigh` resolves through the
+ * recursive pattern parser to the `coding-router:low` id at `xhigh`, because
+ * that parser matches the full pattern exactly before splitting a suffix, and
+ * on a miss strips the trailing level and recurses onto the literal id.
+ *
+ * The test is whether the WHOLE pattern is a shipped id — see
+ * {@link isWholeLiteralModelId} for why a suffix-stripped base answers for a
+ * different model.
+ *
+ * The catalog is a required parameter, not an option: an empty catalog and an
+ * absent one produce different selections, and the absent spelling is the one
+ * that silently drops the guard.
+ */
+function withThinkingSuffix(
+	patterns: string[],
+	level: ConfiguredThinkingLevel,
+	availableModels: readonly Model<Api>[],
+): string[] {
+	return patterns.map(pattern => {
+		const split = splitThinkingSuffix(pattern);
+		// Only a pattern the split would actually TRUNCATE is ambiguous. With no
+		// trailing effort name there is nothing to reinterpret, so the level
+		// replaces nothing and is simply appended — consulting the catalog here
+		// would cost a scan to reach the same string.
+		if (
+			split.level !== undefined &&
+			isWholeLiteralModelId(pattern, (provider, id) =>
+				availableModels.some(model => model.provider === provider && model.id === id),
+			)
+		) {
+			return `${pattern}:${level}`;
+		}
+		return `${split.base}:${level}`;
+	});
 }
 
 function resolveEffectiveAgentModelSelection(
@@ -1329,7 +1473,16 @@ function resolveEffectiveAgentModelSelection(
 
 	const fallback =
 		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	const fallbackPatterns = resolveConfiguredModelPatterns(fallback, settings);
+	// A self alias names no model, so the agent inherits the session's — but a
+	// SUFFIXED one (`*:xhigh`) still names the thinking knob, and the inherited
+	// pattern carries none of it. Re-apply the requested level here or the
+	// spawned agent silently runs at whatever tier the session happened to be
+	// on. `@task` is deliberately excluded: its suffixed spellings are not
+	// session-inherited in the first place.
+	const requestedLevel = singleAgentPattern ? parseDefaultModelRoleSelfAlias(singleAgentPattern)?.level : undefined;
+	if (requestedLevel === undefined) return { patterns: fallbackPatterns };
+	return { patterns: withThinkingSuffix(fallbackPatterns, requestedLevel, options.availableModels) };
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
@@ -1346,6 +1499,26 @@ export interface AgentModelSelection {
  * inherited retry-fallback chain is keyed off the role, which the expansion
  * discards, and deriving the two halves separately is how they drift apart.
  */
+/**
+ * The catalog an inherited model pattern is classified against: the registry's
+ * available projection, plus the session's ACTIVE model when that projection
+ * omits it.
+ *
+ * `ModelRegistry.getAvailable()` answers from the registry's own auth storage,
+ * so a session that pinned a model directly and supplies its credentials
+ * separately (the SDK's `options.model` + `options.getApiKey`) need not appear
+ * in it. Classification is the only thing this catalog decides, and a model the
+ * session is demonstrably RUNNING is a literal id however its key arrived — so
+ * an active id ending in an effort name (`nanogpt/coding-router:low`) must not
+ * read as a selector and be rewritten into a different model.
+ */
+export function modelCatalogForClassification(available: Model<Api>[] | undefined, active: Model | undefined): Model[] {
+	const catalog = available ?? [];
+	if (!active) return catalog;
+	if (catalog.some(model => model.provider === active.provider && model.id === active.id)) return catalog;
+	return [...catalog, active];
+}
+
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
 	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
 	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
@@ -1488,11 +1661,6 @@ interface ExplicitThinkingSelectorOptions {
 	isLiteralModelId?: (provider: string, id: string) => boolean;
 }
 
-function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
-	const parsed = parseModelString(value);
-	return parsed !== undefined && options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
-}
-
 export function extractExplicitThinkingSelector(
 	value: string | undefined,
 	settings?: Settings,
@@ -1506,16 +1674,24 @@ export function extractExplicitThinkingSelector(
 	let current = normalized;
 	while (!visited.has(current)) {
 		visited.add(current);
-		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		const roleAliasPrefixLength = modelRoleAliasPrefixLength(current);
+		const rolePrefixLength = roleAliasPrefixLength ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		// A role alias carries a selector by definition (`@smol:high`), so its
+		// suffix is never part of a model id. Everything else is a model
+		// selector, and a shipped id may END in an effort name — so ask the
+		// catalog about the whole value before reading any suffix off it,
+		// strict levels included. `:low` on `nanogpt/coding-router:low` is
+		// identity, not thinking, and a suffix-stripped base would answer for a
+		// different model entirely.
+		if (roleAliasPrefixLength === undefined && isWholeLiteralModelId(current, options?.isLiteralModelId)) {
+			return undefined;
+		}
 		const strictSelector = splitThinkingSuffix(current, rolePrefixLength).level;
 		if (strictSelector) {
 			return strictSelector;
 		}
 		const maxSelector = splitThinkingSuffix(current, rolePrefixLength, MAX_THINKING_SUFFIX_OPTIONS).level;
-		if (
-			maxSelector &&
-			(modelRoleAliasPrefixLength(current) !== undefined || !isLiteralModelSelector(current, options))
-		) {
+		if (maxSelector) {
 			return maxSelector;
 		}
 		const expanded = expandRoleAlias(current, settings).trim();

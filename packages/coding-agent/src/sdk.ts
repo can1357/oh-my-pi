@@ -8,7 +8,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
-	type ThinkingLevel,
+	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -70,6 +70,9 @@ import {
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	isDefaultModelRoleSelfAlias,
+	normalizeModelPatternList,
+	parseDefaultModelRoleSelfAlias,
 	parseModelPattern,
 	parseModelString,
 	pickDefaultAvailableModel,
@@ -77,10 +80,11 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	type ResolvedModelRoleValue,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
-import { buildServiceTierByFamily } from "./config/service-tier";
+import { buildServiceTierByFamily, SERVICE_TIER_FAMILIES } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
@@ -432,6 +436,22 @@ export interface CreateAgentSessionOptions {
 	 * of re-deriving tiers from settings.
 	 */
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
+	/**
+	 * On resume, adopt the config-resolved default model, its thinking level, and
+	 * service tier instead of restoring the values baked into the session on its
+	 * original launch. Default (unset/false) preserves the resume behavior of
+	 * keeping the session's own model/thinking/tier, so a bare resume never yanks
+	 * a conversation off the model it was running. Set by the CLI `--reapply-config`
+	 * flag; SDK embedders (e.g. Compass) pass it to re-apply an updated profile on
+	 * resume. No-op on a fresh session, which already starts from config.
+	 *
+	 * Model and thinking are gated on there being no explicit `--model`: passing
+	 * `--model` pins those two and config does not override them. The service tier
+	 * is independent of `--model` — it re-applies per family regardless (a family
+	 * the config does not name keeps the session's), and the dedicated
+	 * `openAIServiceTier` / `--service-tier` override still wins over it.
+	 */
+	reapplyConfig?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -680,7 +700,19 @@ export interface CreateAgentSessionResult {
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 	/** MCP manager for server lifecycle management (undefined if MCP disabled) */
 	mcpManager?: MCPManager;
-	/** Warning if session was restored with a different model than saved */
+	/**
+	 * A model-selection notice surfaced to the user, and a warning by default: a
+	 * session that could not be restored on its saved model, a broken config
+	 * default, or an unresolved double failure all arrive here.
+	 *
+	 * Only one shape is informational — a clean `--reapply-config` adoption, which
+	 * is prefixed `"--reapply-config: resumed on "`. The bare `--reapply-config:`
+	 * prefix is NOT the discriminator: the broken-default and double-failure
+	 * notices share it and are genuine warnings. Callers that distinguish severity
+	 * should match the adoption prefix specifically, or reuse
+	 * {@link buildModelFallbackNotification}, which is the one place this rule
+	 * lives.
+	 */
 	modelFallbackMessage?: string;
 	/** LSP servers detected for startup; warmup may continue in the background */
 	lspServers?: LspStartupServerInfo[];
@@ -1463,6 +1495,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
 		options.thinkingLevel !== undefined ||
+		options.reapplyConfig === true ||
 		options.systemPrompt !== undefined ||
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
@@ -1548,6 +1581,91 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			matchPreferences: modelMatchPreferences,
 		}),
 	);
+	// `--reapply-config` (options.reapplyConfig) adopts the config-resolved default over
+	// the session's baked value ON A PER-KNOB BASIS: a knob is adopted only when
+	// config actually specifies it, otherwise the session's own value is kept.
+	// For the model that means config must NAME a default role. Mirror the
+	// resolver's own notion of "no default" (model-resolver.ts: a blank value or
+	// a default-role self alias resolves to nothing): a tombstoned/absent
+	// `modelRoles.default`, an empty string, or a self alias — `default`, `*`,
+	// `@default`, `pi/default` (an overlay that only retunes a non-default role,
+	// or only a tier) is NOT a config default, so the session model is retained
+	// rather than discarded onto an arbitrary fallback. The alias spellings come
+	// from `isDefaultModelRoleSelfAlias`, never a second list here: a copy that
+	// drifts is how `*` once counted as a configured model.
+	const normalizedDefaultRole = defaultRoleValue?.trim();
+	// Classified PER PATTERN, never as one string: `Settings.getModelRole()`
+	// flattens a YAML/comma list into `"*,@default"`, which matches no alias
+	// spelling, so an all-self-alias fallback list read as a real configured
+	// default. Startup then skipped the session restore and reported a broken
+	// config default instead of retaining the session model. `*` counting as a
+	// configured model is the same bug this code already carries a note about;
+	// the list shape is the second instance. Reuses the resolver's own
+	// normalizer so the split cannot drift from how the value is parsed.
+	const defaultRolePatterns = normalizeModelPatternList(normalizedDefaultRole);
+	// Or a self-alias-only list that nonetheless RESOLVED. The sentinel that
+	// makes `default` name no model is applied to the whole unsplit role value,
+	// so a `default` sitting inside a list is matched like any other selector —
+	// and with Cursor credentials the bundled `cursor/default` is a real
+	// available model, so `"default,@default"` resolves to it. Classifying by
+	// spelling alone then called that "no config default" and restored the
+	// session model over a model config genuinely resolved.
+	//
+	// Keyed on what the resolver REACHED, the same rule the thinking suffix
+	// takes above: a spec carrying a model is a configured default whatever its
+	// patterns are spelled like.
+	//
+	// Evaluated on every read, not captured once: `defaultRoleSpec` is
+	// re-resolved after late-registering extension providers appear, and one of
+	// those can be the model an all-self-alias list names — so the answer changes
+	// mid-startup. A captured `false` outlived the registration that disproved it
+	// and handed the resume to the baked-model fallback, which then made the
+	// post-registration retry unreachable because a model was already set.
+	const hasConfigDefaultRole = (): boolean =>
+		defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern)) || defaultRoleSpec.model !== undefined;
+	// A self alias sets no model but a suffixed one (`*:xhigh`) still names the
+	// THINKING knob. `resolveModelRoleValue` cannot report it — the circular
+	// selector resolves to no model, hence `explicitThinkingLevel: false` — so
+	// read the suffix off the raw role value. Without this the per-knob thinking
+	// path sees "config names no thinking knob" and restores the session's baked
+	// level, dropping the tier the user asked `--reapply-config` to apply.
+	// Same reason a list has to be split: a suffixed self alias inside one
+	// (`["*:xhigh", "@default"]`) still names the thinking knob, and the
+	// flattened string parses as neither.
+	//
+	// Only when no concrete candidate RESOLVED, though. A self alias names no
+	// model, so in `["anthropic/claude-sonnet-4-5", "*:low"]` the concrete entry
+	// wins and the `low` belongs to a fallback that was never selected — reading
+	// it anyway ran the chosen model at the loser's level.
+	//
+	// Keyed on what the resolver reached, not on what config listed: with
+	// `missing/model,*:low` the concrete candidate is configured but resolves to
+	// nothing, so `*:low` IS the reached fallback and its suffix is the live
+	// knob. Testing "was a concrete pattern configured" suppressed it there.
+	// Read lazily — `defaultRoleSpec` is re-resolved once late-registering
+	// extension providers appear, which can turn an unresolved candidate into a
+	// resolved one.
+	//
+	// The FIRST alias in the list, not the first one carrying a suffix. A bare
+	// `*` is itself a reached fallback that names no thinking knob, so in
+	// `missing/model,*,*:low` the bare `*` wins and the session keeps its own
+	// level; skipping to the later `*:low` applied a suffix from a fallback
+	// resolution never reached.
+	// Set by `pickInitialThinkingLevel`, which owns the precedence this answers:
+	// whether its single read of `restoredSessionThinkingLevel` can be reached at
+	// all. Read by the saved-suffix reparse, whose whole purpose is correcting
+	// that value.
+	let savedSuffixIsReadable = true;
+	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined => {
+		if (spec.model) return undefined;
+		for (const pattern of defaultRolePatterns) {
+			const alias = parseDefaultModelRoleSelfAlias(pattern);
+			if (alias) return alias.level;
+		}
+		return undefined;
+	};
+	const adoptConfigModel = (): boolean =>
+		Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole();
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
@@ -1555,14 +1673,40 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// initial pass here so model-dependent setup (thinking-level resolution,
 	// host preconnect) can use the restored model; extension-registered
 	// providers aren't visible yet, so we retry the preferred candidates once
-	// extensions register below.
-	const sessionModelStrings =
-		!hasExplicitModel && hasExistingSession
-			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
-			: [];
+	// extensions register below. Under `--reapply-config` the config default wins
+	// first (the early restore + reclaim below are skipped), but these stay the
+	// fallback for when the config default resolves to nothing — a resume must
+	// never be yanked onto an arbitrary pick.
+	const savedSessionModelStrings = hasExistingSession
+		? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
+		: [];
+	// Every identity consumer below is already gated on `!hasExplicitModel` or
+	// on `adoptConfigModel`, which is itself `!hasExplicitModel` — so the saved
+	// selectors are read for identity only when no `--model` pinned one. The
+	// thinking suffix is parsed separately just below, which is why the list is
+	// collected regardless of the pin.
+	const sessionModelStrings = savedSessionModelStrings;
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
-	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
+	// A saved model selector carries TWO knobs: the model identity and its
+	// thinking suffix. The identity walk below is the only other place that
+	// suffix is read, so a resume that skips the walk — adopting the config
+	// model, or pinning one with `--model` — must parse the suffix here or lose
+	// the knob. Without this a session whose only thinking selection lives in
+	// the selector (a legacy `model_change` of `provider/model:xhigh` with no
+	// `thinking_level_change`) silently drops to the selected model's own
+	// default, though nothing named a thinking knob to replace it with: config
+	// cannot (it named none), and `--model` pins identity only. Index 0 is the
+	// last-active selector, which is the session's current choice; the identity
+	// walk has no chosen index here.
+	if ((adoptConfigModel() || hasExplicitModel) && savedSessionModelStrings.length > 0) {
+		restoredSessionThinkingLevel = parseModelString(savedSessionModelStrings[0], {
+			allowMaxSuffix: true,
+			allowAutoAlias: true,
+			isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+		})?.thinkingLevel;
+	}
+	if (!hasExplicitModel && !adoptConfigModel() && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
@@ -1602,6 +1746,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			model = settingsDefaultModel;
 		});
 	}
+	// The early role resolution above ran before extension factories registered
+	// their providers (and before any cold discovery pass), so an ordered
+	// `modelRoles.default` list whose FIRST candidate lives behind such a
+	// provider resolved to a later, already-available candidate. Under
+	// `--reapply-config` that model is adopted immediately, which would leave
+	// `model` non-null and skip the post-registration retry below — resuming on
+	// the lower-priority configured fallback instead of the first configured
+	// model. Remember that the early match was not the first candidate so the
+	// retry runs anyway once providers are registered.
+	//
+	// And the mirror case: an all-self-alias list that has not resolved YET
+	// classifies as "no config default", so the baked model is restored and
+	// `model` is non-null for the same reason — but here the retry is what would
+	// have proved the classification wrong, since the model the list names can be
+	// registered by an extension later. Retry whenever `--reapply-config` names a
+	// default that has not been adopted, and let the re-resolution decide.
+	const reResolveConfigDefault = (): boolean => {
+		if (hasExplicitModel || !options.reapplyConfig) return false;
+		if (!settings.getModelRole("default")) return false;
+		if (!adoptConfigModel()) return true;
+		return model !== undefined && (defaultRoleSpec.matchedPatternIndex ?? 0) > 0;
+	};
 
 	const taskDepth = options.taskDepth ?? 0;
 
@@ -1612,17 +1778,76 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// role reclaim so the final model's own defaults aren't masked by an earlier
 	// fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
+		// Adopt the config thinking level over the session's baked one whenever
+		// config actually NAMES that knob — either as an explicit selector on the
+		// default role (`:xhigh`) or as a global `defaultThinkingLevel`. Thinking
+		// is a knob of its own, so this must not be coupled to the role carrying a
+		// suffix; config that sets only `defaultThinkingLevel` still specifies the
+		// level, and `--reapply-config` must honor it. With config naming no
+		// thinking knob at all the session's own entry is kept, so the flag never
+		// silently moves the level onto a bare model default. A self-aliased
+		// default (`*:xhigh`) names the knob too, via `selfAliasThinkingLevel`:
+		// it resolves to no model, so `defaultRoleSpec` never reports its suffix.
+		// `defaultRoleSpec` is read live — it is re-resolved post-extension for
+		// role models that register late.
+		//
+		// `inherit` is the spelling for "name no thinking knob", so a resolved
+		// selector carrying it (`anthropic/claude-sonnet-4-5:inherit`, `@slow:inherit`)
+		// names none either — even though it resolves to a model and therefore
+		// reports `explicitThinkingLevel`. Counting it would skip the session's
+		// persisted level and then resolve `inherit` to no provider effort,
+		// disabling the reasoning the selector asked to inherit. The self-alias
+		// path already drops it in `parseDefaultModelRoleSelfAlias`; this is the
+		// same rule for the resolved-role spelling.
+		const configRoleThinkingLevel =
+			defaultRoleSpec.explicitThinkingLevel && defaultRoleSpec.thinkingLevel !== ThinkingLevel.Inherit
+				? defaultRoleSpec.thinkingLevel
+				: undefined;
+		const selfAliasThinkingLevel = selfAliasThinkingLevelFor(defaultRoleSpec);
+		const hasConfigThinkingLevel =
+			configRoleThinkingLevel !== undefined ||
+			selfAliasThinkingLevel !== undefined ||
+			settings.isConfigured("defaultThinkingLevel");
+		const adoptConfigThinking = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigThinkingLevel;
+		// Every condition under which the ONE read of `restoredSessionThinkingLevel`
+		// below is unreachable. Recorded on the closure so the discovery fetch that
+		// exists only to correct that value can ask the same question instead of
+		// re-deriving a subset of it.
+		savedSuffixIsReadable = options.thinkingLevel === undefined && !hasThinkingEntry && !adoptConfigThinking;
 		let level = options.thinkingLevel;
-		if (level === undefined && hasExistingSession && hasThinkingEntry) {
+		if (level === undefined && hasExistingSession && hasThinkingEntry && !adoptConfigThinking) {
 			level =
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
 				parseThinkingLevel(existingSession.thinkingLevel);
 		}
-		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
+		// The saved selector's own suffix, the session's thinking choice when it
+		// recorded no `thinking_level_change` at all. Skipped under adoption:
+		// config naming the knob outranks the session's, and this branch sits
+		// ahead of the config selector below.
+		if (
+			level === undefined &&
+			!hasThinkingEntry &&
+			!adoptConfigThinking &&
+			restoredSessionThinkingLevel !== undefined
+		) {
 			level = restoredSessionThinkingLevel;
 		}
-		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
-			level = defaultRoleSpec.thinkingLevel;
+		// The default role's own explicit selector. A resolved role reports it via
+		// `defaultRoleSpec`; a self alias resolves to no model, so its suffix
+		// arrives through `selfAliasThinkingLevel` instead. Both are the same knob
+		// at the same precedence — ahead of the selected model's `defaultLevel`.
+		if (level === undefined && !hasExplicitModel && (!hasThinkingEntry || adoptConfigThinking)) {
+			if (configRoleThinkingLevel !== undefined) {
+				level = configRoleThinkingLevel;
+			} else if (selfAliasThinkingLevel !== undefined) {
+				level = selfAliasThinkingLevel;
+			}
+		}
+		// The role selector carries no `:level`, but config names the knob
+		// globally. Under adoption that configured value outranks the selected
+		// model's own `defaultLevel`, which would otherwise mask it.
+		if (level === undefined && adoptConfigThinking && settings.isConfigured("defaultThinkingLevel")) {
+			level = parseConfiguredThinkingLevel(settings.get("defaultThinkingLevel"));
 		}
 		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
 			level = selectedModel.thinking.defaultLevel;
@@ -2294,7 +2519,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// downstream fallback filling `model`). Reclaim it here so resume
 		// honors the last active role in either case.
 		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
-		if (!hasExplicitModel && sessionRetryLimit > 0) {
+		if (!hasExplicitModel && !adoptConfigModel() && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
 					const sessionModelStr = sessionModelStrings[i];
@@ -2358,6 +2583,90 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					);
 					restoreSessionModel();
 				}
+			}
+		}
+		// Counterpart for the branch the retry above excludes. The saved suffix is
+		// parsed early (before extensions load) whenever config or `--model`
+		// supplies the identity, and `isLiteralModelId` is answered by a registry
+		// that has no extension providers yet — so a saved id whose literal form
+		// ends in an effort name (`custom/router:low`) is not recognized whole and
+		// its trailing segment is misread as the session's thinking choice, then
+		// carried onto the config- or CLI-selected model. Re-parse now that the
+		// providers are registered; the predicate can finally see those ids.
+		if ((adoptConfigModel() || hasExplicitModel) && savedSessionModelStrings.length > 0) {
+			const savedSessionModelString = savedSessionModelStrings[0];
+			const reparseSavedSuffix = () =>
+				parseModelString(savedSessionModelString, {
+					allowMaxSuffix: true,
+					allowAutoAlias: true,
+					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+				});
+			let savedParse = reparseSavedSuffix();
+			// Registration alone is not visibility. A dynamic-only provider — an
+			// extension's `fetchDynamicModels`, or a models.yml `discovery:` — has
+			// no models until its catalog is fetched, and a cold start finds no
+			// cache row for the offline hydration above to load. So
+			// `isLiteralModelId` still answers no and the id is still split at its
+			// trailing `:low`. Only a split parse can be wrong this way, and only
+			// where a catalog exists to fetch: fetch that one provider (cache-aware
+			// and coalesced with any in-flight pass) and ask again. `hasProvider`
+			// is the predicate that covers BOTH halves — `getDiscoverableProviders`
+			// reports only the config-declared one, which would skip exactly the
+			// extension-registered provider this reparse exists for.
+			// Only when the reparsed suffix can still be READ. `pickInitialThinkingLevel`
+			// consults `restoredSessionThinkingLevel` at exactly one precedence step,
+			// itself gated on an unset `options.thinkingLevel` and no persisted
+			// `thinking_level_change` — both settled before this point and neither
+			// re-derived later. A resumed branch that already recorded its level, or
+			// a `--thinking` pin, therefore discards whatever this fetch would
+			// correct, and a cold dynamic provider charges the startup its full
+			// discovery timeout for a value nothing reads.
+			if (
+				savedSuffixIsReadable &&
+				savedParse?.thinkingLevel !== undefined &&
+				// `canRefreshProvider`, not `hasProvider`: a cold BUILT-IN manager
+				// provider (a configured vLLM endpoint) has neither live models nor a
+				// `discovery:` entry nor a runtime manager, so `hasProvider` says no
+				// while a scoped refresh would have fetched exactly the catalog that
+				// proves the id literal — and the split parse handed the chosen model
+				// the loser's `:low`.
+				modelRegistry.canRefreshProvider(savedParse.provider)
+			) {
+				const savedProvider = savedParse.provider;
+				// Coalescing covers configured `discovery:` providers only
+				// (`#discoverProviderModelsCoalesced`); the runtime and built-in
+				// managers an extension registers have no in-flight map, so a
+				// non-UI session that started the deferred pass above would fetch
+				// the same remote twice here and race its catalog and cache
+				// writes. Await the stashed promise first, exactly as the later
+				// fallback does — never `startRuntimeDiscovery()`, which would
+				// undo a UI session's deliberate deferral.
+				await runtimeDiscoveryPromise;
+				// And the SDK-built registry's own background refresh, which fetches
+				// these same built-in catalogs on a separate promise — the join the
+				// later discovery fallback already makes, for the same reason.
+				await modelRegistry.awaitBackgroundRefresh();
+				await logger.time("restoreSessionSuffixDiscoveryFallback", () =>
+					modelRegistry.refreshDiscoverableProviders(new Set([savedProvider]), "online-if-uncached"),
+				);
+				savedParse = reparseSavedSuffix();
+			}
+			restoredSessionThinkingLevel = savedParse?.thinkingLevel;
+			// The early parse already fed a WRONG level into `thinkingLevel` and
+			// `effectiveThinkingLevel`. Correcting only the restored value leaves
+			// the session running the misread one whenever `model` is already
+			// resolved here, since the later fallback recomputation is gated on
+			// `!model`. Re-pick from the corrected restored value.
+			thinkingLevel = pickInitialThinkingLevel(model);
+			autoThinking = thinkingLevel === AUTO_THINKING;
+			effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+			if (model) {
+				const reparsedModel = model;
+				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+					autoThinking
+						? resolveProvisionalAutoLevel(reparsedModel)
+						: resolveThinkingLevelForModel(reparsedModel, effectiveThinkingLevel),
+				);
 			}
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
@@ -2660,7 +2969,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Fall back to first available model with a valid API key, honoring the
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
 		// user explicitly requested a model via --model that wasn't found.
-		if (!model && deferredModelPatterns.length === 0) {
+		if ((!model || reResolveConfigDefault()) && deferredModelPatterns.length === 0) {
 			// Retry the configured default role against the current catalog,
 			// setting `model` (+ thinking level) when it resolves. Extension
 			// factories register providers AFTER the early `defaultRoleSpec`
@@ -2701,44 +3010,121 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return true;
 			};
 
+			// Cold-cache discovery race (issues #6114, #6162): a discovery provider
+			// (models.yml `openai-models-list`, LM Studio/Ollama/llama.cpp, or an
+			// openai-compat proxy) ships no static models, so the static+cached
+			// catalog above could not see the configured default at all — even
+			// though `omp models` (which awaits discovery) lists it. Background
+			// discovery in main.ts fires only AFTER createAgentSession returns.
+			// One cache-aware pass, at most, per session creation.
+			//
+			// The guard asks `hasRefreshableProviders()`, not
+			// `getDiscoverableProviders()`: an extension supplying the configured
+			// default through `fetchDynamicModels` registers a RUNTIME provider,
+			// which the config-declared list never reports. With every
+			// implicit/config provider absent or disabled that list is empty, so
+			// gating on it would skip `refresh()` — which does cover runtime
+			// managers — and hand the resume to the baked-model fallback below.
+			//
+			// A non-UI session already started that runtime pass above, so this
+			// path can be reached with a discovery over the very same runtime
+			// managers still in flight. Await it before refreshing: two concurrent
+			// passes fetch each extension's remote twice and race one another's
+			// catalog and cache writes. Awaiting also makes the refresh cheaper
+			// than it looks — by the time it runs, every runtime manager
+			// short-circuits on the cache the awaited pass just wrote, leaving
+			// only the config-discovery providers it alone covers to fetch. It is
+			// the stashed promise, never `startRuntimeDiscovery()`: a UI session
+			// deliberately has no pass running yet, and starting one here would
+			// undo the deferral that keeps discovery off the first frame.
+			let discoveryRefreshed = false;
+			const refreshDiscoveryOnce = async (): Promise<boolean> => {
+				if (discoveryRefreshed || !modelRegistry.hasRefreshableProviders()) return false;
+				discoveryRefreshed = true;
+				await runtimeDiscoveryPromise;
+				// And the background refresh startup kicked off for a registry the SDK
+				// built itself, which fetches the same built-in dynamic catalogs. It is
+				// a separate promise from the runtime pass, so awaiting only the latter
+				// left it in flight and the `refresh` below raced it — two concurrent
+				// requests for one catalog, both writing the cache. A no-op once it has
+				// settled, which is the common case by the time startup reaches here.
+				await modelRegistry.awaitBackgroundRefresh();
+				await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
+				return true;
+			};
+
 			await tryResolveDefaultRole();
 
+			// The configured default outranks BOTH lower-priority pickers below —
+			// the session's own baked model and the arbitrary availability pick —
+			// and each of those runs only while `model` is unset, so whichever
+			// fires first would permanently shadow the discovery retry. Take the
+			// cold-cache pass here, before either can claim `model`. It is also
+			// the only retry for an ordered role list whose FIRST candidate needs
+			// discovery: that leaves `model` set to the later candidate, which no
+			// `!model` guard downstream can revisit.
+			if (
+				!hasExplicitModel &&
+				Boolean(settings.getModelRole("default")) &&
+				// `reResolveConfigDefault()` also covers a `--reapply-config` default
+				// that has not been adopted at all, which includes an all-self-alias
+				// list still waiting on the provider that gives it a model. Without it
+				// the baked restore left `model` set at index 0 and this guard
+				// concluded there was nothing left to discover.
+				(!model || (defaultRoleSpec.matchedPatternIndex ?? 0) > 0 || reResolveConfigDefault()) &&
+				(await refreshDiscoveryOnce())
+			) {
+				await tryResolveDefaultRole();
+			}
+
+			// Under `--reapply-config` the early session restore was skipped so the
+			// config default could win. It didn't resolve (even post-extension), so
+			// fall back to the session's own baked model rather than an arbitrary
+			// pick — a resume must never be silently yanked onto an unrelated model.
+			if (!model && adoptConfigModel() && sessionModelStrings.length > 0) {
+				logger.time("restoreSessionModelReapplyFallback", () => {
+					for (let i = 0; i < sessionModelStrings.length; i++) {
+						const parsedModel = parseModelString(sessionModelStrings[i], {
+							allowMaxSuffix: true,
+							allowAutoAlias: true,
+							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+						});
+						if (!parsedModel) continue;
+						const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
+						if (restoredModel && hasModelAuth(restoredModel)) {
+							model = restoredModel;
+							restoredSessionModelIndex = i;
+							restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+							thinkingLevel = pickInitialThinkingLevel(restoredModel);
+							autoThinking = thinkingLevel === AUTO_THINKING;
+							effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+							effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+								autoThinking
+									? resolveProvisionalAutoLevel(restoredModel)
+									: resolveThinkingLevelForModel(restoredModel, effectiveThinkingLevel),
+							);
+							preconnectModelHost(restoredModel.baseUrl);
+							break;
+						}
+					}
+				});
+			}
 			if (!model) {
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
 				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
 					modelRegistry.hasConcreteAuth(provider),
 				);
 
-				// Cold-cache discovery race (issues #6114, #6162): a discovery
-				// provider (models.yml `openai-models-list`, LM Studio/Ollama/
-				// llama.cpp, or an openai-compat proxy) ships no static models, so
-				// the static+cached catalog resolved nothing above. Background
-				// discovery in main.ts fires only AFTER createAgentSession returns,
-				// so on a cache-cold boot the configured default stays unresolved
-				// and `pick` silently degrades to an unrelated authed provider's
-				// default (#6162) or "No models available" (#6114) — even though
-				// `omp models` (which awaits discovery) lists the model. Await one
-				// cache-aware discovery pass and retry when a default role is
-				// configured (must win over `pick`) or nothing resolved at all.
-				// The common path — role already resolved, or a `pick` with no
-				// configured default — never pays for it.
-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
-				if (
-					!hasExplicitModel &&
-					(defaultRoleConfigured || !pick) &&
-					modelRegistry.getDiscoverableProviders().length > 0
-				) {
-					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
-					if (!(await tryResolveDefaultRole()) && !model) {
-						const refreshedCandidates = await resolveAllowedModels(
-							modelRegistry,
-							settings,
-							modelMatchPreferences,
-						);
-						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
-							modelRegistry.hasConcreteAuth(provider),
-						);
-					}
+				// The configured default already took its discovery pass above, so
+				// what is left here is #6114: nothing resolved at all and the only
+				// catalog that could carry a model is a discovery provider's.
+				// `refreshDiscoveryOnce` is a no-op when that pass already ran, so
+				// the common path never pays for a second one.
+				if (!pick && !hasExplicitModel && (await refreshDiscoveryOnce())) {
+					const refreshedCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+					pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
+						modelRegistry.hasConcreteAuth(provider),
+					);
 				}
 
 				if (!model && pick) {
@@ -2755,6 +3141,45 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+			}
+		}
+
+		// `--reapply-config` user signal. The resolution above is silent, so a
+		// resume that swapped the session's model — or a broken config default
+		// that fell back to the session's own model — would give no indication
+		// the overlay was (or was not) applied. Surface one notice for whichever
+		// happened. Only under `adoptConfigModel`, so the bare-resume path keeps
+		// its exact prior message flow.
+		const bakedSessionModel = sessionModelStrings[0];
+		if (adoptConfigModel() && model && bakedSessionModel) {
+			const configDefaultResolved =
+				defaultRoleSpec.model !== undefined &&
+				defaultRoleSpec.model.provider === model.provider &&
+				defaultRoleSpec.model.id === model.id;
+			if (restoredSessionModelIndex >= 0) {
+				// The post-resolution fallback restored the session's baked model:
+				// the config default named a model that did not resolve.
+				modelFallbackMessage = `--reapply-config: config default "${defaultRoleValue}" did not resolve${
+					defaultRoleSpec.warning ? ` (${defaultRoleSpec.warning})` : ""
+				}; kept the session's ${formatModelString(model)}`;
+			} else if (configDefaultResolved) {
+				// The config default resolved and won over the baked model. Notice
+				// only when it is genuinely a different model than the session ran.
+				const bakedParsed = parseModelString(bakedSessionModel, {
+					allowMaxSuffix: true,
+					allowAutoAlias: true,
+					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+				});
+				if (bakedParsed?.provider !== model.provider || bakedParsed?.id !== model.id) {
+					modelFallbackMessage = `--reapply-config: resumed on ${formatModelString(model)} from config instead of the session's ${bakedSessionModel}`;
+				}
+			} else {
+				// Neither the config default nor the session's baked model resolved,
+				// so the model came from an arbitrary availability pick. Never leave
+				// that silent — it is the case the bare-resume path warns about too.
+				modelFallbackMessage = `--reapply-config: config default "${defaultRoleValue}" did not resolve${
+					defaultRoleSpec.warning ? ` (${defaultRoleSpec.warning})` : ""
+				} and the session's ${bakedSessionModel} could not be restored; using ${formatModelString(model)}`;
 			}
 		}
 
@@ -3529,15 +3954,48 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `model` is final here: deferred patterns, auth fallback, and extension
 		// role reclaim have all run, so a resolver can scope tiers to its family.
 		const resolvedServiceTierByFamily = options.resolveServiceTierByFamily?.(model);
+		const configServiceTierByFamily = buildServiceTierByFamily(
+			settings.get("tier.openai"),
+			settings.get("tier.anthropic"),
+			settings.get("tier.google"),
+		);
+		// Under `--reapply-config`, adopt the config tier PER FAMILY: a family the
+		// config specifies overrides the session's, a family it does not keeps the
+		// session's baked value. `buildServiceTierByFamily` omits a family set to
+		// `none`, so the map alone cannot distinguish "not configured" from an
+		// explicit `none` — and `none` is a CONFIGURED value meaning "send no
+		// service_tier", which must clear the session's baked tier rather than fall
+		// through to it. So the merge consults `isConfigured` per family and deletes
+		// the ones config names but the map omits. Unlike the model/thinking knobs,
+		// the tier is NOT gated on `!hasExplicitModel`: `--model` pins only the
+		// model, and the dedicated `openAIServiceTier` override below is the way to
+		// pin the tier. Without the flag, the session's tier map is restored
+		// wholesale when present, else the config map is used.
+		const mergeConfigServiceTier = (): ServiceTierByFamily => {
+			const merged: ServiceTierByFamily = { ...existingSession.serviceTier, ...configServiceTierByFamily };
+			for (const family of SERVICE_TIER_FAMILIES) {
+				if (configServiceTierByFamily[family] === undefined && settings.isConfigured(`tier.${family}`)) {
+					delete merged[family];
+				}
+			}
+			return merged;
+		};
+		// On a RESUME, a missing tier entry is the empty map, not "consult config".
+		// A session that baked no tier writes an explicit `null` entry now, but one
+		// written before that did — or before tiers existed — has nothing, and
+		// reading that absence as "adopt whatever config says at resume time" let a
+		// `tier.*` set AFTER the session take effect on a bare resume, which is the
+		// one thing omitting `--reapply-config` guarantees. A NEW session has no
+		// baked state to preserve, so config is its source as before.
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
-			(hasServiceTierEntry
-				? (existingSession.serviceTier ?? {})
-				: buildServiceTierByFamily(
-						settings.get("tier.openai"),
-						settings.get("tier.anthropic"),
-						settings.get("tier.google"),
-					));
+			(options.reapplyConfig
+				? mergeConfigServiceTier()
+				: hasServiceTierEntry
+					? (existingSession.serviceTier ?? {})
+					: hasExistingSession
+						? {}
+						: configServiceTierByFamily);
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
@@ -3698,11 +4156,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
-				sessionManager.appendServiceTierChange(
-					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
-				);
-			}
+			// Recorded even when the map is EMPTY, as an explicit `null` meaning "this
+			// session baked no tier". Skipping it made absence ambiguous: a resume
+			// could not tell a session that baked nothing from a pre-tier session, so
+			// the empty case fell through to whatever `tier.*` config said at resume
+			// time — adopting a tier the user set AFTER the session, which is exactly
+			// what resuming without `--reapply-config` promises not to do.
+			sessionManager.appendServiceTierChange(
+				Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+			);
 		}
 
 		// Full toolset for the advisor, built unconditionally so it can be toggled at

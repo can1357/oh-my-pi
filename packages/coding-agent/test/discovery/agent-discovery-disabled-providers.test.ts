@@ -97,6 +97,7 @@ describe("discoverAgents — claude-plugins disabled provider", () => {
 			resolveAgentModelPatterns({
 				agentModel: agent?.model,
 				activeModelPattern: "openai-codex/gpt-5.6-sol",
+				availableModels: [],
 			}),
 		).toEqual(["openai-codex/gpt-5.6-sol"]);
 	});

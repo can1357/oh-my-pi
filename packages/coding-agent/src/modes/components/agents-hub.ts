@@ -10,6 +10,7 @@
  * every per-agent knob is picked instead of memorized.
  */
 
+import type { Model } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -33,6 +34,7 @@ import type { EffectiveExtensionRoots } from "../../capability/types";
 import { getConfigDirs } from "../../config";
 import type { ModelRegistry } from "../../config/model-registry";
 import {
+	modelCatalogForClassification,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
 	resolveAgentPrewalkPattern,
@@ -121,6 +123,13 @@ interface GeneratedAgentSpec {
 /** Ambient model context for resolution previews and the creation architect. */
 export interface AgentsHubModelContext {
 	modelRegistry?: ModelRegistry;
+	/**
+	 * The session's ACTIVE model, which `getAvailable()` can omit: a session that
+	 * pinned a model directly and authenticates it itself is absent from that
+	 * projection. Supplied so the hub classifies an inherited id exactly as the
+	 * spawn path does — see `modelCatalogForClassification`.
+	 */
+	activeModel?: () => Model | undefined;
 	activeModelPattern?: string;
 	defaultModelPattern?: string;
 	/**
@@ -404,6 +413,14 @@ export class AgentsHubComponent implements Component {
 			settings: this.#settings,
 			activeModelPattern: this.#modelContext.activeModelPattern,
 			fallbackModelPattern: this.#modelContext.defaultModelPattern,
+			// So a suffixed self alias re-tiers an inherited SELECTOR but leaves an
+			// inherited literal id (`nanogpt/coding-router:low`) alone. Same catalog
+			// the spawn path classifies against, or the hub would DISPLAY a
+			// re-tiered model the spawn correctly leaves alone.
+			availableModels: modelCatalogForClassification(
+				this.#modelContext.modelRegistry?.getAvailable(),
+				this.#modelContext.activeModel?.(),
+			),
 		});
 	}
 

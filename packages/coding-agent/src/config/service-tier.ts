@@ -20,6 +20,13 @@ export type ServiceTierOpenAISettingValue = (typeof SERVICE_TIER_OPENAI_VALUES)[
 export type ServiceTierAnthropicSettingValue = (typeof SERVICE_TIER_ANTHROPIC_VALUES)[number];
 export type ServiceTierGoogleSettingValue = (typeof SERVICE_TIER_GOOGLE_VALUES)[number];
 
+/**
+ * The provider families carrying an independent `tier.<family>` setting, in
+ * the order the settings schema declares them. Lets a caller walk every family
+ * knob without restating the list.
+ */
+export const SERVICE_TIER_FAMILIES = ["openai", "anthropic", "google"] as const satisfies readonly ServiceTierFamily[];
+
 /** Whether a runtime value is a supported OpenAI service-tier setting. */
 export function isServiceTierOpenAISettingValue(value: string): value is ServiceTierOpenAISettingValue {
 	return SERVICE_TIER_OPENAI_VALUES.some(tier => tier === value);
