@@ -249,6 +249,7 @@ import {
 	mcpDisallowTargetsServer,
 	normalizeToolNames,
 	withSiblingTools,
+	withoutSiblingTools,
 } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { ToolContextStore } from "./tools/context";
@@ -3160,13 +3161,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// public name only the winner survives in `toolRegistry` and the losing
 		// server would read as resource-only — its resources then escaping the
 		// disallow scope that targets its tools. The manager keeps every
-		// server's tools, each carrying its own `serverName`.
-		const owningServers = new Set<string>();
-		for (const tool of mcpManager?.getTools() ?? []) {
-			const owner = (tool as { mcpServerName?: unknown }).mcpServerName;
-			if (typeof owner === "string") owningServers.add(owner);
-		}
-		const ownsAnyTool = (serverName: string): boolean => owningServers.has(serverName);
+		// server's tools, each carrying its own `mcpServerName`.
+		//
+		// Resolved per call, not snapshotted: for an interactive session MCP
+		// discovery is deferred, so a set captured at construction would be
+		// empty (and equally stale after `tools/list_changed` adds or removes a
+		// server's tools).
+		const ownsAnyTool = (serverName: string): boolean =>
+			(mcpManager?.getTools() ?? []).some(
+				tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
+			);
 		const serverResourcesAllowed = (name: string): boolean =>
 			mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) ||
 			(!ownsAnyTool(name) && resourceOnlyServerAllowed(name));
@@ -3599,9 +3603,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// The registry's proxy objects carry `mcpServerName` (raw config server name),
 		// so `mcp__<server>_*` matches length-capped minted names by ownership too.
 		if (disallowedPatterns.length > 0) {
-			initialToolNames = initialToolNames.filter(name => {
+			initialToolNames = withoutSiblingTools(initialToolNames, name => {
 				const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
-				return !isToolDisallowed(
+				return isToolDisallowed(
 					name,
 					disallowedPatterns,
 					typeof mcpServerName === "string" ? mcpServerName : undefined,

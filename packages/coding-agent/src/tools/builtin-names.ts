@@ -104,6 +104,22 @@ export function withSiblingTools(names: readonly string[]): string[] {
 }
 
 /**
+ * The reverse of {@link withSiblingTools}: if either member of a pair is
+ * disallowed, both are — half a pair is unusable, so honouring a deny on just
+ * one would leave a tool whose sibling call is guaranteed to fail. Returns the
+ * filtered list.
+ */
+export function withoutSiblingTools(names: readonly string[], isDisallowed: (name: string) => boolean): string[] {
+	return names.filter(name => {
+		if (isDisallowed(name)) return false;
+		for (const [a, b] of SIBLING_TOOL_PAIRS) {
+			if (name === a || name === b) return !isDisallowed(name === a ? b : a);
+		}
+		return true;
+	});
+}
+
+/**
  * Expand the `exec` tool alias into its concrete backends: `eval` (kept only
  * when at least one eval backend is allowed per `backends`) and `bash`. A deny
  * on the alias itself blocks the whole expansion; a deny on a child is applied
