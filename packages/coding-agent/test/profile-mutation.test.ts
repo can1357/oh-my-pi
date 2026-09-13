@@ -360,9 +360,11 @@ describe("/profile mutation parsing and execution", () => {
 		if ("error" in parsed) {
 			return { message: parsed.error, settings: s };
 		}
-		const message = await runProfileMutation(s, parsed as ProfileMutation);
+		const result = await runProfileMutation(s, parsed as ProfileMutation);
 		await s.flush();
-		return { message, settings: s };
+		// Failed mutations surface their error text in place of a message; the
+		// tests below assert on that text, matching the old string API.
+		return { message: result.ok ? result.message : result.error, settings: s };
 	}
 
 	test("bare args activate directly (back-compat)", async () => {

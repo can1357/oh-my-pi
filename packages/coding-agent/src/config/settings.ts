@@ -895,8 +895,14 @@ export class Settings {
 			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			this.#rebuildMerged();
 
+			// The profile-state check below ALSO fires modelRolesSignal for the
+			// same underlying role delta when the active profile's roles
+			// changed; fire the raw modelRoles notification only when the
+			// profile comparison will not emit one, so one reload produces
+			// exactly one notification per effective change.
 			const nextModelRoles = this.get("modelRoles");
-			if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles)) {
+			const profileSignals = this.#fireProfileSignalsIfNeeded(previousSignaledValues.profileState);
+			if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles) && !profileSignals.rolesChanged) {
 				this.#fireEffectiveSettingChanged("modelRoles", nextModelRoles, previousSignaledValues.modelRoles);
 			}
 			const nextSessionAccent = this.get("statusLine.sessionAccent");
@@ -907,11 +913,6 @@ export class Settings {
 					previousSignaledValues.sessionAccent,
 				);
 			}
-			// Local before/after comparison of EFFECTIVE profile state (name +
-			// overlay roles): an external edit to the ACTIVE profile's roles
-			// notifies live consumers even when the name is unchanged; inactive
-			// profile edits change neither and stay silent.
-			this.#fireProfileSignalsIfNeeded(previousSignaledValues.profileState);
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
@@ -3257,7 +3258,7 @@ export class Settings {
 		before:
 			| { active: string; roles: Record<string, string> | undefined; defaultRole: string | undefined }
 			| undefined,
-	): void {
+	): { rolesChanged: boolean; activeChanged: boolean } {
 		const after = this.#effectiveProfileSnapshot();
 		// No prior snapshot means this is the first profiles write we've seen:
 		// fire conservatively so consumers can't miss a real change.
@@ -3269,6 +3270,7 @@ export class Settings {
 		const defaultChanged = !before || before.defaultRole !== after.defaultRole;
 		if (rolesChanged) modelRolesSignal.fire();
 		if (activeChanged || defaultChanged) activeProfileSignal.fire();
+		return { rolesChanged, activeChanged };
 	}
 
 	/**

@@ -100,17 +100,26 @@ function usageError(signature: string): { error: string } {
 	return { error: `Usage: /profile ${signature}` };
 }
 
+/** Discriminated outcome so callers can route failures to error paths. */
+export type ProfileMutationResult = { ok: true; message: string } | { ok: false; error: string };
+
 /**
  * Execute a parsed profile mutation through the Settings profile API and
- * flush persistence. Returns a user-facing status message, or an error
- * string prefixed with "Unknown profile"/"Invalid"/"Usage:" on failure.
+ * flush persistence. Returns a discriminated result: failures (unknown
+ * profile, validation, lock/I-O errors) are `ok: false` so callers never
+ * have to sniff message prefixes.
  */
-export async function runProfileMutation(settings: Settings, mutation: ProfileMutation): Promise<string> {
+export async function runProfileMutation(
+	settings: Settings,
+	mutation: ProfileMutation,
+): Promise<ProfileMutationResult> {
+	const fail = (error: string): ProfileMutationResult => ({ ok: false, error });
+	const done = (message: string): ProfileMutationResult => ({ ok: true, message });
 	switch (mutation.op) {
 		case "list": {
 			const snapshot = settings.describeProfiles();
 			const names = Object.keys(snapshot.profiles).sort();
-			if (names.length === 0) return "No profiles configured.";
+			if (names.length === 0) return done("No profiles configured.");
 			const lines = names.map(name => {
 				const profile = snapshot.profiles[name];
 				const activeMark = snapshot.active === name ? " ●" : "";
@@ -121,11 +130,13 @@ export async function runProfileMutation(settings: Settings, mutation: ProfileMu
 						: ` (${profile.definedIn[0] ?? "global"})`;
 				return `${name}${activeMark}${scopeTag}${desc ? ` — ${desc}` : ""}`;
 			});
-			return `Profiles${snapshot.active ? ` (active: ${snapshot.active})` : ""}:\n${lines.map(line => `  ${line}`).join("\n")}`;
+			return done(
+				`Profiles${snapshot.active ? ` (active: ${snapshot.active})` : ""}:\n${lines.map(line => `  ${line}`).join("\n")}`,
+			);
 		}
 		case "show": {
 			const definition = settings.getProfile(mutation.name);
-			if (definition === undefined) return unknownProfile(mutation.name);
+			if (definition === undefined) return fail(unknownProfile(mutation.name));
 			const snapshot = settings.describeProfiles();
 			const info = snapshot.profiles[mutation.name];
 			const lines = [
@@ -137,7 +148,7 @@ export async function runProfileMutation(settings: Settings, mutation: ProfileMu
 			const roleNames = Object.keys(roles);
 			lines.push(roleNames.length > 0 ? "Model roles:" : "Model roles: (none)");
 			for (const role of roleNames.sort()) lines.push(`  ${role}: ${roles[role]}`);
-			return lines.join("\n");
+			return done(lines.join("\n"));
 		}
 		case "create": {
 			try {
@@ -146,39 +157,43 @@ export async function runProfileMutation(settings: Settings, mutation: ProfileMu
 					modelRoles: mutation.roles,
 				});
 			} catch (error) {
-				return mutationError(error);
+				return fail(mutationError(error));
 			}
-			return `Profile ${mutation.name} created in ${mutation.scope} config with ${Object.keys(mutation.roles).length} role(s).`;
+			return done(
+				`Profile ${mutation.name} created in ${mutation.scope} config with ${Object.keys(mutation.roles).length} role(s).`,
+			);
 		}
 		case "set-role": {
-			if (settings.getProfile(mutation.name) === undefined) return unknownProfile(mutation.name);
+			if (settings.getProfile(mutation.name) === undefined) return fail(unknownProfile(mutation.name));
 			try {
 				await settings.setProfile(mutation.scope, mutation.name, {
 					modelRoles: { [mutation.role]: mutation.selector as string },
 				});
 			} catch (error) {
-				return mutationError(error);
+				return fail(mutationError(error));
 			}
-			return mutation.selector === null
-				? `Role ${mutation.role} removed from profile ${mutation.name}.`
-				: `Profile ${mutation.name}.${mutation.role} = ${mutation.selector}.`;
+			return done(
+				mutation.selector === null
+					? `Role ${mutation.role} removed from profile ${mutation.name}.`
+					: `Profile ${mutation.name}.${mutation.role} = ${mutation.selector}.`,
+			);
 		}
 		case "set-description": {
-			if (settings.getProfile(mutation.name) === undefined) return unknownProfile(mutation.name);
+			if (settings.getProfile(mutation.name) === undefined) return fail(unknownProfile(mutation.name));
 			try {
 				await settings.setProfile(mutation.scope, mutation.name, { description: mutation.description });
 			} catch (error) {
-				return mutationError(error);
+				return fail(mutationError(error));
 			}
-			return `Description of profile ${mutation.name} updated.`;
+			return done(`Description of profile ${mutation.name} updated.`);
 		}
 		case "delete": {
 			try {
 				await settings.removeProfile(mutation.scope, mutation.name);
 			} catch (error) {
-				return mutationError(error);
+				return fail(mutationError(error));
 			}
-			return `Profile ${mutation.name} deleted from ${mutation.scope} config.`;
+			return done(`Profile ${mutation.name} deleted from ${mutation.scope} config.`);
 		}
 	}
 }

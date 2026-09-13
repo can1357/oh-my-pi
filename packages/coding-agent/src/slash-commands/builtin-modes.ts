@@ -216,23 +216,19 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const settings = runtime.settings;
 			if (command.args) {
 				const parsed = parseProfileMutation(command.args);
-				let message: string | undefined;
 				if (typeof parsed === "string") {
 					// Direct activation: existing behavior.
-					message = activateProfile(settings, parsed);
-				} else if ("error" in parsed) {
-					message = parsed.error;
-				} else {
-					message = await runProfileMutation(settings, parsed as ProfileMutation);
+					const message = activateProfile(settings, parsed);
+					if (message.startsWith("Unknown profile")) return usage(message, runtime);
+					await runtime.output(message);
+					await runtime.notifyConfigChanged?.();
+					await runtime.notifyTitleChanged?.();
+					return commandConsumed();
 				}
-				if (
-					message?.startsWith("Unknown profile") ||
-					message?.startsWith("Usage:") ||
-					message?.startsWith("Invalid")
-				) {
-					return usage(message, runtime);
-				}
-				await runtime.output(message ?? "No active profile.");
+				if ("error" in parsed) return usage(parsed.error, runtime);
+				const result = await runProfileMutation(settings, parsed as ProfileMutation);
+				if (!result.ok) return usage(result.error, runtime);
+				await runtime.output(result.message);
 				await runtime.notifyConfigChanged?.();
 				await runtime.notifyTitleChanged?.();
 				return commandConsumed();
@@ -245,23 +241,26 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const settings = runtime.ctx.settings;
 			if (command.args) {
 				const parsed = parseProfileMutation(command.args);
-				let message: string | undefined;
 				if (typeof parsed === "string") {
-					message = activateProfile(settings, parsed);
-				} else if ("error" in parsed) {
-					message = parsed.error;
-				} else {
-					message = await runProfileMutation(settings, parsed as ProfileMutation);
-				}
-				if (
-					message?.startsWith("Unknown profile") ||
-					message?.startsWith("Usage:") ||
-					message?.startsWith("Invalid")
-				) {
-					runtime.ctx.showError(message);
+					const message = activateProfile(settings, parsed);
+					if (message.startsWith("Unknown profile")) {
+						runtime.ctx.showError(message);
+						return;
+					}
+					runtime.ctx.showStatus(message);
+					runtime.ctx.editor.setText("");
 					return;
 				}
-				runtime.ctx.showStatus(message ?? "No active profile.");
+				if ("error" in parsed) {
+					runtime.ctx.showError(parsed.error);
+					return;
+				}
+				const result = await runProfileMutation(settings, parsed as ProfileMutation);
+				if (!result.ok) {
+					runtime.ctx.showError(result.error);
+					return;
+				}
+				runtime.ctx.showStatus(result.message);
 				runtime.ctx.editor.setText("");
 				return;
 			}

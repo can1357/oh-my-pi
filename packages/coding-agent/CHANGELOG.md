@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added model-role Profiles: named model-role overlays in `profiles` config selected via `/profile` (manager, list/show/set-role/delete subcommands) or the one-shot `--model-profile` flag, with the active profile shown on the status line.
+- Added model-role Profiles: named model-role overlays in `profiles` config selected via `/profile` (manager, list/show/set-role/delete subcommands) or the one-shot `--model-profile` flag, with the active profile shown on the status line ([#11921](https://github.com/can1357/oh-my-pi/pull/11921) by [@fedoragobrowse-design](https://github.com/fedoragobrowse-design)).
 - Fixed debounced setting changes being silently lost when a profile write re-read the config file in the same 100 ms window.
 - Fixed a project-config `activeProfile` selection surviving its profile's deletion and masking a same-name global profile instead of falling back to it.
 - Fixed a profile switch while plan mode was active leaving plan-exit model restore pointed at the pre-switch model.
@@ -913,7 +913,6 @@
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
-- Added model-role Profiles (activeProfile/profiles settings, /profile command, --model-profile flag)
 
 ### Changed
 

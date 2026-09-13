@@ -997,8 +997,19 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				return;
 			}
+			case "edit-readonly":
+				this.ctx.showError(
+					`Profile "${action.name}" comes from a --config overlay and is read-only here: edit its source config instead.`,
+				);
+				return;
+			case "delete-readonly":
+				this.ctx.showError(
+					`Profile "${action.name}" comes from a --config overlay and is read-only here: remove it from the overlay config instead.`,
+				);
+				return;
 		}
 	}
+
 	/**
 	 * Inline name prompt for a new profile. Resolves the created name on
 	 * success, or undefined when cancelled/empty (no profile is written).

@@ -38,6 +38,8 @@ export type ProfileManagerAction =
 	| { kind: "select"; name: string }
 	| { kind: "edit"; name: string; scope: "global" | "project" }
 	| { kind: "delete"; name: string; scope: "global" | "project" }
+	| { kind: "edit-readonly"; name: string }
+	| { kind: "delete-readonly"; name: string }
 	| { kind: "create" }
 	| { kind: "cancel" };
 
@@ -179,14 +181,17 @@ export class ProfileManagerComponent extends OverlayPanel {
 	}
 
 	/**
-	 * Scope a mutation should target for a row: the effective definition.
-	 * Project wins over global when both define the same name (project has
-	 * higher precedence), so the row the user sees is the one that is edited.
+	 * Scope a mutation should target for a row, or `null` when the row is
+	 * effectively read-only: an overlay-only profile comes from a `--config`
+	 * overlay that outranks every persisted layer, so writing a global copy
+	 * would be silently masked and deleting a nonexistent global profile
+	 * would just error.
 	 */
-	#mutationScope(name: string): "global" | "project" {
+	#mutationScope(name: string): "global" | "project" | null {
 		const entry = this.#entries.find(candidate => candidate.name === name);
 		if (entry?.definedIn.includes("project")) return "project";
-		return "global";
+		if (entry?.definedIn.includes("global")) return "global";
+		return null;
 	}
 
 	handleInput(keyData: string): void {
@@ -196,11 +201,15 @@ export class ProfileManagerComponent extends OverlayPanel {
 		}
 		const selected = this.#selectedName();
 		if (matchesKey(keyData, "e") && selected && !isActionRow(selected)) {
-			this.#onAction({ kind: "edit", name: selected, scope: this.#mutationScope(selected) });
+			const scope = this.#mutationScope(selected);
+			if (scope) this.#onAction({ kind: "edit", name: selected, scope });
+			else this.#onAction({ kind: "edit-readonly", name: selected });
 			return;
 		}
 		if (matchesKey(keyData, "d") && selected && !isActionRow(selected)) {
-			this.#onAction({ kind: "delete", name: selected, scope: this.#mutationScope(selected) });
+			const scope = this.#mutationScope(selected);
+			if (scope) this.#onAction({ kind: "delete", name: selected, scope });
+			else this.#onAction({ kind: "delete-readonly", name: selected });
 			return;
 		}
 		if (matchesKey(keyData, "n")) {
@@ -211,6 +220,9 @@ export class ProfileManagerComponent extends OverlayPanel {
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		// While a prompt replaces the list, the hidden SelectList must not see
+		// clicks: routing them could activate/delete rows behind the form.
+		if (this.#promptForm) return;
 		routeSelectListMouseWithTopBorder(this.#list, event, line, col);
 	}
 }

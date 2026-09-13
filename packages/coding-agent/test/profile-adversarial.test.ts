@@ -403,8 +403,9 @@ describe("Profiles adversarial coverage", () => {
 			writeGlobal({ profiles: {} });
 			const s = await load();
 			const parsed = parse("delete missing") as Extract<ProfileMutation, { op: "delete" }>;
-			const message = await runProfileMutation(s, parsed);
-			expect(message).toContain("does not exist");
+			const result = await runProfileMutation(s, parsed);
+			if (!result.ok) expect(result.error).toContain("does not exist");
+			else expect.unreachable("deleting a missing profile must fail");
 		});
 	});
 

@@ -9,12 +9,15 @@ import * as path from "node:path";
 import { acquireFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { onActiveProfileChanged, onModelRolesChanged, resetSettingsForTest, Settings } from "../src/config/settings";
-import { sanitizeStatusText } from "../src/modes/shared";
 import { initTheme } from "../src/modes/theme/theme";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "../src/tools/render-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { renderSegment } from "../src/modes/components/status-line/segments";
+import type { SegmentContext } from "../src/modes/components/status-line/types";
+import { stripVTControlCharacters } from "node:util";
 
 const YAML = Bun.YAML;
+
+const stripAnsi = (text: string): string => stripVTControlCharacters(text);
 
 describe("review-finding regressions", () => {
 	test("E: external edit to the ACTIVE profile's roles fires signals on reloadFromDisk", async () => {
@@ -46,8 +49,11 @@ describe("review-finding regressions", () => {
 			);
 			await s.reloadFromDisk();
 			expect(s.getModelRole("default")).toBe("provider/two");
-			expect(roleSignals).toBeGreaterThan(0);
-			expect(profileSignals).toBeGreaterThan(0);
+			// Exactly ONE role notification per reload: the raw modelRoles fire
+			// and the profile-state fire are consolidated (double-firing started
+			// two async plan-model transitions per reload).
+			expect(roleSignals).toBe(1);
+			expect(profileSignals).toBe(1);
 		} finally {
 			for (const unsub of unsubs) unsub();
 		}
@@ -123,18 +129,37 @@ describe("review-finding regressions", () => {
 		await temp.remove();
 	});
 
-	test("J: status-line profile name is sanitized and width-bounded", async () => {
+	test("J: status-line profile name is sanitized and width-bounded in the rendered segment", async () => {
 		await initTheme();
 		// Malformed config values that could corrupt TUI layout.
 		const evil = "\x1b[31mred\u0007\tnew\nline";
-		const safe = truncateToWidth(sanitizeStatusText(evil), TRUNCATE_LENGTHS.SHORT);
-		expect(safe).not.toContain("\x1b");
-		expect(safe).not.toContain("\n");
-		expect(safe).not.toContain("\t");
-		expect(safe.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.SHORT);
-		// A long-but-valid name is truncated, not passed through.
-		const long = truncateToWidth(sanitizeStatusText("x".repeat(200)), TRUNCATE_LENGTHS.SHORT);
-		expect(long.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.SHORT);
+		// The observable contract is the RENDERED model segment: whatever the
+		// config contains, the emitted cells must be sanitized and bounded.
+		const render = (profileName: string): string => {
+			const session = {
+				state: { model: { name: "Test Model", id: "test-model" } },
+				settings: { getActiveProfile: () => profileName },
+				isFastModeActive: () => false,
+			};
+			const ctx = {
+				session,
+				activeRepo: null,
+				width: 200,
+				options: {},
+				compactThinkingLevel: false,
+			} as unknown as SegmentContext;
+			const rendered = renderSegment("model", ctx);
+			return stripAnsi(rendered.content);
+		};
+		const renderedEvil = render(evil);
+		expect(renderedEvil).not.toContain("\x1b");
+		expect(renderedEvil).not.toContain("\n");
+		expect(renderedEvil).not.toContain("\t");
+		// A long-but-valid name is truncated, not passed through: the rendered
+		// prefix stays within the segment's bound (icon + model name + prefix).
+		const renderedLong = render("x".repeat(200));
+		expect(renderedLong).not.toContain("x".repeat(100));
+		expect(Bun.stringWidth(renderedLong)).toBeLessThanOrEqual(200);
 	});
 });
 
