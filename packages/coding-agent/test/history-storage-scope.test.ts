@@ -203,12 +203,20 @@ describe("HistoryStorage scope filtering", () => {
 		// A row submitted while the symlinked spelling was current: stored `cwd` keeps it.
 		await storage.add("submitted through the link", link, "s1");
 
-		// Both spellings must see the same repository — stored rows may carry either.
-		const viaPhysical = new Set(promptsOf(storage, { kind: "repo", value: fixtures.repoA }));
-		const viaLink = new Set(promptsOf(storage, { kind: "repo", value: link }));
-		expect(viaLink).toEqual(viaPhysical);
-		expect(viaPhysical).toContain("alpha deploy pipeline");
-		expect(viaPhysical).toContain("submitted through the link");
+		// Both spellings must see the same repository and the same directory — stored rows may
+		// carry either, and a plain string comparison would split them in two.
+		for (const [kind, value] of [
+			["repo", fixtures.repoA],
+			["repo", link],
+			["cwd", fixtures.repoA],
+			["cwd", link],
+		] as const) {
+			const prompts = promptsOf(storage, { kind, value });
+			expect(prompts).toContain("alpha deploy pipeline");
+			expect(prompts).toContain("submitted through the link");
+		}
+		// `cwd` stays exact: it must not widen to the repository the way `repo` does.
+		expect(promptsOf(storage, { kind: "cwd", value: link })).not.toContain("beta run tests");
 	});
 
 	it("re-resolves repository membership after a nested repository appears", async () => {

@@ -57,10 +57,14 @@ type ScopeClause = { where: string; and: string; params: SQLQueryBindings[] };
 
 const EMPTY_SCOPE_CLAUSE: ScopeClause = { where: "", and: "", params: [] };
 
-// A bare repository root is not a directory list, so `repo` scope expands it with `json_each`;
-// the list is bound as JSON, keeping the statement text (and its cache key) constant.
-const REPO_WHERE = "WHERE cwd IN (SELECT value FROM json_each(?))";
-const REPO_AND = "AND cwd IN (SELECT value FROM json_each(?))";
+// A bare directory is not a list, so directory scopes expand to stored spellings and bind them
+// with `json_each`; the array travels as JSON, keeping the statement text (and its cache key)
+// constant no matter how many directories match.
+const DIRS_WHERE = "WHERE cwd IN (SELECT value FROM json_each(?))";
+const DIRS_AND = "AND cwd IN (SELECT value FROM json_each(?))";
+
+/** Normalized spelling of a stored directory and the normalized root of the repository containing it. */
+type DirFacts = { physical: string; root: string };
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
@@ -109,10 +113,11 @@ export class HistoryStorage {
 	#upsertRowStmt: Statement;
 	// Scope fragments vary per query shape, so statements are cached by full SQL text.
 	#stmts = new Map<string, Statement>();
-	// Repository membership per stored directory, in normalized form. Repository topology can
-	// change while the process runs (a nested `git init`, an added worktree), so the cache is
-	// dropped on every write: the next read after a submission re-resolves it.
-	#rootCache = new Map<string, string>();
+	// Directory scopes resolve stored `cwd` spellings per read. Repository topology and stored
+	// spellings can change while the process runs (a nested `git init`, a moved worktree, a new
+	// prompt), so both memos are dropped on every write and rebuilt by the next read.
+	#dirFacts = new Map<string, DirFacts>();
+	#dirsByTarget = new Map<string, string[]>();
 
 	private constructor(dbPath: string) {
 		this.#ensureDir(dbPath);
@@ -190,7 +195,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
-		this.#rootCache.clear();
+		this.#dirFacts.clear();
+		this.#dirsByTarget.clear();
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
@@ -423,12 +429,11 @@ ON CONFLICT(prompt) DO UPDATE SET
 			case "session":
 				return { where: "WHERE session_id = ?", and: "AND session_id = ?", params: [scope.value ?? ""] };
 			case "cwd":
-				return { where: "WHERE cwd = ?", and: "AND cwd = ?", params: [scope.value ?? ""] };
 			case "repo":
 				return {
-					where: REPO_WHERE,
-					and: REPO_AND,
-					params: [JSON.stringify(this.#repoDirs(scope.value))],
+					where: DIRS_WHERE,
+					and: DIRS_AND,
+					params: [JSON.stringify(this.#scopeDirs(scope.kind, scope.value))],
 				};
 			default:
 				return { where: "WHERE 1 = 0", and: "AND 1 = 0", params: [] };
@@ -436,31 +441,45 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Stored directories belonging to the repository rooted at `root`. Resolved per read
-	 * because `cwd` holds the raw submission directory: a subdirectory or a linked worktree
-	 * shares only its primary root with the repository, never its path, so a plain equality
-	 * (or a path prefix) would drop most of a repository's history.
+	 * Stored directories a scope reads: the ones denoting `target` itself (`cwd`), or every
+	 * one belonging to the repository rooted at `target` (`repo`).
 	 *
-	 * Roots are compared in their normalized form (symlinks resolved, case folded on Windows):
-	 * the same checkout reached as `/repo` and through a symlink yields two spellings of one
-	 * root, and stored rows keep whichever spelling was current when they were submitted.
+	 * `cwd` holds the raw submission directory, so neither a plain equality nor a path prefix
+	 * works: a subdirectory or a linked worktree shares only its primary root with the
+	 * repository, and the same directory can be stored under two spellings (a symlinked
+	 * checkout keeps its symlink spelling, since `setProjectDir` resolves lexically). Rows are
+	 * therefore resolved per read, comparing normalized spellings on both sides.
 	 */
-	#repoDirs(root?: string): string[] {
-		if (!root) return [];
-		const target = normalizePathForComparison(root);
-		const rows = this.#prepare(
-			"SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''",
-		).all() as Array<{ cwd: string }>;
-		return rows.map(row => row.cwd).filter(dir => this.#rootOf(dir) === target);
+	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
+		if (!target) return [];
+		const normalized = normalizePathForComparison(target);
+		const cacheKey = `${kind}\u0000${normalized}`;
+		const cached = this.#dirsByTarget.get(cacheKey);
+		if (cached) return cached;
+		const dirs = this.#storedDirs().filter(dir => {
+			const facts = this.#factsOf(dir);
+			return kind === "cwd" ? facts.physical === normalized : facts.root === normalized;
+		});
+		this.#dirsByTarget.set(cacheKey, dirs);
+		return dirs;
 	}
 
-	/** Normalized primary root of `dir`, memoized until the next write invalidates the cache. */
-	#rootOf(dir: string): string {
-		const cached = this.#rootCache.get(dir);
-		if (cached !== undefined) return cached;
-		const root = normalizePathForComparison(primaryRootOrCwd(dir));
-		this.#rootCache.set(dir, root);
-		return root;
+	#storedDirs(): string[] {
+		return (
+			this.#prepare("SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''").all() as Array<{
+				cwd: string;
+			}>
+		).map(row => row.cwd);
+	}
+
+	/** Normalized spelling and primary root of a stored directory, memoized until the next write. */
+	#factsOf(dir: string): DirFacts {
+		const cached = this.#dirFacts.get(dir);
+		if (cached) return cached;
+		const physical = normalizePathForComparison(dir);
+		const facts: DirFacts = { physical, root: normalizePathForComparison(primaryRootOrCwd(physical)) };
+		this.#dirFacts.set(dir, facts);
+		return facts;
 	}
 
 	#prepare(sql: string): Statement {
