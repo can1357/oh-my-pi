@@ -52,7 +52,17 @@ runs:
         run: |
            export BUN_INSTALL="${HOME}/.bun"
            curl -fsSL https://bun.sh/install | bash -s "bun-v${{ steps.env.outputs.bun_version }}"
-           echo "${BUN_INSTALL}/bin" >> "$GITHUB_PATH"
+           # Git Bash reports HOME as a POSIX path, but runner command files are
+           # consumed by later native shells such as PowerShell.
+           if [ "${RUNNER_OS:-}" = "Windows" ]; then
+             bun_install="$(cygpath --windows "$BUN_INSTALL")"
+             bun_bin="$(cygpath --windows "$BUN_INSTALL/bin")"
+           else
+             bun_install="$BUN_INSTALL"
+             bun_bin="$BUN_INSTALL/bin"
+           fi
+           printf 'BUN_INSTALL=%s\n' "$bun_install" >> "$GITHUB_ENV"
+           printf '%s\n' "$bun_bin" >> "$GITHUB_PATH"
 
       # Off-infra (GitHub-hosted): actions/cache for the bun store, split into
       # restore + save. actions/cache entries are scoped per ref but count
