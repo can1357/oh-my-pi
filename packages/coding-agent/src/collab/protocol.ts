@@ -149,7 +149,7 @@ export function generateRoomId(): string {
 }
 
 /** Normalize a relay base URL (ws/wss/http/https) into a ws/wss origin, or an error. */
-function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: string } {
+export function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: string } {
 	let url: URL;
 	try {
 		url = new URL(relayUrl);

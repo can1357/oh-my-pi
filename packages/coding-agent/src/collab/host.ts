@@ -41,6 +41,7 @@ import {
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
+	normalizeRelayOrigin,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
@@ -102,6 +103,8 @@ function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEn
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
 }
 const CONNECT_TIMEOUT_MS = 15_000;
+/** Message a start rejects with when hosting was stopped before it finished. */
+export const COLLAB_STOPPED_ERROR = "Collab hosting was stopped";
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
 export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
 const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fetch cap (${TRANSCRIPT_READ_CAP} bytes)`;
@@ -124,6 +127,7 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
+	#relayOrigin = "";
 	#link = "";
 	#webLink = "";
 	#viewLink = "";
@@ -140,10 +144,18 @@ export class CollabHost {
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	/** The exact `onEntryAppended` this host installed, so teardown releases only its own. */
+	#entryTap?: (entry: StoredSessionEntry) => void;
 	#stopped = false;
-
+	#published = false;
+	#firstOpen?: PromiseWithResolvers<void>;
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
+	}
+
+	/** Normalized ws(s) origin of the relay this room is hosted through; empty before {@link start}. */
+	get relayOrigin(): string {
+		return this.#relayOrigin;
 	}
 
 	get link(): string {
@@ -163,6 +175,11 @@ export class CollabHost {
 	/** Read-only variant of {@link webLink}. */
 	get webViewLink(): string {
 		return this.#webViewLink;
+	}
+
+	/** Session id this room is bound to; broadcasts tear down if the session switches. */
+	get sessionId(): string {
+		return this.#sessionId;
 	}
 
 	get participants(): CollabParticipant[] {
@@ -207,6 +224,9 @@ export class CollabHost {
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
 		this.#writeToken = writeToken;
+		const normalizedOrigin = normalizeRelayOrigin(relayUrl);
+		if ("error" in normalizedOrigin) throw new Error(normalizedOrigin.error);
+		this.#relayOrigin = normalizedOrigin.origin;
 		this.#link = formatCollabLink(relayUrl, roomId, rawKey, writeToken);
 		this.#webLink = formatCollabWebLink(relayUrl, roomId, rawKey, writeToken, webUrl);
 		this.#viewLink = formatCollabLink(relayUrl, roomId, rawKey);
@@ -214,16 +234,22 @@ export class CollabHost {
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		const key = await importRoomKey(rawKey);
+		// stop() can land while the key import is in flight: #stopped is already
+		// true and #teardown has run, so nothing created past this point would
+		// ever be torn down. Bail before the socket exists.
+		if (this.#stopped) throw new Error(COLLAB_STOPPED_ERROR);
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
 		this.#sessionId = this.#ctx.sessionManager.getSessionId();
 
 		const firstOpen = Promise.withResolvers<void>();
+		this.#firstOpen = firstOpen;
 		let opened = false;
 		socket.onOpen = () => {
 			if (!opened) {
 				opened = true;
+				this.#firstOpen = undefined;
 				firstOpen.resolve();
 			}
 		};
@@ -234,6 +260,7 @@ export class CollabHost {
 		socket.onClose = (reason, willReconnect) => {
 			if (this.#stopped) return;
 			if (!opened) {
+				this.#firstOpen = undefined;
 				firstOpen.reject(new Error(reason));
 				return;
 			}
@@ -261,6 +288,15 @@ export class CollabHost {
 			clearTimeout(timeout);
 		}
 
+		// A stop that landed after onOpen cleared #firstOpen already ran
+		// #teardown against a socket it could not see. Close it and leave the
+		// taps below uninstalled.
+		if (this.#stopped) {
+			socket.close();
+			this.#socket = null;
+			throw new Error(COLLAB_STOPPED_ERROR);
+		}
+
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
 			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
 			this.#onEventForState(event);
@@ -278,12 +314,28 @@ export class CollabHost {
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
-		this.#ctx.sessionManager.onEntryAppended = entry => {
+		// `onEntryAppended` is a single slot on the session manager, so a stale
+		// host tearing down must not clear the live host's tap. Keep the exact
+		// function this host installed and only release that one.
+		const entryTap = (entry: StoredSessionEntry): void => {
 			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
 		};
+		this.#entryTap = entryTap;
+		this.#ctx.sessionManager.onEntryAppended = entryTap;
+	}
+
+	/**
+	 * Install the host's status segment on the status line.
+	 *
+	 * Deferred until the host is assigned to `ctx.collabHost` so an abandoned
+	 * or cancelled in-flight start never overwrites status line state.
+	 */
+	publishStatus(): void {
+		if (this.#stopped) return;
+		this.#published = true;
 		this.#updateStatusSegment();
 	}
 
@@ -297,7 +349,16 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
-		this.#ctx.sessionManager.onEntryAppended = undefined;
+		if (this.#firstOpen) {
+			this.#firstOpen.reject(new Error("Collab stopped"));
+			this.#firstOpen = undefined;
+		}
+		// A stale host stopping must leave the live host replicating: the slot is
+		// shared, so release it only when it still holds this host's own tap.
+		if (this.#entryTap && this.#ctx.sessionManager.onEntryAppended === this.#entryTap) {
+			this.#ctx.sessionManager.onEntryAppended = undefined;
+		}
+		this.#entryTap = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		for (const unsubscribe of this.#busUnsubscribers) unsubscribe();
@@ -315,9 +376,11 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		this.#ctx.collabHost = undefined;
-		this.#ctx.statusLine.setCollabStatus(null);
-		this.#ctx.ui.requestRender();
+		if (this.#ctx.collabHost === this) {
+			this.#ctx.collabHost = undefined;
+			this.#ctx.statusLine.setCollabStatus(null);
+			this.#ctx.ui.requestRender();
+		}
 	}
 
 	#broadcast(frame: CollabFrame): void {
@@ -331,6 +394,16 @@ export class CollabHost {
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		// A room bound to a session that is no longer live must service nothing.
+		// #broadcast covers the outbound half; this is the inbound one, and it
+		// is the half that can disclose: #handleHello snapshots the CURRENT
+		// transcript and #handleFetchTranscript reads it, so a room whose
+		// session was switched or rolled back under it would serve a session it
+		// was never shared for.
+		if (this.#sessionId && this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			void this.stop("session switched");
+			return;
+		}
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
@@ -693,6 +766,7 @@ export class CollabHost {
 	}
 
 	#updateStatusSegment(): void {
+		if (!this.#published || this.#ctx.collabHost !== this) return;
 		this.#ctx.statusLine.setCollabStatus({ role: "host", participantCount: this.#peers.size + 1 });
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.ui.requestRender();
