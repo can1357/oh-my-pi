@@ -256,11 +256,10 @@ export function isActionableCredentialDisable(
 	});
 }
 
-/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
+/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause; never longer than 80 characters. */
 export function summarizeDisableCause(cause: string): string {
 	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
-	if (description) return description;
-	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
+	const stripped = description ?? cause.replace(/^oauth refresh failed:\s*/i, "");
 	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
 	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
 }
