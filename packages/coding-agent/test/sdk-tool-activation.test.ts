@@ -2524,10 +2524,20 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		).rejects.toThrow("Cannot register custom tool 'yield': 'yield' is a reserved protocol tool.");
 	});
 
+	// The memory block is imperative prose ("Use `recall` proactively…"), so it
+	// must follow the EFFECTIVE set of the tools it names: a scope that drops one
+	// would otherwise steer the model into a guaranteed unavailable-tool error,
+	// and a scope that drops only unreferenced memory tools (`memory_edit`,
+	// `learn`) must not withhold guidance that never mentions them.
+	const memoryBackendOptions = (tempDir: string): Partial<CreateAgentSessionOptions> => ({
+		...baseOptions(tempDir),
+		settings: Settings.isolated({ "memory.backend": "mnemopi" }),
+	});
+
 	it("suppresses memory backend instructions under an enforced allowlist omitting memory tools", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
+			...memoryBackendOptions(tempDir),
 			toolNames: ["read", "grep"],
 			enforceToolAllowlist: true,
 		});
@@ -2535,9 +2545,79 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.refreshBaseSystemPrompt();
 			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).not.toContain("memory://");
-			expect(prompt).not.toContain("recall");
-			expect(prompt).not.toContain("retain");
+			expect(prompt).not.toContain("Use `recall`");
+			expect(prompt).not.toContain("Use `retain`");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("suppresses memory backend instructions when the allowlist omits a tool the block tells the model to call", async () => {
+		// `recall` is allowed, but the same prose also directs `retain`/`reflect`.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...memoryBackendOptions(tempDir),
+			toolNames: ["read", "recall"],
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			await session.refreshBaseSystemPrompt();
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain("Use `retain`");
+			expect(prompt).not.toContain("Use `reflect`");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps memory backend instructions when the allowlist covers every tool the block names", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...memoryBackendOptions(tempDir),
+			toolNames: ["read", "recall", "retain", "reflect"],
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			await session.refreshBaseSystemPrompt();
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain("Use `recall`");
+			expect(prompt).toContain("Use `retain`");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps memory backend instructions when a disallow drops only tools the block never names", async () => {
+		// `memory_edit` is a memory tool but is not referenced by the Mnemopi
+		// block, so scoping it out must not withhold the guidance.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...memoryBackendOptions(tempDir),
+			disallowedTools: ["memory_edit"],
+		});
+
+		try {
+			await session.refreshBaseSystemPrompt();
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain("Use `recall`");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("suppresses memory backend instructions when a disallow drops a tool the block names", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...memoryBackendOptions(tempDir),
+			disallowedTools: ["recall"],
+		});
+
+		try {
+			await session.refreshBaseSystemPrompt();
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain("Use `recall`");
 		} finally {
 			await session.dispose();
 		}

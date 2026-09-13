@@ -144,7 +144,7 @@ import {
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
-import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
+import { MEMORY_BACKEND_TOOL_NAMES, MEMORY_INSTRUCTION_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
@@ -3271,18 +3271,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
-			// A scope that disallows the memory tools (any of them, or bare `*`)
-			// must not receive the backend's instructions: they direct the child
-			// to call `recall`/`retain`/`reflect`, which the scope invariant
-			// would reject (guaranteed unavailable-tool errors). Same rule as
-			// the auto-learn guidance below — tool-specific guidance follows the
-			// effective set.
+			// The backend's instructions are imperative prose ("Use `recall`
+			// proactively…"), so they are only truthful while every tool the block
+			// names is in the effective tool set — a scope that drops one would
+			// steer the model into a guaranteed unavailable-tool error. Same rule
+			// as the auto-learn guidance below — tool-specific guidance follows
+			// the effective set. Keyed on the tools each backend's OWN block
+			// references, not the memory tool roster: scoping out an unreferenced
+			// tool (`memory_edit`, `learn`) must not withhold guidance that never
+			// mentions it, and a partial allowlist (`tools: [recall]`) must not
+			// keep prose that also tells the model to call `retain`/`reflect`.
+			const memoryInstructionTools = MEMORY_INSTRUCTION_TOOL_NAMES[settings.get("memory.backend")];
+			// Bare `*` is deny-all: no tool is callable, so no block that points
+			// at one survives — including backends whose prose names none.
 			const memoryToolsScopedOut =
 				restrictToolNames ||
-				(enforceToolAllowlist &&
-					!MEMORY_BACKEND_TOOL_NAMES.some(name => explicitlyRequestedToolNameSet?.has(name))) ||
-				MEMORY_BACKEND_TOOL_NAMES.some(name => isToolDisallowed(name, disallowedPatterns)) ||
-				disallowedPatterns.includes("*");
+				disallowedPatterns.includes("*") ||
+				memoryInstructionTools.some(
+					name =>
+						!isToolScopedIn(name, disallowedPatterns, {
+							enforceToolAllowlist,
+							allowedToolNames: explicitlyRequestedToolNameSet,
+							isBuiltIn: true,
+						}),
+				);
 			const memoryBackend = memoryToolsScopedOut ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
