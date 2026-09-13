@@ -253,6 +253,47 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 });
 
+describe("input controller — collab guest history", () => {
+	/** A guest replica: the real dispatcher gates and the real guest branch both run. */
+	function guestCtx() {
+		const harness = makeCtx();
+		harness.ctx.collabGuest = {
+			readOnly: false,
+			sendPrompt: vi.fn(),
+		} as unknown as InteractiveModeContext["collabGuest"];
+		harness.ctx.shutdown = vi.fn(async () => {});
+		controllerFor(harness.ctx);
+		return harness;
+	}
+
+	it("keeps a command the guest gates refuse out of history", async () => {
+		// `/new` and `/mcp list` are refused by the guest allowlist, `/hotkeys extra` by the
+		// argument gate, and the rest by the guest branch that rejects unhandled slash text.
+		const refused = ["/new", "/mcp list", "/hotkeys extra", "/model opus", "/not-a-builtin do something", "/"];
+		const recorded: string[] = [];
+
+		for (const command of refused) {
+			const { editor, addToHistory } = guestCtx();
+			await editor.onSubmit?.(command);
+			if (addToHistory.mock.calls.length > 0) recorded.push(command);
+		}
+
+		expect(recorded).toEqual([]);
+	});
+
+	it("records a command the guest may run locally, alias included", async () => {
+		const direct = guestCtx();
+		await direct.editor.onSubmit?.("/hotkeys");
+		expect(direct.addToHistory).toHaveBeenCalledWith("/hotkeys");
+
+		// `/q` reaches its allowlisted spec through the alias, so the guard has to resolve the
+		// canonical name rather than trust the token that was typed.
+		const aliased = guestCtx();
+		await aliased.editor.onSubmit?.("/q");
+		expect(aliased.addToHistory).toHaveBeenCalledWith("/q");
+	});
+});
+
 describe("yield queue list parsing", () => {
 	it("recognizes numeric, Roman, and alphabetic sequences", () => {
 		const expected = ["first", "second", "third"];

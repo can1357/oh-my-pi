@@ -171,6 +171,25 @@ export async function executeBuiltinSlashCommand(
 	return false;
 }
 
+/**
+ * Whether the collab guest gates refuse `text` instead of running it: the builtin allowlist
+ * applied by {@link executeBuiltinSlashCommand}, then the guest branch that rejects whatever the
+ * dispatcher left unhandled. The input controller records a command before dispatch and must not
+ * remember one a guest cannot run, so this mirrors the two gates here — one place to follow when
+ * either changes.
+ */
+export function guestRefusesSlashCommand(text: string): boolean {
+	const parsed = parseSlashCommand(text);
+	// Callers only ask about text starting with "/", so an unparsable body is the bare "/".
+	if (!parsed) return true;
+	// Unknown names, skills and extension commands fall through the dispatcher unconsumed.
+	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
+	if (!command) return true;
+	if (!COLLAB_GUEST_ALLOWED_COMMANDS[command.name]) return true;
+	// An arg-bearing call of an arg-less builtin is declined above and left unhandled as well.
+	return parsed.args.length > 0 && !command.allowArgs;
+}
+
 /** Look up a unified spec by name or alias. Used by the ACP dispatcher. */
 export function lookupBuiltinSlashCommand(name: string): SlashCommandSpec | undefined {
 	return BUILTIN_SLASH_COMMAND_LOOKUP.get(name);

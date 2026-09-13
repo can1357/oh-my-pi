@@ -31,7 +31,11 @@ import { AgentRegistry } from "../../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	guestRefusesSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -933,7 +937,7 @@ export class InputController {
 				// under the context it was typed in — in the database *and* in the editor's local
 				// list, which is still the one that context seeded. Recording after dispatch put
 				// the command in the destination's list, where the next Up would recall it.
-				if (text.startsWith("/") && !shouldSkipHistory(text)) {
+				if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
 					this.ctx.editor.addToHistory(text);
 				}
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
@@ -1611,7 +1615,7 @@ export class InputController {
 			// Same reason as the submit path: record before dispatch files the command under the
 			// context it was typed in — in the database and in the editor's local list, which is
 			// still the one that context seeded.
-			if (text.startsWith("/") && !shouldSkipHistory(text)) {
+			if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
 				this.ctx.editor.addToHistory(text);
 			}
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
@@ -2136,6 +2140,14 @@ export class InputController {
 			this.ctx.editor.insertTextAttachment(text);
 			this.ctx.showError("Failed to save paste to a file — attached as a text chip instead");
 		}
+	}
+
+	/**
+	 * Whether this session's collab guest gates refuse `text` instead of running it. A refused
+	 * command must not enter history: the next Up would offer a command that cannot be repeated.
+	 */
+	#guestRefusesSlash(text: string): boolean {
+		return this.ctx.collabGuest !== undefined && guestRefusesSlashCommand(text);
 	}
 
 	/**
