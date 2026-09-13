@@ -7201,6 +7201,8 @@ export class AuthStorage {
 	 * Disabled credential tombstones for display surfaces (`omp usage`,
 	 * broker `GET /v1/credentials/disabled`). Empty when the backing store
 	 * keeps no tombstones or the remote broker predates the endpoint.
+	 * SQLite retains automatic OAuth failures for 30 days after disable, even
+	 * after recovery. Use `listActionableDisabledCredentials` for reminders.
 	 */
 	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
 		if (!this.#store.listDisabledCredentials) return [];

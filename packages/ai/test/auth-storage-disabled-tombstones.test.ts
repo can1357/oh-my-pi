@@ -136,7 +136,7 @@ describe("disabled credential tombstone retention", () => {
 		]);
 	});
 
-	it("lets provider logout supersede automatic tombstones for every logged-out identity only", () => {
+	it("clears provider history on whole-provider logout without touching another provider", () => {
 		if (!store) throw new Error("test setup failed");
 		const peerId = store.upsertAuthCredentialForProvider("anthropic", credential("peer"))[0].id;
 		store.deleteAuthCredential(peerId, AUTOMATIC_CAUSE);
@@ -157,7 +157,6 @@ describe("disabled credential tombstone retention", () => {
 
 		expect(readRows(dbPath)).toEqual([
 			{ id: peerId, disabled_cause: AUTOMATIC_CAUSE },
-			{ id: absentId, disabled_cause: AUTOMATIC_CAUSE },
 			...activeIds.map(id => ({ id, disabled_cause: "deleted by user" })),
 		]);
 		expect(store.listAuthCredentials("openai-codex")).toEqual([]);
@@ -207,6 +206,46 @@ describe("disabled credential tombstone retention", () => {
 		expect(readRows(dbPath)).toEqual([{ id: newId, disabled_cause: "logged out by user" }]);
 	});
 
+	it("preserves an unrelated identity-less tombstone on named-account removal until provider logout", async () => {
+		if (!store) throw new Error("test setup failed");
+		const oldId = store.upsertAuthCredentialForProvider("openai-codex", {
+			type: "oauth",
+			access: "opaque-account-a",
+			refresh: "opaque-refresh-a",
+			expires: Date.now() + 3_600_000,
+		})[0].id;
+		store.deleteAuthCredential(oldId, AUTOMATIC_CAUSE);
+		const namedId = store.upsertAuthCredentialForProvider("openai-codex", credential("b", "bob@example.com"))[0].id;
+		store.deleteAuthCredential(namedId, "deleted by user");
+
+		expect(readRows(dbPath)).toEqual([
+			{ id: oldId, disabled_cause: AUTOMATIC_CAUSE },
+			{ id: namedId, disabled_cause: "deleted by user" },
+		]);
+		expect(await store.listDisabledCredentials("openai-codex")).toContainEqual(
+			expect.objectContaining({ id: oldId, cause: AUTOMATIC_CAUSE }),
+		);
+
+		// No active rows remain: an explicit provider logout still owns its history.
+		store.deleteAuthCredentialsForProvider("openai-codex", "logged out by user");
+		expect(await store.listDisabledCredentials("openai-codex")).toEqual([]);
+		expect(readRows(dbPath)).toEqual([]);
+	});
+
+	it("starts retention at automatic disable rather than the aged active row's last update", async () => {
+		if (!store) throw new Error("test setup failed");
+		const id = store.upsertAuthCredentialForProvider("openai-codex", credential("aged-active"))[0].id;
+		ageRow(dbPath, id);
+		const beforeDisableMs = Math.floor(Date.now() / 1000) * 1000;
+		store.deleteAuthCredential(id, AUTOMATIC_CAUSE);
+		const [summary] = await store.listDisabledCredentials("openai-codex");
+		expect(summary).toMatchObject({ id, cause: AUTOMATIC_CAUSE });
+		expect(summary?.disabledAtMs).toBeGreaterThanOrEqual(beforeDisableMs);
+		expect(summary?.disabledAtMs).toBeLessThanOrEqual(Date.now());
+		store.upsertAuthCredentialForProvider("openai-codex", credential("recovered"));
+		expect((await store.listDisabledCredentials("openai-codex")).map(row => row.id)).toEqual([id]);
+	});
+
 	it("lets a deliberate removal clear a legacy tombstone the removed org-scoped login had upgraded", () => {
 		if (!store) throw new Error("test setup failed");
 		// Pre-org login (identity `email:<e>`), torn down automatically.
@@ -240,10 +279,7 @@ describe("disabled credential tombstone retention", () => {
 		// The exact cause the CLI's runLogout() writes.
 		store.deleteAuthCredentialsForProvider("openai-codex", "logged out by user");
 
-		expect(readRows(dbPath)).toEqual([
-			{ id: bobId, disabled_cause: AUTOMATIC_CAUSE },
-			{ id: teamId, disabled_cause: "logged out by user" },
-		]);
+		expect(readRows(dbPath)).toEqual([{ id: teamId, disabled_cause: "logged out by user" }]);
 	});
 
 	it("expires an aged tombstone on the read path of a store that never writes again", async () => {

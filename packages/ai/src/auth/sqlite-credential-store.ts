@@ -263,7 +263,7 @@ export function copyOAuthCredentialIdentity(
 	if (credential.orgId) target.orgId = credential.orgId;
 }
 
-/** Tombstones without any identity are retired by any OAuth login; live-row dedup remains stricter. */
+/** Identity-less tombstone reminders are resolved by any OAuth login; identity matching remains stricter. */
 export function isOAuthCredentialIdentityRecovered(
 	existing: ResolvedOAuthCredentialIdentity,
 	incoming: ResolvedOAuthCredentialIdentity,
@@ -1444,39 +1444,34 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * they still been active: exact identity-key equality, or the same
 	 * upgrade-aware rule `matchesReplacementCredential` applies at login (a
 	 * pre-org `<b>` row is claimed by `<b>|org:<o>`; another member's or
-	 * subscription's row never is). A tombstone with no identity at all can
-	 * never be matched more precisely, so any OAuth credential of the provider
-	 * supersedes it. `keepAutomatic` preserves rows that record an automatic
-	 * teardown (recovery keeps the forensics); a deliberate removal passes
-	 * `false` so the identities it removes take their history with them.
+	 * subscription's row never is). Recovery can retire identity-less hygiene
+	 * rows, but a single-account removal cannot claim unidentified history.
+	 * `keepAutomatic` preserves automatic teardown forensics across recovery;
+	 * a deliberate removal passes `false` to clear only matching identities.
 	 */
 	#purgeTombstonesSupersededBy(
 		provider: string,
 		credentials: readonly AuthCredential[],
 		options: { keepAutomatic: boolean; excludeIds?: ReadonlySet<number> },
 	): void {
-		const identityKeys = new Set<string>();
-		const oauthCredentials: AuthCredential[] = [];
+		const identities: ResolvedOAuthCredentialIdentity[] = [];
 		for (const credential of credentials) {
 			if (credential.type !== "oauth") continue;
-			oauthCredentials.push(credential);
-			const identityKey = resolveCredentialIdentityKey(provider, credential);
-			if (identityKey) identityKeys.add(identityKey);
+			identities.push(resolveOAuthCredentialIdentity(provider, credential));
 		}
-		if (oauthCredentials.length === 0) return;
+		if (identities.length === 0) return;
 		const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 		for (const row of disabledRows) {
 			if (row.credential_type !== "oauth" || options.excludeIds?.has(row.id)) continue;
 			if (options.keepAutomatic && isAutomaticDisableCause(row.disabled_cause ?? "disabled")) continue;
-			const identityKey = resolveRowCredentialIdentityKey(provider, row);
-			if (identityKey === null || identityKeys.has(identityKey)) {
-				this.#hardDeleteStmt.run(row.id);
-				continue;
-			}
 			const disabledCredential = deserializeCredential(row);
-			if (disabledCredential === null) continue;
-			const superseded = oauthCredentials.some(active =>
-				matchesReplacementCredential(provider, disabledCredential, identityKey, active),
+			if (disabledCredential?.type !== "oauth") continue;
+			const identity = resolveOAuthCredentialIdentity(provider, disabledCredential);
+			identity.key = normalizeStoredIdentityKey(row.identity_key) ?? identity.key;
+			const superseded = identities.some(incoming =>
+				options.keepAutomatic
+					? isOAuthCredentialIdentityRecovered(identity, incoming)
+					: matchesOAuthCredentialIdentity(identity, incoming),
 			);
 			if (superseded) this.#hardDeleteStmt.run(row.id);
 		}
@@ -1638,14 +1633,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				return;
 			}
 			const logout = this.#db.transaction(() => {
-				const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
+				// Whole-provider logout owns all prior history, including unidentified
+				// tombstones and providers with no remaining active credentials.
+				this.#db.run("DELETE FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL", [provider]);
 				this.#deleteByProviderStmt.run(cause, provider);
-				const removed = rows.flatMap(row => deserializeCredential(row) ?? []);
-				if (removed.length === 0) return;
-				this.#purgeTombstonesSupersededBy(provider, removed, {
-					keepAutomatic: false,
-					excludeIds: new Set(rows.map(row => row.id)),
-				});
 			});
 			logout.immediate();
 		} catch {

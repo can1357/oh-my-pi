@@ -690,7 +690,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				fresh: { email: "person@example.com" },
 				recovered: true,
 			},
-		])("recovery and persistence agree: $name", async ({ provider, old, fresh, recovered }) => {
+		])("retention survives recovery while reminders follow identity: $name", async ({ provider, old, fresh, recovered }) => {
 			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 			try {
 				const [row] = store.upsertAuthCredentialForProvider(provider, oauthIdentity(old));
@@ -698,9 +698,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				const [summary] = await store.listDisabledCredentials(provider);
 				expect(isActionableCredentialDisable(summary!, [{ provider, type: "oauth", ...fresh }])).toBe(!recovered);
 				store.upsertAuthCredentialForProvider(provider, oauthIdentity(fresh));
-				expect((await store.listDisabledCredentials(provider)).some(entry => entry.id === row!.id)).toBe(
-					!recovered,
-				);
+				const retained = await store.listDisabledCredentials(provider);
+				expect(retained).toEqual([summary!]);
+				const active = store.listAuthCredentials(provider).map(entry => ({ provider, ...entry.credential }));
+				expect(isActionableCredentialDisable(retained[0]!, active)).toBe(!recovered);
 			} finally {
 				store.close();
 			}
@@ -731,7 +732,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			}
 		});
 
-		test("preserves a project-only tombstone until the same project signs in", async () => {
+		test("retains project-only forensics but clears the reminder when the same project signs in", async () => {
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "project-tombstone-"));
 			const storage = await AuthStorage.create(path.join(dir, "agent.db"));
 			try {
@@ -750,6 +751,9 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					"project-a",
 				]);
 				await storage.set("google-gemini-cli", [credential]);
+				expect(await storage.listDisabledCredentials()).toContainEqual(
+					expect.objectContaining({ id, projectId: "project-a", cause: "invalid_grant" }),
+				);
 				expect(await storage.listActionableDisabledCredentials()).toEqual([]);
 			} finally {
 				storage.close();
@@ -872,14 +876,16 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				expect((await storage.listActionableDisabledCredentials()).map(row => row.id)).toEqual([id]);
 				expect((await storage.listDisabledCredentials()).map(row => row.id)).toEqual([id]);
 				await storage.set("unit-token-identity", [credential]);
-				expect((await storage.listDisabledCredentials()).map(row => row.id)).not.toContain(id);
+				expect(await storage.listDisabledCredentials()).toContainEqual(
+					expect.objectContaining({ id, accountId: "user-1", cause: "invalid_grant" }),
+				);
 				expect(await storage.listActionableDisabledCredentials()).toEqual([]);
 			} finally {
 				storage.close();
 			}
 		});
 
-		test("retires an identity-less tombstone on re-login so a later logout cannot resurrect it", async () => {
+		test("retains identity-less forensics without a reminder after re-login until provider logout", async () => {
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-identityless-"));
 			const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
 			try {
@@ -896,9 +902,13 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([id]);
 
 				await authStorage.set("unit-idless", [{ ...bare, access: "opaque-access-2", refresh: "r-2" }]);
-				expect(await authStorage.listDisabledCredentials("unit-idless")).toEqual([]);
+				expect(await authStorage.listDisabledCredentials("unit-idless")).toContainEqual(
+					expect.objectContaining({ id, cause: "oauth refresh failed: invalid_grant" }),
+				);
+				expect(await authStorage.listActionableDisabledCredentials()).toEqual([]);
 
 				await authStorage.remove("unit-idless");
+				expect((await authStorage.listDisabledCredentials("unit-idless")).map(row => row.id)).not.toContain(id);
 				expect(await authStorage.listActionableDisabledCredentials()).toEqual([]);
 			} finally {
 				authStorage.close();

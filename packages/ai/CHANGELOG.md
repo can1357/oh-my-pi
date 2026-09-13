@@ -6,8 +6,7 @@
 
 - Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity. Actionable summaries use canonical claims and fresh recovery state, respect broker account pools, and redact diagnostic causes while protected forensic data remains intact ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - Automatic OAuth credential disables (definitive refresh failure, upstream token invalidation, broker disable) now log the provider, credential id, account, and cause, and `credential_disabled` events carry the credential id and account identity ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
-- Fixed automatic OAuth disable causes being lost on re-login by retaining tombstones for 30 days; deliberate credential removal clears older tombstones of the same identity.
-- An OAuth account the auth layer signed out automatically keeps its tombstone (and the cause) through a re-login of the same identity; tombstones now expire after 30 days, and a deliberate logout clears the older tombstones of the identities it removes ([#11911](https://github.com/can1357/oh-my-pi/pull/11911) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic OAuth failure tombstones survive re-login for 30 days after disable without stale recovery reminders. Single-account removal clears only matching history, preserving unidentified tombstones; whole-provider logout clears that provider's prior history ([#11911](https://github.com/can1357/oh-my-pi/pull/11911) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.19] - 2026-09-12
 
