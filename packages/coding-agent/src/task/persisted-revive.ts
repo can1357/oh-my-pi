@@ -12,6 +12,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { withSiblingTools } from "../tools/builtin-names";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
 import type { AgentDefinition } from "./types";
@@ -203,10 +204,14 @@ export function createPersistedSubagentReviverFactory(
 			// snapshot predates tools that registered late originally and would
 			// drop one that is available again at revival time with no later
 			// registration event to re-activate it.
-			await session.setActiveToolsByName([
-				...(init.declaredTools ?? revivedToolNames),
-				...session.getMountedXdevToolNames(),
-			]);
+			//
+			// The list is re-declared through the sibling pairing: the original
+			// run's active set carried the sister pair `declaredTools` alone
+			// cannot reproduce (`tools: [checkpoint]` was widened to include
+			// `rewind` during construction), so clamping to the raw declaration
+			// would strand the revived agent mid-investigation.
+			const revivedScope = withSiblingTools(init.declaredTools ?? revivedToolNames);
+			await session.setActiveToolsByName([...revivedScope, ...session.getMountedXdevToolNames()]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that

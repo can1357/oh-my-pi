@@ -70,6 +70,40 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 }
 
 /**
+ * Tools that are unusable without their sister, so any list naming one must
+ * name the other. `createTools` auto-registers the pair from either name, but a
+ * caller-supplied allowlist would otherwise drop the sister from the ACTIVE
+ * set — leaving an agent able to checkpoint yet unable to rewind (or vice
+ * versa). Shared by the SDK's session construction and the cold-revive clamp so
+ * a replayed allowlist cannot lose the pairing the original run had.
+ *
+ * Registration is not consulted: every consumer filters against its own
+ * registry afterwards (`setActiveToolsByName` ignores unknown names), and the
+ * revive path has no registry to consult before the session rebuild.
+ */
+const SIBLING_TOOL_PAIRS: readonly (readonly [string, string])[] = [["checkpoint", "rewind"]] as const;
+
+/**
+ * Add each sibling pair's sister for every member already named. Returns a new
+ * array (input order, then added sisters), or the input when no pair applies.
+ */
+export function withSiblingTools(names: readonly string[]): string[] {
+	let out: string[] | undefined;
+	for (const [a, b] of SIBLING_TOOL_PAIRS) {
+		for (const [present, sister] of [
+			[a, b],
+			[b, a],
+		] as const) {
+			if (names.includes(present) && !names.includes(sister)) {
+				out ??= [...names];
+				out.push(sister);
+			}
+		}
+	}
+	return out ?? [...names];
+}
+
+/**
  * Expand the `exec` tool alias into its concrete backends: `eval` (kept only
  * when at least one eval backend is allowed per `backends`) and `bash`. A deny
  * on the alias itself blocks the whole expansion; a deny on a child is applied

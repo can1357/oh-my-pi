@@ -248,6 +248,7 @@ import {
 	isToolScopedIn,
 	mcpDisallowTargetsServer,
 	normalizeToolNames,
+	withSiblingTools,
 } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { ToolContextStore } from "./tools/context";
@@ -3154,10 +3155,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// not silently remove its resources.
 		const resourceOnlyServerAllowed = (serverName: string): boolean =>
 			!enforceToolAllowlist && !mcpDisallowTargetsServer(disallowedPatterns, serverName);
-		const ownsAnyTool = (serverName: string): boolean =>
-			Array.from(toolRegistry.values()).some(
-				tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
-			);
+		// Ownership is read from the manager's loaded tools, NOT the registry:
+		// registered names are deduplicated, so when two servers mint the same
+		// public name only the winner survives in `toolRegistry` and the losing
+		// server would read as resource-only — its resources then escaping the
+		// disallow scope that targets its tools. The manager keeps every
+		// server's tools, each carrying its own `serverName`.
+		const owningServers = new Set<string>();
+		for (const tool of mcpManager?.getTools() ?? []) {
+			const owner = (tool as { mcpServerName?: unknown }).mcpServerName;
+			if (typeof owner === "string") owningServers.add(owner);
+		}
+		const ownsAnyTool = (serverName: string): boolean => owningServers.has(serverName);
 		const serverResourcesAllowed = (name: string): boolean =>
 			mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) ||
 			(!ownsAnyTool(name) && resourceOnlyServerAllowed(name));
@@ -3501,7 +3510,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		let explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
@@ -3527,15 +3536,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Checkpoint and rewind are a pair: `createTools` auto-includes the sister
 		// tool in the registry, but an explicit `toolNames` list would otherwise
 		// drop it from the ACTIVE set — leaving the agent able to checkpoint but
-		// unable to rewind (or vice versa). Mirror the pairing here. Unlike the
-		// manage_skill/learn mirror above, this is a safety pairing — it applies
-		// to restricted sessions too.
+		// unable to rewind (or vice versa). Unlike the manage_skill/learn mirror
+		// above, this is a safety pairing — it applies to restricted sessions too.
 		if (explicitlyRequestedToolNames) {
-			if (builtInToolNames.includes("checkpoint") && !explicitlyRequestedToolNames.includes("rewind")) {
-				explicitlyRequestedToolNames.push("rewind");
-			} else if (builtInToolNames.includes("rewind") && !explicitlyRequestedToolNames.includes("checkpoint")) {
-				explicitlyRequestedToolNames.push("checkpoint");
-			}
+			explicitlyRequestedToolNames = withSiblingTools(explicitlyRequestedToolNames);
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));

@@ -733,4 +733,53 @@ describe("persisted allowlist revival", () => {
 		// later registration event) stays active.
 		expect(activeToolNames).toEqual([["read", "late_tool", "yield"]]);
 	});
+
+	it("keeps the checkpoint/rewind pair when reviving a declaration that named only one", async () => {
+		// `tools: [checkpoint]` is widened to include `rewind` during session
+		// construction (the pair is unusable apart), but `declaredTools` records
+		// the declaration. Clamping the revival to it would strand the agent able
+		// to checkpoint yet unable to rewind.
+		const cwd = makeTempDir("@pi-sibling-revive-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		manager.appendSessionInit({
+			systemPrompt: "persisted prompt",
+			task: "persisted task",
+			tools: ["checkpoint", "rewind", "yield"],
+			declaredTools: ["checkpoint", "yield"],
+			enforceToolAllowlist: true,
+		});
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			content: [{ type: "text", text: "persisted" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await manager.close();
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+
+		const activeToolNames: string[][] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(activeToolNames).toEqual([["checkpoint", "yield", "rewind"]]);
+	});
 });
