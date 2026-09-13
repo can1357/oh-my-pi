@@ -3,6 +3,18 @@ export interface HelloRefreshTabChange {
 	groupId?: number;
 }
 
+export function applyHelloTabChanges<T extends { tabId: number }>(
+	tabs: readonly T[],
+	changes: ReadonlyMap<number, T | null>,
+): T[] {
+	const current = new Map(tabs.map(tab => [tab.tabId, tab]));
+	for (const [tabId, tab] of changes) {
+		if (tab === null) current.delete(tabId);
+		else current.set(tabId, tab);
+	}
+	return [...current.values()];
+}
+
 /**
  * URL and group changes affect relay reconciliation, so an in-flight hello
  * carrying their previous values must be suppressed rather than merely
@@ -15,11 +27,7 @@ export function invalidatesHelloReconciliation(changeInfo: HelloRefreshTabChange
 export function shouldSuppressHelloSnapshot(
 	structuralDirty: boolean,
 	reconciliationDirty: boolean,
-	allowStaleStructural: boolean,
 	allowStaleReconciliation: boolean,
 ): boolean {
-	return (
-		(structuralDirty && !allowStaleStructural) ||
-		(reconciliationDirty && !allowStaleReconciliation)
-	);
+	return structuralDirty || (reconciliationDirty && !allowStaleReconciliation);
 }

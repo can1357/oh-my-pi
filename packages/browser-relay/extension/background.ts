@@ -58,6 +58,7 @@ import {
 	snapshotAfterPendingOperationsSettle,
 } from "./pending-ops";
 import {
+	applyHelloTabChanges,
 	invalidatesHelloReconciliation,
 	shouldSuppressHelloSnapshot,
 } from "./hello-refresh";
@@ -751,20 +752,16 @@ let helloRefresh: {
 	socket: WebSocket;
 	done: Promise<void>;
 	/**
-	 * The attachment set or tab set changed while this hello was in flight, so its
-	 * snapshot may misreport attach/detach state. A stale send here would make
+	 * The attachment set changed while this hello was in flight, so its snapshot
+	 * may misreport attach/detach state. A stale send here would make
 	 * `RelayBridge.#onHello()` detach or re-add a session incorrectly, so the send
 	 * is suppressed and rebuilt. These invalidations come from discrete events
-	 * (attach/detach, tab create/remove), so they cannot starve the handshake.
+	 * (attach/detach), so they cannot starve the handshake. Tab lifecycle events
+	 * are instead overlaid onto the completed snapshot below.
 	 */
 	structuralDirty: boolean;
-	/**
-	 * The previous refresh in this chain was already suppressed for a structural
-	 * change. Permit this snapshot through if tab churn continues so a stream of
-	 * creates/removes cannot indefinitely block relay initialization; the queued
-	 * rebuild still publishes the final tab set once churn settles.
-	 */
-	allowStaleStructural: boolean;
+	/** Tab lifecycle events received after this hello started building. */
+	tabChanges: Map<number, TabSnapshot | null>;
 	/**
 	 * Reconciliation metadata (URL or group membership) changed after this hello
 	 * snapshotted the tab. Suppress the first stale snapshot in a refresh chain to
@@ -813,7 +810,7 @@ function refreshHello(onSent?: () => void): void {
 	if (!socket || socket.readyState !== WebSocket.OPEN) return;
 	if (helloRefresh?.socket === socket) {
 		// A refresh is already running for this socket; its snapshot may predate
-		// this attachment/tab-set change. Rebuild after it settles instead of
+		// this attachment state change. Rebuild after it settles instead of
 		// discarding the refresh.
 		helloRefresh.structuralDirty = true;
 		// Carry a caller's post-send callback onto the in-flight refresh so a
@@ -824,14 +821,13 @@ function refreshHello(onSent?: () => void): void {
 	}
 	const startRefresh = (
 		afterSend: (() => void) | null,
-		allowStaleStructural: boolean,
 		allowStaleReconciliation: boolean,
 	): void => {
 		const entry: {
 			socket: WebSocket;
 			done: Promise<void>;
 			structuralDirty: boolean;
-			allowStaleStructural: boolean;
+			tabChanges: Map<number, TabSnapshot | null>;
 			reconciliationDirty: boolean;
 			allowStaleReconciliation: boolean;
 			metaDirty: boolean;
@@ -839,7 +835,7 @@ function refreshHello(onSent?: () => void): void {
 		} = {
 			socket,
 			structuralDirty: false,
-			allowStaleStructural,
+			tabChanges: new Map(),
 			reconciliationDirty: false,
 			allowStaleReconciliation,
 			metaDirty: false,
@@ -848,6 +844,7 @@ function refreshHello(onSent?: () => void): void {
 		};
 		entry.done = buildHello()
 			.then(async (hello) => {
+				hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
 				// Suppress a hello whose attachment snapshot was invalidated before it
 				// could be sent. A guard detach that marks this refresh structurally
 				// dirty in flight means `getTargets()` may predate the detach, so this
@@ -865,7 +862,6 @@ function refreshHello(onSent?: () => void): void {
 					shouldSuppressHelloSnapshot(
 						entry.structuralDirty,
 						entry.reconciliationDirty,
-						entry.allowStaleStructural,
 						entry.allowStaleReconciliation,
 					)
 				)
@@ -882,17 +878,20 @@ function refreshHello(onSent?: () => void): void {
 						!shouldSuppressHelloSnapshot(
 							entry.structuralDirty,
 							entry.reconciliationDirty,
-							entry.allowStaleStructural,
 							entry.allowStaleReconciliation,
 						) &&
 						ws === socket &&
 						socket.readyState === WebSocket.OPEN,
 				);
+				// Tab events can arrive while attachment persistence is awaiting. Apply
+				// their latest state again immediately before the synchronous send so an
+				// allowed bounded retry never retracts a newer tabCreated/tabUpdated or
+				// resurrects a tabRemoved event with an authoritative stale tab list.
+				hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
 				if (
 					shouldSuppressHelloSnapshot(
 						entry.structuralDirty,
 						entry.reconciliationDirty,
-						entry.allowStaleStructural,
 						entry.allowStaleReconciliation,
 					)
 				)
@@ -941,7 +940,6 @@ function refreshHello(onSent?: () => void): void {
 					// post-send callback onto the rebuild.
 					startRefresh(
 						entry.afterSend,
-						entry.allowStaleStructural || entry.structuralDirty,
 						entry.allowStaleReconciliation || entry.reconciliationDirty,
 					);
 				} else {
@@ -950,11 +948,17 @@ function refreshHello(onSent?: () => void): void {
 			});
 		helloRefresh = entry;
 	};
-	startRefresh(onSent ?? null, false, false);
+	startRefresh(onSent ?? null, false);
 }
 
 function invalidateHelloRefresh(): void {
 	if (helloRefresh) helloRefresh.structuralDirty = true;
+}
+
+function updateHelloTabSnapshot(tabId: number, tab: TabSnapshot | null): void {
+	if (!helloRefresh) return;
+	helloRefresh.tabChanges.set(tabId, tab);
+	helloRefresh.metaDirty = true;
 }
 
 function invalidateHelloReconciliation(): void {
@@ -1504,10 +1508,9 @@ chrome.tabs.onCreated.addListener((tab) => {
 		// before this tab was created, so its in-flight hello omits the new tab.
 		// Delivered after this `tabCreated`, that stale hello makes
 		// RelayBridge.#onHello() treat its tab list as authoritative and drop the
-		// just-created target with no later event to restore it. Mark the refresh
-		// dirty so the stale send is suppressed and the rebuild re-queries the live
-		// tab set, mirroring the onRemoved invalidation.
-		invalidateHelloRefresh();
+		// just-created target with no later event to restore it. Overlay the event on
+		// any in-flight snapshot so bounded retries cannot send the older tab set.
+		updateHelloTabSnapshot(snap.tabId, snap);
 		post({ t: "tabCreated", tab: snap });
 	}
 });
@@ -1515,6 +1518,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 	const snap = snapshot(tab);
 	if (snap) {
+		updateHelloTabSnapshot(snap.tabId, snap);
 		// An in-flight refresh whose snapshot predates this update carries stale
 		// tab metadata that RelayBridge.#onHello() would restore
 		// over the newer `tabUpdated`. Mark the refresh meta-dirty so it rebuilds
@@ -1540,10 +1544,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 	// chrome.tabs.query() before this removal landed, so its in-flight hello can
 	// still advertise the closed tab as present/attached. Delivered after this
 	// `tabRemoved`, that stale hello would make RelayBridge.#onHello() re-add the
-	// removed target with no later tab event to correct it. Mark the refresh dirty
-	// so the stale send is suppressed and the rebuild re-queries the live tab set,
-	// mirroring the invalidation attachment changes already perform.
-	invalidateHelloRefresh();
+	// removed target with no later tab event to correct it. Overlay the removal on
+	// any in-flight snapshot so bounded retries cannot resurrect the old tab.
+	updateHelloTabSnapshot(tabId, null);
 	post({ t: "tabRemoved", tabId });
 });
 

@@ -326,11 +326,21 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
 }
 
 // extension/hello-refresh.ts
+function applyHelloTabChanges(tabs, changes) {
+  const current = new Map(tabs.map((tab) => [tab.tabId, tab]));
+  for (const [tabId, tab] of changes) {
+    if (tab === null)
+      current.delete(tabId);
+    else
+      current.set(tabId, tab);
+  }
+  return [...current.values()];
+}
 function invalidatesHelloReconciliation(changeInfo) {
   return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
-function shouldSuppressHelloSnapshot(structuralDirty, reconciliationDirty, allowStaleStructural, allowStaleReconciliation) {
-  return structuralDirty && !allowStaleStructural || reconciliationDirty && !allowStaleReconciliation;
+function shouldSuppressHelloSnapshot(structuralDirty, reconciliationDirty, allowStaleReconciliation) {
+  return structuralDirty || reconciliationDirty && !allowStaleReconciliation;
 }
 
 // extension/background.ts
@@ -755,11 +765,11 @@ function refreshHello(onSent) {
       helloRefresh.afterSend = onSent;
     return;
   }
-  const startRefresh = (afterSend, allowStaleStructural, allowStaleReconciliation) => {
+  const startRefresh = (afterSend, allowStaleReconciliation) => {
     const entry = {
       socket,
       structuralDirty: false,
-      allowStaleStructural,
+      tabChanges: new Map,
       reconciliationDirty: false,
       allowStaleReconciliation,
       metaDirty: false,
@@ -767,10 +777,12 @@ function refreshHello(onSent) {
       afterSend
     };
     entry.done = buildHello().then(async (hello) => {
-      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleStructural, entry.allowStaleReconciliation))
+      hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
         return;
-      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleStructural, entry.allowStaleReconciliation) && ws === socket && socket.readyState === WebSocket.OPEN);
-      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleStructural, entry.allowStaleReconciliation))
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation) && ws === socket && socket.readyState === WebSocket.OPEN);
+      hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.reconciliationDirty, entry.allowStaleReconciliation))
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(hello));
@@ -786,18 +798,24 @@ function refreshHello(onSent) {
       if (helloRefresh !== entry)
         return;
       if ((entry.structuralDirty || entry.reconciliationDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
-        startRefresh(entry.afterSend, entry.allowStaleStructural || entry.structuralDirty, entry.allowStaleReconciliation || entry.reconciliationDirty);
+        startRefresh(entry.afterSend, entry.allowStaleReconciliation || entry.reconciliationDirty);
       } else {
         helloRefresh = null;
       }
     });
     helloRefresh = entry;
   };
-  startRefresh(onSent ?? null, false, false);
+  startRefresh(onSent ?? null, false);
 }
 function invalidateHelloRefresh() {
   if (helloRefresh)
     helloRefresh.structuralDirty = true;
+}
+function updateHelloTabSnapshot(tabId, tab) {
+  if (!helloRefresh)
+    return;
+  helloRefresh.tabChanges.set(tabId, tab);
+  helloRefresh.metaDirty = true;
 }
 function invalidateHelloReconciliation() {
   if (helloRefresh)
@@ -1111,13 +1129,14 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);
   if (snap) {
-    invalidateHelloRefresh();
+    updateHelloTabSnapshot(snap.tabId, snap);
     post({ t: "tabCreated", tab: snap });
   }
 });
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap) {
+    updateHelloTabSnapshot(snap.tabId, snap);
     if (invalidatesHelloReconciliation(changeInfo))
       invalidateHelloReconciliation();
     else
@@ -1127,7 +1146,7 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   forgetRecoverable(tabId);
-  invalidateHelloRefresh();
+  updateHelloTabSnapshot(tabId, null);
   post({ t: "tabRemoved", tabId });
 });
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
