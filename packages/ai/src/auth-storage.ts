@@ -6982,17 +6982,20 @@ export class AuthStorage {
 		if (modelPolicyScope === undefined) return undefined;
 
 		const rawMessage = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-		// The provider's own sentence leads so text classification keeps matching.
+		// The provider's own sentence leads so text classification keeps matching;
+		// the Codex sentence comes from the same template the classifier is built on.
 		const head = exactCodexModelPolicy
-			? `The '${deniedModel}' model is not supported when using Codex with a ChatGPT account.`
+			? AIError.codexChatGPTAccountPolicyMessage(deniedModel)
 			: rawMessage.trim().replace(/[.\s]*$/, ".");
 
 		const nowMs = Date.now();
+		let deniedCount = 0;
 		const tried: string[] = [];
 		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
 			const label = credential.type === "oauth" ? credentialAccountLabel(credential) : "API key";
 			const providerKey = this.#getProviderTypeKey(provider, credential.type);
 			if (this.#getCredentialBlockedUntil(provider, providerKey, index, modelPolicyScope) !== undefined) {
+				deniedCount += 1;
 				tried.push(`${label} denied`);
 				continue;
 			}
@@ -7003,12 +7006,12 @@ export class AuthStorage {
 				tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
 			}
 		}
-		const parts = [
-			head,
-			tried.length > 0
-				? `No other signed-in ${provider} account can serve it: ${tried.join(", ")}.`
-				: `No signed-in ${provider} account can serve it.`,
-		];
+		// Rotation records the denial as a model-scoped block on the stored
+		// credential it served. Without one, the request did not run on this
+		// pool (a pinned runtime/config key, say) and the denial is not ours to
+		// explain.
+		if (deniedCount === 0) return undefined;
+		const parts = [head, `No other signed-in ${provider} account can serve it: ${tried.join(", ")}.`];
 
 		let recentlySignedOut: string[] = [];
 		try {

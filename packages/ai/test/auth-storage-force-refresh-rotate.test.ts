@@ -999,7 +999,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		);
 	});
 
-	test("modelEntitlementError stays silent for errors that are not an exact model-policy denial", async () => {
+	test("modelEntitlementError stays silent for errors that are not an exact model-policy denial, or that no stored credential served", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		expect(await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, authError())).toBeUndefined();
 		expect(
@@ -1013,6 +1013,20 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			await authStorage.modelEntitlementError(
 				CODEX_PROVIDER,
 				undefined,
+				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
+			),
+		).toBeUndefined();
+		// A request that ran on a pinned runtime key never rotated through the
+		// stored pool, so no credential carries the model-scope block and the
+		// pool has nothing to explain.
+		await authStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "untouched", refresh: "ref-U", expires: farExpiry(), email: "u@example.com" },
+		]);
+		authStorage.setRuntimeApiKey(CODEX_PROVIDER, "sk-pinned");
+		expect(
+			await authStorage.modelEntitlementError(
+				CODEX_PROVIDER,
+				DAYBREAK_MODEL,
 				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
 			),
 		).toBeUndefined();
