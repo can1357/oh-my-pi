@@ -130,6 +130,21 @@ function parseJsonBody(errorMessage: string): Record<string, unknown> | undefine
 }
 
 /**
+ * Detect synthetic 429 RESOURCE_EXHAUSTED returned by Cloud Code Assist / Google Antigravity
+ * when systemInstruction contains blocked fingerprint text. Real quota errors carry structured
+ * details (ErrorInfo / RetryInfo), while the synthetic rejection has no details array.
+ */
+export function isAntigravitySynthetic429(status: number | undefined, errorMessage: string): boolean {
+	if (status !== 429) return false;
+	const body = parseJsonBody(errorMessage);
+	const error = asRecord(body?.error);
+	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
+		return false;
+	}
+	return !Array.isArray(error.details);
+}
+
+/**
  * Classify structured Google RESOURCE_EXHAUSTED bodies before consulting text.
  * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an
  * embedded top-level object as well as a raw JSON body.
@@ -140,7 +155,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
 		return undefined;
 	}
-	if (!Array.isArray(error.details)) return undefined;
+	if (!Array.isArray(error.details)) return "RATE_LIMIT_EXCEEDED";
 
 	for (const value of error.details) {
 		const detail = asRecord(value);
@@ -166,7 +181,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 			}
 		}
 	}
-	return undefined;
+	return "RATE_LIMIT_EXCEEDED";
 }
 
 function isQuotaExhaustedReason(reason: RateLimitReason): boolean {

@@ -12,7 +12,7 @@ import {
 	getAntigravityUserAgent,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, fetchWithRetry, logger, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -290,6 +290,8 @@ export interface AntigravityProviderSessionState extends ProviderSessionState {
 	sessionId?: string;
 	stepIndex?: number;
 	lastExecutionId?: string;
+	foldedModels?: Set<string>;
+	hasLoggedSystemInstructionFold?: boolean;
 }
 
 const ANTIGRAVITY_PROVIDER_SESSION_STATE_KEY = "google-antigravity-session-state";
@@ -310,6 +312,56 @@ export function getAntigravityProviderSessionState(
 	return existing;
 }
 
+export function canFoldSystemInstruction(request: CloudCodeAssistRequest["request"]): boolean {
+	const si = request.systemInstruction;
+	if (!si?.parts || si.parts.length === 0) return false;
+	return si.parts.some(p => typeof p.text === "string" && p.text.trim().length > 0);
+}
+
+export function foldSystemInstructionIntoContents(request: CloudCodeAssistRequest["request"]): boolean {
+	const si = request.systemInstruction;
+	if (!si?.parts || si.parts.length === 0) return false;
+	const systemParts = si.parts.filter(p => typeof p.text === "string" && p.text.length > 0);
+	delete request.systemInstruction;
+	if (systemParts.length === 0) return false;
+
+	if (!request.contents || request.contents.length === 0) {
+		request.contents = [{ role: "user", parts: [...systemParts] }];
+		return true;
+	}
+	const firstTurn = request.contents[0];
+	if (firstTurn.role === "user") {
+		firstTurn.parts = [...systemParts, ...(firstTurn.parts ?? [])];
+	} else {
+		request.contents.unshift({ role: "user", parts: [...systemParts] });
+	}
+	return true;
+}
+
+export function foldSystemPromptsIntoContents(
+	contents: CloudCodeAssistRequest["request"]["contents"],
+	systemPrompts: string[],
+): void {
+	const parts = systemPrompts.filter(text => text.length > 0).map(text => ({ text }));
+	if (parts.length === 0) return;
+	if (contents.length === 0) {
+		contents.push({ role: "user", parts });
+		return;
+	}
+	const firstTurn = contents[0];
+	if (firstTurn.role === "user") {
+		firstTurn.parts = [...parts, ...(firstTurn.parts ?? [])];
+	} else {
+		contents.unshift({ role: "user", parts });
+	}
+}
+
+export function sanitizeAntigravitySystemInstruction(text: string): string {
+	if (!text.includes("<system-conventions>")) return text;
+	const nonce = crypto.randomUUID().slice(0, 8);
+	return text.replaceAll("<system-conventions>", `<system-conventions id="${nonce}">`);
+}
+
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -320,6 +372,7 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_FIRST_EVENT_TIMEOUT_MS = 300_000;
 const FIRST_EVENT_TIMEOUT_ERROR = "Cloud Code Assist stream timed out while waiting for the first event";
+let loggedSystemInstructionFoldWithoutSession = false;
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
@@ -502,6 +555,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		let providerState: AntigravityProviderSessionState | undefined;
+		let wireModelId: string | undefined;
+		let didFoldThisTurn = false;
+		let wasFoldedFromStart = false;
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -531,9 +588,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			const baseUrl = model.baseUrl?.trim();
 			let endpoints: string[];
-			const providerState = isAntigravity
-				? getAntigravityProviderSessionState(options?.providerSessionState)
-				: undefined;
+			providerState = isAntigravity ? getAntigravityProviderSessionState(options?.providerSessionState) : undefined;
 
 			if (isAntigravity) {
 				const mode = options?.antigravityEndpointMode ?? "auto";
@@ -590,7 +645,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					: {}),
 				...options?.headers,
 			};
-			const requestBodyJson = JSON.stringify(requestBody);
+			let requestBodyJson = JSON.stringify(requestBody);
+			wireModelId = options?.requestModelId ?? model.requestModelId ?? model.id;
+			wasFoldedFromStart = isAntigravity && Boolean(providerState?.foldedModels?.has(wireModelId));
+			didFoldThisTurn = wasFoldedFromStart;
+
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -949,31 +1008,98 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 							fetch: options?.fetch,
 							timeout: false,
+							shouldRetryResponse: (res, bodyText) => {
+								if (isAntigravity && AIError.isAntigravitySynthetic429(res.status, bodyText)) {
+									return false;
+								}
+								return true;
+							},
 						});
 					} finally {
 						watchdog.clear();
 					}
 
 					if (!response.ok) {
-						if (AIError.isTransientStatus(response.status)) {
-							if (!isLastEndpoint) {
-								continue;
+						let errorText = await response.text();
+						if (
+							!started &&
+							isAntigravity &&
+							!didFoldThisTurn &&
+							canFoldSystemInstruction(requestBody.request) &&
+							AIError.isAntigravitySynthetic429(response.status, errorText)
+						) {
+							const alreadyLogged = providerState
+								? providerState.hasLoggedSystemInstructionFold
+								: loggedSystemInstructionFoldWithoutSession;
+							if (!alreadyLogged) {
+								if (providerState) {
+									providerState.hasLoggedSystemInstructionFold = true;
+								} else {
+									loggedSystemInstructionFoldWithoutSession = true;
+								}
+								const totalChars =
+									requestBody.request.systemInstruction?.parts?.reduce(
+										(sum, p) => sum + (p.text?.length ?? 0),
+										0,
+									) ?? 0;
+								logger.warn(
+									"Antigravity synthetic 429 RESOURCE_EXHAUSTED detected on systemInstruction; folding system prompt into first user turn",
+									{
+										model: model.id,
+										provider: model.provider,
+										systemInstructionParts: requestBody.request.systemInstruction?.parts?.length ?? 0,
+										totalSystemChars: totalChars,
+									},
+								);
+							}
+							foldSystemInstructionIntoContents(requestBody.request);
+							requestBodyJson = JSON.stringify(requestBody);
+							if (rawRequestDump) {
+								rawRequestDump.body = requestBody;
+							}
+							didFoldThisTurn = true;
+
+							const retryWatchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+							try {
+								response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+									method: "POST",
+									headers: requestHeaders,
+									body: requestBodyJson,
+									signal: retryWatchdog.signal,
+									maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
+									defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+									maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+									fetch: options?.fetch,
+									timeout: false,
+								});
+							} finally {
+								retryWatchdog.clear();
+							}
+							if (!response.ok) {
+								errorText = await response.text();
 							}
 						}
-						const errorText = await response.text();
-						const validationUrl = extractGoogleValidationUrl(errorText);
-						const errorMessage = validationUrl
-							? formatGoogleValidationRequiredMessage(
-									validationUrl,
-									"retry your request",
-									parsedCredentials.email,
-								)
-							: errorText;
-						throw new AIError.GeminiCliApiError(
-							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
-							response.status,
-							{ headers: response.headers },
-						);
+
+						if (!response.ok) {
+							if (AIError.isTransientStatus(response.status)) {
+								if (!isLastEndpoint) {
+									continue;
+								}
+							}
+							const validationUrl = extractGoogleValidationUrl(errorText);
+							const errorMessage = validationUrl
+								? formatGoogleValidationRequiredMessage(
+										validationUrl,
+										"retry your request",
+										parsedCredentials.email,
+									)
+								: errorText;
+							throw new AIError.GeminiCliApiError(
+								`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
+								response.status,
+								{ headers: response.headers },
+							);
+						}
 					}
 
 					const requestUrl = response.url;
@@ -1082,6 +1208,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					// undefined so a response without an id can't leave a stale value.
 					if (providerState) {
 						providerState.lastExecutionId = lastResponseId;
+						if (didFoldThisTurn) {
+							if (!providerState.foldedModels) {
+								providerState.foldedModels = new Set();
+							}
+							providerState.foldedModels.add(wireModelId);
+						}
 					}
 					break;
 				} catch (error) {
@@ -1112,6 +1244,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			if (wireModelId && (didFoldThisTurn || wasFoldedFromStart) && providerState?.foldedModels) {
+				providerState.foldedModels.delete(wireModelId);
+			}
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
@@ -1314,13 +1449,23 @@ export function buildRequest(
 		contents,
 	};
 
+	const wireModelId = options.requestModelId ?? model.requestModelId ?? model.id;
+	const state = isAntigravity ? getAntigravityProviderSessionState(options.providerSessionState) : undefined;
+	const shouldFold = isAntigravity && systemPrompts.length > 0 && Boolean(state?.foldedModels?.has(wireModelId));
+
 	// System instruction is an object with parts, not a plain string. Antigravity
 	// tags it with role "user" to mirror the real client.
 	if (systemPrompts.length > 0) {
-		request.systemInstruction = {
-			...(isAntigravity ? { role: "user" } : {}),
-			parts: systemPrompts.map(text => ({ text })),
-		};
+		if (shouldFold) {
+			foldSystemPromptsIntoContents(contents, systemPrompts);
+		} else {
+			request.systemInstruction = {
+				...(isAntigravity ? { role: "user" } : {}),
+				parts: systemPrompts.map(text => ({
+					text: isAntigravity ? sanitizeAntigravitySystemInstruction(text) : text,
+				})),
+			};
+		}
 	}
 
 	if (context.tools && context.tools.length > 0) {
@@ -1372,8 +1517,6 @@ export function buildRequest(
 			},
 		};
 	}
-
-	const wireModelId = options.requestModelId ?? model.requestModelId ?? model.id;
 
 	if (isAntigravity) {
 		// The real client sends a fixed per-model output cap independent of the
