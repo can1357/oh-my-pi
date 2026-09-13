@@ -481,6 +481,9 @@ export class CollabHost {
 	async #runTeardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		// A room that ended on its own (fatal relay close) reaches here without
+		// `#runStop`: leave the public slot before the first await as well.
+		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
 		const publication = this.#registryPublication;
 		this.#registryPublication = null;
 		if (publication) {
@@ -509,7 +512,6 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
 		// A publication still being created when the room ended is withdrawn

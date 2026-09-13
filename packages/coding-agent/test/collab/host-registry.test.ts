@@ -401,13 +401,18 @@ describe("collab host registry lifecycle (#6099)", () => {
 		const { ctx } = makeHostContext();
 		host = new CollabHost(ctx);
 		await host.start(RELAY_URL, WEB_URL);
+		// The controller installs a live room here; `/collab` and `/join` read it.
+		ctx.collabHost = host;
 		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
 
 		const hostSocket = capturedSockets.find(s => s.role === "host");
 		if (!hostSocket) throw new Error("host transport socket was never created");
 		// Code 4001 ("room closed") is classified fatal/non-reconnecting by
-		// relay-client, so the host tears down instead of retrying.
+		// relay-client, so the host tears down instead of retrying. The public
+		// slot is left at once — before registry withdrawal is awaited — so a
+		// concurrent `/collab` cannot re-print the dead room's link.
 		hostSocket.onclose?.({ code: 4001, reason: "room closed" });
+		expect(ctx.collabHost).toBeUndefined();
 
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
