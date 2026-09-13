@@ -9,6 +9,7 @@
 
 - Fixed upstream divergence counts being omitted for non-branch tracking refs.
 - Fixed repeated status refreshes rescanning unchanged Git upstream history.
+- Fixed `statusSummary` failing when a branch's upstream is an annotated tag; the tag is now peeled to its commit before counting divergence.
 - Fixed Wayland computer-use clicks landing in the wrong place on scaled monitors by mapping captures through the portal's logical monitor geometry ([#11540](https://github.com/can1357/oh-my-pi/issues/11540)).
 
 ## [18.1.15] - 2026-09-08

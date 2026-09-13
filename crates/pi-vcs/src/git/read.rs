@@ -472,9 +472,11 @@ impl GitRepo {
 			return Ok(Some((ahead, behind)));
 		}
 		let repo = self.gix()?;
+		// `^{commit}` peels annotated tags: an upstream configured through
+		// `refs/tags/*` resolves to the tag object, which the walker rejects.
 		let parse = |sha: &str| {
 			repo
-				.rev_parse_single(sha)
+				.rev_parse_single(format!("{sha}^{{commit}}").as_str())
 				.map(|id| id.detach())
 				.map_err(|err| Error::backend("git rev-list", err))
 		};
@@ -1676,6 +1678,36 @@ mod tests {
 		commit(root, "a1", "a1\n", "a1")?;
 		// One commit past the local main it tracks.
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_peels_annotated_tag_upstream() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["tag", "-a", "v1", "-m", "v1"])?;
+		git(root, &["config", "branch.main.remote", "."])?;
+		git(root, &["config", "branch.main.merge", "refs/tags/v1"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		// The tracking ref resolves to the tag object, not the tagged commit;
+		// git peels it and so must the walk.
+		assert_ne!(
+			git(root, &["rev-parse", "refs/tags/v1"])?.trim(),
+			git(root, &["rev-parse", "refs/tags/v1^{commit}"])?.trim()
+		);
+		assert_eq!(
+			git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.trim(),
+			"1\t0"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		assert_eq!(repo.status_summary()?.ahead, Some(1));
+
+		// A tag on HEAD itself: the tag SHA differs from HEAD, so in-sync is
+		// established by the peeled walk rather than the equal-SHA short-circuit.
+		git(root, &["tag", "-a", "v2", "-m", "v2"])?;
+		git(root, &["config", "branch.main.merge", "refs/tags/v2"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
 		Ok(())
 	}
 
