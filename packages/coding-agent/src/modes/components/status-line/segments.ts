@@ -806,11 +806,15 @@ const VIM_MODE_ICON_KEYS: Record<NonNullable<SegmentContext["vim"]>["mode"], Sym
 	"visual-line": "icon.vimVisualLine",
 };
 
-const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeColor> = {
-	insert: "success",
-	normal: "accent",
-	visual: "warning",
-	"visual-line": "warning",
+/**
+ * Colors resolve through the theme like the icons above; `createTheme` defaults an omitted key to
+ * the token named here before. Exported because the composer border colors the same four modes.
+ */
+export const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeColor> = {
+	insert: "statusLineVimInsert",
+	normal: "statusLineVimNormal",
+	visual: "statusLineVimVisual",
+	"visual-line": "statusLineVimVisualLine",
 };
 
 const vimSegment: StatusLineSegment = {

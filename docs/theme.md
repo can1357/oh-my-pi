@@ -38,7 +38,7 @@ Color values accept:
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`.
+All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`, and the `statusLineVim*` tokens, which are optional and fall back to `accent`/`success`/`warning`.
 
 ### Core text and borders (11)
 
@@ -65,9 +65,11 @@ All tokens below are required in `colors` except `thinkingMax`, which is optiona
 
 `thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`
 
-### Status line segment colors (13)
+### Status line segment colors (13 required, 4 optional)
 
 `statusLineSep`, `statusLineModel`, `statusLinePath`, `statusLineGitClean`, `statusLineGitDirty`, `statusLineContext`, `statusLineSpend`, `statusLineStaged`, `statusLineDirty`, `statusLineUntracked`, `statusLineOutput`, `statusLineCost`, `statusLineSubagents`
+
+The Vim-mode indicator (the `vim` segment and the composer border, both shown while `tui.vimMode` is on) takes four optional tokens: `statusLineVimNormal` (defaults to `accent`), `statusLineVimInsert` (`success`), `statusLineVimVisual` (`warning`) and `statusLineVimVisualLine` (`warning`).
 
 ## Optional tokens
 

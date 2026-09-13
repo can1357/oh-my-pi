@@ -147,7 +147,15 @@ const COLORBLIND_ADJUSTMENT = { h: 60, s: 0.71 };
 export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Theme {
 	const { mode, symbolPresetOverride, colorBlindMode } = options;
 	const colorMode = mode ?? detectColorMode();
-	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
+	// Optional keys, defaulted before resolution so a `vars` reference still resolves.
+	const colors = {
+		...themeJson.colors,
+		statusLineVimNormal: themeJson.colors.statusLineVimNormal ?? themeJson.colors.accent,
+		statusLineVimInsert: themeJson.colors.statusLineVimInsert ?? themeJson.colors.success,
+		statusLineVimVisual: themeJson.colors.statusLineVimVisual ?? themeJson.colors.warning,
+		statusLineVimVisualLine: themeJson.colors.statusLineVimVisualLine ?? themeJson.colors.warning,
+	};
+	const resolvedColors = resolveThemeColors(colors, themeJson.vars);
 
 	if (colorBlindMode) {
 		const added = resolvedColors.toolDiffAdded;

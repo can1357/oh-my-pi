@@ -75,6 +75,11 @@ const themeColorsSchema = type({
 	statusLineOutput: "string | number",
 	statusLineCost: "string | number",
 	statusLineSubagents: "string | number",
+	// Vim-mode indicator; omitted keys default in `createTheme`.
+	"statusLineVimNormal?": "string | number",
+	"statusLineVimInsert?": "string | number",
+	"statusLineVimVisual?": "string | number",
+	"statusLineVimVisualLine?": "string | number",
 });
 const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFramesOverride => {
 	if (Array.isArray(value)) {
@@ -178,7 +183,11 @@ export type ThemeColor =
 	| "statusLineUntracked"
 	| "statusLineOutput"
 	| "statusLineCost"
-	| "statusLineSubagents";
+	| "statusLineSubagents"
+	| "statusLineVimNormal"
+	| "statusLineVimInsert"
+	| "statusLineVimVisual"
+	| "statusLineVimVisualLine";
 
 /** Set of all valid ThemeColor string values for runtime validation */
 const THEME_COLOR_RECORD = {
@@ -242,6 +251,10 @@ const THEME_COLOR_RECORD = {
 	statusLineOutput: true,
 	statusLineCost: true,
 	statusLineSubagents: true,
+	statusLineVimNormal: true,
+	statusLineVimInsert: true,
+	statusLineVimVisual: true,
+	statusLineVimVisualLine: true,
 } satisfies Record<ThemeColor, true>;
 
 const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));
