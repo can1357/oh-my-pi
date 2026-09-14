@@ -4,6 +4,7 @@
 
 ### Added
 
+- `exa.includeSummary` and `exa.searchType` settings let operators stop Exa's per-result summary billing and pick a cheaper retrieval strategy; `web_search` otherwise behaves as before.
 - `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
 
 ### Fixed
