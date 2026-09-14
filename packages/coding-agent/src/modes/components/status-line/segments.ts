@@ -676,12 +676,13 @@ const contextPctSegment: StatusLineSegment = {
 			}`;
 		}
 		const compact = ctx.options.context_pct?.compact === true;
+		const liveCompactDisplay = `ctx:${formatCompactContextPercent(pct)}`;
 		const display = ctx.startupPlaceholder
 			? compact
-				? `ctx:${STARTUP_PLACEHOLDER}`
+				? `ctx:${STARTUP_PLACEHOLDER}`.padEnd(liveCompactDisplay.length)
 				: STARTUP_PLACEHOLDER
 			: compact
-				? `ctx:${formatCompactContextPercent(pct)}`
+				? liveCompactDisplay
 				: formatContextUsage(pct, window, ctx.contextTokens);
 		const text = theme.fg(color, display);
 		const content = compact ? `${text}${autoIcon}` : withIcon(theme.icon.context, `${text}${autoIcon}`);
