@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14
