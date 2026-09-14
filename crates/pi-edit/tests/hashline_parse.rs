@@ -598,7 +598,7 @@ fn input_rejects_multi_group_headers_instead_of_inventing_a_path() {
 }
 
 #[test]
-fn input_rejects_malformed_tags_and_guides_foreign_missing_headers() {
+fn input_rejects_malformed_tags_and_missing_headers() {
 	for header in ["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#1A2B copied]"] {
 		assert!(
 			Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options())
@@ -615,18 +615,51 @@ fn input_rejects_malformed_tags_and_guides_foreign_missing_headers() {
 		error.contains("input must begin with \"[PATH#HASH]\"")
 			&& error.contains("[src/foo.ts#1A2B]")
 	);
+	assert!(!error.contains("Detected incompatible"), "{error}");
+	assert!(!error.contains("Do not merely prepend"), "{error}");
 
+	let error = Patch::parse("*** Begin Patch\nCUT 38.=40\n*** End Patch", &options())
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("input must begin with \"[PATH#HASH]\""), "{error}");
+	assert!(!error.contains("Detected incompatible"), "{error}");
+}
+
+#[test]
+fn input_reports_all_detected_foreign_syntax_on_first_failure() {
 	let error = Patch::parse(
-		"*** Begin Patch\n*** Update File: a.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n*** End Patch",
+		"*** Begin Patch\n*** Update File: a.ts\n@@ -1,1 +1,1 @@\n<<<<<<< \
+		 SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n*** End Patch",
 		&options(),
 	)
 	.unwrap_err()
 	.to_string();
+	assert!(
+		error.contains("Detected incompatible apply_patch, unified diff, SEARCH/REPLACE syntax"),
+		"{error}"
+	);
 	assert!(error.contains("Do not merely prepend the header"), "{error}");
-	assert!(error.contains("discard it and rewrite the entire input"), "{error}");
+	assert!(
+		error.contains("Discard the incompatible body and rewrite existing-file changes"),
+		"{error}"
+	);
 	assert!(error.contains("[PATH#HASH]"), "{error}");
 	assert!(error.contains("PUT N.=M:"), "{error}");
 	assert!(error.contains("+TEXT"), "{error}");
+}
+
+#[test]
+fn input_routes_apply_patch_add_file_to_write() {
+	let error = Patch::parse(
+		"*** Begin Patch\n*** Add File: a.ts\n+export const value = 1;\n*** End Patch",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("Detected incompatible apply_patch syntax"), "{error}");
+	assert!(error.contains("use the `write` tool"), "{error}");
+	assert!(!error.contains("[PATH#HASH]"), "{error}");
+	assert!(!error.contains("Copy `HASH`"), "{error}");
 }
 
 #[test]

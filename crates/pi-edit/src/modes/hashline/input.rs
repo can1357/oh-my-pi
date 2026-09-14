@@ -16,7 +16,7 @@ use super::{
 		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
 		json_quote,
 	},
-	parser::parse_patch,
+	parser::{ForeignSyntax, detect_foreign_syntax, parse_patch},
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
@@ -24,11 +24,12 @@ use crate::error::EditError;
 
 /// Envelope and abort sentinels recognized when nested inside a header row.
 const ENVELOPE_MARKERS: [&str; 3] = [BEGIN_PATCH_MARKER, END_PATCH_MARKER, ABORT_MARKER];
-const FIRST_FAILURE_GUIDANCE: &str =
-	"Do not merely prepend the header to the existing input. If the remaining body uses unified \
-	 diff, apply_patch, or SEARCH/REPLACE syntax, discard it and rewrite the entire input as \
-	 Hashline: `[PATH#HASH]`, then `PUT N.=M:`, then `+TEXT`. Copy `HASH` and the original line \
-	 numbers from the latest `read`/`search` output.";
+const FOREIGN_REWRITE_GUIDANCE: &str =
+	"Discard the incompatible body and rewrite existing-file changes as Hashline: `[PATH#HASH]`, \
+	 then operations such as `PUT N.=M:` followed by `+TEXT`, `CUT N.=M`, `PUT <N:`, or `PUT >N:`. \
+	 Copy `HASH` and the original line numbers from the latest `read`/`search` output.";
+const ADD_FILE_GUIDANCE: &str =
+	"For `*** Add File:` sections, use the `write` tool because new files have no snapshot hash.";
 
 static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(
@@ -37,8 +38,6 @@ static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RECOVERY_TAG_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"#([0-9A-Fa-f]{4})\s*$").expect("valid regex"));
-static UNIFIED_HUNK_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
 /// Parsed edits, optional file operation, and parser warnings for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +339,25 @@ fn strip_leading_blanks(input: &str) -> String {
 	lines.join("\n")
 }
 
+fn foreign_syntax_guidance(syntax: &ForeignSyntax) -> String {
+	if !syntax.any() {
+		return String::new();
+	}
+	let mut guidance = format!(
+		" Detected incompatible {} syntax. Do not merely prepend the header to the existing input.",
+		syntax.labels()
+	);
+	if syntax.needs_hashline_rewrite() {
+		guidance.push(' ');
+		guidance.push_str(FOREIGN_REWRITE_GUIDANCE);
+	}
+	if syntax.has_add_file() {
+		guidance.push(' ');
+		guidance.push_str(ADD_FILE_GUIDANCE);
+	}
+	guidance
+}
+
 fn split_raw_sections(
 	input: &str,
 	options: &SplitOptions<'_>,
@@ -352,16 +370,15 @@ fn split_raw_sections(
 		.collect();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		if is_unified_header(first.trim_end()) {
-			return Err(EditError::parse(format!(
-				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. \
-				 {FIRST_FAILURE_GUIDANCE}"
-			)));
+		let syntax = detect_foreign_syntax(&input);
+		let guidance = foreign_syntax_guidance(&syntax);
+		if syntax.has_add_file() && !syntax.needs_hashline_rewrite() {
+			return Err(EditError::parse(guidance.trim_start()));
 		}
 		let preview: String = first.chars().take(120).collect();
 		return Err(EditError::parse(format!(
 			"input must begin with \"[PATH#HASH]\" on the first non-blank line for anchored edits; \
-			 got: {}. Example: \"[src/foo.ts#{}]\" then edit ops. {FIRST_FAILURE_GUIDANCE}",
+			 got: {}. Example: \"[src/foo.ts#{}]\" then edit ops.{guidance}",
 			json_quote(&preview),
 			HL_FILE_HASH_EXAMPLES[0]
 		)));
@@ -455,7 +472,4 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Result<Vec<RawSection>
 		result.push(section);
 	}
 	Ok(result)
-}
-fn is_unified_header(line: &str) -> bool {
-	UNIFIED_HUNK_RE.is_match(line)
 }

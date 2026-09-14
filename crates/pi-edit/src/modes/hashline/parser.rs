@@ -29,6 +29,81 @@ const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
 static UNIFIED_HUNK_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
+const APPLY_PATCH_EXISTING_FILE_MARKERS: [&str; 3] =
+	["*** Update File:", "*** Delete File:", "*** Move to:"];
+const APPLY_PATCH_ADD_FILE_MARKER: &str = "*** Add File:";
+
+#[derive(Default)]
+pub(super) struct ForeignSyntax {
+	apply_patch:               bool,
+	apply_patch_existing_file: bool,
+	apply_patch_add_file:      bool,
+	unified_diff:              bool,
+	search_replace:            bool,
+}
+
+impl ForeignSyntax {
+	pub(super) const fn any(&self) -> bool {
+		self.apply_patch || self.unified_diff || self.search_replace
+	}
+
+	pub(super) const fn needs_hashline_rewrite(&self) -> bool {
+		self.apply_patch_existing_file || self.unified_diff || self.search_replace
+	}
+
+	pub(super) const fn has_add_file(&self) -> bool {
+		self.apply_patch_add_file
+	}
+
+	pub(super) fn labels(&self) -> String {
+		[
+			self.apply_patch.then_some("apply_patch"),
+			self.unified_diff.then_some("unified diff"),
+			self.search_replace.then_some("SEARCH/REPLACE"),
+		]
+		.into_iter()
+		.flatten()
+		.collect::<Vec<_>>()
+		.join(", ")
+	}
+}
+
+fn apply_patch_operation_flags(line: &str) -> (bool, bool) {
+	(
+		APPLY_PATCH_EXISTING_FILE_MARKERS
+			.iter()
+			.any(|prefix| line.starts_with(prefix)),
+		line.starts_with(APPLY_PATCH_ADD_FILE_MARKER),
+	)
+}
+
+fn is_unified_hunk_line(line: &str) -> bool {
+	line.starts_with("@@") && line.ends_with("@@")
+}
+
+pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
+	let mut syntax = ForeignSyntax::default();
+	let mut saw_unified_old_header = false;
+	let mut saw_unified_new_header = false;
+	let mut saw_search_marker = false;
+	let mut saw_replace_marker = false;
+	for raw_line in input.lines() {
+		let line = raw_line.trim();
+		let (existing_file_op, add_file) = apply_patch_operation_flags(line);
+		syntax.apply_patch |= existing_file_op || add_file;
+		syntax.apply_patch_existing_file |= existing_file_op;
+		syntax.apply_patch_add_file |= add_file;
+		syntax.unified_diff |= is_unified_hunk_line(line) || line.starts_with("diff --git ");
+		saw_unified_old_header |= line.starts_with("--- ");
+		saw_unified_new_header |= line.starts_with("+++ ");
+		saw_search_marker |= line.starts_with("<<<<<<< SEARCH");
+		saw_replace_marker |= line.starts_with(">>>>>>> REPLACE");
+	}
+	syntax.unified_diff |= saw_unified_old_header && saw_unified_new_header;
+	syntax.search_replace = saw_search_marker && saw_replace_marker;
+	syntax
+}
+
 /// Inverted concrete range with metadata for source-aware enrichment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidAbsoluteRange {
@@ -737,10 +812,8 @@ fn parse_bare_range(text: &str) -> Option<ParsedRange> {
 }
 fn contamination_message(text: &str) -> Option<String> {
 	let trimmed = text.trim_start();
-	if ["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"]
-		.iter()
-		.any(|prefix| trimmed.starts_with(prefix))
-	{
+	let (apply_patch_existing_file, apply_patch_add_file) = apply_patch_operation_flags(trimmed);
+	if apply_patch_existing_file || apply_patch_add_file {
 		let preview = if trimmed.chars().count() > 48 {
 			format!("{}…", trimmed.chars().take(48).collect::<String>())
 		} else {
