@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as path from "node:path";
 import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
@@ -13,7 +14,7 @@ import type {
 } from "../../../src/launch/protocol";
 import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "../../../src/launch/protocol";
 import type { LaunchContextBoundary, ToolSession } from "../../../src/tools";
-import { executeLaunch } from "../../../src/tools/hub/launch";
+import { executeLaunch, launchRenderResult } from "../../../src/tools/hub/launch";
 import { PROGRESS_LIMITS } from "../../../src/async/progress-limits";
 
 const OWNER = "owner-session";
@@ -352,9 +353,27 @@ describe("hub process output monitoring", () => {
 		});
 		expect(harness.requests).toEqual([expect.objectContaining({ op: "start", owner: undefined })]);
 		expect(harness.getSubscription()).toBeUndefined();
+		expect(unmonitored.details).toMatchObject({ op: "start", monitoring: "off" });
 		expect(unmonitored.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining("Started") }),
 		]);
+
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("Expected an initialized theme");
+		const rendered = Bun.stripANSI(
+			launchRenderResult(unmonitored, { expanded: false, isPartial: false }, uiTheme, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				pty: false,
+				progress: "off",
+			})
+				.render(120)
+				.join("\n"),
+		);
+		expect(rendered).toContain("monitor off");
+		expect(rendered).not.toContain("monitor stopped");
 	});
 
 	it("never replays output that predates a successful monitor attach", async () => {
