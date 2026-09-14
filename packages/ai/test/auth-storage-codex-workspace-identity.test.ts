@@ -151,7 +151,7 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		]);
 	});
 
-	it("purges a disabled legacy email-keyed row on the first workspace-scoped login with the same email", async () => {
+	it("retains an automatically disabled legacy email-keyed row after workspace-scoped re-login", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		// Pre-org login → bare email key, then upstream invalidates the refresh
@@ -163,16 +163,22 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		const legacyId = store.listAuthCredentials("openai-codex")[0].id;
 		store.deleteAuthCredential(legacyId, "oauth refresh failed: OAuthError: 401 refresh_token_invalidated");
 
-		// Same human logs in again, now workspace-scoped: the org-scoped login
-		// claims and hard-deletes the pre-org tombstone instead of stranding it.
+		// Same human logs in again, now workspace-scoped: preserve the original
+		// identity and automatic disable cause for investigation after recovery.
 		store.upsertAuthCredentialForProvider(
 			"openai-codex",
 			codexCredential({ suffix: "team", accountId: TEAM_WS, orgId: TEAM_WS, orgName: "team" }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
+			{
+				identity_key: `email:${EMAIL}`,
+				disabled_cause: "oauth refresh failed: OAuthError: 401 refresh_token_invalidated",
+			},
 			{ identity_key: `email:${EMAIL}|org:${TEAM_WS}`, disabled_cause: null },
 		]);
-		expect(await store.listDisabledCredentials("openai-codex")).toHaveLength(0);
+		expect(await store.listDisabledCredentials("openai-codex")).toMatchObject([
+			{ id: legacyId, cause: "oauth refresh failed: OAuthError: 401 refresh_token_invalidated" },
+		]);
 	});
 
 	it("keeps a disabled row of a different member of the same workspace after a workspace-scoped login", async () => {

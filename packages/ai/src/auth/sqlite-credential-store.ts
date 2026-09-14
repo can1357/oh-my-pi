@@ -90,6 +90,7 @@ type SerializedCredentialRecord = {
 
 const AUTH_SCHEMA_VERSION = 7;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
+const DISABLED_CREDENTIAL_RETENTION_SEC = 30 * 24 * 60 * 60;
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
@@ -177,6 +178,18 @@ export function normalizeDisabledCause(disabledCause: string): string {
 
 function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): StoredAuthCredential {
 	return { id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause };
+}
+
+/**
+ * The user asked for this credential to go (`omp auth logout`, the account
+ * selector, `omp auth-broker logout`). Only these removals take the older
+ * tombstones of the same identity with them: `replaced by …` and
+ * `deduplicated duplicate credential` are routine hygiene on rows that
+ * another live credential supersedes, and must not erase the forensics an
+ * automatic tombstone still holds for that identity.
+ */
+export function isDeliberateRemovalCause(cause: string): boolean {
+	return /^(deleted by user|logged out by user)/i.test(cause);
 }
 
 function resolveProviderCredentialIdentityKey(provider: string, identifiers: readonly string[]): string | null {
@@ -506,7 +519,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				)`,
 		);
 		this.#deleteStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
 		);
 		// The automatic path additionally requires the row to still be active: a
 		// row a peer already tombstoned must not be re-stamped with a second cause
@@ -1299,6 +1312,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
+		// A long-lived store (the auth broker) may never write again; the read
+		// path enforces retention so an expired tombstone cannot outlive it.
+		try {
+			this.#purgeExpiredDisabledRows();
+		} catch {
+			// Best-effort cleanup; the listing itself must still answer
+		}
 		const rows =
 			(provider
 				? (this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[])
@@ -1367,11 +1387,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				}
 			}
 
-			this.#purgeSupersededDisabledRows(
-				providerName,
-				result,
-				result.some(row => row.credential.type === "oauth"),
-			);
+			this.#purgeSupersededDisabledRows(providerName, result);
 			return result;
 		});
 
@@ -1425,70 +1441,78 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				if (!activeCredential) continue;
 				result.push(toStoredAuthCredential(row, activeCredential));
 			}
-			this.#purgeSupersededDisabledRows(providerName, result, item.type === "oauth" && targetId !== null);
+			this.#purgeSupersededDisabledRows(providerName, result);
 			return result;
 		});
 
 		return upsert(provider, credential);
 	}
 
-	/**
-	 * Hard-deletes disabled rows for a provider when an active replacement exists.
-	 * OAuth credentials use the replacement identity matcher, including token
-	 * claims and alternate same-org identities; API keys match by provider and type.
-	 * Unidentified OAuth tombstones require an explicit later login/replacement,
-	 * not the presence or refresh of an unrelated sibling. Only upsert/replace
-	 * pass `oauthLogin` after writing a row, in the same transaction: even a
-	 * same-row login proves ordering without timestamp precision or new state.
-	 */
-	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[], oauthLogin = false): void {
-		try {
-			let hasActiveApiKey = false;
-			const activeIdentities: ResolvedOAuthCredentialIdentity[] = [];
-			for (const row of activeRows) {
-				if (row.credential.type === "api_key") hasActiveApiKey = true;
-				else activeIdentities.push(resolveOAuthCredentialIdentity(provider, row.credential));
-			}
-			if (!hasActiveApiKey && activeIdentities.length === 0) return;
+	#purgeExpiredDisabledRows(): void {
+		this.#db.run(
+			`DELETE FROM auth_credentials WHERE disabled_cause IS NOT NULL AND updated_at < (${SQLITE_NOW_EPOCH} - ?)`,
+			[DISABLED_CREDENTIAL_RETENTION_SEC],
+		);
+	}
 
-			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[];
-			// One login accounts for at most one prior sign-out. When several
-			// identity-less tombstones exist, purging all of them on a single login
-			// silently drops the other accounts' startup and usage warnings, so only
-			// the most recent unidentified tombstone is consumed here.
-			const unidentifiedTarget = oauthLogin
-				? disabledRows.reduce<{ id: number; at: number } | null>((target, row) => {
-						if (row.credential_type === "api_key") return target;
-						const candidate = deserializeCredential(row);
-						if (candidate?.type !== "oauth") return target;
-						const candidateIdentity = resolveOAuthCredentialIdentity(provider, candidate);
-						candidateIdentity.key = normalizeStoredIdentityKey(row.identity_key) ?? candidateIdentity.key;
-						if (candidateIdentity.key !== null || candidateIdentity.identifiers.length > 0) return target;
-						if (target === null) return { id: row.id, at: row.updated_at ?? 0 };
-						// Rows are not disabled in insertion order, so the newest
-						// tombstone is the latest `updated_at`; the id only breaks ties.
-						if ((row.updated_at ?? 0) > target.at) return { id: row.id, at: row.updated_at ?? 0 };
-						if ((row.updated_at ?? 0) === target.at && row.id > target.id)
-							return { id: row.id, at: row.updated_at ?? 0 };
-						return target;
-					}, null)
-				: null;
-			for (const row of disabledRows) {
-				if (row.credential_type === "api_key") {
-					if (hasActiveApiKey) this.#hardDeleteStmt.run(row.id);
-					continue;
-				}
-				const disabledCredential = deserializeCredential(row);
-				if (disabledCredential?.type !== "oauth") continue;
-				const identity = resolveOAuthCredentialIdentity(provider, disabledCredential);
-				identity.key = normalizeStoredIdentityKey(row.identity_key) ?? identity.key;
-				if (
-					row.id === unidentifiedTarget?.id ||
-					activeIdentities.some(active => isOAuthCredentialIdentityRecovered(identity, active))
-				) {
-					this.#hardDeleteStmt.run(row.id);
+	/**
+	 * Hard-delete OAuth tombstones that `credentials` would have replaced had
+	 * they still been active: exact identity-key equality, or the same
+	 * upgrade-aware rule `matchesReplacementCredential` applies at login (a
+	 * pre-org `<b>` row is claimed by `<b>|org:<o>`; another member's or
+	 * subscription's row never is). `keepAutomatic` preserves automatic teardown
+	 * forensics across recovery. Unidentified rows cannot be claimed by unrelated
+	 * siblings; this retention contribution keeps their automatic history until
+	 * explicit provider logout or expiry.
+	 */
+	#purgeTombstonesSupersededBy(
+		provider: string,
+		credentials: readonly AuthCredential[],
+		options: { keepAutomatic: boolean; excludeIds?: ReadonlySet<number> },
+	): void {
+		const identities: ResolvedOAuthCredentialIdentity[] = [];
+		for (const credential of credentials) {
+			if (credential.type !== "oauth") continue;
+			identities.push(resolveOAuthCredentialIdentity(provider, credential));
+		}
+		if (identities.length === 0) return;
+		const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
+		for (const row of disabledRows) {
+			if (row.credential_type !== "oauth" || options.excludeIds?.has(row.id)) continue;
+			const disabledCredential = deserializeCredential(row);
+			if (disabledCredential?.type !== "oauth") continue;
+			const identity = resolveOAuthCredentialIdentity(provider, disabledCredential);
+			identity.key = normalizeStoredIdentityKey(row.identity_key) ?? identity.key;
+			if (options.keepAutomatic && isAutomaticDisableCause(row.disabled_cause ?? "disabled")) continue;
+			const superseded = identities.some(incoming =>
+				options.keepAutomatic
+					? isOAuthCredentialIdentityRecovered(identity, incoming)
+					: matchesOAuthCredentialIdentity(identity, incoming),
+			);
+			if (superseded) this.#hardDeleteStmt.run(row.id);
+		}
+	}
+
+	/**
+	 * Expires old tombstones, hard-deletes API-key tombstones once an active
+	 * API key exists, and hard-deletes superseded lifecycle tombstones. Known
+	 * automatic OAuth tombstones survive recovery for forensics until retention
+	 * expiry or explicit provider logout.
+	 */
+	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[]): void {
+		try {
+			this.#purgeExpiredDisabledRows();
+			if (activeRows.some(row => row.credential.type === "api_key")) {
+				const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
+				for (const row of disabledRows) {
+					if (row.credential_type === "api_key") this.#hardDeleteStmt.run(row.id);
 				}
 			}
+			this.#purgeTombstonesSupersededBy(
+				provider,
+				activeRows.map(row => row.credential),
+				{ keepAutomatic: true },
+			);
 		} catch {
 			// Best-effort cleanup; don't let it break the main operation
 		}
@@ -1557,24 +1581,55 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Returns whether this call actually disabled the row. A busy or read-only
-	 * database, an aborting trigger, or a row that is already gone all report
-	 * `false` — callers announce a teardown and drop the row from memory on the
-	 * strength of this answer, and a swallowed write failure would have them do
-	 * that while the credential stays live in persistence.
+	 * Returns whether this call actually disabled or removed the row. A busy or
+	 * read-only database, an aborting trigger, or a row that is already gone all
+	 * report `false` — callers announce a teardown and drop the row from memory
+	 * on the strength of this answer, and a swallowed write failure would have
+	 * them do that while the credential stays live in persistence.
 	 */
 	deleteAuthCredential(id: number, disabledCause: string): boolean {
 		const cause = normalizeDisabledCause(disabledCause);
-		// A deliberate removal owns the row's history and may replace an existing
-		// tombstone; an automatic teardown must not overwrite a peer's.
-		const stmt = isAutomaticDisableCause(cause) ? this.#disableIfActiveStmt : this.#deleteStmt;
-		try {
-			const result = stmt.run(cause, id) as { changes: number };
-			return result.changes > 0;
+		if (!isDeliberateRemovalCause(cause)) {
+			try {
+				// Guarded on the row still being active: a row a peer already
+				// tombstoned must not be re-stamped with a second cause and
+				// timestamp, which would overwrite the original forensics and let
+				// this process announce a teardown it did not perform.
+				return (this.#disableIfActiveStmt.run(cause, id) as { changes: number }).changes > 0;
+			} catch (error) {
+				logger.debug("auth credential disable failed", { id, error: String(error) });
+				return false;
+			}
+		}
+		// Read-then-write under WAL: take the write lock up front so a
+		// concurrent writer cannot leave this a deferred snapshot that fails
+		// to upgrade (SQLITE_BUSY_SNAPSHOT). Propagate failures so callers only
+		// remove their in-memory credential after the transaction commits.
+		let changed = false;
+		const remove = this.#db.transaction(() => {
+			const stmt = this.#db.prepare(
+				"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ?",
+			);
+			let row: AuthRow | null;
+			try {
+				row = stmt.get(id) as AuthRow | null;
+			} finally {
+				stmt.finalize();
+			}
+			if (row?.disabled_cause != null) {
+				// The explicit id owns a peer's tombstone even without a known identity.
+				changed = (this.#hardDeleteStmt.run(id) as { changes: number }).changes > 0;
+			} else {
+				changed = (this.#deleteStmt.run(cause, id) as { changes: number }).changes > 0;
+			}
+			const removed = row ? deserializeCredential(row) : null;
+			if (row && removed) {
+				this.#purgeTombstonesSupersededBy(row.provider, [removed], {
 		} catch (error) {
-			logger.debug("auth credential disable failed", { id, error: String(error) });
+			logger.debug("auth credential removal failed", { id, error: String(error) });
 			return false;
 		}
+		return changed;
 	}
 
 	/**
@@ -1604,11 +1659,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result.changes > 0;
 	}
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
-		try {
-			this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
-		} catch {
-			// Ignore delete failures
+		const cause = normalizeDisabledCause(disabledCause);
+		if (!isDeliberateRemovalCause(cause)) {
+			this.#deleteByProviderStmt.run(cause, provider);
+			return;
 		}
+		const logout = this.#db.transaction(() => {
+			// Whole-provider logout owns all prior history, including unidentified
+			// tombstones and providers with no remaining active credentials.
+			this.#db.run("DELETE FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL", [provider]);
+			this.#deleteByProviderStmt.run(cause, provider);
+		});
+		logout.immediate();
 	}
 
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null {

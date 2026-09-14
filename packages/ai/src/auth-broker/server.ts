@@ -26,6 +26,7 @@ import type {
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
 	HealthzResponse,
+	ProviderLogoutResponse,
 	RefresherSchedule,
 	SnapshotEntry,
 	SnapshotResponse,
@@ -48,6 +49,7 @@ import {
 	credentialBlockRequestSchema,
 	credentialDisableRequestSchema,
 	credentialUploadRequestSchema,
+	providerLogoutRequestSchema,
 } from "./wire-schemas";
 
 const DEFAULT_EXTERNAL_CHANGE_POLL_MS = 250;
@@ -786,6 +788,13 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 							: disabled.map(({ projectId: _projectId, ...summary }) => summary),
 					};
 					return json(200, body, { Vary: AUTH_BROKER_CAPABILITIES_HEADER });
+				}
+				if (req.method === "POST" && pathname === "/v1/provider/logout") {
+					const parsed = await parseBody(req, providerLogoutRequestSchema);
+					if (!parsed.ok) return parsed.response;
+					await opts.storage.remove(parsed.data.provider);
+					const response: ProviderLogoutResponse = { ok: true };
+					return json(200, response);
 				}
 				const refreshMatch = req.method === "POST" ? pathname.match(REFRESH_ROUTE) : null;
 				if (refreshMatch) {

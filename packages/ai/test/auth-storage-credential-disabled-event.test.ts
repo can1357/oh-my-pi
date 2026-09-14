@@ -714,7 +714,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				},
 			});
 			await authStorage.set("anthropic", [expiredOAuth()]);
-			// A remote client's own `remove()` reaches the broker host as `deleted by user`.
+			// A remote client's own `removeCredential()` reaches the broker host as `deleted by user`.
 			expect(authStorage.disableCredentialById(1, "deleted by user")).toBe(true);
 
 			expect(authStorage.exportSnapshot().credentials).toEqual([]);
@@ -823,21 +823,34 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				fresh: { email: " ", accountId: " ", projectId: " ", orgId: " " },
 				recovered: false,
 			},
-		])("recovery and persistence agree: $name", async ({ provider, old, fresh, recovered }) => {
-			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-			try {
-				const [row] = store.upsertAuthCredentialForProvider(provider, oauthIdentity(old));
-				store.deleteAuthCredential(row!.id, "invalid_grant");
-				const [summary] = await store.listDisabledCredentials(provider);
-				expect(isActionableCredentialDisable(summary!, [{ provider, type: "oauth", ...fresh }])).toBe(!recovered);
-				store.upsertAuthCredentialForProvider(provider, oauthIdentity(fresh));
-				expect((await store.listDisabledCredentials(provider)).some(entry => entry.id === row!.id)).toBe(
-					!recovered,
-				);
-			} finally {
-				store.close();
-			}
-		});
+			{
+				name: "blank identities cannot prove recovery from a live OAuth credential",
+				provider: "anthropic",
+				old: { email: " ", accountId: " ", projectId: " ", orgId: " " },
+				fresh: { email: "person@example.com" },
+				recovered: false,
+			},
+		])(
+			"retention survives recovery while reminders follow identity: $name",
+			async ({ provider, old, fresh, recovered }) => {
+				const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+				try {
+					const [row] = store.upsertAuthCredentialForProvider(provider, oauthIdentity(old));
+					store.deleteAuthCredential(row!.id, "invalid_grant");
+					const [summary] = await store.listDisabledCredentials(provider);
+					expect(isActionableCredentialDisable(summary!, [{ provider, type: "oauth", ...fresh }])).toBe(
+						!recovered,
+					);
+					store.upsertAuthCredentialForProvider(provider, oauthIdentity(fresh));
+					const retained = await store.listDisabledCredentials(provider);
+					expect(retained).toEqual([summary!]);
+					const active = store.listAuthCredentials(provider).map(entry => ({ provider, ...entry.credential }));
+					expect(isActionableCredentialDisable(retained[0]!, active)).toBe(!recovered);
+				} finally {
+					store.close();
+				}
+			},
+		);
 
 		test("active identity projection preserves alternate refresh claims for organization upgrades", async () => {
 			const authStorage = openStorage();
@@ -915,7 +928,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			}
 		});
 
-		test("preserves a project-only tombstone until the same project signs in", async () => {
+		test("retains project-only forensics but clears the reminder when the same project signs in", async () => {
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "project-tombstone-"));
 			const storage = await AuthStorage.create(path.join(dir, "agent.db"));
 			try {
@@ -934,6 +947,9 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					"project-a",
 				]);
 				await storage.set("google-gemini-cli", [credential]);
+				expect(await storage.listDisabledCredentials()).toContainEqual(
+					expect.objectContaining({ id, projectId: "project-a", cause: "invalid_grant" }),
+				);
 				expect(await storage.listActionableDisabledCredentials()).toEqual([]);
 			} finally {
 				storage.close();
@@ -1054,7 +1070,6 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const actionable = await authStorage.listActionableDisabledCredentials();
 			expect(actionable.map(summary => summary.id)).toEqual([1, 2]);
 		});
-
 		test("reports tombstones without recovery suppression when the snapshot cannot be revalidated", async () => {
 			const store = new MemoryAuthCredentialStore();
 			store.listDisabledCredentials = async () => [tombstone({})];
@@ -1083,14 +1098,16 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				expect((await storage.listActionableDisabledCredentials()).map(row => row.id)).toEqual([id]);
 				expect((await storage.listDisabledCredentials()).map(row => row.id)).toEqual([id]);
 				await storage.set("unit-token-identity", [credential]);
-				expect((await storage.listDisabledCredentials()).map(row => row.id)).not.toContain(id);
+				expect(await storage.listDisabledCredentials()).toContainEqual(
+					expect.objectContaining({ id, accountId: "user-1", cause: "invalid_grant" }),
+				);
 				expect(await storage.listActionableDisabledCredentials()).toEqual([]);
 			} finally {
 				storage.close();
 			}
 		});
 
-		test("retires an identity-less tombstone on re-login so a later logout cannot resurrect it", async () => {
+		test("retains identity-less forensics and its reminder until provider logout", async () => {
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-disabled-identityless-"));
 			const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
 			try {
@@ -1107,9 +1124,13 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				expect((await authStorage.listActionableDisabledCredentials()).map(summary => summary.id)).toEqual([id]);
 
 				await authStorage.set("unit-idless", [{ ...bare, access: "opaque-access-2", refresh: "r-2" }]);
-				expect(await authStorage.listDisabledCredentials("unit-idless")).toEqual([]);
+				expect(await authStorage.listDisabledCredentials("unit-idless")).toContainEqual(
+					expect.objectContaining({ id, cause: "oauth refresh failed: invalid_grant" }),
+				);
+				expect((await authStorage.listActionableDisabledCredentials()).map(row => row.id)).toEqual([id]);
 
 				await authStorage.remove("unit-idless");
+				expect((await authStorage.listDisabledCredentials("unit-idless")).map(row => row.id)).not.toContain(id);
 				expect(await authStorage.listActionableDisabledCredentials()).toEqual([]);
 			} finally {
 				authStorage.close();
@@ -1176,7 +1197,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 		);
 
 		test.each(["upsert", "replace"])(
-			"a later explicit %s login retires unknown tombstones even when reusing a sibling row",
+			"a later explicit %s login retains unknown automatic history when reusing a sibling row",
 			async method => {
 				const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 				try {
@@ -1189,9 +1210,11 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 							? store.upsertAuthCredentialForProvider("anthropic", replacement)
 							: store.replaceAuthCredentialsForProvider("anthropic", [replacement]);
 					expect(rows.map(row => row.id)).toEqual([live!.id]);
-					expect(await store.listDisabledCredentials()).toEqual([]);
+					expect((await store.listDisabledCredentials()).map(row => row.id)).toEqual([lost!.id]);
 					store.deleteAuthCredential(live!.id, "logged out by user");
-					expect((await store.listDisabledCredentials()).map(row => row.id)).toEqual([live!.id]);
+					expect((await store.listDisabledCredentials()).map(row => row.id).toSorted()).toEqual(
+						[lost!.id, live!.id].toSorted(),
+					);
 				} finally {
 					store.close();
 				}
