@@ -198,7 +198,9 @@ describe("AgentSession model persistence", () => {
 
 		await created.session.setModel(routed);
 
-		expect(created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+		expect(
+			created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+		).toMatchObject({
 			type: "model_change",
 			model: "openrouter/z-ai/glm-4.7@cerebras",
 		});

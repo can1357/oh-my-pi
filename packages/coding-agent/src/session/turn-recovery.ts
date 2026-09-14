@@ -1518,10 +1518,9 @@ export class TurnRecovery {
 	}
 
 	/** Primary selector retained while the current model belongs to a retry fallback chain. */
-	getActiveRetryFallbackPrimary(): Pick<
-		ActiveRetryFallbackState,
-		"originalSelector" | "originalThinkingLevel"
-	> | undefined {
+	getActiveRetryFallbackPrimary():
+		| Pick<ActiveRetryFallbackState, "originalSelector" | "originalThinkingLevel">
+		| undefined {
 		const state = this.#activeRetryFallback;
 		if (!state) return undefined;
 		return {

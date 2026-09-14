@@ -1,6 +1,10 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { formatModelSelectorValue, formatModelStringWithRouting, resolveModelRoleValue } from "../config/model-resolver";
+import {
+	formatModelSelectorValue,
+	formatModelStringWithRouting,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { ExtensionCommandContext, ExtensionContext } from "../extensibility/extensions/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";

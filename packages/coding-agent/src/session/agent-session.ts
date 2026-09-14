@@ -8118,10 +8118,9 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Primary selector retained while retry fallback routing owns the current model. */
-	getActiveRetryFallbackPrimary(): Pick<
-		ActiveRetryFallbackState,
-		"originalSelector" | "originalThinkingLevel"
-	> | undefined {
+	getActiveRetryFallbackPrimary():
+		| Pick<ActiveRetryFallbackState, "originalSelector" | "originalThinkingLevel">
+		| undefined {
 		return this.#recovery.getActiveRetryFallbackPrimary();
 	}
 

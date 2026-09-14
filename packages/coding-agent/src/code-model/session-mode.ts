@@ -35,15 +35,10 @@ export interface CodeModelSessionController {
 	run(action: "start" | "finish" | "status", ctx: ExtensionContext, signal?: AbortSignal): Promise<CodeModelResult>;
 }
 
-export type CodeModelBeforeIdleHandler = (
-	event: SessionBeforeIdleEvent,
-	ctx: ExtensionContext,
-) => Promise<void>;
+export type CodeModelBeforeIdleHandler = (event: SessionBeforeIdleEvent, ctx: ExtensionContext) => Promise<void>;
 
 export interface CodeModelSessionHooks {
-	getRetryFallbackPrimary?: () =>
-		| { selector: string; effort: ConfiguredThinkingLevel | undefined }
-		| undefined;
+	getRetryFallbackPrimary?: () => { selector: string; effort: ConfiguredThinkingLevel | undefined } | undefined;
 	registerBeforeIdle?: (handler: CodeModelBeforeIdleHandler) => void;
 }
 
