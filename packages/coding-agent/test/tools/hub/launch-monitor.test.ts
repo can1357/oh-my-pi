@@ -320,7 +320,7 @@ describe("hub process output monitoring", () => {
 		expect(harness.active).toEqual([]);
 	});
 
-	it("rejects a monitored start without a session owner before launching", async () => {
+	it("rejects a monitored start without a session owner but accepts explicit off", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 		const session = { ...harness.session, getSessionId: undefined } as unknown as ToolSession;
@@ -346,8 +346,11 @@ describe("hub process output monitoring", () => {
 			op: "start",
 			name: daemon.name,
 			application: process.execPath,
+			pty: false,
+			progress: "off",
 		});
 		expect(harness.requests).toEqual([expect.objectContaining({ op: "start", owner: undefined })]);
+		expect(harness.getSubscription()).toBeUndefined();
 		expect(unmonitored.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining("Started") }),
 		]);
