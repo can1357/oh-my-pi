@@ -520,6 +520,8 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** APIs whose provider transport resolves credentials without a stored account. */
+	nativeAuthApis?: string[];
 	available?: boolean;
 	showInLoginList?: boolean;
 	storeAs?: string;
