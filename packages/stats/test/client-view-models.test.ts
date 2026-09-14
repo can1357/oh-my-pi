@@ -6,7 +6,7 @@ import type { AgentTypeStats, ModelPerformancePoint } from "../src/shared-types"
 const DAY = 24 * 60 * 60 * 1000;
 
 describe("client view models", () => {
-	it("keeps sparse all-time model performance buckets instead of dropping old points", () => {
+	it("keeps sparse all-time points and marks inactive gaps", () => {
 		const points: ModelPerformancePoint[] = [
 			{
 				timestamp: DAY,
@@ -28,9 +28,9 @@ describe("client view models", () => {
 
 		const series = buildModelPerformanceLookup(points, "all").get("gpt-5.5::openai-codex");
 
-		expect(series?.data.map(point => point.timestamp)).toEqual([DAY, DAY * 10]);
-		expect(series?.data.map(point => point.requests)).toEqual([1, 2]);
-		expect(series?.data.map(point => point.avgTtftSeconds)).toEqual([0.25, 0.5]);
+		expect(series?.data.map(point => point.timestamp)).toEqual([DAY, DAY * 2, DAY * 10]);
+		expect(series?.data.map(point => point.requests)).toEqual([1, 0, 2]);
+		expect(series?.data.map(point => point.avgTtftSeconds)).toEqual([0.25, null, 0.5]);
 	});
 });
 

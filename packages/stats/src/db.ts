@@ -372,6 +372,20 @@ export async function initDb(): Promise<Database> {
 	backfillMissingCatalogCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
+	// Dashboard aggregates read nearly every numeric field. The messages table
+	// also stores large session/error strings, so table scans pull hundreds of
+	// megabytes of unrelated payload into SQLite's page cache. Create this after
+	// legacy column migrations and backfills, then force aggregate queries to use
+	// it so narrower grouping indexes cannot win on all-time scans.
+	db.run(`
+		CREATE INDEX IF NOT EXISTS idx_messages_dashboard_cover ON messages(
+			timestamp, model, provider, folder, agent_type, stop_reason,
+			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+			total_tokens, premium_requests, cost_input, cost_output,
+			cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
+			cost_unpriced, duration, ttft
+		)
+	`);
 	return db;
 }
 
@@ -789,7 +803,7 @@ export function getOverallStats(cutoff?: number): AggregatedStats {
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second,
 			MIN(timestamp) as first_timestamp,
 			MAX(timestamp) as last_timestamp
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 	`);
 
@@ -825,7 +839,7 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second,
 			MIN(timestamp) as first_timestamp,
 			MAX(timestamp) as last_timestamp
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY model, provider
 		ORDER BY total_requests DESC
@@ -867,7 +881,7 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second,
 			MIN(timestamp) as first_timestamp,
 			MAX(timestamp) as last_timestamp
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY folder
 		ORDER BY total_requests DESC
@@ -898,7 +912,7 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 			SUM(cache_read_tokens) as total_cache_read_tokens,
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(cost_total) as total_cost
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY agent_type
 	`);
@@ -931,7 +945,7 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
 			SUM(CASE WHEN stop_reason = 'error' THEN 1 ELSE 0 END) as errors,
 			SUM(total_tokens) as tokens,
 			SUM(cost_total) as cost
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY bucket
 		ORDER BY bucket ASC
@@ -971,7 +985,7 @@ export function getModelTimeSeries(
 			model,
 			provider,
 			COUNT(*) as requests
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY bucket, model, provider
 		ORDER BY bucket ASC
@@ -1009,7 +1023,7 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
 			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			SUM(premium_requests) as total_premium_requests,
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY provider
 		ORDER BY total_tokens DESC
@@ -1063,7 +1077,7 @@ export function getProviderHourlyBurn(cutoff?: number | null): ProviderHourlyPoi
 			SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) as total_tokens,
 			SUM(output_tokens) as output_tokens,
 			COUNT(*) as requests
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY provider, hour
 		ORDER BY provider, hour
@@ -1106,7 +1120,7 @@ export function getProviderTimeSeries(
 			SUM(cost_total) as cost,
 			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			COUNT(*) as requests
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY bucket, provider
 		ORDER BY bucket ASC
@@ -1152,7 +1166,7 @@ export function getModelPerformanceSeries(
 			COUNT(*) as requests,
 			AVG(ttft) as avg_ttft,
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY bucket, model, provider
 		ORDER BY bucket ASC
@@ -1326,7 +1340,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 			SUM(cost_cache_read) as cost_cache_read,
 			SUM(cost_cache_write) as cost_cache_write,
 			COUNT(*) as requests
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		GROUP BY bucket, model, provider
 		ORDER BY bucket ASC
@@ -1363,7 +1377,7 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
 			SUM(cost_total) as cost,
 			COUNT(*) as requests,
 			SUM(total_tokens) as total_tokens
-		FROM messages
+		FROM messages INDEXED BY idx_messages_dashboard_cover
 		WHERE timestamp >= ?
 		GROUP BY day
 		ORDER BY day ASC

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed long dashboard loads and blocked section switches on large stats databases by serving aggregate queries from a compact covering index instead of scanning stored session and error payloads.
+- Fixed sparse model performance charts hiding isolated observations or presenting missing buckets as zero throughput; charts now mark observed points, preserve gaps, label both axes, and show the request coverage behind each trend.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

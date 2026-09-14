@@ -35,14 +35,27 @@ export function MiniSparkline({
 	timestamps,
 	values,
 	color,
+	showPoints = false,
 }: {
 	timestamps: number[];
-	values: number[];
+	values: Array<number | null>;
 	color: string;
+	showPoints?: boolean;
 }) {
 	const chartData = {
 		labels: timestamps.map(ts => format(new Date(ts), "MMM d")),
-		datasets: [{ data: values, ...lineSeriesStyle(color) }],
+		datasets: [
+			{
+				data: values,
+				...lineSeriesStyle(color),
+				spanGaps: false,
+				pointRadius: values.map((value, index) => {
+					if (value === null) return 0;
+					const isolated = values[index - 1] == null && values[index + 1] == null;
+					return showPoints || isolated ? 2 : 0;
+				}),
+			},
+		],
 	};
 
 	const options = {
