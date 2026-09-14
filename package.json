@@ -204,7 +204,7 @@
 			"oxfmt"
 		]
 	},
-	"packageManager": "bun@1.4.0",
+	"packageManager": "bun@>=1.4",
 	"patchedDependencies": {
 		"@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
 		"puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch"
