@@ -61,7 +61,7 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
  && tar -xJf /tmp/zig.tar.xz -C /opt \
  && ln -sf "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
  && rm -f /tmp/zig.tar.xz
-# cmake + ninja for native C deps (audiopus_sys builds bundled libopus via
+# cmake + ninja for native C deps (opusic-sys builds bundled libopus via
 # CMake; MSVC cross builds generate with Ninja). Pinned so every job builds
 # native C deps with the same generator versions.
 RUN curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" -o /tmp/cmake.tar.gz \

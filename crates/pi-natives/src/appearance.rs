@@ -324,11 +324,10 @@ mod platform {
 					// -- Polling timer (keep-alive + fallback) ---------------
 					//
 					// Two purposes:
-					// 1. Keeps `CFRunLoopRun` alive — without any source/timer
-					//    attached, `CFRunLoopRun` returns immediately.
-					// 2. Polls `CFPreferencesCopyAppValue` every 2 s so we catch
-					//    theme changes even if the Mach-port notification does not
-					//    fire on this thread.
+					// 1. Keeps `CFRunLoopRun` alive — without any source/timer attached,
+					//    `CFRunLoopRun` returns immediately.
+					// 2. Polls `CFPreferencesCopyAppValue` every 2 s so we catch theme changes even
+					//    if the Mach-port notification does not fire on this thread.
 					let timer_ctx = TimerContext {
 						version:          0,
 						info:             ctx_ptr.cast::<c_void>(),
