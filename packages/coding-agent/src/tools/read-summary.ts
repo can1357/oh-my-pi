@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { isMarkdownPath } from "../modes/theme/theme";
+import type { ClientBridge } from "../session/client-bridge";
 import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
@@ -43,20 +44,27 @@ const MAX_SUMMARY_LINES = 20_000;
 export function isProseSummaryPath(filePath: string): boolean {
 	return isMarkdownPath(filePath) || path.extname(filePath).toLowerCase() === ".txt";
 }
+export function getReadTextFileBridge(session: ToolSession): ClientBridge | undefined {
+	const bridge = session.getClientBridge?.();
+	return bridge?.capabilities.readTextFile && bridge.readTextFile ? bridge : undefined;
+}
+
 export function routeReadThroughBridge(
 	session: ToolSession,
 	absolutePath: string,
 	options?: { line?: number; limit?: number },
 ): Promise<string> | undefined {
-	const bridge = session.getClientBridge?.();
-	if (!bridge?.capabilities.readTextFile || !bridge.readTextFile) return undefined;
-	return bridge.readTextFile({ path: absolutePath, ...options });
+	const bridge = getReadTextFileBridge(session);
+	return bridge ? bridge.readTextFile!({ path: absolutePath, ...options }) : undefined;
 }
 /**
  * Structural summary of `absolutePath`, or `null` when the file is too large,
  * too short, or unparseable. `diskText` lets a caller that already read the file
  * hand those bytes over instead of forcing a second read; an ACP bridge still
- * wins, since the editor's buffer is the source of truth.
+ * wins, since the editor's buffer is the source of truth. `languagePath`
+ * overrides only parser-language inference (speculative reads pass the
+ * requested lexical path while reading the resolved target); bytes and cache
+ * identity stay on `absolutePath`.
  */
 export async function trySummarize(
 	session: ToolSession,
@@ -64,6 +72,7 @@ export async function trySummarize(
 	fileSize: number,
 	signal?: AbortSignal,
 	diskText?: string,
+	languagePath?: string,
 ): Promise<SummaryResult | null> {
 	if (fileSize > MAX_SUMMARY_BYTES) return null;
 
@@ -82,12 +91,12 @@ export async function trySummarize(
 		const unfoldUntilLines = session.settings.get("read.summarize.unfoldUntil");
 		const unfoldLimitLines = session.settings.get("read.summarize.unfoldLimit");
 		const cache = getSummaryParseCache(session);
-		const cacheKey = `${absolutePath}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
+		const cacheKey = `${absolutePath}\0${languagePath ?? ""}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
 		const memoized = cache.get(cacheKey);
 		if (memoized !== undefined) return memoized || null;
 		const result = summarizeCode({
 			code,
-			path: absolutePath,
+			path: languagePath ?? absolutePath,
 			minBodyLines,
 			minCommentLines,
 			unfoldUntilLines,

@@ -469,6 +469,12 @@ describe("AgentSession advisor context maintenance", () => {
 			`${nativeModel.provider}/${nativeModel.id}`,
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
+		// Provider-native compaction re-issues the advisor's own request, so
+		// every candidate receives the advisor's live system prompt.
+		expect(advisor.state.systemPrompt.length).toBeGreaterThan(0);
+		for (const call of compactSpy.mock.calls) {
+			expect(call[5]?.remoteSystemPrompt).toEqual(advisor.state.systemPrompt);
+		}
 		expect(JSON.stringify(advisor.state.messages)).toContain("same-provider native summary");
 	});
 
@@ -556,5 +562,116 @@ describe("AgentSession advisor context maintenance", () => {
 			`${crossProviderModel.provider}/${crossProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("authenticated fallback summary");
+	});
+
+	it("preserves native compaction state across advisor compactions", async () => {
+		const opus46 = getBundledModel("anthropic", "claude-opus-4-6");
+		if (!opus46) throw new Error("Expected bundled opus model");
+		const primaryMock = createMockModel({
+			provider: "anthropic",
+			responses: [{ content: ["primary complete"] }, { content: ["primary complete again"] }],
+		});
+		const advisorMock = createMockModel({
+			provider: "anthropic",
+			contextWindow: CONTEXT_WINDOW,
+			responses: [
+				{ content: ["advisor reviewed current update"] },
+				{ content: ["advisor reviewed second update"] },
+				{ content: ["advisor reviewed third update"] },
+			],
+		});
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": true,
+			"compaction.methodOrder": ["soft"],
+			"contextPromotion.enabled": false,
+		});
+		settings.setModelRole("advisor", `${opus46.provider}/${opus46.id}`);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+			streamFn: primaryMock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be active");
+		advisor.setModel(opus46);
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([opus46]);
+		// Opus 4-6 has a 1M-token window against a reserve-based threshold, and
+		// only the newest usage report anchors the estimate — so the anchors
+		// themselves must each clear ~850k, where the shared helper's 371k
+		// suffices for the fallback harness's 400k windows.
+		const hugeAnchor = (timestamp: number): AssistantMessage => {
+			const anchor = usageAnchor(advisorMock, timestamp);
+			const usage = { ...anchor.usage, cacheRead: 950_000 };
+			return { ...anchor, usage: { ...usage, totalTokens: usage.input + usage.output + usage.cacheRead } };
+		};
+		const seedOverflow = (base: number): void => {
+			for (let i = 0; i < 2; i++) advisor.state.messages.push(hugeAnchor(base + i));
+		};
+		seedOverflow(Date.now() - 4_000);
+		const nativePreserveData = {
+			anthropicCompaction: {
+				provider: "anthropic",
+				content: "native advisor summary",
+				encryptedContent: "enc_advisor_0",
+				filesText: "<files>\n# /repo/\nold.ts (Read)\n</files>",
+				model: "claude-opus-4-6",
+				usedTokens: 60_000,
+			},
+		};
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "native advisor summary",
+			shortSummary: "native advisor",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 60_000,
+			preserveData: nativePreserveData,
+		}));
+
+		await session.prompt("small current update");
+
+		// The in-memory summary replays the native block on later requests...
+		expect(compactSpy.mock.calls).toHaveLength(1);
+		const [summaryMessage] = advisor.state.messages;
+		expect(summaryMessage?.role).toBe("compactionSummary");
+		if (summaryMessage?.role !== "compactionSummary") throw new Error("Expected advisor compaction summary");
+		expect(summaryMessage.providerPayload).toEqual({
+			type: "anthropicCompaction",
+			provider: "anthropic",
+			content: "native advisor summary",
+			encryptedContent: "enc_advisor_0",
+			filesText: "<files>\n# /repo/\nold.ts (Read)\n</files>",
+		});
+		expect((summaryMessage as unknown as { preserveData?: unknown }).preserveData).toEqual(nativePreserveData);
+		// The native summary's rewrite marker predates the retained tail, so
+		// the next request keeps the tail's bound thinking and cached prefix.
+		const retainedTail = advisor.state.messages[1];
+		if (!retainedTail) throw new Error("Expected retained advisor tail");
+		expect(summaryMessage.timestamp).toBeLessThan(retainedTail.timestamp);
+		const firstSummaryTimestamp = summaryMessage.timestamp;
+		// ...and the next maintenance round feeds it back into preparation.
+		seedOverflow(Date.now());
+		await session.prompt("second update");
+
+		expect(compactSpy.mock.calls).toHaveLength(2);
+		const secondPreparation = compactSpy.mock.calls[1]?.[0];
+		expect(secondPreparation?.previousSummary).toBe("native advisor summary");
+		expect(secondPreparation?.previousPreserveData).toEqual(nativePreserveData);
+		// The second summary reuses the first round's marker instead of minting
+		// a fresh one, keeping one stable rewrite point across compactions.
+		const [secondSummary] = advisor.state.messages;
+		expect(secondSummary?.role).toBe("compactionSummary");
+		if (secondSummary?.role !== "compactionSummary") throw new Error("Expected second advisor summary");
+		expect(secondSummary.timestamp).toBe(firstSummaryTimestamp);
 	});
 });

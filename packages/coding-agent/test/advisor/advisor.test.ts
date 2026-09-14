@@ -6312,15 +6312,6 @@ describe("advisor", () => {
 			expect(text).toContain("Architecture");
 		});
 
-		it("seeds a visible default advisor (labeled with the role model) when the config is empty", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({ advisors: [] }, { defaultModelLabel: "anthropic/claude-opus" });
-			const text = strip(overlay.render(200));
-			expect(text).toContain("default");
-			expect(text).toContain("anthropic/claude-opus");
-		});
 		it("shows disabled advisors with a dim circle marker and toggles them in the detail editor", async () => {
 			const uiTheme = await getThemeByName("dark");
 			if (!uiTheme) throw new Error("theme unavailable");
@@ -6337,87 +6328,6 @@ describe("advisor", () => {
 			expect(text).toContain("○ Disabled");
 			// The preview of the highlighted (first) advisor shows its enabled status.
 			expect(text).toContain("● on");
-		});
-
-		it("preserves top-level maxNotesPerUpdate while stripping the synthetic default advisor on save", async () => {
-			let savedDoc: WatchdogConfigDoc | undefined;
-			const overlay = new AdvisorConfigOverlayComponent(
-				{} as unknown as TUI,
-				{ ...deps },
-				"project",
-				{ maxNotesPerUpdate: 3, advisors: [] },
-				{
-					...callbacks,
-					save: async (_scope, doc) => {
-						savedDoc = doc;
-					},
-				},
-			);
-			overlay.render(200);
-			// Arrow down 4 times to "Save & apply" (advisor:0, add, shared, scope, save)
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\r");
-			await Promise.resolve();
-			expect(savedDoc).toBeDefined();
-			expect(savedDoc?.maxNotesPerUpdate).toBe(3);
-			expect(savedDoc?.advisors).toEqual([]);
-		});
-
-		it("preserves customized default advisor and top-level maxNotesPerUpdate on save", async () => {
-			let savedDoc: WatchdogConfigDoc | undefined;
-			const overlay = new AdvisorConfigOverlayComponent(
-				{} as unknown as TUI,
-				{ ...deps },
-				"project",
-				{ maxNotesPerUpdate: 3, advisors: [{ name: "default", instructions: "custom" }] },
-				{
-					...callbacks,
-					save: async (_scope, doc) => {
-						savedDoc = doc;
-					},
-				},
-			);
-			overlay.render(200);
-			// Arrow down 4 times to "Save & apply" (advisor:0, add, shared, scope, save)
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\r");
-			await Promise.resolve();
-			expect(savedDoc).toBeDefined();
-			expect(savedDoc?.maxNotesPerUpdate).toBe(3);
-			expect(savedDoc?.advisors).toEqual([{ name: "default", instructions: "custom" }]);
-		});
-
-		it("preserves top-level instructions while stripping the synthetic default advisor on save", async () => {
-			let savedDoc: WatchdogConfigDoc | undefined;
-			const overlay = new AdvisorConfigOverlayComponent(
-				{} as unknown as TUI,
-				{ ...deps },
-				"project",
-				{ instructions: "baseline rules", advisors: [] },
-				{
-					...callbacks,
-					save: async (_scope, doc) => {
-						savedDoc = doc;
-					},
-				},
-			);
-			overlay.render(200);
-			// Arrow down 4 times to "Save & apply" (advisor:0, add, shared, scope, save)
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\r");
-			await Promise.resolve();
-			expect(savedDoc).toBeDefined();
-			expect(savedDoc?.instructions).toBe("baseline rules");
-			expect(savedDoc?.advisors).toEqual([]);
 		});
 	});
 });

@@ -988,7 +988,7 @@ describe("Agent", () => {
 		});
 	});
 
-	it("persists the transformed payload when the transformer resolves after message_end", async () => {
+	it("keeps the latest Cursor result observable while a transform delays the assistant drain", async () => {
 		// The transformer is awaited by the provider's fire-and-forget dispatch,
 		// so `message_end` decoded from the same chunk can reach the drain while
 		// it is still pending. Buffering the call is not enough: a transformer
@@ -1022,9 +1022,11 @@ describe("Agent", () => {
 		// Gating on the `message_end` event instead would deadlock: that event is
 		// emitted from inside the drain that now waits on this promise.
 		const gate = Promise.withResolvers<void>();
+		const transformStarted = Promise.withResolvers<void>();
 		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
 			cursorOnToolResult: async message => {
+				transformStarted.resolve();
 				await gate.promise;
 				return { ...message, content: [{ type: "text" as const, text: "transformed" }] };
 			},
@@ -1040,19 +1042,86 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		let snapshotDuringEmission: readonly ToolResultMessage[] = [];
+		agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				snapshotDuringEmission = agent.getPendingToolResults();
+			}
+		});
 
 		const turn = agent.prompt("trigger");
+		await transformStarted.promise;
 		// Let the stream drain as far as it can while the transformer is blocked.
 		// An unawaited drain finishes the turn here, with the original payload.
 		for (let i = 0; i < 50; i++) await Promise.resolve();
+		const suspendedSnapshot = agent.getPendingToolResults();
 		gate.resolve();
 		await turn;
+		expect(suspendedSnapshot).toEqual([realToolResult]);
+		expect(snapshotDuringEmission).toMatchObject([
+			{ toolCallId: toolCall.id, content: [{ type: "text", text: "transformed" }] },
+		]);
+		expect(agent.getPendingToolResults()).toEqual([]);
 
 		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
 		expect(toolResults).toHaveLength(1);
 		expect(toolResults[0]).toMatchObject({
 			toolCallId: toolCall.id,
 			content: [{ type: "text", text: "transformed" }],
+		});
+	});
+
+	it("exposes buffered Cursor results until the assistant drain empties them", async () => {
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-pending",
+			name: "shell",
+			arguments: { command: "pwd" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const buffered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: message => message,
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(realToolResult);
+					buffered.resolve();
+					await finish.promise;
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		const turn = agent.prompt("trigger");
+		await buffered.promise;
+
+		expect(agent.getPendingToolResults()).toEqual([realToolResult]);
+
+		finish.resolve();
+		await turn;
+
+		expect(agent.getPendingToolResults()).toEqual([]);
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
 		});
 	});
 

@@ -21,6 +21,7 @@ import type {
 	DailyActivityPoint,
 	FolderStats,
 	MessageStats,
+	MessageStatsInput,
 	ModelPerformancePoint,
 	ModelStats,
 	ModelTimeSeriesPoint,
@@ -48,13 +49,35 @@ const ZERO_USAGE_COST: UsageCost = {
 	total: 0,
 };
 
-const UNPRICED_XAI_OAUTH_SQL =
-	"CASE WHEN provider = 'xai-oauth' AND total_tokens > 0 AND cost_total = 0 THEN 1 ELSE 0 END";
+/**
+ * Predicate counting one stored request as "unpriced" — the public rate card
+ * has no charge for it, so its zero is unknown spend rather than free usage.
+ * Two shapes store that zero:
+ *   - `xai-oauth` bills through the SuperGrok subscription, so ingestion
+ *     deliberately records no per-request price;
+ *   - `cost_unpriced = 1`, set by `insertMessageStats` when `resolveStoredCost`
+ *     refuses to price a scheduled (time-based) card whose entry carried no
+ *     recoverable request timestamp — the epoch would silently become the
+ *     tariff. Such a row keeps its real tokens and its zero until a re-parse
+ *     recovers the time.
+ *
+ * Nothing else sets the marker: an explicit recorded zero, a free flat card,
+ * and a model with no catalog card at all keep `cost_unpriced = 0` even at the
+ * parser's timestamp sentinel, because their zero is a real price.
+ * `prefix` qualifies the columns for queries that alias `messages`.
+ */
+function unpricedRequestSql(prefix = ""): string {
+	return `CASE WHEN ${prefix}total_tokens > 0 AND ${prefix}cost_total = 0
+		AND (${prefix}provider = 'xai-oauth' OR ${prefix}cost_unpriced = 1) THEN 1 ELSE 0 END`;
+}
+
+const UNPRICED_REQUEST_SQL = unpricedRequestSql();
 
 interface CostBackfillRow {
 	id: number;
 	provider: string;
 	model: string;
+	timestamp: number;
 	input_tokens: number;
 	output_tokens: number;
 	cache_read_tokens: number;
@@ -65,6 +88,7 @@ interface NoCacheInputCostBackfillRow {
 	id: number;
 	provider: string;
 	model: string;
+	timestamp: number;
 	input_tokens: number;
 	cache_read_tokens: number;
 	cache_write_tokens: number;
@@ -127,6 +151,11 @@ const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
 // reach the inclusive 200K tier. A one-time full re-parse repairs them through
 // the cost-refreshing UPSERT in `insertMessageStats`.
 const COST_REINGEST_BACKFILL_KEY = "messages_cost_reingest_v1";
+// The absence-aware `resolveStoredCost` and the `cost_unpriced` marker only
+// reach already-ingested rows through a re-parse, and the reingest sentinel
+// above is already spent for them — without this one, every historical row
+// keeps `cost_unpriced = 0` and unknown scheduled spend reports as free.
+const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -177,6 +206,7 @@ export async function initDb(): Promise<Database> {
 			cost_cache_write REAL NOT NULL,
 			cost_total REAL NOT NULL,
 			cost_no_cache_input REAL,
+			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			UNIQUE(session_file, entry_id)
 		);
@@ -250,6 +280,11 @@ export async function initDb(): Promise<Database> {
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
+	}
+	// Rows ingested before this column existed default to 0 (not unpriced), so
+	// their epoch-sentinel zeros read as free until a re-parse rewrites them.
+	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
+		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
 	}
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
@@ -330,6 +365,7 @@ export async function initDb(): Promise<Database> {
 	backfillUserMessages(db);
 	backfillToolCalls(db);
 	backfillReingestCosts(db);
+	backfillUnpricedCosts(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -365,7 +401,17 @@ function getCatalogCost(provider: string, modelId: string): ModelCost | null {
 	return null;
 }
 
-function calculateCatalogCost(provider: string, modelId: string, tokens: CostTokens): UsageCost | null {
+/** Whether the catalog prices this model on a time-based (scheduled) card. */
+export function isScheduledCatalogModel(provider: string, modelId: string): boolean {
+	return getCatalogCost(provider, modelId)?.timeBased != null;
+}
+
+function calculateCatalogCost(
+	provider: string,
+	modelId: string,
+	tokens: CostTokens,
+	timestamp: number,
+): UsageCost | null {
 	const cost = getCatalogCost(provider, modelId);
 	if (!cost) return null;
 
@@ -382,10 +428,10 @@ function calculateCatalogCost(provider: string, modelId: string, tokens: CostTok
 			(orchestration?.cacheRead ?? 0),
 		cost: { ...ZERO_USAGE_COST },
 	};
-	return calculateUsageCost(cost, usage);
+	return calculateUsageCost(cost, usage, timestamp);
 }
 
-function normalizeUsageCost(cost: UsageCost): UsageCost {
+function normalizeUsageCost(cost: Partial<UsageCost>): UsageCost {
 	const input = cost.input ?? 0;
 	const output = cost.output ?? 0;
 	const cacheRead = cost.cacheRead ?? 0;
@@ -394,37 +440,80 @@ function normalizeUsageCost(cost: UsageCost): UsageCost {
 	return { input, output, cacheRead, cacheWrite, total };
 }
 
-function resolveStoredCost(stats: MessageStats): UsageCost {
-	// `usage.cost` was optional in older session files, and legacy payloads
-	// can carry a partially-populated cost object (e.g. only `total`). The
-	// messages table declares every cost_* column as REAL NOT NULL, so any
-	// missing field must be normalised here before binding into SQLite.
-	const raw: UsageCost | undefined = stats.usage.cost;
-	const storedCost = raw ? normalizeUsageCost(raw) : undefined;
-
-	// A missing total is derived from the stored components. An explicit zero
-	// remains the sentinel for catalog-based correction.
-	if (storedCost && (raw?.total ?? storedCost.total) !== 0) return storedCost;
-
-	return calculateCatalogCost(stats.provider, stats.model, stats.usage) ?? storedCost ?? ZERO_USAGE_COST;
+/**
+ * The parser records no timestamp for an entry that carries neither a numeric
+ * message timestamp nor a parseable entry timestamp, leaving this sentinel.
+ * Pricing such a request from the clock would bill it as a 1970 request.
+ */
+function hasRequestTimestamp(timestamp: number): boolean {
+	return Number.isFinite(timestamp) && timestamp > 0;
 }
 
-function calculateNoCacheInputCost(provider: string, modelId: string, tokens: CostTokens): number | null {
+interface ResolvedCost {
+	cost: UsageCost;
+	/**
+	 * The stored zero is unknown spend rather than a price: a scheduled card
+	 * with no recoverable request timestamp to select a tariff from. Persisted
+	 * as `cost_unpriced` so the aggregates do not have to infer it.
+	 */
+	unpriced: boolean;
+}
+
+function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
+	// `usage.cost` is absent when the session entry recorded no price at all, and
+	// legacy payloads can carry a partially-populated cost object (e.g. only
+	// `total`). The messages table declares every cost_* column as REAL NOT NULL,
+	// so any missing field must be normalised here before binding into SQLite.
+	const raw: Partial<UsageCost> | undefined = stats.usage.cost;
+	const storedCost = raw ? normalizeUsageCost(raw) : undefined;
+	const catalogCost = getCatalogCost(stats.provider, stats.model);
+
+	// Scheduled prices are frozen per request, including explicitly free usage.
+	// Preserve legacy zero-cost subscription correction for unscheduled models.
+	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || catalogCost?.timeBased)) {
+		return { cost: storedCost, unpriced: false };
+	}
+
+	// Without a request timestamp a scheduled card has no tariff to select, and
+	// the epoch would silently become one. Leave the request unpriced; a re-parse
+	// of the session file repairs it once the timestamp is recoverable.
+	if (!hasRequestTimestamp(stats.timestamp) && catalogCost?.timeBased) {
+		return { cost: storedCost ?? ZERO_USAGE_COST, unpriced: true };
+	}
+
+	return {
+		cost:
+			calculateCatalogCost(stats.provider, stats.model, stats.usage, stats.timestamp) ??
+			storedCost ??
+			ZERO_USAGE_COST,
+		unpriced: false,
+	};
+}
+
+function calculateNoCacheInputCost(
+	provider: string,
+	modelId: string,
+	tokens: CostTokens,
+	timestamp: number,
+): number | null {
 	const cost = getCatalogCost(provider, modelId);
 	if (!cost) return null;
+	// Mirrors `resolveStoredCost`: an unpriced scheduled request must not report
+	// its whole prompt as cache savings just because the clock could be read.
+	if (!hasRequestTimestamp(timestamp) && cost.timeBased) return null;
 	const promptInputTokens =
 		tokens.input +
 		tokens.cacheRead +
 		tokens.cacheWrite +
 		(tokens.orchestration?.input ?? 0) +
 		(tokens.orchestration?.cacheRead ?? 0);
-	return calculateUncachedInputCost(cost, promptInputTokens);
+	return calculateUncachedInputCost(cost, promptInputTokens, timestamp);
 }
 
 function backfillMissingCatalogCosts(database: Database): void {
 	const rows = database
 		.prepare(`
-			SELECT id, provider, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+			SELECT id, provider, model, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
 			FROM messages
 			WHERE cost_total = 0 AND total_tokens > 0
 		`)
@@ -440,12 +529,24 @@ function backfillMissingCatalogCosts(database: Database): void {
 
 	const applyBackfill = database.transaction(() => {
 		for (const row of rows) {
-			const cost = calculateCatalogCost(row.provider, row.model, {
-				input: row.input_tokens,
-				output: row.output_tokens,
-				cacheRead: row.cache_read_tokens,
-				cacheWrite: row.cache_write_tokens,
-			});
+			// A stored zero cannot distinguish missing historical prices from an
+			// explicitly free request. Never reprice recorded scheduled usage: a
+			// zero ingested for a scheduled card is permanent, because this
+			// backfill skips those rows. Re-parsing the session file is the only
+			// repair, and it works only once the entry's absent `cost` reaches
+			// `resolveStoredCost` as absence rather than as a synthesized zero.
+			if (getCatalogCost(row.provider, row.model)?.timeBased) continue;
+			const cost = calculateCatalogCost(
+				row.provider,
+				row.model,
+				{
+					input: row.input_tokens,
+					output: row.output_tokens,
+					cacheRead: row.cache_read_tokens,
+					cacheWrite: row.cache_write_tokens,
+				},
+				row.timestamp,
+			);
 
 			if (!cost || cost.total === 0) continue;
 
@@ -459,7 +560,7 @@ function backfillMissingCatalogCosts(database: Database): void {
 function backfillNoCacheInputCosts(database: Database): void {
 	const rows = database
 		.prepare(`
-			SELECT id, provider, model, input_tokens, cache_read_tokens, cache_write_tokens
+			SELECT id, provider, model, timestamp, input_tokens, cache_read_tokens, cache_write_tokens
 			FROM messages
 			WHERE cost_no_cache_input IS NULL
 		`)
@@ -469,12 +570,17 @@ function backfillNoCacheInputCosts(database: Database): void {
 	const update = database.prepare("UPDATE messages SET cost_no_cache_input = ? WHERE id = ?");
 	const applyBackfill = database.transaction(() => {
 		for (const row of rows) {
-			const cost = calculateNoCacheInputCost(row.provider, row.model, {
-				input: row.input_tokens,
-				output: 0,
-				cacheRead: row.cache_read_tokens,
-				cacheWrite: row.cache_write_tokens,
-			});
+			const cost = calculateNoCacheInputCost(
+				row.provider,
+				row.model,
+				{
+					input: row.input_tokens,
+					output: 0,
+					cacheRead: row.cache_read_tokens,
+					cacheWrite: row.cache_write_tokens,
+				},
+				row.timestamp,
+			);
 			update.run(cost ?? 0, row.id);
 		}
 	});
@@ -522,7 +628,7 @@ export function setFileOffset(sessionFile: string, offset: number, lastModified:
  * stored cost (orchestration-aware) and keeps `premium_requests` monotonic, so
  * a forced re-parse repairs historical `premium_requests` and cost fix-ups.
  */
-export function insertMessageStats(stats: MessageStats[]): number {
+export function insertMessageStats(stats: MessageStatsInput[]): number {
 	if (!db || stats.length === 0) return 0;
 
 	const stmt = db.prepare(`
@@ -530,9 +636,10 @@ export function insertMessageStats(stats: MessageStats[]): number {
 			session_file, entry_id, folder, model, provider, api, timestamp,
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
-			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input, agent_type
+			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
+			cost_unpriced, agent_type
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
@@ -544,14 +651,15 @@ export function insertMessageStats(stats: MessageStats[]): number {
 			cost_cache_read = excluded.cost_cache_read,
 			cost_cache_write = excluded.cost_cache_write,
 			cost_total = excluded.cost_total,
-			cost_no_cache_input = excluded.cost_no_cache_input
+			cost_no_cache_input = excluded.cost_no_cache_input,
+			cost_unpriced = excluded.cost_unpriced
 	`);
 
 	let inserted = 0;
 	const insert = db.transaction(() => {
 		for (const s of stats) {
-			const cost = resolveStoredCost(s);
-			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage) ?? 0;
+			const { cost, unpriced } = resolveStoredCost(s);
+			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
 			const result = stmt.run(
 				s.sessionFile,
 				s.entryId,
@@ -576,6 +684,7 @@ export function insertMessageStats(stats: MessageStats[]): number {
 				cost.cacheWrite,
 				cost.total,
 				noCacheInputCost,
+				unpriced ? 1 : 0,
 				s.agentType,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp).
@@ -670,7 +779,7 @@ export function getOverallStats(cutoff?: number): AggregatedStats {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(premium_requests) as total_premium_requests,
 			SUM(cost_total) as total_cost,
-			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
+			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			SUM(CASE WHEN cost_no_cache_input > 0
 				THEN cost_input + cost_cache_read + cost_cache_write
 				ELSE 0 END) as total_cached_prompt_cost,
@@ -706,7 +815,7 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(premium_requests) as total_premium_requests,
 			SUM(cost_total) as total_cost,
-			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
+			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			SUM(CASE WHEN cost_no_cache_input > 0
 				THEN cost_input + cost_cache_read + cost_cache_write
 				ELSE 0 END) as total_cached_prompt_cost,
@@ -748,7 +857,7 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(premium_requests) as total_premium_requests,
 			SUM(cost_total) as total_cost,
-			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
+			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			SUM(CASE WHEN cost_no_cache_input > 0
 				THEN cost_input + cost_cache_read + cost_cache_write
 				ELSE 0 END) as total_cached_prompt_cost,
@@ -897,7 +1006,7 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) as total_tokens,
 			SUM(cost_total) as total_cost,
-			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
+			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			SUM(premium_requests) as total_premium_requests,
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second
 		FROM messages
@@ -995,7 +1104,7 @@ export function getProviderTimeSeries(
 			provider,
 			SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) as total_tokens,
 			SUM(cost_total) as cost,
-			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
+			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			COUNT(*) as requests
 		FROM messages
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
@@ -1118,6 +1227,7 @@ function rowToMessageStats(row: any): MessageStats {
 			},
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
+		costUnpriced: row.cost_unpriced === 1,
 	};
 }
 
@@ -1159,6 +1269,7 @@ export interface SessionRollupRow {
 	endedAt: number;
 	totalTokens: number;
 	costTotal: number;
+	unpricedRequests: number;
 	/** Comma-joined DISTINCT models. */
 	models: string;
 }
@@ -1173,6 +1284,7 @@ export function getSessionRollups(): SessionRollupRow[] {
 		       MAX(timestamp + COALESCE(duration, 0)) AS endedAt,
 		       SUM(total_tokens) AS totalTokens,
 		       SUM(cost_total) AS costTotal,
+		       SUM(${UNPRICED_REQUEST_SQL}) AS unpricedRequests,
 		       GROUP_CONCAT(DISTINCT model) AS models
 		FROM messages
 		GROUP BY session_file
@@ -1208,7 +1320,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 			model,
 			provider,
 			SUM(cost_total) as cost,
-			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
+			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			SUM(cost_input) as cost_input,
 			SUM(cost_output) as cost_output,
 			SUM(cost_cache_read) as cost_cache_read,
@@ -1367,6 +1479,27 @@ function backfillReingestCosts(database: Database): void {
 }
 
 /**
+ * One-shot `file_offsets` wipe so the next sync re-parses every session and
+ * re-derives `cost_unpriced` from `resolveStoredCost`. Rows ingested before the
+ * marker existed defaulted to 0, and `INSERT ... ON CONFLICT DO UPDATE` only
+ * refreshes them when the session is re-parsed — which the spent reingest
+ * sentinel above will never do again. The re-parse also re-prices the
+ * previously absent legacy `cost` charges, since `resolveStoredCost` now reads
+ * absence as absence. Same sentinel protocol as {@link backfillReingestCosts}.
+ */
+function backfillUnpricedCosts(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(COST_UNPRICED_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM file_offsets");
+	database
+		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(COST_UNPRICED_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
  * Reclassify pre-existing `messages` rows by agent type once, after the
  * `agent_type` column is added to an older database (every prior row defaulted
  * to 'main' on the ALTER). Classification is purely path-based — derived from
@@ -1492,6 +1625,7 @@ export function markSessionBackfillsComplete(): void {
 			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
+			COST_UNPRICED_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}
@@ -1841,7 +1975,9 @@ export function updateToolResults(links: ToolResultLink[]): number {
 /**
  * Shared SELECT list for tool aggregates. Real provider usage comes from the
  * invoking assistant turn (`messages` join) divided by `calls_in_turn`, so
- * per-tool token/cost shares stay additive across tools.
+ * per-tool token/cost shares stay additive across tools. The unpriced share
+ * reuses the request predicate against the joined message, whose stored cost
+ * it attributes.
  */
 const TOOL_AGGREGATE_COLUMNS = `
 	COUNT(*) as calls,
@@ -1851,8 +1987,7 @@ const TOOL_AGGREGATE_COLUMNS = `
 	SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn) as total_tokens_share,
 	SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn) as output_tokens_share,
 	SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn) as cost_share,
-	SUM(CASE WHEN t.provider = 'xai-oauth' AND COALESCE(m.total_tokens, 0) > 0 AND COALESCE(m.cost_total, 0) = 0
-		THEN 1.0 / t.calls_in_turn ELSE 0 END) as unpriced_requests_share,
+	SUM(${unpricedRequestSql("m.")} * 1.0 / t.calls_in_turn) as unpriced_requests_share,
 	MAX(t.timestamp) as last_used
 `;
 

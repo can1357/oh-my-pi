@@ -425,6 +425,87 @@ describe("buildSessionTrace", () => {
 		expect(summary.idleMs).toBe(10_000);
 	});
 
+	it("marks dateless scheduled usage as unpriced instead of free", async () => {
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		await fs.mkdir(projectDir, { recursive: true });
+		const file = path.join(projectDir, "1700000000001_unpriced.jsonl");
+		const entries: unknown[] = [
+			{ type: "title", v: 1, title: "Unpriced" },
+			{ type: "session", version: 3, id: "s", timestamp: iso(T), cwd: "/tmp/proj" },
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+				},
+			},
+		];
+		await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+		const { summary } = await buildSessionTrace(file);
+		expect(summary.requests).toBe(1);
+		expect(summary.totalTokens).toBe(100);
+		expect(summary.costTotal).toBe(0);
+		expect(summary.unpricedRequests).toBe(1);
+	});
+
+	it("derives a missing total from buckets before classifying trace costs", async () => {
+		// Legacy entries can omit totalTokens while carrying real buckets; the
+		// parser derives the total and the db marks the request unpriced, so the
+		// trace headline must agree instead of reporting the zero as free. A
+		// malformed bucket counts as absent and stays free at zero tokens.
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		await fs.mkdir(projectDir, { recursive: true });
+		const file = path.join(projectDir, "1700000000002_derived-unpriced.jsonl");
+		const entries: unknown[] = [
+			{ type: "title", v: 1, title: "Derived" },
+			{ type: "session", version: 3, id: "s", timestamp: iso(T), cwd: "/tmp/proj" },
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			},
+			{
+				type: "message",
+				id: "a2",
+				parentId: "a1",
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: "10", output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			},
+		];
+		await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+		const { summary } = await buildSessionTrace(file);
+		expect(summary.requests).toBe(2);
+		expect(summary.totalTokens).toBe(100);
+		expect(summary.costTotal).toBe(0);
+		expect(summary.unpricedRequests).toBe(1);
+	});
+
 	it("rejects paths outside the sessions root", async () => {
 		await writeFixture();
 		expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);

@@ -894,6 +894,16 @@ async function spillLargeResultToArtifact(
 // Tool wrapper
 // =============================================================================
 
+export async function postProcessToolResult(
+	result: AgentToolResult,
+	toolName: string,
+	context?: AgentToolContext,
+): Promise<AgentToolResult> {
+	const processed = await spillLargeResultToArtifact(result, toolName, context);
+	const meta: OutputMeta | undefined = processed.details?.meta;
+	return meta ? { ...processed, content: appendOutputNotice(processed.content, meta) } : processed;
+}
+
 async function wrappedExecute(
 	this: AgentTool & { [kUnwrappedExecute]: AgentToolExecFn },
 	toolCallId: string,
