@@ -5,6 +5,18 @@
 ### Fixed
 
 - Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
+### Added
+
+- Added a privacy warning to memory reports reminding users to review data for secrets before sharing
+- `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
+
+### Changed
+
+- Pressing `c` on a `/btw` answer now shows a green "✓ Copied to clipboard" confirmation in the panel and history detail, and BTW history accepts `Ctrl+/` to switch panes ([#12052](https://github.com/can1357/oh-my-pi/pull/12052) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14
 
