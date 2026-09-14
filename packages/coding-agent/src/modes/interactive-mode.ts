@@ -222,6 +222,7 @@ import {
 	createLoopLimitRuntime,
 	describeLoopLimit,
 	describeLoopLimitRuntime,
+	formatDuration as describeLoopInterval,
 	isLoopDurationExpired,
 	isLoopLimitExhausted,
 	type LoopLimitRuntime,
@@ -266,6 +267,14 @@ import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const DEFAULT_WORKING_MESSAGE = "Working…";
+
+/**
+ * Aside `customType` for a `/loop --every` reminder. `#tickLoopInterval`
+ * dedupes on this (via `session.hasQueuedAside`) so a still-pending reminder
+ * never piles up a second one, and `dropQueuedLoopReminders` targets it when
+ * the user interrupts or the loop pauses/disables.
+ */
+export const LOOP_REMINDER_MESSAGE_TYPE = "loop-reminder";
 
 interface WorkingMessageAccent {
 	main: string;
@@ -733,6 +742,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	loopCondition: LoopConditionConfig | undefined = undefined;
+	/** Reminder cadence from `--every`, ms; undefined when the loop has no interval configured. */
+	loopIntervalMs: number | undefined = undefined;
 	/**
 	 * Aborts the in-flight `--while` / `--until` evaluation. Esc between
 	 * iterations lands while the condition command is still running, and
@@ -741,6 +752,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
+	/** Fires {@link #tickLoopInterval} on `loopIntervalMs`'s cadence; `.unref()`d so it never holds the process open. */
+	#loopIntervalTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#nextAppearanceRequestToken = 1;
@@ -1902,6 +1915,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
 		if (!this.loopModeEnabled || !this.loopPrompt) return;
+		// An interval-driven loop owns its own cadence via #loopIntervalTimer;
+		// arming this turn-boundary path too would double-fire every tick.
+		if (this.loopIntervalMs !== undefined) return;
 		const prompt = this.loopPrompt;
 		const loopAction = settings.get("loop.mode");
 		this.#deferLoopAutoSubmit(() => {
@@ -1923,6 +1939,74 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearTimeout(this.#loopAutoSubmitTimer);
 			this.#loopAutoSubmitTimer = undefined;
 		}
+	}
+
+	/**
+	 * (Re-)arm the interval reminder timer from {@link loopIntervalMs}. Called
+	 * from `setLoopPrompt` — once the loop *has* a prompt to repeat — rather
+	 * than from `handleLoopCommand`: a bare `/loop --every 30m` has nothing to
+	 * deliver until the user supplies the instruction, so the clock starts
+	 * with the first (or each subsequent) iteration's prompt, not the command.
+	 * Always cancels any existing timer first, so only one can ever exist.
+	 */
+	#armLoopIntervalTimer(): void {
+		this.#cancelLoopIntervalTimer();
+		if (this.loopIntervalMs === undefined) return;
+		this.#loopIntervalTimer = setInterval(() => this.#tickLoopInterval(), this.loopIntervalMs);
+		this.#loopIntervalTimer.unref();
+	}
+
+	#cancelLoopIntervalTimer(): void {
+		if (this.#loopIntervalTimer) {
+			clearInterval(this.#loopIntervalTimer);
+			this.#loopIntervalTimer = undefined;
+		}
+	}
+
+	/**
+	 * Interval-timer tick: reminds a still-running turn, or submits the next
+	 * iteration once idle — independent of the turn-boundary 800ms path, which
+	 * `#scheduleLoopAutoSubmit` leaves disarmed for an interval-driven loop.
+	 *
+	 * A reminder for a streaming turn is queued, not injected: the agent loop
+	 * folds asides in at the end of a tool round (`agent-loop.ts`, the
+	 * `hasMoreToolCalls` branch after `emitTurnEnd`). A turn that is working
+	 * normally crosses those boundaries constantly, so the reminder lands
+	 * promptly; a turn parked inside one long blocking tool call (say a
+	 * multi-hour `hub wait`) only sees it when that call returns. That is the
+	 * price of not interrupting — a steer would arrive immediately but abort
+	 * the very wait it interrupted. Dedupe keeps at most one reminder pending,
+	 * so a slow boundary collapses several ticks into one delivery rather than
+	 * queueing a backlog to dump at once.
+	 */
+	#tickLoopInterval(): void {
+		if (!this.loopModeEnabled || this.loopModePaused || !this.loopPrompt) return;
+		// Check the budget first: a long streaming turn never reaches
+		// #runLoopIteration's own exhaustion check below, so an expired budget
+		// must stop the loop here instead of reminding it forever.
+		if (isLoopLimitExhausted(this.loopLimit)) {
+			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+			return;
+		}
+		if (this.session.hasQueuedAside?.(LOOP_REMINDER_MESSAGE_TYPE)) return;
+		const prompt = this.loopPrompt;
+		if (this.session.isStreaming) {
+			this.session
+				.promptCustomMessage(
+					{ customType: LOOP_REMINDER_MESSAGE_TYPE, content: prompt, display: false, attribution: "user" },
+					{ streamingBehavior: "aside" },
+				)
+				// A session transition or teardown racing this tick rejects the queueing
+				// call; log it rather than leaving an unhandled rejection. The next tick
+				// retries on its own.
+				.catch(err => logger.warn("loop interval reminder failed", { error: String(err) }));
+			return;
+		}
+		// Compacting / post-prompt work, or no armed input waiter yet:
+		// promptCustomMessage would fall through to a fresh-turn start and throw
+		// AgentBusyError. Skip; the next tick retries.
+		if (this.#isAutoSubmitBlocked() || !this.onInputCallback) return;
+		void this.#runLoopIteration(settings.get("loop.mode"), prompt);
 	}
 
 	#scheduleGoalContinuation(): void {
@@ -2116,7 +2200,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				? "running"
 				: "waiting";
 		this.statusLine.setLoopModeStatus(
-			this.loopModeEnabled ? { state, limit: this.loopLimit, condition: this.loopCondition } : undefined,
+			this.loopModeEnabled
+				? { state, limit: this.loopLimit, condition: this.loopCondition, intervalMs: this.loopIntervalMs }
+				: undefined,
 		);
 		this.ui.requestRender();
 	}
@@ -2128,7 +2214,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopLimit = undefined;
 		this.loopCondition = undefined;
+		this.loopIntervalMs = undefined;
 		this.#cancelLoopAutoSubmit();
+		this.#cancelLoopIntervalTimer();
+		this.dropQueuedLoopReminders();
 		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 		if (wasEnabled) {
@@ -2146,6 +2235,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#abortLoopCondition();
 		this.loopPrompt = prompt;
 		this.loopModePaused = false;
+		// Arms (or re-arms) the reminder cadence from this iteration's start —
+		// a bare `/loop --every 30m` has nothing to deliver until now.
+		this.#armLoopIntervalTimer();
 		this.#syncLoopModeStatus();
 	}
 
@@ -2158,8 +2250,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopModePaused = true;
 		this.#cancelLoopAutoSubmit();
+		this.#cancelLoopIntervalTimer();
+		this.dropQueuedLoopReminders();
 		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
+	}
+
+	/**
+	 * Drops a still-queued interval reminder aside. Called before
+	 * `session.abort()` in `InputController#abortStreamingTurn`:
+	 * `AgentSession.#resumeStrandedIrcAsides` folds a stranded aside into
+	 * context once a user interrupt suppresses auto-resume, so without this an
+	 * Esc would silently re-append the reminder the user just cancelled.
+	 */
+	dropQueuedLoopReminders(): void {
+		this.session.dropQueuedAsides?.(LOOP_REMINDER_MESSAGE_TYPE);
 	}
 
 	async handleLoopCommand(args = ""): Promise<string | undefined> {
@@ -2177,15 +2282,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopLimit = createLoopLimitRuntime(parsed.limit);
 		this.loopCondition = parsed.condition;
+		this.loopIntervalMs = parsed.intervalMs;
 		this.#syncLoopModeStatus();
 		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
 		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
 		// The condition is a *continuation* signal: the first iteration always
 		// runs, and it is re-evaluated before each subsequent one.
 		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
+		const intervalSuffix = parsed.intervalMs
+			? ` Reminding every ${describeLoopInterval(parsed.intervalMs)} while a turn runs.`
+			: "";
 		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
 		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix}${intervalSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
 		);
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and
@@ -5279,6 +5388,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
+		this.#cancelLoopIntervalTimer();
+		this.dropQueuedLoopReminders();
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;
@@ -5397,6 +5508,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pending input callback against a session that is already disposing.
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
+		// The interval reminder timer (and any pending reminder aside) must not
+		// outlive it either, for the same reason.
+		this.#cancelLoopIntervalTimer();
+		this.dropQueuedLoopReminders();
 
 		// Surface progress before any asynchronous cleanup, including live commands
 		// and BTW history writes, so the user sees a reason for the pause.

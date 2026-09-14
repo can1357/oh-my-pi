@@ -42,7 +42,7 @@ const TIME_UNITS_MS = new Map<string, number>([
 ]);
 
 const LOOP_USAGE =
-	"Usage: /loop [count|duration] [--while|--until '<command>'] [prompt]. Examples: /loop 10, /loop 10m, /loop 20 --until 'bun test' fix the failing tests.";
+	"Usage: /loop [count|duration] [--while|--until '<command>'] [--every <duration>] [prompt]. Examples: /loop 10, /loop 10m, /loop 20 --until 'bun test' fix the failing tests, /loop --every 30m fix tests, /loop 2h --every 30m fix tests.";
 
 /**
  * Flag → `until` polarity. `--while` continues while the command succeeds;
@@ -53,18 +53,36 @@ const CONDITION_FLAGS: Record<string, boolean | undefined> = {
 	"--until": true,
 };
 
+const EVERY_FLAG = "--every";
+
+/**
+ * Node's max `setInterval`/`setTimeout` delay (a signed 32-bit ms count, see
+ * https://nodejs.org/api/timers.html#settimeoutcallback-delay-args). A larger
+ * value overflows the internal int32 and fires immediately instead of after
+ * the requested delay, which would spam the agent with reminders.
+ */
+const MAX_LOOP_INTERVAL_MS = 2 ** 31 - 1;
+
 export interface ParsedLoopArgs {
 	/** Iteration/duration budget, when the user supplied a leading limit token. */
 	limit?: LoopLimitConfig;
 	/** Continue-condition from `--while` / `--until`, re-evaluated before each iteration. */
 	condition?: LoopConditionConfig;
+	/**
+	 * Reminder cadence from `--every`: fires on its own timer independent of
+	 * turn boundaries, so a single long-running turn is reminded repeatedly
+	 * instead of only once it finishes. Independent of `limit`, which still
+	 * governs when the loop stops.
+	 */
+	intervalMs?: number;
 	/** Inline loop prompt: text after the limit and flags, or the whole argument when neither was given. */
 	prompt?: string;
 }
 
 /**
  * Parse `/loop` arguments into an optional leading limit, an optional
- * continue-condition flag, and an optional inline prompt.
+ * continue-condition flag, an optional reminder cadence, and an optional
+ * inline prompt.
  *
  * A leading token that *looks* like a limit (starts with a digit or sign) or
  * like a flag (starts with `--`) but fails to parse is a hard error, so a typo
@@ -79,13 +97,14 @@ export function parseLoopArgs(args: string): ParsedLoopArgs | string {
 	const limitResult = takeLoopLimit(trimmed);
 	if (typeof limitResult === "string") return limitResult;
 
-	const conditionResult = takeLoopCondition(limitResult.rest);
-	if (typeof conditionResult === "string") return conditionResult;
+	const flagsResult = takeLoopFlags(limitResult.rest);
+	if (typeof flagsResult === "string") return flagsResult;
 
 	return {
 		limit: limitResult.limit,
-		condition: conditionResult.condition,
-		prompt: conditionResult.rest || undefined,
+		condition: flagsResult.condition,
+		intervalMs: flagsResult.intervalMs,
+		prompt: flagsResult.rest || undefined,
 	};
 }
 
@@ -126,13 +145,33 @@ function takeLoopLimit(input: string): { limit?: LoopLimitConfig; rest: string }
 	return LOOP_USAGE;
 }
 
-/** Split an optional leading `--while` / `--until` flag off the argument string. */
-function takeLoopCondition(input: string): { condition?: LoopConditionConfig; rest: string } | string {
+/** Split optional leading `--while` / `--until` / `--every` flags off the argument string. */
+function takeLoopFlags(input: string): { condition?: LoopConditionConfig; intervalMs?: number; rest: string } | string {
 	let rest = input.trim();
 	let condition: LoopConditionConfig | undefined;
+	let intervalMs: number | undefined;
 
 	while (rest.startsWith("--")) {
 		const name = /^(--[a-z][a-z-]*)(?=[\s=]|$)/.exec(rest)?.[1];
+
+		if (name === EVERY_FLAG) {
+			if (intervalMs !== undefined) return "Use only one --every flag.";
+			const afterName = rest.slice(name.length);
+			const valueText = (afterName.startsWith("=") ? afterName.slice(1) : afterName).trimStart();
+			const token = /^\S+/.exec(valueText)?.[0];
+			const parsedInterval = token === undefined ? undefined : parseCompoundDuration(token.toLowerCase());
+			if (token === undefined || parsedInterval === undefined) {
+				return `${EVERY_FLAG} needs a duration like 30m or 1h30m. ${LOOP_USAGE}`;
+			}
+			if (typeof parsedInterval === "string") return parsedInterval;
+			if (parsedInterval.durationMs > MAX_LOOP_INTERVAL_MS) {
+				return `${EVERY_FLAG} interval must be at most ${MAX_LOOP_INTERVAL_MS}ms (~24.8 days, Node's max timer delay).`;
+			}
+			intervalMs = parsedInterval.durationMs;
+			rest = valueText.slice(token.length).trim();
+			continue;
+		}
+
 		const until = name === undefined ? undefined : CONDITION_FLAGS[name];
 		if (name === undefined || until === undefined) {
 			return `Unknown /loop flag ${name ?? rest.split(/\s+/, 1)[0]}. ${LOOP_USAGE}`;
@@ -150,7 +189,7 @@ function takeLoopCondition(input: string): { condition?: LoopConditionConfig; re
 		rest = value.rest;
 	}
 
-	return { condition, rest };
+	return { condition, intervalMs, rest };
 }
 
 function makeIterations(amountText: string): LoopLimitConfig | string {
@@ -175,7 +214,7 @@ function makeDuration(amountText: string, unitMs: number): LoopLimitConfig | str
  * when it is shaped like a duration but uses an unknown unit / non-positive
  * amount.
  */
-function parseCompoundDuration(token: string): LoopLimitConfig | string | undefined {
+function parseCompoundDuration(token: string): { kind: "duration"; durationMs: number } | string | undefined {
 	if (!/^(?:\d+[a-z]+)+$/.test(token)) return undefined;
 	const segments = token.match(/\d+[a-z]+/g);
 	if (!segments) return undefined;
@@ -249,7 +288,7 @@ export function describeLoopLimitRuntime(limit: LoopLimitRuntime): string {
 	return `${formatDuration(limit.durationMs)} limit`;
 }
 
-function formatDuration(durationMs: number): string {
+export function formatDuration(durationMs: number): string {
 	if (durationMs % 3_600_000 === 0) {
 		const hours = durationMs / 3_600_000;
 		return `${hours} ${hours === 1 ? "hour" : "hours"}`;

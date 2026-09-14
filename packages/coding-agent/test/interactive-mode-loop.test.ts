@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { InteractiveMode, LOOP_REMINDER_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import type { LoopConditionVerdict } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -429,6 +429,151 @@ describe("InteractiveMode loop auto-submit", () => {
 			vibeGate.resolve();
 			await vibeEnter;
 			expect(mode.vibeModeEnabled).toBe(true);
+		});
+	});
+
+	describe("interval reminder (--every)", () => {
+		function streamingSession(): void {
+			Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+			Object.defineProperty(session, "hasPostPromptWork", { configurable: true, get: () => false });
+		}
+
+		it("configures both a duration budget and a reminder interval from /loop 2h --every 30m", async () => {
+			await mode.handleLoopCommand("2h --every 30m");
+			expect(mode.loopLimit).toMatchObject({ kind: "duration", durationMs: 7_200_000 });
+			expect(mode.loopIntervalMs).toBe(1_800_000);
+		});
+
+		// Non-goal regression guard: a bare duration budget (no --every) must not
+		// gain an interval, and #scheduleLoopAutoSubmit — not the interval timer —
+		// still owns its cadence (see the top-level auto-submit tests above).
+		it("configures a duration budget with no interval from /loop 1h", async () => {
+			await mode.handleLoopCommand("1h");
+			expect(mode.loopLimit).toMatchObject({ kind: "duration", durationMs: 3_600_000 });
+			expect(mode.loopIntervalMs).toBeUndefined();
+		});
+
+		it("leaves the turn-boundary auto-submit path disarmed and submits on the interval's own cadence once idle", async () => {
+			vi.useFakeTimers();
+			Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+			Object.defineProperty(session, "hasPostPromptWork", { configurable: true, get: () => false });
+
+			mode.loopModeEnabled = true;
+			mode.loopIntervalMs = 1_800_000;
+			mode.setLoopPrompt("keep going");
+
+			const resolved: SubmittedUserInput[] = [];
+			pendingInput = mode.getUserInput();
+			void pendingInput.then(input => resolved.push(input));
+
+			// The turn-boundary path's own 800ms delay must not fire a submission —
+			// only the 30-minute interval timer owns this loop's cadence.
+			vi.advanceTimersByTime(800);
+			await flushMicrotasks();
+			expect(resolved).toHaveLength(0);
+
+			// The interval timer itself still submits once idle.
+			vi.advanceTimersByTime(1_800_000 - 800);
+			await flushMicrotasks();
+			expect(resolved).toHaveLength(1);
+			expect(resolved[0].text).toBe("keep going");
+		});
+
+		it("disables the loop when a tick lands after the budget expires, instead of delivering a reminder", async () => {
+			vi.useFakeTimers();
+			streamingSession();
+			const promptCustomMessage = vi.spyOn(session, "promptCustomMessage");
+			const showStatus = vi.spyOn(mode, "showStatus");
+
+			mode.loopModeEnabled = true;
+			mode.loopIntervalMs = 1_800_000;
+			mode.loopLimit = { kind: "duration", durationMs: 7_200_000, deadlineMs: Date.now() - 1 };
+			mode.setLoopPrompt("keep going");
+
+			vi.advanceTimersByTime(1_800_000);
+			await flushMicrotasks();
+
+			expect(mode.loopModeEnabled).toBe(false);
+			expect(showStatus).toHaveBeenCalledWith("Loop limit reached. Loop mode disabled.");
+			expect(promptCustomMessage).not.toHaveBeenCalled();
+		});
+
+		it("delivers an interval reminder via a non-interrupting aside while the turn streams", async () => {
+			vi.useFakeTimers();
+			streamingSession();
+			const promptCustomMessage = vi.spyOn(session, "promptCustomMessage");
+
+			mode.loopModeEnabled = true;
+			mode.loopIntervalMs = 1_800_000;
+			mode.setLoopPrompt("keep going");
+
+			vi.advanceTimersByTime(1_800_000);
+			await flushMicrotasks();
+
+			expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+			const [message, options] = promptCustomMessage.mock.calls[0];
+			expect(options).toEqual({ streamingBehavior: "aside" });
+			expect(message).toMatchObject({
+				customType: LOOP_REMINDER_MESSAGE_TYPE,
+				content: "keep going",
+				display: false,
+				attribution: "user",
+			});
+			// Regression guard for the Contract: an aside must never ride the
+			// steering/follow-up queues `interruptMode: "immediate"` aborts.
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+		});
+
+		it("does not send a second reminder while the first is still pending", async () => {
+			vi.useFakeTimers();
+			streamingSession();
+			const promptCustomMessage = vi.spyOn(session, "promptCustomMessage");
+
+			mode.loopModeEnabled = true;
+			mode.loopIntervalMs = 1_800_000;
+			mode.setLoopPrompt("keep going");
+
+			vi.advanceTimersByTime(1_800_000);
+			await flushMicrotasks();
+			expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+
+			vi.advanceTimersByTime(1_800_000);
+			await flushMicrotasks();
+			expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		});
+
+		it("drops a pending reminder when the loop is disabled", async () => {
+			vi.useFakeTimers();
+			streamingSession();
+
+			mode.loopModeEnabled = true;
+			mode.loopIntervalMs = 1_800_000;
+			mode.setLoopPrompt("keep going");
+
+			vi.advanceTimersByTime(1_800_000);
+			await flushMicrotasks();
+			expect(session.hasQueuedAside(LOOP_REMINDER_MESSAGE_TYPE)).toBe(true);
+
+			mode.disableLoopMode();
+			expect(session.hasQueuedAside(LOOP_REMINDER_MESSAGE_TYPE)).toBe(false);
+		});
+
+		it("drops a pending reminder when the loop is paused", async () => {
+			vi.useFakeTimers();
+			streamingSession();
+
+			mode.loopModeEnabled = true;
+			mode.loopIntervalMs = 1_800_000;
+			mode.setLoopPrompt("keep going");
+
+			vi.advanceTimersByTime(1_800_000);
+			await flushMicrotasks();
+			expect(session.hasQueuedAside(LOOP_REMINDER_MESSAGE_TYPE)).toBe(true);
+
+			mode.pauseLoop();
+			expect(session.hasQueuedAside(LOOP_REMINDER_MESSAGE_TYPE)).toBe(false);
 		});
 	});
 });
