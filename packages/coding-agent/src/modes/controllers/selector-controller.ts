@@ -500,6 +500,7 @@ export class SelectorController {
 			this.ctx.settings,
 			{
 				modelRegistry: this.ctx.session.modelRegistry,
+				activeModel: () => this.ctx.session.model,
 				activeModelPattern,
 				defaultModelPattern,
 				extensionRoots: () => this.ctx.session.effectiveExtensionRoots,

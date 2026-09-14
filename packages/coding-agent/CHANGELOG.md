@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `--reapply-config` (and the `reapplyConfig` SDK option): on `--resume`, adopt the config-resolved default model, its thinking level, and service tier instead of restoring the values baked into the session at its original launch. Adoption is per-knob (and per-family for the service tier) — a value the config does not specify keeps the session's own, while an explicit `tier.<family>: none` clears it — and the flag is off by default, so a bare resume still restores the session's model/thinking/tier. With an explicit `--model`, which pins the model only, a session whose thinking choice lives solely in its saved model selector keeps that level rather than falling to the pinned model's default. A model id that merely ends in an effort name (`nanogpt/coding-router:low`) counts as identity, not a thinking selection, so adopting a different model leaves thinking unset and a `*:<level>` agent alias inheriting such a model applies the requested level to it rather than switching models; `*:inherit` names no level at all, so it inherits the tier instead of suppressing reasoning. A resume that swaps the model, or falls back after a broken config default, is surfaced as a notice. Lets a `--config`/`--profile` overlay re-apply on resume ([#11177](https://github.com/can1357/oh-my-pi/pull/11177) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
@@ -13,6 +14,8 @@
 
 ### Fixed
 
+- Speculative reads now open the authorized resolved target while rendering the requested path, so enabling speculation no longer changes read output for symlinks; video targets are declined at authorization (by [@h4vc](https://github.com/h4vc)).
+- JavaScript speculation now verifies the retained tool-bridge dispatcher and string-coercion intrinsic identities before projecting reads (by [@h4vc](https://github.com/h4vc)).
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 - Multi-step logins (e.g. Perplexity email → code) now move the input field under the latest prompt instead of leaving it stuck beneath the first one.
 
@@ -27,6 +30,10 @@
 - First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
+### Added
+
+### Fixed
 
 ## [18.1.20] - 2026-09-13
 

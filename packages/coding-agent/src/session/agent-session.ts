@@ -9253,10 +9253,9 @@ export class AgentSession {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
-			const hasServiceTierEntry = this.sessionManager
-				.getBranch()
-				.some(entry => entry.type === "service_tier_change");
+			const restoreBranch = this.sessionManager.getBranch();
+			const hasThinkingEntry = restoreBranch.some(entry => entry.type === "thinking_level_change");
+			const hasServiceTierEntry = restoreBranch.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
 			const configuredServiceTierByFamily = buildServiceTierByFamily(
 				this.settings.get("tier.openai"),
@@ -9278,8 +9277,16 @@ export class AgentSession {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			// A missing tier entry on a resumed session is the empty map, not
+			// "consult config": a bare `/resume` runs the target as it was baked, so a
+			// `tier.*` set after that session must not silently take effect here. Only
+			// a target with no history at all falls through to the configured tiers.
 			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				hasServiceTierEntry
+					? (sessionContext.serviceTier ?? {})
+					: restoreBranch.length > 0
+						? {}
+						: configuredServiceTierByFamily,
 			);
 
 			if (switchingToDifferentSession) {

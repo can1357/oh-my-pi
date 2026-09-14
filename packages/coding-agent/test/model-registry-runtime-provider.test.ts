@@ -13,8 +13,10 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
@@ -25,6 +27,16 @@ describe("ModelRegistry runtime provider registration", () => {
 	let fetchRequests: string[];
 
 	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
+	/** Every config-declared discovery provider id, for the disable list. */
+	const scoped0Providers = (): string[] => registry.getDiscoverableProviders();
+	/** Every provider a built-in model manager can discover, for the disable list. */
+	const builtInProviderIds = (): string[] => [
+		...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+		...MODELS_DEV_CATALOG_PROVIDER_IDS,
+		"google-antigravity",
+		"google-gemini-cli",
+		"openai-codex",
+	];
 
 	// Stub transport: reject every request so refresh("online") drives the full
 	// online discovery path with deterministic, instant failures instead of real
@@ -1424,5 +1436,120 @@ describe("ModelRegistry runtime provider registration", () => {
 		// conflict rather than a vacuous assertion.
 		expect(configured.find(providerName, "glm-5.3")?.baseUrl).toBe("https://model-level.example/v1");
 		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
+	});
+
+	// The cold-cache discovery guard in `createAgentSession` asks this predicate.
+	// `getDiscoverableProviders()` projects only the CONFIG-declared half, so an
+	// extension supplying the configured default through `fetchDynamicModels`
+	// left the guard blind: with every config provider disabled that list
+	// contributes nothing, the guard skipped the refresh that DOES cover runtime
+	// managers, and the resume fell through to the baked-model fallback.
+	test("hasRefreshableProviders counts a runtime provider when every other provider is disabled", async () => {
+		const providerName = "dynamic-refreshable-provider";
+		// Disable every config-declared discovery provider AND every built-in
+		// manager, so ONLY a runtime manager can make the registry refreshable —
+		// the exact case the guard's old `getDiscoverableProviders().length === 0`
+		// test got wrong. The built-in half has to go too: an ambient credential
+		// for any descriptor-backed provider would otherwise open the gate on its
+		// own and the runtime registration below would prove nothing.
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [...scoped0Providers(), ...builtInProviderIds()],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+
+		scoped.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-responses",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "dynamic-refreshable-model" }],
+			},
+			"ext://runtime",
+		);
+
+		expect(scoped.hasRefreshableProviders()).toBe(true);
+	});
+
+	// `refresh()` also discovers descriptor-backed providers through its built-in
+	// model managers, which neither the config-declared list nor the runtime
+	// managers report. A configured default that exists only in a built-in
+	// dynamic catalog — a newly discovered Codex or Copilot model on a cold
+	// cache — therefore looked unrefreshable: the guard skipped the only
+	// synchronous online pass, the resume restored its baked model, and the
+	// later background refresh does not redo model selection.
+	test("hasRefreshableProviders counts a credentialed built-in provider", async () => {
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [...scoped0Providers(), ...builtInProviderIds()],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+
+		// Re-enable one descriptor-backed provider and give it a credential, so a
+		// built-in manager is the ONLY thing a refresh could discover through.
+		const enabled = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== "openai-codex"),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(enabled.hasRefreshableProviders()).toBe(false);
+
+		authStorage.setRuntimeApiKey("openai-codex", "codex-test-token");
+		try {
+			expect(enabled.hasRefreshableProviders()).toBe(true);
+		} finally {
+			authStorage.removeRuntimeApiKey("openai-codex");
+		}
+	});
+
+	// An uncredentialed built-in provider must NOT open the gate: `getAvailable()`
+	// drops every model whose provider has no credential, so such a provider can
+	// never contribute a selectable candidate however much it discovers — and a
+	// cold-start session would pay a pointless synchronous online pass.
+	test("hasRefreshableProviders ignores a built-in provider with no credential", async () => {
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== "openai-codex"),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(authStorage.hasAuth("openai-codex")).toBe(false);
+		expect(scoped.hasRefreshableProviders()).toBe(false);
 	});
 });

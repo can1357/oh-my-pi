@@ -47,6 +47,10 @@ export const launchHelp = {
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,
 		}),
+		"reapply-config": Flags.boolean({
+			description:
+				"On resume, use the config-resolved default model, thinking level, and service tier instead of restoring the session's own — applied per knob (and per family for the service tier), so anything the config does not specify keeps the session's; lets a --config/--profile overlay re-apply on resume (default off)",
+		}),
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,

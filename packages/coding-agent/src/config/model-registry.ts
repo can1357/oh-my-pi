@@ -151,6 +151,33 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 );
 
 /**
+ * Every provider {@link ModelRegistry.refresh} can discover through a built-in
+ * model manager, rather than a models.yml `discovery:` block or an extension's
+ * runtime manager: the standard descriptors, the bespoke special managers, and
+ * the bundled catalog-only providers that get the shared models.dev layer with
+ * no endpoint manager of their own. Mirrors the three sources
+ * `#collectBuiltInModelManagerOptions` draws from, so
+ * {@link ModelRegistry.hasRefreshableProviders} cannot under-report what a
+ * refresh would actually cover.
+ */
+const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
+	Object.fromEntries(
+		(() => {
+			const bundledProviderIds: Record<string, true> = Object.create(null);
+			for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
+			return [
+				...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+				...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
+				...MODELS_DEV_CATALOG_PROVIDER_IDS.filter(
+					providerId =>
+						BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] !== true && bundledProviderIds[providerId] === true,
+				),
+			].map(providerId => [providerId, true as const]);
+		})(),
+	),
+);
+
+/**
  * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
  * that a provider override left unset so an override never clobbers an
  * existing value with `undefined`.
@@ -799,7 +826,13 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// `#providerLookupSnapshots` is keyed by the folded provider spelling
+		// (`#modelsForProviderLookup` stores under `provider.trim().toLowerCase()`),
+		// so a mixed-case registration (`MyGateway`) would otherwise leave its cold,
+		// pre-discovery snapshot behind under the lowercase key while this deleted a
+		// key that never existed — and the post-refresh `find` kept returning the
+		// empty catalog.
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/**
@@ -2366,6 +2399,36 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Whether {@link refresh} has any catalog left to discover: a config-declared
+	 * discovery provider, a runtime provider an extension registered through
+	 * `fetchDynamicModels`, or an eligible built-in model manager. `refresh`
+	 * covers all three — {@link getDiscoverableProviders} reports only the
+	 * config-declared half, so a guard written against it skips the refresh for a
+	 * catalog only an extension or a built-in descriptor supplies, exactly the
+	 * case whose cache is cold at session creation.
+	 *
+	 * A built-in provider counts only when its discoveries could actually be
+	 * selected: {@link getAvailable} drops every model whose provider has no
+	 * credential, so an uncredentialed descriptor can never contribute a
+	 * candidate however much it discovers. Gating on the same availability test
+	 * keeps a credential-less cold start off a pointless synchronous online
+	 * pass, while a newly-discovered Codex or Copilot model — whose provider is
+	 * authed by definition — still gets one.
+	 */
+	hasRefreshableProviders(): boolean {
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+		if (this.#discoverableProviders.some(provider => !disabledProviders.has(provider.provider))) return true;
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			if (!disabledProviders.has(provider)) return true;
+		}
+		const isProviderAvailable = this.#createProviderAvailabilityCheck();
+		for (const provider in REFRESHABLE_BUILT_IN_PROVIDER_IDS) {
+			if (isProviderAvailable(provider)) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Whether `providerId` is known to the registry: it has at least one live
 	 * model, or it is configured for dynamic discovery (models.yml `discovery:`
 	 * or a runtime extension provider) and is not disabled. Discovery-only
@@ -2377,6 +2440,75 @@ export class ModelRegistry {
 	hasProvider(providerId: string): boolean {
 		const providerModels = this.#hasFullSnapshot ? this.#models : this.#composeStaticModels(new Set([providerId]));
 		if (providerModels.some(model => model.provider === providerId)) return true;
+		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
+		return (
+			this.#discoverableProviders.some(provider => provider.provider === providerId) ||
+			this.#runtimeModelManagers.has(providerId)
+		);
+	}
+
+	/**
+	 * Whether a refresh scoped to `providerId` would actually fetch a catalog.
+	 *
+	 * Wider than {@link hasProvider}, which answers "is this provider known" and
+	 * so omits a BUILT-IN manager provider with no static rows and no live models
+	 * — a configured vLLM endpoint, say. `#collectBuiltInModelManagerOptions`
+	 * builds a manager for those, so a caller gating a provider-scoped refresh on
+	 * `hasProvider` skips the very fetch that would populate them. Same union the
+	 * unscoped {@link hasRefreshableProviders} takes, narrowed to one provider.
+	 */
+	canRefreshProvider(providerId: string): boolean {
+		if (this.#hasDiscoveryManager(providerId)) return true;
+		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
+		return (
+			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true && this.#createProviderAvailabilityCheck()(providerId)
+		);
+	}
+
+	/**
+	 * The provider's key as the registry actually stores it, resolved from a
+	 * possibly differently-cased spelling.
+	 *
+	 * `find` resolves a model reference case-insensitively, but
+	 * {@link canRefreshProvider} and {@link refreshDiscoverableProviders} do
+	 * exact map/set lookups keyed by the registered spelling — the runtime
+	 * managers an extension registers, and a models.yml `discovery:` entry,
+	 * preserve whatever case they were registered with, while built-ins are
+	 * canonical lowercase. So a saved selector spelled `Dynamic/router:low`
+	 * against a `dynamic` provider AND a `MyGateway/...` selector against a
+	 * mixed-case-registered `MyGateway` are both wrong to force to either raw or
+	 * lowercase: fold the input the same way `resolveProviderModelReference`
+	 * keys every provider (`trim().toLowerCase()`) and return the registered key
+	 * that folds to it. Falls back to the trimmed input when nothing matches, so
+	 * a genuinely unknown provider stays a no-op at the refreshability check.
+	 */
+	resolveProviderKey(provider: string): string {
+		const normalized = provider.trim().toLowerCase();
+		if (!normalized) return provider.trim();
+		for (const key of this.#runtimeModelManagers.keys()) {
+			if (key.toLowerCase() === normalized) return key;
+		}
+		for (const discoverable of this.#discoverableProviders) {
+			if (discoverable.provider.toLowerCase() === normalized) return discoverable.provider;
+		}
+		for (const key of this.#knownStaticProviders()) {
+			if (key.toLowerCase() === normalized) return key;
+		}
+		return provider.trim();
+	}
+
+	/**
+	 * Whether a scoped refresh of `providerId` could discover an ID it does not
+	 * already hold.
+	 *
+	 * Deliberately NOT `hasProvider`, which answers yes for a STATIC-ONLY
+	 * provider purely because one of its models is registered — a `custom/base`
+	 * declared in models.yml with no `discovery:` entry. A caller gating a fetch
+	 * on that awaited every in-flight discovery pass to perform a refresh that
+	 * cannot add anything, so an unrelated cold catalog delayed startup by its
+	 * full discovery timeout.
+	 */
+	#hasDiscoveryManager(providerId: string): boolean {
 		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
 		return (
 			this.#discoverableProviders.some(provider => provider.provider === providerId) ||

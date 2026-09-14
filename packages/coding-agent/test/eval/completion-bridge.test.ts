@@ -81,6 +81,10 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 	}
 	const modelRegistry = {
 		getAvailable: () => opts.available ?? [SMOL, DEFAULT, SLOW],
+		find: (provider: string, id: string) =>
+			(opts.available ?? [SMOL, DEFAULT, SLOW]).find(model => model.provider === provider && model.id === id),
+		hasProvider: (provider: string) =>
+			(opts.available ?? [SMOL, DEFAULT, SLOW]).some(model => model.provider === provider),
 		getApiKey: async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 	} as unknown as ModelRegistry;
@@ -162,6 +166,9 @@ const session = {
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
+		find: (provider: string, id: string) =>
+			[SMOL].find(model => model.provider === provider && model.id === id),
+		hasProvider: (provider: string) => [SMOL].some(model => model.provider === provider),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	},
