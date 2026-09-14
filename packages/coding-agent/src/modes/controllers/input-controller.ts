@@ -676,8 +676,31 @@ export class InputController {
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
 		if (event.motion) this.#updateHoverHighlight(event.row);
-		else if (event.leftClick) this.#focusClickedAgent(event.row);
+		else if (event.leftClick) {
+			// Option-click inside the prompt box moves the caret, matching the
+			// gesture terminals provide at a shell prompt. Plain clicks keep
+			// focusing a subagent card, and the two never compete for a row:
+			// the editor rejects rows outside its own painted ones.
+			if (event.alt && this.#placeCaretFromClick(event.row, event.col)) return { consume: true };
+			this.#focusClickedAgent(event.row);
+		}
 		return { consume: true };
+	}
+
+	/**
+	 * Option-click caret placement. The editor's published row is relative to
+	 * the mutable viewport top, so the screen row is rebased onto it; an empty
+	 * viewport (resize transaction, alternate screen, deferred image paint)
+	 * means the painted rows are already stale, so the click places nothing.
+	 */
+	#placeCaretFromClick(screenRow: number, col: number): boolean {
+		const viewport = this.ctx.ui.getMutableViewport();
+		if (viewport.length === 0) return false;
+		if (!this.ctx.editor.placeCursorAtViewportCell(screenRow - viewport.top, col)) return false;
+		// A consumed report never reaches the TUI's own repaint, so the moved
+		// caret has to ask for one.
+		this.ctx.ui.requestRender();
+		return true;
 	}
 
 	/**

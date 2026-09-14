@@ -324,13 +324,27 @@ export class Composer implements TerminalFrameProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			// Same one-render-per-root discipline as `#renderRoots`, plus the
+			// editor's row for pointer hit-testing.
+			const rendered: string[] = [];
+			let editorRow: number | undefined;
+			for (const root of roots) {
+				if (root === this.editor) editorRow = rendered.length;
+				rendered.push(...root.render(width));
+			}
+			const drop = Math.max(0, rendered.length - rows);
+			this.editor.setViewportPaintRow(editorRow === undefined ? undefined : editorRow - drop);
+			return { viewport: rendered.slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
 		const afterRoots = roots.slice(transcriptIndex + 1);
 		const after: string[] = [];
 		const afterSpans: ViewportClickSpan[] = [];
+		// Row of the editor's first painted line within `after`, for pointer
+		// hit-testing. Measured during the same pass that renders the rows, so no
+		// component is rendered twice (renders carry side effects).
+		let editorRowInAfter: number | undefined;
 		for (const root of afterRoots) {
 			const start = after.length;
 			// Row targets usually nest one level down: chrome roots are plain
@@ -347,9 +361,14 @@ export class Composer implements TerminalFrameProvider {
 			const lastTarget = resolves.findLastIndex(resolve => resolve !== undefined);
 			if (plainContainer) {
 				let offset = start;
+				// Runs past `lastTarget`, which freezes `offset` early: the editor
+				// container sits after every click span.
+				let rowCursor = start;
 				for (let index = 0; index < targets.length; index++) {
 					const childLines = targets[index]!.render(width);
 					after.push(...childLines);
+					if (targets[index] === this.editor) editorRowInAfter = rowCursor;
+					rowCursor += childLines.length;
 					if (index > lastTarget) continue;
 					const resolve = resolves[index];
 					if (resolve !== undefined && childLines.length > 0) {
@@ -360,6 +379,7 @@ export class Composer implements TerminalFrameProvider {
 				continue;
 			}
 			after.push(...root.render(width));
+			if (root === this.editor) editorRowInAfter = start;
 			if (lastTarget === -1) continue;
 			let offset = start;
 			for (let index = 0; index <= lastTarget; index++) {
@@ -390,6 +410,11 @@ export class Composer implements TerminalFrameProvider {
 		}
 		const drop = Math.max(0, before.length + active.length + after.length - rows);
 		const mutable = [...before, ...active, ...after].slice(drop);
+		// Signed: a viewport that clips the editor's top still leaves its lower
+		// rows addressable, and the offset from the painted top is negative.
+		this.editor.setViewportPaintRow(
+			editorRowInAfter === undefined ? undefined : before.length + active.length + editorRowInAfter - drop,
+		);
 		const viewportLength = mutable.length;
 		const spans: ViewportClickSpan[] = [];
 		const shift = (span: ViewportClickSpan, base: number): void => {

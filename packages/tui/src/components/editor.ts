@@ -423,6 +423,22 @@ interface WrapEntry {
 	chunks: TextChunk[] | null;
 }
 
+/**
+ * Geometry of one {@link Editor.render} pass, retained so a pointer cell can be
+ * mapped back to a buffer position between frames. Widths are the same values
+ * the render used, so hit-testing never re-derives them.
+ */
+interface EditorRenderLayout {
+	/** Chrome rows above the first content row (the style's top row). */
+	topChromeRows: number;
+	/** Left chrome cells (side border plus horizontal padding). */
+	chromeWidth: number;
+	/** Prompt-gutter cells, which content begins after when the style has one. */
+	promptGutterWidth: number;
+	/** The content rows actually painted, in paint order. */
+	visibleLayoutLines: readonly LayoutLine[];
+}
+
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	/** Stable accent for composer chrome that should not follow the mutable border state. */
@@ -557,6 +573,14 @@ export class Editor implements Component, Focusable {
 
 	// Character jump mode
 	#jumpMode: "forward" | "backward" | null = null;
+
+	/** Signed row of this editor's first rendered row within the last painted
+	 *  mutable viewport (0 = viewport top). Negative while the editor's top is
+	 *  clipped above it. Published per frame by the owning composer; `undefined`
+	 *  when no viewport owns the editor, which disables pointer hit-testing. */
+	#viewportPaintRow: number | undefined;
+	/** Geometry of the last {@link render}, for pointer hit-testing between frames. */
+	#lastRenderLayout: EditorRenderLayout | undefined;
 
 	/** Vim-style modal editing (opt-in, see the `tui.vimMode` setting). `null` when disabled, in
 	 *  which case every code path below behaves exactly as it did before the mode existed. */
@@ -1486,6 +1510,15 @@ export class Editor implements Component, Focusable {
 			const autocompleteResult = this.#autocompleteList.render(width);
 			result.push(...autocompleteResult);
 		}
+
+		// Pointer hit-testing reads this between frames; capture the same widths
+		// the rows above were painted with so a click never re-derives them.
+		this.#lastRenderLayout = {
+			topChromeRows: topRow !== undefined ? 1 : 0,
+			chromeWidth: borderWidth,
+			promptGutterWidth: promptGutter?.width ?? 0,
+			visibleLayoutLines,
+		};
 
 		return result;
 	}
@@ -2472,6 +2505,64 @@ export class Editor implements Component, Focusable {
 
 	moveToMessageEnd(): void {
 		this.#moveToMessageEnd();
+	}
+
+	/**
+	 * Publish where this editor's first rendered row sits inside the last
+	 * painted mutable viewport (0 = viewport top). Signed, because the row is
+	 * negative whenever the editor's top is clipped above the viewport. Pass
+	 * `undefined` when no normal-buffer viewport owns the editor, which
+	 * disables {@link placeCursorAtViewportCell}.
+	 */
+	setViewportPaintRow(row: number | undefined): void {
+		this.#viewportPaintRow = row;
+	}
+
+	/**
+	 * Move the caret to a pointer cell: `rowInViewport` is viewport-relative
+	 * (0 = top of the painted mutable viewport, i.e. an SGR row minus the
+	 * viewport top) and `col` is the 0-based screen column. Returns false while
+	 * the cell falls outside this editor's painted rows — chrome above/below it,
+	 * a clipped-away row, or no published viewport — so the caller is free to
+	 * route the event elsewhere.
+	 *
+	 * Only the caret moves: like keyboard navigation this reports no document
+	 * mutation, so `onChange` consumers (persistence, validation, derived draft
+	 * state) never see a phantom edit.
+	 */
+	placeCursorAtViewportCell(rowInViewport: number, col: number): boolean {
+		const paintRow = this.#viewportPaintRow;
+		const layout = this.#lastRenderLayout;
+		if (paintRow === undefined || layout === undefined) return false;
+		const visibleIndex = rowInViewport - paintRow - layout.topChromeRows;
+		const layoutLine = layout.visibleLayoutLines[visibleIndex];
+		if (layoutLine === undefined) return false;
+
+		// Cells left of the content (side border, padding, prompt gutter) belong
+		// to the line start; cells past the row's text belong to its end, which
+		// for a wrapped segment is the segment end rather than the logical line.
+		const textCol = col - layout.chromeWidth - layout.promptGutterWidth;
+		const lineText = this.#state.lines[layoutLine.sourceLine] ?? "";
+		const inText = textCol > 0 && textCol < layoutLine.width;
+		let target = layoutLine.sourceStartCol + (inText ? offsetAtVisualCol(layoutLine.text, textCol) : 0);
+		if (!inText && textCol >= layoutLine.width) target = layoutLine.sourceStartCol + layoutLine.text.length;
+		target = Math.max(0, Math.min(target, lineText.length));
+
+		// Atomic placeholder tokens (image/paste markers) delete as a unit, so
+		// park on the nearer edge instead of dropping the caret inside one.
+		const token = this.#atomicTokenAt(lineText, target);
+		if (token !== undefined) target = target - token.start < token.end - target ? token.start : token.end;
+
+		this.#exitHistoryForEditing();
+		this.#resetKillSequence();
+		this.#state.cursorLine = layoutLine.sourceLine;
+		this.#setCursorCol(target);
+		// A click is a bare caret move, so normal-mode Vim must rest the caret on
+		// a grapheme exactly as `h`/`l` would.
+		this.#clampVimCursor();
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+		return true;
 	}
 
 	/**
