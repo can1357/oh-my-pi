@@ -703,28 +703,59 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			isWindows: process.platform === "win32",
 		});
 	}
-	readonly parameters: BashToolSchema;
+	/**
+	 * Read LIVE, not snapshotted at construction. `async.enabled` can move under
+	 * a running session (an external config edit plus `/refresh settings`), and
+	 * this schema is what advertises the `async` parameter to the model. The
+	 * agent loop re-derives every tool's wire schema from this property on each
+	 * provider request (`normalizeTools`), so a getter is the whole reconcile:
+	 * enabling starts advertising `async`, disabling stops — no tool
+	 * re-registration needed. Mirrors `ReadTool.parameters`, which switches on
+	 * `memory.backend` the same way.
+	 *
+	 * Pair this with the `#asyncEnabled` execution check below and the
+	 * `asyncEnabled` flag in `description`: all three must read the same live
+	 * value, or the advertised schema, the rendered guidance, and the accepted
+	 * arguments disagree.
+	 */
+	get parameters(): BashToolSchema {
+		return this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
+	}
 	// Non-pty calls run alongside each other (the executor isolates overlapping
 	// runs on the same shell session); pty takes over the terminal UI and must
 	// run alone.
 	readonly concurrency = (args: Partial<BashToolInput>): "shared" | "exclusive" =>
 		args.pty === true ? "exclusive" : "shared";
 	readonly strict = true;
-	readonly #asyncEnabled: boolean;
-	readonly #autoBackgroundEnabled: boolean;
-	readonly #autoBackgroundThresholdMs: number;
+	/**
+	 * Whether background execution is currently permitted. A getter rather than
+	 * a constructor snapshot: a launch-time copy left an enable unable to accept
+	 * background execution and, worse, left a disable still able to launch
+	 * background jobs — while task execution already read the setting live.
+	 */
+	get #asyncEnabled(): boolean {
+		return this.session.settings.get("async.enabled");
+	}
+	/**
+	 * The auto-background policy, read live for the same reason as
+	 * {@link #asyncEnabled}: a launch-time copy kept backgrounding commands under
+	 * the old policy and threshold after an edit plus a settings refresh, and
+	 * reported the stale values in `description`.
+	 */
+	get #autoBackgroundEnabled(): boolean {
+		return this.session.settings.get("bash.autoBackground.enabled");
+	}
 
-	constructor(private readonly session: ToolSession) {
-		this.#asyncEnabled = this.session.settings.get("async.enabled");
-		this.#autoBackgroundEnabled = this.session.settings.get("bash.autoBackground.enabled");
-		this.#autoBackgroundThresholdMs = Math.max(
+	get #autoBackgroundThresholdMs(): number {
+		return Math.max(
 			0,
 			Math.floor(
 				this.session.settings.get("bash.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
 			),
 		);
-		this.parameters = this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
 	}
+
+	constructor(private readonly session: ToolSession) {}
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult): string {
 		const outputText = normalizeResultOutput(result);

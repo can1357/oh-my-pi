@@ -19,6 +19,13 @@ import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleAppliesToAgent } from "./r
 export interface RuleBuckets {
 	rulebookRules: Rule[];
 	alwaysApplyRules: Rule[];
+	/**
+	 * Names of the condition-bearing rules the TTSR manager consumed (holds) on
+	 * this pass. An in-session refresh reconciles the manager against this set
+	 * (`TtsrManager.retainRules`) to drop a rule deleted from disk or newly
+	 * disabled; at init it is unused.
+	 */
+	ttsrRuleNames: Set<string>;
 }
 
 export interface BucketRulesOptions {
@@ -53,16 +60,32 @@ export function bucketRules(
 
 	const rulebookRules: Rule[] = [];
 	const alwaysApplyRules: Rule[] = [];
+	const ttsrRuleNames = new Set<string>();
 
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 		if (!ruleAppliesToAgent(rule, options.agentName)) continue;
 
+		// A TTSR-conditioned rule is "consumed" by the manager and must not also
+		// appear in the rulebook/always buckets. On an in-session refresh the
+		// manager is reused, so an EDITED rule keeps its name: a plain `addRule`
+		// would no-op on the existing name and leave the STALE compiled
+		// conditions/scope/globs live (still matched, still republished via
+		// `rule://`). `addOrUpdateRule` recompiles a surviving entry whose
+		// TTSR-relevant content changed while preserving its injection state, and
+		// registers a brand-new rule on first sight. It returns membership (like
+		// `hasRule`): true when the rule is monitored after the call, false when
+		// its conditions/scope were rejected — that rule then falls through to the
+		// buckets below, exactly as at init.
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
-		const isTtsrRule = hasTtsrCondition ? ttsrManager.addRule(rule) : false;
-		if (isTtsrRule) continue;
+		if (hasTtsrCondition) {
+			if (ttsrManager.addOrUpdateRule(rule)) {
+				ttsrRuleNames.add(rule.name);
+				continue;
+			}
+		}
 		if (rule.alwaysApply === true) {
 			alwaysApplyRules.push(rule);
 			continue;
@@ -72,5 +95,5 @@ export function bucketRules(
 		}
 	}
 
-	return { rulebookRules, alwaysApplyRules };
+	return { rulebookRules, alwaysApplyRules, ttsrRuleNames };
 }

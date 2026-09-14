@@ -334,31 +334,48 @@ export class EditTool implements AgentTool<TInput> {
 	readonly concurrency = "exclusive";
 	readonly strict = true;
 
-	readonly #allowFuzzy: boolean;
-	readonly #fuzzyThreshold: number;
-	readonly #writethrough: WritethroughCallback;
 	readonly #editMode?: EditMode;
-	readonly #deferredDiagnostics: DeferredDiagnostics;
+	#deferredDiagnostics?: { value: DeferredDiagnostics; deduplicate: boolean };
 	readonly #sessions = new Map<string, EditSession>();
 
 	constructor(
 		private readonly session: ToolSession,
 		mode?: EditMode,
 	) {
-		const {
-			PI_EDIT_FUZZY: editFuzzy = "auto",
-			PI_EDIT_FUZZY_THRESHOLD: editFuzzyThreshold = "auto",
-			PI_EDIT_VARIANT: envEditVariant = "auto",
-		} = Bun.env;
+		const { PI_EDIT_VARIANT: envEditVariant = "auto" } = Bun.env;
 		this.#editMode = mode ?? resolveConfiguredEditMode(envEditVariant);
-		this.#allowFuzzy = resolveAllowFuzzy(session, editFuzzy);
-		this.#fuzzyThreshold = resolveFuzzyThreshold(session, editFuzzyThreshold);
-		const deduplicateDiagnostics =
-			(session.enableLsp ?? true) &&
-			session.settings.get("lsp.diagnosticsOnEdit") &&
-			session.settings.get("lsp.diagnosticsDeduplicate");
-		this.#deferredDiagnostics = new DeferredDiagnostics(session, deduplicateDiagnostics);
-		this.#writethrough = createEditWritethrough(session);
+	}
+
+	// Read LIVE, like `mode`/`description`/`parameters` above already are. These
+	// were captured in the constructor, so a settings edit to the fuzzy policy or
+	// the LSP write behaviour could not reach a built tool, and a refresh
+	// reported settings applied while edits kept using startup behaviour. The
+	// environment overrides are re-read too: they are the same inputs the
+	// resolvers take, and reading them here costs nothing.
+	get #allowFuzzy(): boolean {
+		return resolveAllowFuzzy(this.session, Bun.env.PI_EDIT_FUZZY ?? "auto");
+	}
+
+	get #fuzzyThreshold(): number {
+		return resolveFuzzyThreshold(this.session, Bun.env.PI_EDIT_FUZZY_THRESHOLD ?? "auto");
+	}
+
+	get #writethrough(): WritethroughCallback {
+		return createEditWritethrough(this.session);
+	}
+
+	// Cached on the dedup MODE, not rebuilt per access: a deduplicating batch
+	// must accumulate across edits, so only a change to the mode may discard it.
+	get #deferredDiagnosticsTool(): DeferredDiagnostics {
+		const deduplicate =
+			(this.session.enableLsp ?? true) &&
+			this.session.settings.get("lsp.diagnosticsOnEdit") &&
+			this.session.settings.get("lsp.diagnosticsDeduplicate");
+		const cached = this.#deferredDiagnostics;
+		if (cached && cached.deduplicate === deduplicate) return cached.value;
+		const value = new DeferredDiagnostics(this.session, deduplicate);
+		this.#deferredDiagnostics = { value, deduplicate };
+		return value;
 	}
 
 	get mode(): EditMode {
@@ -655,7 +672,7 @@ export class EditTool implements AgentTool<TInput> {
 			signal,
 			Bun.file(request.path),
 			request.lspBatchId ? { id: request.lspBatchId, flush: request.flushLsp } : undefined,
-			destination => (destination === request.path ? this.#deferredDiagnostics.begin(request.path) : undefined),
+			destination => (destination === request.path ? this.#deferredDiagnosticsTool.begin(request.path) : undefined),
 		);
 
 		if (preWriteBytes !== undefined) {

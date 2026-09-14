@@ -1262,6 +1262,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setTitleGenerationStart?.(() => this.#inputController.notifyTitleGenerationStart());
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
+		// Re-arm idle compaction when `/refresh settings` reloads an idle setting,
+		// through the same `EventController` path the settings selector uses.
+		this.session.setReconcileIdleCompaction?.(() => this.#eventController.refreshIdleCompactionTimer());
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
 

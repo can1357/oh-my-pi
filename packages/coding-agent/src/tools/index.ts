@@ -8,10 +8,12 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import type { SettingPath } from "../config/settings-schema";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { RefreshResult, RefreshScope } from "../extensibility/reload";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -59,6 +61,7 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
+import { RefreshTool } from "./refresh";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
@@ -99,6 +102,7 @@ export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./read";
+export * from "./refresh";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
@@ -185,6 +189,13 @@ export interface ToolSession {
 	skills?: readonly Skill[];
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
+	/**
+	 * Re-read frozen config surfaces (skills · rules · settings/model · MCP) from
+	 * disk into the live session without a restart. Backs the `refresh` tool and
+	 * `/refresh` command. Absent on sessions with no backing `AgentSession` (e.g.
+	 * the read-CLI harness).
+	 */
+	refresh?: (scope: RefreshScope) => Promise<RefreshResult>;
 	/** Pre-loaded prompt templates */
 	promptTemplates?: PromptTemplate[];
 	/** Pre-loaded rules (forwarded to subagents to skip re-discovery). */
@@ -298,6 +309,19 @@ export interface ToolSession {
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
+	/**
+	 * Records which boolean-gated built-ins this invocation permits, so a later
+	 * settings refresh can build one whose gate was off at startup without
+	 * widening a restricted tool list.
+	 */
+	setSettingGatedBuiltinPermissions?: (names: ReadonlySet<string>) => void;
+	/**
+	 * Records whether this invocation permits the `think` scratchpad, so a later
+	 * `externalThinking` false->true refresh can build it without widening a
+	 * restricted tool list that never named it. Parallels
+	 * {@link setSettingGatedBuiltinPermissions} for the hidden `think` tool.
+	 */
+	setThinkToolPermitted?: (permitted: boolean) => void;
 	/** Canonical map containing every registered tool exactly once. */
 	toolRegistry?: Map<string, Tool>;
 	/** `xd://` presentation state backed by {@link toolRegistry}. */
@@ -493,6 +517,10 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	// Unconditional (unlike restart's `createIf`): refresh is always a valid
+	// command whose "unavailable" message when the session hook is unbound is
+	// itself the contract.
+	refresh: s => new RefreshTool(s),
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
@@ -502,6 +530,116 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 };
 
 export type ToolName = BuiltinToolName;
+
+/**
+ * Built-ins whose presence is decided ONLY by a boolean setting.
+ *
+ * Single-sourced because two callers need the same answer: `createTools` filters
+ * the startup set through it, and the settings refresh reconciles the live set
+ * against it. `createTools` runs once per session, so before the refresh read
+ * this table a `bash.enabled` edit left shell execution advertised and callable
+ * on true→false and absent until restart on false→true.
+ *
+ * Deliberately only the unconditional gates. Every other entry in
+ * `isToolAllowed` mixes in state a reconcile must not re-derive — task depth,
+ * an explicit tool whitelist, goal-record status, model capability, backend
+ * probe results — so those stay expressed there and are not reconciled.
+ */
+export const BOOLEAN_GATED_TOOLS = {
+	ask: "ask.enabled",
+	ast_edit: "astEdit.enabled",
+	ast_grep: "astGrep.enabled",
+	bash: "bash.enabled",
+	debug: "debug.enabled",
+	github: "github.enabled",
+	glob: "glob.enabled",
+	grep: "grep.enabled",
+	security_scan: "security.enabled",
+	web_search: "web_search.enabled",
+} as const satisfies Readonly<Record<string, SettingPath>>;
+
+/**
+ * Core built-ins whose existence is gated on settings COMPOUNDED with an
+ * invocation-scoped condition (task depth, an explicit tool list, a
+ * construction-time capability). Maps each to the settings its gate reads.
+ *
+ * The split matters: the settings half must reconcile on `/refresh settings`,
+ * while the invocation half must never be widened by a settings edit. The
+ * invocation half is captured once, at construction, in the session's
+ * permission set; {@link settingGatedToolEnabled} evaluates the settings half
+ * against live settings. Without the split, every one of these tools stayed
+ * frozen at its launch-time value while remaining callable — its `execute()`
+ * does not re-check the setting.
+ */
+export const COMPOUND_GATED_TOOLS = {
+	lsp: ["lsp.enabled"],
+	todo: ["todo.enabled"],
+	checkpoint: ["checkpoint.enabled"],
+	rewind: ["checkpoint.enabled"],
+	task: ["task.maxRecursionDepth"],
+	hub: ["task.maxRecursionDepth"],
+	manage_skill: ["autolearn.enabled"],
+	learn: ["autolearn.enabled", "memory.backend"],
+	// Reachability of the Python kernel is the invocation half, captured at
+	// construction; which backends the user allows is the settings half.
+	eval: ["eval.py", "eval.js"],
+	context_notes: ["compaction.experimentalContextManagement"],
+	new_context: ["compaction.experimentalContextManagement"],
+} as const satisfies Readonly<Record<string, readonly SettingPath[]>>;
+
+/** Every setting an edit to which must trigger the gated-tool reconcile. */
+export const GATED_TOOL_SETTINGS: readonly SettingPath[] = [
+	...Object.values(BOOLEAN_GATED_TOOLS),
+	...new Set(Object.values(COMPOUND_GATED_TOOLS).flat()),
+];
+
+/**
+ * Whether `name`'s SETTINGS half is satisfied — the same conditions
+ * `createTools`' predicate applies, minus the invocation-scoped ones the
+ * permission set carries. Returns `undefined` for a tool with no settings gate.
+ */
+export function settingGatedToolEnabled(name: string, settings: Settings, taskDepth: number): boolean | undefined {
+	const booleanGate = booleanGateFor(name);
+	if (booleanGate !== undefined) return settings.get(booleanGate) === true;
+	switch (name) {
+		case "lsp":
+			return settings.get("lsp.enabled") === true;
+		case "todo":
+			return settings.get("todo.enabled") === true;
+		case "checkpoint":
+		case "rewind":
+			return settings.get("checkpoint.enabled") === true;
+		case "task":
+			return canSpawnAtDepth(settings.get("task.maxRecursionDepth") ?? 2, taskDepth);
+		case "hub":
+			return isIrcEnabled(settings, taskDepth);
+		case "manage_skill":
+			return settings.get("autolearn.enabled") === true;
+		case "eval": {
+			// Env flags override the settings keys, so read the same resolver
+			// `createTools` uses rather than the raw settings.
+			const backends = resolveEvalBackends({ settings });
+			return backends.python || backends.js;
+		}
+		case "context_notes":
+		case "new_context":
+			return settings.get("compaction.experimentalContextManagement") === true;
+		case "learn":
+			return (
+				settings.get("autolearn.enabled") === true &&
+				["hindsight", "mnemopi", "local"].includes(settings.get("memory.backend") ?? "")
+			);
+		default:
+			return undefined;
+	}
+}
+
+/** The boolean setting gating `name`'s existence, or `undefined` if it has none. */
+export function booleanGateFor(name: string): SettingPath | undefined {
+	return Object.hasOwn(BOOLEAN_GATED_TOOLS, name)
+		? BOOLEAN_GATED_TOOLS[name as keyof typeof BOOLEAN_GATED_TOOLS]
+		: undefined;
+}
 
 /**
  * Create tools from BUILTIN_TOOLS registry.
@@ -536,7 +674,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
 	// we only probe Python when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
-	let pythonAvailable = true;
+	// `undefined` = the probe never ran, which is NOT the same as success. With
+	// both backends off at startup nothing probes, and recording that as
+	// available let a later `eval.py` edit plus `/refresh settings` advertise
+	// `eval` on a machine with no usable kernel — where a fresh session under the
+	// same settings omits it. The reconcile re-probes when the state is unknown.
+	let pythonAvailable: boolean | undefined = true;
 	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
 	if (!skipEvalPreflight && !allowJs && evalRequested) {
 		if (allowPython) {
@@ -550,10 +693,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			if (!availability.ok) {
 				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
 			}
+		} else {
+			// Both backends off: nothing probed, so reachability is unknown.
+			pythonAvailable = undefined;
 		}
 	}
 
-	const effectivePythonAllowed = allowPython && pythonAvailable;
+	const effectivePythonAllowed = allowPython && pythonAvailable === true;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
 	const allowEval = effectivePythonAllowed || allowJs;
@@ -563,7 +709,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// the sister tool so a one-sided frontmatter `tools:` entry still works.
 	// Unlike the AST/auto-learn convenience auto-includes below, this is a
 	// safety pairing — it applies to restricted sessions too.
-	if (requestedTools && session.settings.get("checkpoint.enabled")) {
+	//
+	// Deliberately NOT conditioned on `checkpoint.enabled`: the requested list is
+	// built once, while the setting is now reconciled live, and the refresh can
+	// only re-enable a name the list already carries. Reading the setting here
+	// would let a session that started with checkpointing off keep a permanently
+	// one-sided pair after it is turned on. Exposure stays gated — both names go
+	// through the same settings half as every other compound-gated tool.
+	if (requestedTools) {
 		if (requestedTools.includes("checkpoint") && !requestedTools.includes("rewind")) {
 			requestedTools.push("rewind");
 		} else if (requestedTools.includes("rewind") && !requestedTools.includes("checkpoint")) {
@@ -626,6 +779,43 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+	// The invocation-scoped conditions on a compound-gated tool: task depth, an
+	// explicit tool list, a construction-time capability. Fixed for this
+	// session's lifetime, which is what makes it safe to capture in the
+	// permission set the settings refresh consults.
+	const topLevelOrRequested = (session.taskDepth ?? 0) === 0 || requestedTools !== undefined;
+	const invocationPermitsGatedTool = (name: string): boolean => {
+		switch (name) {
+			case "lsp":
+				return enableLsp;
+			case "todo":
+				return !includeYield || session.prewalkArmed === true;
+			case "checkpoint":
+			case "rewind":
+			case "manage_skill":
+			case "learn":
+				return topLevelOrRequested;
+			case "hub":
+				return !restrictToolNames && session.enableIrc !== false;
+			case "eval":
+				// Only the PROBE result, never the settings half: a settings edit
+				// cannot make an absent kernel appear. `undefined` means the probe
+				// never ran, which still permits the tool — the reconcile re-probes
+				// before activating it, rather than trusting a skipped probe.
+				return allowJs || pythonAvailable !== false;
+			case "context_notes":
+			case "new_context":
+				// Both read and annotate the transcript through the read/grep
+				// pipeline, so they are offered only where that pair is.
+				return (
+					!restrictToolNames &&
+					requestedTools?.includes("read") !== false &&
+					requestedTools?.includes("grep") !== false
+				);
+			default:
+				return true;
+		}
+	};
 	const isToolAllowed = (name: string) => {
 		// Never in the default set. Explicitly activatable while goal.enabled and
 		// no goal record exists yet — /guided-goal enables it so the agent can
@@ -637,51 +827,19 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
-		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
-		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
-		if (name === "debug") return session.settings.get("debug.enabled");
-		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
-		if (name === "glob") return session.settings.get("glob.enabled");
-		if (name === "grep") return session.settings.get("grep.enabled");
-		if (name === "github") return session.settings.get("github.enabled");
-		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
-		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "web_search") return session.settings.get("web_search.enabled");
-		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;
-		if (name === "ask") return session.settings.get("ask.enabled");
-		if (name === "checkpoint" || name === "rewind")
-			return (
-				session.settings.get("checkpoint.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "hub") {
-			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
-			);
-		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
-		if (name === "manage_skill")
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "learn") {
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
-			);
-		}
-		if (name === "task") {
-			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
-		}
-		return true;
+		// The invocation-scoped half of each compound gate, kept separate from the
+		// settings half below: a settings refresh reconciles the second and must
+		// never widen the first.
+		if (!invocationPermitsGatedTool(name)) return false;
+		// The settings half, from the shared table so the refresh reconciles
+		// against exactly this predicate.
+		return settingGatedToolEnabled(name, session.settings, session.taskDepth ?? 0) ?? true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
@@ -699,6 +857,67 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
 				];
+
+	// Which boolean-gated built-ins this INVOCATION permits, independent of what
+	// its settings happened to enable. A later false->true refresh needs both
+	// facts: the gate alone cannot tell "the setting was off" from "a restricted
+	// tool list or `--no-tools` excluded it", and only the first may be built.
+	if (session.setSettingGatedBuiltinPermissions) {
+		const permitted = new Set<string>();
+		// Every gated core built-in whose INVOCATION conditions hold, from the
+		// shared tables so this cannot drift from the predicate above. The
+		// settings half is deliberately NOT consulted: this records what the
+		// invocation allows, and the reconcile evaluates the setting live.
+		// A companion the expansion above appends — `ast_grep` beside `grep`,
+		// `ast_edit` beside `edit`, the context-management pair, the auto-learn
+		// tools — is appended only when its SETTING is already on. Reading
+		// membership of the list alone therefore encoded the startup value of the
+		// very setting the reconcile exists to re-evaluate, so an explicit
+		// unrestricted list that started with the setting off could never gain the
+		// tool, though a fresh session with the same list and the new setting
+		// auto-includes it. Permission comes from the sibling/invocation condition
+		// instead, exactly as the expansion's non-settings half states it.
+		const companionInvocationAllows = (name: string): boolean => {
+			if (restrictToolNames || !requestedTools) return false;
+			switch (name) {
+				case "ast_grep":
+					return requestedTools.includes("grep");
+				case "ast_edit":
+					return requestedTools.includes("edit");
+				case "context_notes":
+				case "new_context":
+					return requestedTools.includes("read") && requestedTools.includes("grep");
+				case "manage_skill":
+				case "learn":
+					return (session.taskDepth ?? 0) === 0;
+				default:
+					return false;
+			}
+		};
+		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...Object.keys(COMPOUND_GATED_TOOLS)]) {
+			if (!(name in allTools)) continue;
+			if (
+				filteredRequestedTools !== undefined &&
+				!requestedTools?.includes(name) &&
+				!companionInvocationAllows(name)
+			) {
+				continue;
+			}
+			if (!invocationPermitsGatedTool(name)) continue;
+			permitted.add(name);
+		}
+		session.setSettingGatedBuiltinPermissions(permitted);
+	}
+
+	// `think` (hidden) is force-added for an unrestricted session but withheld
+	// from a restricted tool list unless it is explicitly named — startup never
+	// auto-adds it under `restrictToolNames`. Record that invocation permission
+	// so a later `externalThinking` false->true refresh honours it rather than
+	// widening the restricted allowlist. Same distinction the setting-gated
+	// built-in permissions draw, kept for the hidden scratchpad.
+	if (session.setThinkToolPermitted) {
+		session.setThinkToolPermitted(!restrictToolNames || requestedTools?.includes("think") === true);
+	}
 
 	const activeToolNames = new Set(baseEntries.map(([name]) => name));
 	if (session.setActiveToolNames) {

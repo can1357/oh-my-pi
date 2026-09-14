@@ -243,6 +243,70 @@ This skill is added after session creation.
 		expect(session.skills.some((s: Skill) => s.name === "runtime-added-skill")).toBe(false);
 	});
 
+	it("carries refreshed skill warnings into the session", async () => {
+		// The roster reload extracted only `.skills` and dropped the accompanying
+		// warnings, so `session.skillWarnings` kept reporting startup diagnostics:
+		// a skill that became malformed after launch produced no warning, and one
+		// whose file was fixed or deleted kept its old one. `refreshSkills()`
+		// already replaces both fields; the `refresh("skills")` path did not.
+		//
+		// Two custom directories claiming one skill name is the discovery warning
+		// reachable from disk alone — same-source duplicates keep first-wins and
+		// warn about the loser.
+		const roots = ["warn-cust-1", "warn-cust-2"].map(name => path.join(tempDir, name));
+		fs.mkdirSync(path.join(roots[0], "dup-skill"), { recursive: true });
+		fs.writeFileSync(
+			path.join(roots[0], "dup-skill", "SKILL.md"),
+			`---
+name: dup-skill
+description: The first claimant of this name.
+---
+
+# Dup Skill
+`,
+		);
+
+		const settings = createIsolatedSkillsSettings();
+		settings.set("skills.customDirectories", roots);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+		});
+
+		expect(session.skillWarnings).toEqual([]);
+
+		// The second claimant appears AFTER launch, so the warning it produces
+		// exists only in the reloaded roster.
+		fs.mkdirSync(path.join(roots[1], "dup-skill"), { recursive: true });
+		fs.writeFileSync(
+			path.join(roots[1], "dup-skill", "SKILL.md"),
+			`---
+name: dup-skill
+description: A second directory claiming the same name.
+---
+
+# Dup Skill
+`,
+		);
+
+		await session.refresh("skills");
+
+		expect(session.skillWarnings).toHaveLength(1);
+		expect(session.skillWarnings[0].message).toContain("name collision");
+		expect(session.skillWarnings[0].message).toContain("dup-skill");
+
+		// And the other direction: fixing the collision must DROP the stale
+		// warning, which keeping the startup set leaves behind forever.
+		removeSyncWithRetries(path.join(roots[1], "dup-skill"));
+		await session.refresh("skills");
+
+		expect(session.skillWarnings).toEqual([]);
+		expect(session.skills.some((s: Skill) => s.name === "dup-skill")).toBe(true);
+	});
+
 	it("manage_skill hot-registers managed skills in the active session", async () => {
 		const originalAgentDir = getAgentDir();
 		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");

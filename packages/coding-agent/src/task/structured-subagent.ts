@@ -473,6 +473,15 @@ function buildExecutorOptions(
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
+		// The parent's roster, not a restriction the caller chose: this path
+		// ALWAYS forwards `session.rules`, so a child must let a parent refresh
+		// replace it. Without the marker the child's launch-time roster reads as
+		// an explicit policy and added/edited/deleted rules stay stale in it.
+		rulesInherited: true,
+		// Same provenance for skills: this path always forwards `session.skills`,
+		// so without the marker the child's launch-time roster reads as an
+		// explicit caller restriction and a parent's refresh cannot reach it.
+		skillsInherited: true,
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.

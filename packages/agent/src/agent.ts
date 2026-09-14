@@ -725,6 +725,83 @@ export class Agent {
 	}
 
 	/**
+	 * Get the owned/in-band tool dialect, or `undefined` for provider-native
+	 * tool calling.
+	 */
+	get dialect(): Dialect | undefined {
+		return this.#dialect;
+	}
+
+	/**
+	 * Set the owned/in-band tool dialect. Request assembly reads this field on
+	 * every call, so a host reconciling a reloaded `tools.format` must write it
+	 * here — rendering a prompt for the new dialect while the loop keeps the old
+	 * one leaves the catalog and the wire shape disagreeing, and tool calls stop
+	 * round-tripping.
+	 */
+	set dialect(value: Dialect | undefined) {
+		this.#dialect = value;
+	}
+
+	/**
+	 * Kimi Code wire protocol for later requests. Mutable because `providers.kimiApiFormat`
+	 * is reloadable: the constructor copies the setting into `#kimiApiFormat` and every
+	 * request forwards that field, so a settings refresh must be able to move it or the
+	 * session keeps talking the launch-time protocol to a provider that may have switched.
+	 */
+	get kimiApiFormat(): "openai" | "anthropic" | undefined {
+		return this.#kimiApiFormat;
+	}
+
+	set kimiApiFormat(value: "openai" | "anthropic" | undefined) {
+		this.#kimiApiFormat = value;
+	}
+
+	get preferWebsockets(): boolean | undefined {
+		return this.#preferWebsockets;
+	}
+
+	set preferWebsockets(value: boolean | undefined) {
+		this.#preferWebsockets = value;
+	}
+
+	get intentTracing(): boolean {
+		return this.#intentTracing;
+	}
+
+	/**
+	 * Live, because `tools.intentTracing` decides whether the required intent
+	 * field is injected into every tool schema. Frozen at construction, a
+	 * `/refresh settings` left request assembly and the prompt guidance on the
+	 * launch-time policy while the reloaded settings view reported the new one.
+	 */
+	set intentTracing(value: boolean) {
+		this.#intentTracing = value;
+	}
+
+	get pruneToolDescriptions(): boolean {
+		return this.#pruneToolDescriptions;
+	}
+
+	/**
+	 * Live, for the same reason as {@link intentTracing}: `inlineToolDescriptors`
+	 * decides whether the wire carries full tool descriptions or the pruned
+	 * form. Frozen at construction, a `/refresh settings` left request assembly
+	 * on the launch-time catalog policy.
+	 */
+	set pruneToolDescriptions(value: boolean) {
+		this.#pruneToolDescriptions = value;
+	}
+
+	get abortOnFabricatedToolResult(): boolean | undefined {
+		return this.#abortOnFabricatedToolResult;
+	}
+
+	set abortOnFabricatedToolResult(value: boolean | undefined) {
+		this.#abortOnFabricatedToolResult = value;
+	}
+
+	/**
 	 * Get the current max retry delay in milliseconds.
 	 */
 	get maxRetryDelayMs(): number | undefined {

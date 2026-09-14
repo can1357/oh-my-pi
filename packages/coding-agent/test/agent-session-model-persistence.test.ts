@@ -604,6 +604,35 @@ describe("AgentSession model persistence", () => {
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
+	it("lists only the default model for a settings-tracking auto-swap (role 'default')", () => {
+		// A settings-tracking auto-swap now records role `undefined`, so
+		// `getLastModelChangeRole` reports "default" — restoring must offer the
+		// default alone rather than resurrect a tracked selector as a user pin.
+		expect(
+			getRestorableSessionModels(
+				{
+					default: "anthropic/claude-sonnet-4-5",
+				},
+				"default",
+			),
+		).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	it("treats a user role literally named 'settings' as a real restorable role", () => {
+		// The tracking marker is a dedicated entry flag, not a role sentinel, so a
+		// user's `modelRoles.settings` is a genuine role: its model is restored
+		// ahead of the default, never swallowed as an internal marker.
+		expect(
+			getRestorableSessionModels(
+				{
+					default: "anthropic/claude-sonnet-4-5",
+					settings: "anthropic/claude-sonnet-4-6",
+				},
+				"settings",
+			),
+		).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
+	});
+
 	it("lists a named role model before the default fallback", () => {
 		expect(
 			getRestorableSessionModels(

@@ -162,4 +162,42 @@ describe("SessionManager cwd adoption on resume", () => {
 		expect(manager.getSessionDir()).not.toBe(path.resolve(store));
 		expect(storage.fullReads).toBe(1);
 	});
+
+	it("clears settings ownership when a root is removed on the fallback path", async () => {
+		const launch = makeTempDir("@pi-cwd-fallback-own-launch-");
+		const store = makeTempDir("@pi-cwd-fallback-own-store-");
+		const goneProject = makeTempDir("@pi-cwd-fallback-own-gone-");
+		const extra = makeTempDir("@pi-cwd-fallback-own-extra-");
+
+		// Seed a session whose header records `extra` as a SETTINGS-OWNED root.
+		const seed = SessionManager.create(goneProject, store);
+		seed.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		await seed.addWorkspaceDirectory(extra);
+		await seed.setSettingsOwnedDirectories([path.resolve(extra)]);
+		await seed.rewriteEntries();
+		const file = seed.getSessionFile();
+		if (!file) throw new Error("expected a persisted session file");
+		await seed.close();
+
+		// The recorded project directory is gone, so resume keeps the launch cwd
+		// and marks the session fallback-runtime-only.
+		await removeWithRetries(goneProject);
+		const manager = await SessionManager.open(file, undefined, undefined, { initialCwd: launch });
+		expect(manager.getSettingsOwnedDirectories()).toContain(path.resolve(extra));
+
+		// Remove the settings-owned root, then manually re-add it — both on the
+		// fallback path. Pre-fix `removeWorkspaceDirectory` returned early before
+		// the ownership cleanup, so `extra` stayed settings-owned and a later
+		// settings refresh that dropped the configured root would revoke the
+		// independently re-added one.
+		await manager.removeWorkspaceDirectory(extra);
+		await manager.addWorkspaceDirectory(extra);
+
+		try {
+			expect(manager.getAdditionalDirectories()).toContain(path.resolve(extra));
+			expect(manager.getSettingsOwnedDirectories()).not.toContain(path.resolve(extra));
+		} finally {
+			await manager.close();
+		}
+	});
 });

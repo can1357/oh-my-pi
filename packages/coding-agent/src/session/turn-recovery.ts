@@ -187,6 +187,12 @@ export interface TurnRecoveryHost {
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
+	/**
+	 * Move the thinking level for an automatic fallback swap. MUST carry the
+	 * session's existing thinking provenance, not pin it: these swaps are not
+	 * user choices, and recording one as a pin stops a later settings edit from
+	 * reaching the level.
+	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	/** Hard per-session effort ceiling; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(): Effort | undefined;

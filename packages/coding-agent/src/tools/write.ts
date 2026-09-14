@@ -584,26 +584,48 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return typeof content === "string" ? content : undefined;
 	}
 
-	readonly #writethrough: WritethroughCallback;
-	readonly #deferredDiagnostics: DeferredDiagnostics | undefined;
+	// Built per write from the LIVE settings rather than captured once: a
+	// settings refresh can move any of the three flags, and a constructor
+	// snapshot kept formatting and diagnostics running after they were disabled
+	// (and inert after they were enabled) until the process restarted.
+	//
+	// `#deferredDiagnostics` is cached per dedup mode, not rebuilt per write:
+	// it accumulates a pending batch across writes, so a fresh instance each
+	// time would drop whatever was queued.
+	#deferredDiagnosticsCache: { dedup: boolean; value: DeferredDiagnostics } | undefined;
 
-	constructor(private readonly session: ToolSession) {
-		const enableLsp = session.enableLsp ?? true;
-		const enableFormat = enableLsp && session.settings.get("lsp.formatOnWrite");
-		const enableDiagnostics = enableLsp && session.settings.get("lsp.diagnosticsOnWrite");
-		const dedup = enableDiagnostics && session.settings.get("lsp.diagnosticsDeduplicate");
-		this.#deferredDiagnostics =
-			enableDiagnostics && session.queueDeferredDiagnostics ? new DeferredDiagnostics(session, dedup) : undefined;
-		this.#writethrough = enableLsp
-			? createLspWritethrough(session.cwd, {
-					enableFormat,
-					enableDiagnostics,
-					transformDiagnostics: dedup
-						? (path, result) => getDiagnosticsLedger(session).reduce(path, result)
-						: undefined,
-				})
-			: writethroughNoop;
+	get #lspWriteConfig(): { enableFormat: boolean; enableDiagnostics: boolean; dedup: boolean; enableLsp: boolean } {
+		const enableLsp = this.session.enableLsp ?? true;
+		const enableDiagnostics = enableLsp && this.session.settings.get("lsp.diagnosticsOnWrite");
+		return {
+			enableLsp,
+			enableFormat: enableLsp && this.session.settings.get("lsp.formatOnWrite"),
+			enableDiagnostics,
+			dedup: enableDiagnostics && this.session.settings.get("lsp.diagnosticsDeduplicate"),
+		};
 	}
+
+	get #deferredDiagnostics(): DeferredDiagnostics | undefined {
+		const { enableDiagnostics, dedup } = this.#lspWriteConfig;
+		if (!enableDiagnostics || !this.session.queueDeferredDiagnostics) return undefined;
+		if (this.#deferredDiagnosticsCache?.dedup !== dedup) {
+			this.#deferredDiagnosticsCache = { dedup, value: new DeferredDiagnostics(this.session, dedup) };
+		}
+		return this.#deferredDiagnosticsCache.value;
+	}
+
+	get #writethrough(): WritethroughCallback {
+		const { enableLsp, enableFormat, enableDiagnostics, dedup } = this.#lspWriteConfig;
+		if (!enableLsp) return writethroughNoop;
+		const session = this.session;
+		return createLspWritethrough(session.cwd, {
+			enableFormat,
+			enableDiagnostics,
+			transformDiagnostics: dedup ? (path, result) => getDiagnosticsLedger(session).reduce(path, result) : undefined,
+		});
+	}
+
+	constructor(private readonly session: ToolSession) {}
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
 		const candidates = parseArchivePathCandidates(writePath).filter(candidate => candidate.archivePath !== writePath);

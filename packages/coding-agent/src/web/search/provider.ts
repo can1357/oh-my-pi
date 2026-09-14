@@ -9,10 +9,10 @@
 // listings can share it without importing provider implementations.
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import type { SearchProvider } from "./providers/base";
+import type { SearchAvailabilityContext, SearchProvider } from "./providers/base";
 import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
 
-export type { SearchParams } from "./providers/base";
+export type { SearchAvailabilityContext, SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
 export { SEARCH_PROVIDER_ORDER } from "./types";
 
@@ -257,14 +257,15 @@ export function resolveProviderCandidates(forcedProvider?: SearchProviderId): Se
 export async function resolveProviderChain(
 	authStorage: AuthStorage,
 	forcedProvider?: SearchProviderId,
+	context?: SearchAvailabilityContext,
 ): Promise<SearchProvider[]> {
 	const providers: SearchProvider[] = [];
 
 	for (const candidate of resolveProviderCandidates(forcedProvider)) {
 		const provider = await getSearchProvider(candidate.id);
 		const available = candidate.explicit
-			? await provider.isExplicitlyAvailable(authStorage)
-			: await provider.isAvailable(authStorage);
+			? await provider.isExplicitlyAvailable(authStorage, context)
+			: await provider.isAvailable(authStorage, context);
 		if (available) providers.push(provider);
 	}
 

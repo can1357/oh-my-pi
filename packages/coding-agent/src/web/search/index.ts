@@ -13,6 +13,7 @@ import { ModelRegistry } from "../../config/model-registry";
 import { settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme } from "../../modes/theme/theme";
+import { getSessionExaApiKey } from "../../mcp/reload";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
 import { discoverAuthStorage } from "../../sdk";
@@ -131,6 +132,8 @@ interface ExecuteSearchOptions {
 	authStorage: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	sessionId?: string;
+	/** Calling session's own MCP-discovered Exa key; see {@link SearchParams.sessionExaApiKey}. */
+	sessionExaApiKey?: string;
 	signal?: AbortSignal;
 }
 
@@ -140,7 +143,7 @@ async function executeSearch(
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
-	const { authStorage, modelRegistry, sessionId, signal } = options;
+	const { authStorage, modelRegistry, sessionId, sessionExaApiKey, signal } = options;
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
@@ -189,9 +192,14 @@ async function executeSearch(
 		lastProvider = providerMeta;
 		try {
 			provider = await getSearchProvider(candidate.id);
+			// The session key travels with the availability check, not just with
+			// `search()` below: without it the auto chain skips Exa for a session
+			// holding its own MCP-discovered key whenever the process-global env
+			// key is absent.
+			const availabilityContext = { sessionExaApiKey };
 			const available = candidate.explicit
-				? await provider.isExplicitlyAvailable(authStorage)
-				: await provider.isAvailable(authStorage);
+				? await provider.isExplicitlyAvailable(authStorage, availabilityContext)
+				: await provider.isAvailable(authStorage, availabilityContext);
 			if (!available && !candidate.explicit) continue;
 			if (!available && candidate.explicit) {
 				throw new SearchProviderError(
@@ -216,6 +224,7 @@ async function executeSearch(
 				authStorage,
 				modelRegistry,
 				sessionId,
+				sessionExaApiKey,
 				antigravityEndpointMode,
 				geminiModel,
 			});
@@ -345,6 +354,11 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 			authStorage,
 			modelRegistry: this.#session.modelRegistry,
 			sessionId,
+			// This session's own MCP-discovered credential, keyed by its manager.
+			// Without it a second top-level session falls through to the
+			// process-global `EXA_API_KEY` — the FIRST session's key — and
+			// authenticates as that account.
+			sessionExaApiKey: getSessionExaApiKey(this.#session.mcpManager),
 			signal,
 		});
 	}

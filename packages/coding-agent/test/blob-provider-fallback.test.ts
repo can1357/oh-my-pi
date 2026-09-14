@@ -116,7 +116,7 @@ describe("provider-file stream fallback", () => {
 			return scriptedStream(channel === "inline" ? "success" : "error");
 		};
 		const service = new FakeFallbackService();
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
 
 		const events = await eventTypes(await wrapped(model, imageContext("native")));
 
@@ -132,11 +132,53 @@ describe("provider-file stream fallback", () => {
 			return scriptedStream(seen.length === 1 ? "error" : "success");
 		};
 		const service = new FakeFallbackService();
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
 
 		expect(await eventTypes(await wrapped(model, imageContext("native")))).toEqual(["start", "done"]);
 		expect(seen.map(channelOf)).toEqual(["native", "url"]);
 		expect(service.fallbacks).toEqual(["native"]);
+	});
+
+	it("uses a broker that only exists after wrapping", async () => {
+		// The wrapper is built once at startup, but the broker is rebuilt whenever
+		// its settings move — so a reload that ENABLES serving produces the first
+		// instance long after this point. Captured by value, the wrapper had
+		// already short-circuited to the bare base stream and stayed there, and no
+		// request ever recovered.
+		const broker: { current?: FakeFallbackService } = {};
+		const calls: string[] = [];
+		const base: StreamFn = (_model, context) => {
+			const channel = channelOf(context);
+			calls.push(channel);
+			return scriptedStream(channel === "inline" ? "success" : "error");
+		};
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => broker.current);
+
+		broker.current = new FakeFallbackService();
+		const events = await eventTypes(await wrapped(model, imageContext("native")));
+
+		expect(calls).toEqual(["native", "url", "inline"]);
+		expect(events).toEqual(["start", "done"]);
+	});
+
+	it("recovers through the replacement broker, not the retired one", async () => {
+		// Replace-then-dispose: the retired instance cannot identify URLs the
+		// replacement minted, so recovering through it fails the request instead.
+		const retired = new FakeFallbackService();
+		let service = retired;
+		const calls: string[] = [];
+		const base: StreamFn = (_model, context) => {
+			const channel = channelOf(context);
+			calls.push(channel);
+			return scriptedStream(channel === "inline" ? "success" : "error");
+		};
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
+
+		service = new FakeFallbackService();
+		await eventTypes(await wrapped(model, imageContext("native")));
+
+		expect(service.fallbacks).toEqual(["native", "url"]);
+		expect(retired.fallbacks).toEqual([]);
 	});
 
 	it("never retries after content has been emitted", async () => {
@@ -146,7 +188,7 @@ describe("provider-file stream fallback", () => {
 			return scriptedStream("content-error");
 		};
 		const service = new FakeFallbackService();
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
 
 		const events = await eventTypes(await wrapped(model, imageContext("native")));
 
