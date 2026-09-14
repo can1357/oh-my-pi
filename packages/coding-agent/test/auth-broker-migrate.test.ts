@@ -6,6 +6,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const TEAM_ORG = "org-team-1111";
 
@@ -34,9 +35,14 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 	let brokerStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
 	const token = "broker-migrate-bearer";
+	// `setAgentDir()` installs a process-wide agent dir (and writes
+	// PI_CODING_AGENT_DIR); without a restore it leaked this suite's
+	// since-deleted temp dir into every later suite in the same worker.
+	let settingsState: SettingsTestState | undefined;
 	const savedEnv: Record<string, string | undefined> = {};
 
 	beforeEach(async () => {
+		settingsState = beginSettingsTest();
 		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
 		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-migrate-client-"));
@@ -57,6 +63,8 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 	});
 
 	afterEach(async () => {
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
 		await handle?.close();
 		brokerStorage?.close();
 		brokerStore?.close();

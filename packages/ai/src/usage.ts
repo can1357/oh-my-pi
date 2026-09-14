@@ -135,6 +135,24 @@ export function resolveUsedFraction(limit: UsageLimit): number | undefined {
 }
 
 /**
+ * Canonicalize a provider plan identifier: trim, lowercase, fold whitespace and
+ * hyphen runs to `_`, and strip a leading `chatgpt_`.
+ *
+ * One implementation for every reader of these identifiers. Credential
+ * classification (`classifyOpenAICodexPlan`) and the auth-broker's exported
+ * `plan` label both interpret the same strings, so a change reaching only one
+ * would make a credential's plan class and its exported subscription label
+ * disagree about the same account.
+ */
+export function canonicalizePlan(plan: string): string {
+	const normalized = plan
+		.trim()
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
+	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+}
+
+/**
  * One recorded usage-limit snapshot: a single limit window of one account at
  * a point in time. The usage cache itself is latest-snapshot-only; history
  * rows are appended by the auth storage layer whenever a fresh report is

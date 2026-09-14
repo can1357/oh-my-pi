@@ -2,10 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Prometheus text-exposition `/metrics` endpoint to the auth-broker server, authorized by a scrape-scoped read-only token distinct from the master bearer, rendering LLM usage for a monitoring backend ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Added a `metricsEnabled` auth-broker server option that gates registration of the `/metrics` route; it defaults to OFF so an embedder does not gain a usage endpoint on a dependency bump, and enabling it without a token that can authorize it refuses to boot rather than serving the exposition unauthenticated ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ### Fixed
 
 - 400-request debug dumps now redact provider-specific auth headers (`x-goog-api-key`, `x-amz-security-token`, and any header whose name carries a key/token/secret), not just a fixed allow-list, so a shared dump can no longer leak a live API key ([#12007](https://github.com/can1357/oh-my-pi/issues/12007)).
-
 ## [18.1.20] - 2026-09-13
 
 ### Fixed

@@ -30,7 +30,16 @@ export default class AuthBroker extends Command {
 	static flags = {
 		json: Flags.boolean({ description: "Output JSON" }),
 		bind: Flags.string({ description: "Bind address for `serve` (host:port)", char: "b" }),
-		regenerate: Flags.boolean({ description: "Regenerate the bearer token" }),
+		regenerate: Flags.boolean({ description: "Regenerate the token (bearer, or --metrics scrape token)" }),
+		metrics: Flags.boolean({
+			description: "Operate on the scrape-scoped /metrics token instead of the master bearer (token)",
+		}),
+		"enable-metrics": Flags.boolean({
+			description: "Expose the scrape-scoped GET /metrics endpoint (serve); off unless enabled",
+		}),
+		"no-enable-metrics": Flags.boolean({
+			description: "Do not expose the scrape-scoped GET /metrics endpoint (serve)",
+		}),
 		via: Flags.string({
 			description: "SSH user@host for remote login (login --via=user@host)",
 		}),
@@ -50,6 +59,10 @@ export default class AuthBroker extends Command {
 			description: "Also upload OAuth from local SQLite during migrate (default skips them)",
 		}),
 		"dry-run": Flags.boolean({ description: "Print actions without executing (import / login --via / migrate)" }),
+		"subscriptions-config": Flags.string({
+			description:
+				"Path to the JSON subscription-config file for `serve`; env OMP_AUTH_BROKER_SUBSCRIPTIONS, flag wins",
+		}),
 	};
 
 	static examples = [
@@ -57,6 +70,9 @@ export default class AuthBroker extends Command {
 		"# Boot on a non-default port\n  omp auth-broker serve --bind=127.0.0.1:9000",
 		"# Print the bearer token\n  omp auth-broker token",
 		"# Rotate the bearer token\n  omp auth-broker token --regenerate",
+		"# Print the scrape-scoped /metrics token\n  omp auth-broker token --metrics",
+		"# Rotate the scrape-scoped /metrics token\n  omp auth-broker token --metrics --regenerate",
+		"# Boot with the scrape-scoped /metrics endpoint exposed\n  omp auth-broker serve --enable-metrics",
 		"# List supported OAuth providers\n  omp auth-broker list",
 		"# Local login (run on the broker host)\n  omp auth-broker login anthropic",
 		"# Interactive provider selection\n  omp auth-broker login",
@@ -82,6 +98,7 @@ export default class AuthBroker extends Command {
 				json: flags.json,
 				bind: flags.bind,
 				regenerate: flags.regenerate,
+				metrics: flags.metrics,
 				via: flags.via,
 				// `login`/`logout` reuse the legacy `provider` slot; `import` keeps `source` separate
 				// so `provider` flag (used as an override) is unambiguous.
@@ -92,6 +109,9 @@ export default class AuthBroker extends Command {
 				includeEnv: flags["include-env"],
 				includeOauth: flags["include-oauth"],
 				dryRun: flags["dry-run"],
+				subscriptionsConfig: flags["subscriptions-config"],
+				enableMetrics: flags["enable-metrics"],
+				noEnableMetrics: flags["no-enable-metrics"],
 			},
 		};
 		await initTheme();

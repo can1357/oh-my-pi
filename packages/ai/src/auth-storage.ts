@@ -49,7 +49,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "./usage";
-import { resolveUsedFraction } from "./usage";
+import { canonicalizePlan, resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
@@ -837,6 +837,14 @@ type UsageRequestDescriptor = {
 	provider: Provider;
 	credential: UsageCredential;
 	baseUrl?: string;
+	/**
+	 * Stored row id of the credential this request came from, when it came from
+	 * one. Carried so a report that recovers NO identity of its own still has a
+	 * stable, non-secret discriminator downstream — see the `credentialKey`
+	 * stamp in {@link AuthStorage.#fetchUsageUncached}. Absent for env- and
+	 * override-derived credentials, which have no row.
+	 */
+	credentialId?: number;
 };
 
 type ForcedUsageRefresh = {
@@ -1096,11 +1104,7 @@ function getUsagePlanType(report: UsageReport | null): string | undefined {
 	if (!metadata) return undefined;
 	const planType = metadata.planType;
 	if (typeof planType !== "string") return undefined;
-	const normalized = planType
-		.trim()
-		.toLowerCase()
-		.replace(/[\s-]+/g, "_");
-	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+	return canonicalizePlan(planType);
 }
 
 function classifyOpenAICodexPlan(report: UsageReport | null): OpenAICodexPlanClass {
@@ -3532,6 +3536,34 @@ export class AuthStorage {
 			// orgId from the `anthropic-organization-id` response header but never
 			// carries a display name, so the stored name must still be attached.
 			// Never attach the stored name over a DIFFERENT org's report.
+			// A stable, non-secret per-credential discriminator. Providers whose
+			// reports carry no account, email, project, or organization identity
+			// (`synthetic`, `charm-hyper`) also use fixed limit ids, so several of
+			// their credentials render one identical label set and the exposition
+			// drops every later one as a duplicate — the accounts silently vanish
+			// from `/metrics`. The stored row id is stable across restarts and
+			// across an OAuth refresh, and is never derived from token material.
+			// Stamped ONLY when the report recovered no identity of its own, so no
+			// series that can already be attributed is re-keyed.
+			//
+			// `scope.shared` is deliberately NOT consulted. It marks a limit as
+			// credential-wide — exhaustion gating counts it against the whole
+			// credential rather than one model family — which most quota providers
+			// set; it does NOT assert that two DIFFERENT credentials observe the
+			// SAME pool. No field in a report proves that today: charm-hyper's
+			// balance is account-wide, but its endpoint exposes no account id to
+			// group keys by, and that very absence is why it marks the limit
+			// shared. Suppressing the stamp on every all-shared report would
+			// therefore also collapse two different accounts' identity-less
+			// reports into one series and silently drop the later one — the loss
+			// this stamp exists to prevent. The two error directions are not
+			// symmetric: stamping a genuine single-account multi-key pool renders
+			// its one balance as several `credential:<id>` series — visible, and
+			// diagnosable as the known multi-key case — while suppressing it drops
+			// an account with no trace. Prefer the visible error; always stamp.
+			if (report && request.credentialId !== undefined && this.#reportHasNoIdentity(report)) {
+				report.metadata = { ...report.metadata, credentialKey: String(request.credentialId) };
+			}
 			if (report && params.credential.orgId !== undefined) {
 				const metadata = report.metadata ?? {};
 				const sameOrg = metadata.orgId === undefined || metadata.orgId === params.credential.orgId;
@@ -3844,7 +3876,14 @@ export class AuthStorage {
 				let hasUsableStoredOAuthCredential = false;
 				for (const entry of entries) {
 					if (entry.credential.type !== "oauth") continue;
-					const request = this.#buildUsageRequestForOauth(provider, entry.credential, baseUrl);
+					// Stamped here too: this branch has its own `continue`, so a pool
+					// of identity-less OAuth rows shared the `unidentified` account and
+					// xAI's fixed limit ids, and the renderer dropped every credential
+					// after the first as a duplicate series.
+					const request = {
+						...this.#buildUsageRequestForOauth(provider, entry.credential, baseUrl),
+						credentialId: entry.id,
+					};
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
@@ -3887,6 +3926,9 @@ export class AuthStorage {
 				} else {
 					request = this.#buildUsageRequestForOauth(provider, credential, baseUrl);
 				}
+				// The stored row id, so an identity-less provider's several
+				// credentials stay distinguishable downstream.
+				request = { ...request, credentialId: entry.id };
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
 			}
@@ -3902,6 +3944,35 @@ export class AuthStorage {
 		return typeof value === "string" ? value.trim() : undefined;
 	}
 
+	/**
+	 * Whether a report carries none of the identities the metrics renderer's
+	 * account chain reads. Deliberately the same sources in the same order, so a
+	 * report that WOULD render a real account label is never re-keyed by the
+	 * credential stamp.
+	 *
+	 * A CONFLICTING `scope.accountId` (several distinct accounts in one report)
+	 * is checked before the weaker `projectId`/account-alias/`scope.projectId`
+	 * fallbacks because it is TERMINAL in the renderer's `accountLabelOf`: once
+	 * that chain sees several accounts it refuses those fallbacks and lands on
+	 * the credential stamp or the sentinel. So the stamp must be applied whenever
+	 * the conflict exists, even alongside a `projectId` the renderer will never
+	 * consult — without it two such reports reach an unstamped sentinel, their
+	 * matching limit ids collide, and the later credential's gauges are dropped.
+	 */
+	#reportHasNoIdentity(report: UsageReport): boolean {
+		if (this.#getUsageReportMetadataValue(report, "accountId")) return false;
+		if (this.#getUsageReportMetadataValue(report, "email")) return false;
+		if (this.#getUsageReportMetadataValue(report, "orgId")) return false;
+		if (this.#hasConflictingScopeAccountId(report)) return true;
+		if (this.#getUsageReportMetadataValue(report, "projectId")) return false;
+		if (this.#getUsageReportMetadataValue(report, "account")) return false;
+		if (this.#getUsageReportMetadataValue(report, "user")) return false;
+		if (this.#getUsageReportMetadataValue(report, "username")) return false;
+		if (this.#getUsageReportScopeAccountId(report)) return false;
+		if (this.#getUsageReportScopeProjectId(report)) return false;
+		return true;
+	}
+
 	#getUsageReportScopeAccountId(report: UsageReport): string | undefined {
 		const ids = new Set<string>();
 		for (const limit of report.limits) {
@@ -3910,6 +3981,22 @@ export class AuthStorage {
 		}
 		if (ids.size === 1) return [...ids][0];
 		return undefined;
+	}
+
+	/**
+	 * Whether the report's limits carry several distinct trimmed
+	 * `scope.accountId` values. Mirrors the metrics renderer's `CONFLICTING_SCOPE`
+	 * outcome: `#getUsageReportScopeAccountId` collapses both "none" and
+	 * "several" to `undefined`, so identity-less detection needs the conflict
+	 * distinguished from a plain absence.
+	 */
+	#hasConflictingScopeAccountId(report: UsageReport): boolean {
+		const ids = new Set<string>();
+		for (const limit of report.limits) {
+			const accountId = limit.scope.accountId?.trim();
+			if (accountId) ids.add(accountId);
+		}
+		return ids.size > 1;
 	}
 
 	#getUsageReportScopeProjectId(report: UsageReport): string | undefined {
@@ -3948,6 +4035,20 @@ export class AuthStorage {
 			}
 			return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 		}
+		// A credential stamp is an EXPLICIT distinct identity that
+		// #fetchUsageUncached applies precisely when the report recovered none of
+		// its own (#reportHasNoIdentity) — the conflicting-scope shape among them,
+		// where the limits name several accounts. Such a report can still carry a
+		// shared metadata.projectId or an account alias, and grouping by those
+		// would fold two genuinely distinct credentials into one group that
+		// #mergeUsageReportGroup collapses to a single credentialKey — exactly the
+		// identity the stamp exists to keep apart. Honor the stamp before the
+		// weaker fallbacks so a stamped report is never merged by a shared id.
+		// Mirrors accountLabelOf, which prefers `credential:<key>` over the same
+		// fallbacks. Unstamped reports (two users on one GCP project) are
+		// untouched: they carry no stamp and still group by project.
+		const credentialKey = this.#getUsageReportMetadataValue(report, "credentialKey");
+		if (credentialKey) return [`${report.provider}:credential:${credentialKey.toLowerCase()}`];
 		const projectId =
 			this.#getUsageReportMetadataValue(report, "projectId") ?? this.#getUsageReportScopeProjectId(report);
 		// Only add project as a fallback when no email is available — two users
