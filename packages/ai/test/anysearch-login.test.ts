@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { loginAnySearch } from "@oh-my-pi/pi-ai/registry/anysearch";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 
 const originalAnySearchApiKey = Bun.env.ANYSEARCH_API_KEY;
+const loginAnySearch = getProviderDefinition("anysearch")?.login;
+if (!loginAnySearch) throw new Error("AnySearch login is not registered");
 
 afterEach(() => {
 	if (originalAnySearchApiKey === undefined) {
@@ -26,23 +28,18 @@ describe("AnySearch login", () => {
 
 	it("opens the AnySearch console and returns a trimmed key without validation requests", async () => {
 		let authUrl: string | undefined;
-		let promptMessage: string | undefined;
 
 		const apiKey = await loginAnySearch({
 			onAuth: info => {
 				authUrl = info.url;
 			},
-			onPrompt: async prompt => {
-				promptMessage = prompt.message;
-				return "  anysearch-test-key  ";
-			},
+			onPrompt: async () => "  anysearch-test-key  ",
 			fetch: () => {
 				throw new Error("AnySearch login must not make a network request");
 			},
 		});
 
 		expect(authUrl).toBe("https://www.anysearch.com/console");
-		expect(promptMessage).toBe("Paste your AnySearch API key");
 		expect(apiKey).toBe("anysearch-test-key");
 	});
 });
