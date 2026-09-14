@@ -315,3 +315,51 @@ describe("legacy shim batch edit path policies", () => {
 		expect(rendered).toContain("no longer parses");
 	});
 });
+// Third review round: legacy renderer output must strip terminal control sequences,
+// and batch edits must surface parse regressions like the single-edit path does.
+describe("legacy shim terminal safety and parse regression", () => {
+	it("strips ANSI escape sequences and carriage returns from result output", () => {
+		const definition = shim.createEditTool(process.cwd());
+		const component = definition.renderResult!(
+			{
+				content: [{ type: "text", text: "replaced ok\n\x1b[2J\x1b[3;Hrepositioned\rCR\ttab" }],
+			} as never,
+			undefined as never,
+			undefined as never,
+		);
+		const rendered = (component as { render: (width: number) => readonly string[] }).render(200).join("\n");
+		expect(rendered).not.toContain("\x1b");
+		expect(rendered).not.toContain("\r");
+		expect(rendered).toContain("repositioned");
+		expect(rendered).toContain("replaced ok");
+	});
+
+	it("warns when a multi-edit batch stops a source file parsing", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-regress-"));
+		try {
+			const file = path.join(dir, "regress.ts");
+			await fs.writeFile(file, "export function one() {\n\treturn 1;\n}\nexport function two() {\n\treturn 2;\n}\n");
+			const edit = shim.createEditTool(dir).execute!;
+			const result = await edit(
+				"regress-1",
+				{
+					path: file,
+					edits: [
+						{ oldText: "export function two() {", newText: "function two() {" },
+						{ oldText: "\treturn 2;\n}", newText: "\treturn 2;\n" },
+					],
+				},
+				undefined,
+				undefined,
+				{ cwd: dir } as never,
+			);
+			const blocks = (result as { content: Array<{ type: string; text: string }> }).content.filter(
+				block => block.type === "text",
+			);
+			const all = blocks.map(block => block.text).join("\n");
+			expect(all).toContain("no longer parses");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});

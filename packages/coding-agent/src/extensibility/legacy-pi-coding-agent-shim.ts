@@ -32,6 +32,7 @@ import {
 	getProjectDir,
 	isCompiledBinary,
 	parseFrontmatter as parseOmpFrontmatter,
+	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "../config/keybindings";
@@ -39,6 +40,10 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
 import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../edit/normalize";
 import { EditTool } from "../edit";
+import { attemptEditAutoRepair } from "../edit/auto-repair";
+import { getEditStore } from "../edit/store";
+import { createLspWritethrough, writethroughNoop } from "../lsp/writethrough";
+import { summarizeCode } from "@oh-my-pi/pi-natives";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { resolveToCwd } from "../tools/path-utils";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
@@ -291,7 +296,44 @@ async function executeBuiltinTool(
  */
 function legacyEditTool(cwd: string): ToolDefinition {
 	const base = legacyBuiltinTool(cwd, "edit");
-	const replaceTool = new EditTool(legacyToolSession(cwd), "replace");
+	const session = legacyToolSession(cwd);
+	const replaceTool = new EditTool(session, "replace");
+	// Mirrors EditTool's createEditWritethrough exactly (same isolated settings).
+	const enableLsp = session.enableLsp ?? true;
+	const writethrough = enableLsp
+		? createLspWritethrough(cwd, {
+				enableFormat: enableLsp && session.settings.get("lsp.formatOnWrite"),
+				enableDiagnostics: enableLsp && session.settings.get("lsp.diagnosticsOnEdit"),
+			})
+		: writethroughNoop;
+
+	/** Same parse check auto-repair uses; `false` for files without a resolver. */
+	const parsed = (code: string, filePath: string): boolean =>
+		summarizeCode({ code: code.length === 0 ? "\n" : code, path: filePath }).parsed;
+
+	/** EditTool's post-apply parse-regression handling, adapted to the batch write. */
+	async function parseRegressionNote(
+		filePath: string,
+		prev: string,
+		next: string,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		if (parsed(prev, filePath) && !parsed(next, filePath)) {
+			const snapshot = { path: filePath, prev, next };
+			let repaired;
+			try {
+				repaired = await attemptEditAutoRepair({ session, snapshot, writethrough, signal });
+				if (repaired) getEditStore(session).invalidate(filePath);
+			} catch (error) {
+				console.warn("Edit auto-repair failed", filePath, error instanceof Error ? error.message : String(error));
+			}
+			const display = path.relative(cwd, filePath) || filePath;
+			return repaired
+				? `Note: ${display} stopped parsing after this edit; an automatic syntax repair (${repaired.model}) was applied on top:\n${repaired.diff}\nReview the repaired region; adjust it if the repair guessed wrong.`
+				: `Warning: ${display} no longer parses after this edit. The change was applied; re-read the edited region and fix the syntax, or revert if unintended.`;
+		}
+		return undefined;
+	}
 	const definition: LegacyBuiltinToolDefinition = {
 		...base,
 		[LEGACY_BUILTIN_TOOL_MARKER]: true as const,
@@ -372,10 +414,14 @@ function legacyEditTool(cwd: string): ToolDefinition {
 			}
 			updated += normalized.slice(cursor);
 			const ending = detectLineEnding(body);
-			await Bun.write(batchPath, bom + restoreLineEndings(updated, ending));
-			return {
-				content: [{ type: "text", text: `Successfully replaced ${replacement.length} blocks in ${batchPath}.` }],
-			} satisfies AgentToolResult;
+			const written = bom + restoreLineEndings(updated, ending);
+			await Bun.write(batchPath, written);
+			const content: AgentToolResult["content"] = [
+				{ type: "text", text: `Successfully replaced ${replacement.length} blocks in ${batchPath}.` },
+			];
+			const note = await parseRegressionNote(batchPath, body, written, signal);
+			if (note) content.push({ type: "text", text: note });
+			return { content } satisfies AgentToolResult;
 		},
 	};
 	return markToolDefinition(definition);
@@ -403,9 +449,10 @@ function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName): ToolDefinit
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const raw = stringField(params, "path") ?? stringField(params, "input") ?? "";
-			// Hostile or file-derived preview text: shorten home leaks, expand tabs,
-			// and cap the width so the call line cannot break terminal layout.
-			const detail = truncateToWidth(replaceTabs(shortenEmbeddedPaths(raw)), TRUNCATE_LENGTHS.LINE);
+			// Hostile or file-derived preview text: strip terminal controls, shorten
+			// home leaks, expand tabs, and cap the width so the call line cannot
+			// break terminal layout.
+			const detail = truncateToWidth(replaceTabs(shortenEmbeddedPaths(sanitizeText(raw))), TRUNCATE_LENGTHS.LINE);
 			return new Text(`${themedTitle(theme, name)} ${themedMuted(theme, detail)}`.trimEnd(), 0, 0);
 		},
 		renderResult: legacyRenderResult,
@@ -463,10 +510,11 @@ function legacyRenderResult(result: AgentToolResult<unknown>, _options: unknown,
 	const theme = renderTheme(themeArg, undefined);
 	const output = allTextResult(result);
 	if (!output) return new Text("", 0, 0);
-	// TUI sanitization contract: tabs break layout, absolute home paths leak, and
-	// file-derived output (diffs, errors) can be unbounded. The cap follows the
-	// shared preview policy instead of a local constant.
-	const sanitized = replaceTabs(shortenEmbeddedPaths(output));
+	// TUI sanitization contract: control sequences can clear or reposition the
+	// terminal, tabs break layout, absolute home paths leak, and file-derived
+	// output (diffs, errors) can be unbounded. The cap follows the shared preview
+	// policy instead of a local constant.
+	const sanitized = replaceTabs(shortenEmbeddedPaths(sanitizeText(output)));
 	const lines = sanitized.split("\n");
 	const visible = lines
 		.slice(0, PREVIEW_LIMITS.OUTPUT_EXPANDED)
