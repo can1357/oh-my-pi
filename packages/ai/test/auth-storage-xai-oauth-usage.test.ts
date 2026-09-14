@@ -11,7 +11,9 @@ function makeStore(credentials: StoredAuthCredential[] = []): AuthCredentialStor
 			return credentials;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

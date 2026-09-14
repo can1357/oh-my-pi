@@ -609,10 +609,11 @@ export interface AuthCredentialStore {
 	onCredentialDisabled?(listener: (event: CredentialDisabledEvent) => void): () => void;
 	updateAuthCredential(id: number, credential: AuthCredential): void;
 	/**
-	 * Disable the credential. An explicit `false` reports that no transition
-	 * happened — a peer already tombstoned the row, or it is gone — so callers
-	 * must not announce a teardown they did not perform. `void` remains
-	 * accepted for stores written against the previous contract.
+	 * Disable the credential. Returning `false` reports that no transition
+	 * happened — a peer already tombstoned the row, or it is gone — so the
+	 * persisted cause is theirs and callers must not announce a teardown they
+	 * did not perform. `void` remains accepted for stores written against the
+	 * previous contract and is treated as an unconditional disable.
 	 */
 	deleteAuthCredential(id: number, disabledCause: string): boolean | void;
 	tryDisableAuthCredentialIfMatches(
@@ -759,7 +760,7 @@ export interface AuthCredentialStore {
 	 * Optional async write hook for disabling one stored credential. Remote stores
 	 * use it to await broker persistence before AuthStorage updates its snapshot.
 	 */
-	deleteAuthCredentialRemote?(id: number, disabledCause: string): Promise<boolean>;
+	deleteAuthCredentialRemote?(id: number, disabledCause: string, signal?: AbortSignal): Promise<boolean>;
 	/**
 	 * Optional async write hook for deliberate whole-provider logout, clearing
 	 * prior disabled history as well as active credentials. When present,
@@ -7649,7 +7650,7 @@ export class AuthStorage {
 			// Do not block before the conditional disable: a peer replacement must
 			// remain usable when it wins the race against this failed request.
 			const deleted = this.#store.deleteAuthCredentialRemote
-				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause)
+				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause, options?.signal)
 				: this.#disableCredentialByIdIfMatches(provider, target.id, target.credential, disabledCause);
 			if (deleted && this.#store.deleteAuthCredentialRemote) {
 				// The broker persists and logs on its own host; this session still
@@ -8120,6 +8121,11 @@ export class AuthStorage {
 	 * automatic cause: a remote client's own `removeCredential()` arrives here as
 	 * `deleted by user`, and the event contract excludes user-initiated
 	 * removals just as the local path does.
+	 *
+	 * A peer that deliberately logged the account out between this client's
+	 * snapshot and the request already owns the tombstone, so persistence
+	 * reports no transition: drop the stale entry, but never announce a
+	 * sign-out under a cause that is not the persisted one.
 	 */
 	disableCredentialById(id: number, disabledCause: string): boolean {
 		// Persistence normalizes before it classifies, so classification and the
@@ -8130,8 +8136,8 @@ export class AuthStorage {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;
 			const target = entries[index]!;
-			// A store on the previous contract reports nothing; only an explicit
-			// `false` means this call did not perform the transition.
+			// A store predating the boolean contract reports nothing; treat that as
+			// the previous unconditional behaviour, not a failed transition.
 			const disabled = this.#store.deleteAuthCredential(id, cause) !== false;
 			if (!disabled) {
 				// The row may still be active (a store that refused) or already
@@ -8139,22 +8145,27 @@ export class AuthStorage {
 				// so the snapshot cannot advertise a credential persistence kept.
 				this.#loadStoredCredentials(provider, this.#store.listAuthCredentials(provider));
 				this.#resetProviderAssignments(provider);
-				return false;
+				// A deliberate logout is idempotent: once the re-read confirms the
+				// row is gone, the requested removal is already complete and the
+				// broker must not answer 404. A refused automatic disable is still
+				// a failed transition.
+				const stillStored = this.#data.get(provider)?.some(entry => entry.id === id) ?? false;
+				return !stillStored && isDeliberateRemovalCause(cause);
 			}
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.#setStoredCredentials(provider, next);
 			this.#resetProviderAssignments(provider);
-			if (disabled && isAutomaticDisableCause(cause)) {
+			if (isAutomaticDisableCause(cause)) {
 				this.#emitCredentialDisabled(
 					credentialDisabledEvent(provider, id, target.credential, cause, this.#liveApiKeyIds(provider)),
 				);
 			}
-			return disabled;
+			return true;
 		}
-		if (isDeliberateRemovalCause(disabledCause.trim())) {
+		if (isDeliberateRemovalCause(cause)) {
 			// A peer may have disabled the selected row after the client snapshot.
 			// The deliberate-removal transaction also purges that tombstone.
-			this.#store.deleteAuthCredential(id, disabledCause);
+			this.#store.deleteAuthCredential(id, cause);
 			return true;
 		}
 		return false;

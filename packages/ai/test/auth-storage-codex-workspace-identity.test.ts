@@ -240,7 +240,9 @@ function makeStore(rows: StoredAuthCredential[]): AuthCredentialStore {
 			return rows;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

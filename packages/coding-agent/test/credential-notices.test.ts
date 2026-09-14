@@ -237,7 +237,8 @@ describe("credential sign-out notices", () => {
 			const notices = await collectDisabledCredentialNotices(authStorage, nowMs, undefined, retained);
 			expect(notices).toHaveLength(9);
 			expect(notices[0]).toContain("repeated@example.com");
-			expect(notices[0]).toContain("generation-17");
+			// Coalescing keeps one notice per account; the cause it shows is classified.
+			expect(notices.filter(notice => notice.includes("repeated@example.com"))).toHaveLength(1);
 			expect(notices[0]).toContain("2m ago");
 			expect(notices[1]).toContain("distinct7@example.com");
 			expect(notices[7]).toContain("distinct1@example.com");
@@ -252,7 +253,7 @@ describe("credential sign-out notices", () => {
 			vi.spyOn(store, "listDisabledCredentials").mockRejectedValue(new Error("broker offline"));
 			const fallback = await collectDisabledCredentialNotices(authStorage, nowMs, undefined, retained);
 			expect(fallback).toHaveLength(9);
-			expect(fallback[0]).toContain("generation-17");
+			expect(fallback.filter(notice => notice.includes("repeated@example.com"))).toHaveLength(1);
 			expect(fallback[1]).toContain("distinct7@example.com");
 			expect(fallback[8]).toContain("1 more");
 			expect([...retained]).toEqual(retainedBefore);
@@ -301,13 +302,13 @@ describe("credential sign-out notices", () => {
 			release.resolve();
 			const notices = await replay;
 			expect(notices).toHaveLength(9);
-			expect(notices[0]).toContain("racing-generation");
 			expect(notices.filter(notice => notice.includes("signed-out@example.com"))).toHaveLength(1);
 			expect(notices[8]).toContain("1 more");
 			expect((await store.listDisabledCredentials()).slice(-2).map(row => row.id)).toEqual([oldId, newId]);
 			const subsequent = await session.getDisabledCredentialNotices();
 			expect(subsequent).toHaveLength(9);
-			expect(subsequent[0]).toContain("racing-generation");
+			// Distinguished by account and recency, not by provider-controlled text.
+			expect(subsequent[0]).toContain("signed-out@example.com");
 			expect(subsequent[8]).toContain("1 more");
 		} finally {
 			unsubscribe();
@@ -333,7 +334,8 @@ describe("credential sign-out notices", () => {
 		}
 		const notices = await collectDisabledCredentialNotices(authStorage, Date.now(), undefined, retained);
 		expect(notices).toHaveLength(4);
-		for (const id of retained.keys()) expect(notices.join("\n")).toContain(`generation-${id}`);
+		// One notice per retained generation; the cause each shows is classified.
+		expect(notices).toHaveLength(retained.size);
 	});
 
 	it("retires recovered OAuth teardown without losing a retained API-key notice", async () => {
