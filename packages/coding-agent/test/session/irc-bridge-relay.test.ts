@@ -12,6 +12,7 @@ function makeBridge() {
 		emitSessionEvent: async () => {},
 		wakeForIrc: (records: AgentMessage[]) => {
 			woken.push(records);
+			return true;
 		},
 	} as unknown as IrcBridgeHost;
 	return { bridge: new IrcBridge(host), woken };

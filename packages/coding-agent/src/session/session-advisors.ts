@@ -441,6 +441,20 @@ export class SessionAdvisors {
 		return this.#buildAdvisorRuntime(seedToCurrent);
 	}
 
+	/** Whether any advisor has a review in flight or deltas queued for one. */
+	get hasActiveReviews(): boolean {
+		return this.#advisors.some(advisor => advisor.runtime.reviewInFlight);
+	}
+
+	/**
+	 * Settles every advisor's in-flight prompt, for a caller about to tear the
+	 * runtime down. `stopRuntime()` aborts instead, which discards an accepted
+	 * review and the note it was producing.
+	 */
+	async drainActiveReviews(): Promise<void> {
+		await Promise.all(this.#advisors.map(advisor => advisor.runtime.pauseForSessionTransition()));
+	}
+
 	/** Stops every advisor runtime and starts recorder shutdown. */
 	stopRuntime(): void {
 		this.#stopAdvisorRuntime();

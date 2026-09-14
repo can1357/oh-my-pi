@@ -19,7 +19,13 @@ export interface IrcBridgeHost {
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	wakeForIrc(records: AgentMessage[]): void;
+	/**
+	 * Starts a wake turn for `records`, or re-queues them when the session
+	 * cannot run one (a latched restart, a suppressed drain). Returns whether a
+	 * turn was actually started, so the delivery receipt can distinguish a real
+	 * wake from a persisted-but-quiet delivery.
+	 */
+	wakeForIrc(records: AgentMessage[]): boolean;
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
 }
 
@@ -59,6 +65,18 @@ export class IrcBridge {
 		while (this.#pendingReplies.size > 0) {
 			await Promise.all(this.#pendingReplies);
 		}
+	}
+
+	/**
+	 * Whether this session still owes a peer a reply that has not settled.
+	 *
+	 * An auto-reply runs with the foreground agent IDLE — a side-channel reply
+	 * started during streaming with async delivery off, or while idle in plan
+	 * mode — so a caller that only watches the agent sees a quiescent session
+	 * while a provider request it must outlive is still running.
+	 */
+	hasPendingReplies(): boolean {
+		return this.#pendingReplies.size > 0;
 	}
 
 	/** Registers a reply obligation that {@link waitForReplies} must outlast. */
@@ -123,6 +141,18 @@ export class IrcBridge {
 		const records = this.#deferredWakes;
 		this.#deferredWakes = [];
 		return records;
+	}
+
+	/**
+	 * Re-queue records as asides that missed their wake turn — used when a
+	 * cooperative restart (or a torn-down session) refuses to start the turn
+	 * that {@link IrcBridgeHost.wakeForIrc} would have driven. They flush to the
+	 * transcript on a successful restart's dispose (`flushPending`) or ride the
+	 * next drain for the resumed session on a recoverable pre-dispose failure —
+	 * never dropped.
+	 */
+	requeuePending(records: AgentMessage[]): void {
+		this.#asides.push(...records);
 	}
 
 	/** Surfaces and consumes queued incoming records before automatic injection. */
@@ -242,8 +272,11 @@ export class IrcBridge {
 			if (autoReply) this.#startAutoReply(msg);
 			return "injected";
 		}
-		this.#host.wakeForIrc([record]);
-		return "woken";
+		// A latched restart (or a suppressed drain) re-queues the record instead of
+		// starting a turn. Reporting "woken" there told a `send await:true` peer a
+		// turn was running that never was, so it waited out its full timeout; the
+		// record IS persisted, which is exactly what "injected" already means.
+		return this.#host.wakeForIrc([record]) ? "woken" : "injected";
 	}
 
 	/** Emits an IRC relay observation for rendering without persisting it. */

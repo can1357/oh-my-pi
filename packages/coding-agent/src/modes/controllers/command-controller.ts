@@ -1293,7 +1293,12 @@ export class CommandController {
 
 		const previousState = this.ctx.sessionManager.captureState();
 		try {
-			await this.ctx.session.moveSession(resolvedPath);
+			if (!(await this.ctx.session.moveSession(resolvedPath))) {
+				// A latched restart refused the move: the session file never moved, so
+				// re-scoping cwd below would strand the workspace away from it.
+				this.ctx.showError("Move failed: a session restart is in progress. Try again once it completes.");
+				return false;
+			}
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return false;
