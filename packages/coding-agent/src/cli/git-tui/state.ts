@@ -764,6 +764,34 @@ export class GitModel {
 		await this.#repo.unstage(files?.map(file => file.path) ?? []);
 	}
 
+	/**
+	 * Throw away the given files' changes. Unstaged entries revert the
+	 * worktree to the index (untracked files are deleted); staged entries
+	 * reset both index and worktree to HEAD, which also drops any unstaged
+	 * edits on the same path. Conflicted entries are skipped.
+	 */
+	async discard(files: readonly ChangedFile[]): Promise<void> {
+		const worktree: string[] = [];
+		const untracked: string[] = [];
+		const staged: string[] = [];
+		const stagedNew: string[] = [];
+		for (const file of files) {
+			if (file.kind === "conflicted") continue;
+			if (file.area === "unstaged") {
+				(file.kind === "untracked" ? untracked : worktree).push(file.path);
+			} else if (file.area === "staged") {
+				staged.push(file.path);
+				if (file.origPath) staged.push(file.origPath);
+				// Paths absent from HEAD stay on disk after the index reset; clean them like untracked files.
+				if (file.kind === "added" || file.kind === "renamed") stagedNew.push(file.path);
+			}
+		}
+		if (worktree.length > 0) await this.#repo.restore({ files: worktree, worktree: true });
+		if (staged.length > 0) await this.#repo.restore({ files: staged, source: "HEAD", staged: true, worktree: true });
+		const toClean = [...untracked, ...stagedNew];
+		if (toClean.length > 0) await this.#repo.clean({ paths: toClean });
+	}
+
 	/** Create (or amend) a commit from the staged changes. */
 	async commit(message: string, options: { amend?: boolean } = {}): Promise<void> {
 		await this.#repo.commitCreate(message, { amend: options.amend });
