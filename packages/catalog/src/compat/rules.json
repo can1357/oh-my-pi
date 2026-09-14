@@ -36,6 +36,7 @@
 		"auth/groq.kdl",
 		"auth/huggingface.kdl",
 		"auth/kagi.kdl",
+		"auth/keenable.kdl",
 		"auth/kilo.kdl",
 		"auth/kimi-code.kdl",
 		"auth/litellm.kdl",
@@ -19020,6 +19021,23 @@
 					"instructions": "Create or copy your API key from the Exa dashboard.",
 					"prompt": "Paste your Exa API key",
 					"placeholder": "API key"
+				}
+			},
+			{
+				"id": "keenable",
+				"apiKeyFormat": "bearer",
+				"name": "Keenable",
+				"env": {
+					"vars": [
+						"KEENABLE_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://keenable.ai",
+					"instructions": "Create or copy your API key from the Keenable dashboard (or run `keenable login`).",
+					"prompt": "Paste your Keenable API key",
+					"placeholder": "keen_..."
 				}
 			},
 			{

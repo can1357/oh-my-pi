@@ -38,6 +38,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	},
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
 	{ value: "exa", label: "Exa", description: "API via /login exa or EXA_API_KEY; explicit keyless fallback via MCP" },
+	{
+		value: "keenable",
+		label: "Keenable",
+		description: "API via /login keenable or KEENABLE_API_KEY; explicit keyless fallback via the public endpoint",
+	},
 	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
 	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
 	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },

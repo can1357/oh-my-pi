@@ -1,0 +1,9 @@
+auth "keenable" {
+	name "Keenable"
+	env "KEENABLE_API_KEY"
+	login "api-key" {
+		auth-url "https://keenable.ai"
+		instructions "Create or copy your API key from the Keenable dashboard (or run `keenable login`)."
+		prompt "Paste your Keenable API key" placeholder="keen_..."
+	}
+}
