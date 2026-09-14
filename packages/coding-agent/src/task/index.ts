@@ -19,6 +19,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import { applyCatalogDescriptionBudget } from "../catalog-budget";
 import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
@@ -129,6 +130,7 @@ interface TaskDescriptionOptions {
 	isolationEnabled: boolean;
 	applyIsolatedChanges: boolean;
 	disabledAgents: string[];
+	agentCatalogDescriptionBudgetChars: number;
 	batchEnabled: boolean;
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
@@ -158,8 +160,9 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	const budgetedAgents = applyCatalogDescriptionBudget(renderedAgents, options.agentCatalogDescriptionBudgetChars);
 	return prompt.render(taskDescriptionTemplate, {
-		agents: renderedAgents,
+		agents: budgetedAgents,
 		scoutAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
@@ -169,7 +172,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		effortEnabled: options.effortEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
 		asyncEnabled: options.asyncEnabled,
-		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
+		hasBlockingAgents: budgetedAgents.some(agent => agent.blocking),
 		ircEnabled: options.ircEnabled,
 	});
 }
@@ -610,6 +613,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
+			agentCatalogDescriptionBudgetChars: this.session.settings.get("task.agentCatalogDescriptionBudgetChars"),
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
