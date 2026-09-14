@@ -46,7 +46,13 @@ export type CodeModelBeforeIdleHandler = (
 	ctx: ExtensionContext,
 ) => Promise<SessionStopEventResult | undefined>;
 
-export type CodeModelBeforeNavigationHandler = (ctx: ExtensionContext) => Promise<{ cancel?: boolean } | undefined>;
+export interface CodeModelNavigationPreparation {
+	cancel?: boolean;
+	rollback?: () => void;
+}
+export type CodeModelBeforeNavigationHandler = (
+	ctx: ExtensionContext,
+) => Promise<CodeModelNavigationPreparation | undefined>;
 export type CodeModelAfterNavigationHandler = (ctx: ExtensionContext) => Promise<void>;
 
 export interface CodeModelSessionHooks {
@@ -344,20 +350,26 @@ export function installCodeModelSession(
 		});
 	}
 
-	async function prepareNavigation(ctx: ExtensionContext) {
-		if (busy) return { cancel: true as const };
+	async function prepareNavigation(ctx: ExtensionContext): Promise<CodeModelNavigationPreparation | undefined> {
+		if (busy) return { cancel: true };
+		const previousState = state ? { ...state } : undefined;
+		const previousReviewPending = reviewPending;
+		const rollback = () => {
+			state = previousState;
+			reviewPending = previousReviewPending;
+		};
 		if (!state) {
 			reviewPending = false;
-			return undefined;
+			return { rollback };
 		}
 		try {
 			await guarded(() => restore(ctx));
 			reviewPending = false;
-			return undefined;
+			return { rollback };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Coding phase recovery failed: ${message} Resolve it before navigating the session.`, "error");
-			return { cancel: true as const };
+			return { cancel: true };
 		}
 	}
 

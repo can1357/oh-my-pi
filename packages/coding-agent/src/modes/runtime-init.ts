@@ -155,6 +155,6 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 	);
 
 	runner.onError(reportRuntimeError);
-	await session.runCodeModelAfterNavigation();
+	await session.runCodeModelAfterNavigation?.();
 	await runner.emit({ type: "session_start" });
 }

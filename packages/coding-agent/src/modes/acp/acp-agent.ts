@@ -2631,7 +2631,7 @@ export class AcpAgent implements Agent {
 			uiContext,
 			"rpc",
 		);
-		await record.session.runCodeModelAfterNavigation();
+		await record.session.runCodeModelAfterNavigation?.();
 		await extensionRunner.emit({ type: "session_start" });
 		record.extensionsConfigured = true;
 	}

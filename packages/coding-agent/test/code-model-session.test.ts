@@ -555,7 +555,9 @@ describe("code-model session phase", () => {
 		).rejects.toThrow("authentication");
 		await finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx);
 		state.setModelAllowed(true);
-		expect(await state.handlers.get(beforeEvent)?.({ type: beforeEvent }, state.ctx)).toBeUndefined();
+		expect(await state.handlers.get(beforeEvent)?.({ type: beforeEvent }, state.ctx)).toMatchObject({
+			rollback: expect.any(Function),
+		});
 		state.branch.splice(0);
 		state.setSessionId("destination-session");
 		await state.handlers.get(afterEvent)?.({ type: afterEvent }, state.ctx);
@@ -597,7 +599,7 @@ describe("code-model session phase", () => {
 			await session.run("start", state.ctx);
 			const prepare = state.handlers.get(beforeEvent);
 			const result = await prepare?.({ type: beforeEvent }, state.ctx);
-			expect(result).toBeUndefined();
+			expect(result).toMatchObject({ rollback: expect.any(Function) });
 			state.branch.splice(0);
 			const recover = state.handlers.get(afterEvent);
 			await recover?.({ type: afterEvent }, state.ctx);

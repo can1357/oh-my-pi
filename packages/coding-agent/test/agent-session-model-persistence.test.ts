@@ -293,6 +293,67 @@ describe("AgentSession model persistence", () => {
 		}
 	});
 
+	it("restores the source cwd when phase recovery cancels switching", async () => {
+		const targetCwd = TempDir.createSync("@pi-model-persistence-target-");
+		try {
+			const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const targetValue = modelValue(targetModel);
+			const targetSessionFile = await writeRoleModelSession(targetValue, targetValue, "default", targetCwd.path());
+			const created = await createSession({
+				codeModelBeforeNavigationHandler: async () => ({ cancel: true }),
+				persist: true,
+			});
+			const sourceCwd = created.session.sessionManager.getCwd();
+			const cwdChanges: Array<[string, string]> = [];
+
+			expect(
+				await created.session.switchSession(targetSessionFile, {
+					onCwdChange: async (newCwd, previousCwd) => {
+						cwdChanges.push([newCwd, previousCwd]);
+						return true;
+					},
+				}),
+			).toBe(false);
+			expect(cwdChanges).toEqual([
+				[targetCwd.path(), sourceCwd],
+				[sourceCwd, targetCwd.path()],
+			]);
+			expect(created.session.sessionManager.getCwd()).toBe(sourceCwd);
+		} finally {
+			targetCwd.removeSync();
+		}
+	});
+
+	it("restores phase state when prepared session commit fails", async () => {
+		const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetValue = modelValue(targetModel);
+		const targetSessionFile = await writeRoleModelSession(targetValue, targetValue, "default");
+		let phaseRollbacks = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => ({
+				rollback: () => {
+					phaseRollbacks++;
+				},
+			}),
+			persist: true,
+		});
+		const beforeSessionFile = created.session.sessionManager.getSessionFile();
+		const prepareSessionFile = created.session.sessionManager.prepareSessionFile.bind(created.session.sessionManager);
+		created.session.sessionManager.prepareSessionFile = async sessionFile => {
+			const prepared = await prepareSessionFile(sessionFile);
+			return {
+				...prepared,
+				commit: async () => {
+					throw new Error("prepared session commit failed");
+				},
+			};
+		};
+
+		await expect(created.session.switchSession(targetSessionFile)).rejects.toThrow("prepared session commit failed");
+		expect(phaseRollbacks).toBe(1);
+		expect(created.session.sessionManager.getSessionFile()).toBe(beforeSessionFile);
+	});
+
 	it("preserves the outgoing phase when tree summarization fails", async () => {
 		let outgoingRestorations = 0;
 		const created = await createSession({

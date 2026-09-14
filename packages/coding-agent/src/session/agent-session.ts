@@ -2123,10 +2123,13 @@ export class AgentSession {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
 
+	async #prepareCodeModelNavigation() {
+		if (!this.#codeModelBeforeNavigationHandler || !this.#extensionRunner) return undefined;
+		return this.#codeModelBeforeNavigationHandler(this.#extensionRunner.createContext());
+	}
+
 	async #codeModelBlocksNavigation(): Promise<boolean> {
-		if (!this.#codeModelBeforeNavigationHandler || !this.#extensionRunner) return false;
-		const result = await this.#codeModelBeforeNavigationHandler(this.#extensionRunner.createContext());
-		return result?.cancel === true;
+		return (await this.#prepareCodeModelNavigation())?.cancel === true;
 	}
 
 	async runCodeModelAfterNavigation(): Promise<void> {
@@ -9152,13 +9155,52 @@ export class AgentSession {
 			if (options?.onCwdChange) {
 				if (path.resolve(targetCwd) !== path.resolve(previousCwd)) {
 					cwdChangeTarget = targetCwd;
-					if (!(await options.onCwdChange(targetCwd, previousCwd))) return false;
+					try {
+						if (!(await options.onCwdChange(targetCwd, previousCwd))) return false;
+					} catch (error) {
+						try {
+							await options.onCwdChange(previousCwd, targetCwd);
+						} catch (rollbackError) {
+							this.beginDispose();
+							throw new Error(
+								`${error instanceof Error ? error.message : String(error)} (cwd rollback failed: ${
+									rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+								}; the process may remain in ${targetCwd})`,
+							);
+						}
+						throw error;
+					}
 				} else if (path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
 					return false;
 				}
 			}
 		}
-		if (await this.#codeModelBlocksNavigation()) return false;
+		const preCodeModelSessionState = this.sessionManager.captureState();
+		const preCodeModelModel = this.model;
+		const preCodeModelThinkingLevel = this.thinkingLevel;
+		const preCodeModelAutoThinking = this.isAutoThinking;
+		const preCodeModelAutoResolvedLevel = this.autoResolvedThinkingLevel();
+		const preCodeModelServiceTierByFamily = this.serviceTierByFamily;
+		const preCodeModelFreshProviderSessionId = this.#freshProviderSessionId;
+		const preCodeModelInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const codeModelPreparation = await this.#prepareCodeModelNavigation();
+		if (codeModelPreparation?.cancel) {
+			if (cwdChangeTarget && options?.onCwdChange) {
+				try {
+					if (!(await options.onCwdChange(previousCwd, cwdChangeTarget))) {
+						throw new Error("cwd rollback was rejected");
+					}
+				} catch (error) {
+					this.beginDispose();
+					throw new Error(
+						`Coding phase recovery cancelled session switching, and cwd rollback failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+			return false;
+		}
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -9387,9 +9429,13 @@ export class AgentSession {
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			return true;
 		} catch (error) {
-			this.sessionManager.restoreState(previousSessionState);
-			this.#freshProviderSessionId = previousFreshProviderSessionId;
-			this.#syncAgentSessionId(previousSessionState.sessionId, false);
+			const restorePreCodeModelState = codeModelPreparation?.rollback !== undefined;
+			const sessionStateToRestore = restorePreCodeModelState ? preCodeModelSessionState : previousSessionState;
+			this.sessionManager.restoreState(sessionStateToRestore);
+			this.#freshProviderSessionId = restorePreCodeModelState
+				? preCodeModelFreshProviderSessionId
+				: previousFreshProviderSessionId;
+			this.#syncAgentSessionId(sessionStateToRestore.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
@@ -9406,7 +9452,9 @@ export class AgentSession {
 			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
 			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
-			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+			this.#inheritedProviderPromptCacheKey = restorePreCodeModelState
+				? preCodeModelInheritedProviderPromptCacheKey
+				: previousInheritedProviderPromptCacheKey;
 			this.#checkpointState = previousCheckpointState;
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;
@@ -9423,14 +9471,22 @@ export class AgentSession {
 			// here — before the target session's thinking level is unwound —
 			// would push a { previousModel, target-session-thinking } config that
 			// was never a real session state.
+			const modelToRestore = restorePreCodeModelState ? preCodeModelModel : previousModel;
 			let modelRolledBack = false;
-			if (previousModel) {
+			if (modelToRestore) {
 				const rolledBackModel = this.model;
-				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				this.agent.setModel(modelToRestore);
+				modelRolledBack = !modelsAreEqual(rolledBackModel, modelToRestore);
 			}
-			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
-			this.#models.restoreServiceTiers(previousServiceTierByFamily);
+			this.#models.restoreThinkingSnapshot(
+				restorePreCodeModelState ? preCodeModelThinkingLevel : previousThinkingLevel,
+				restorePreCodeModelState ? preCodeModelAutoThinking : previousAutoThinking,
+				restorePreCodeModelState ? preCodeModelAutoResolvedLevel : previousAutoResolvedLevel,
+			);
+			this.#models.restoreServiceTiers(
+				restorePreCodeModelState ? preCodeModelServiceTierByFamily : previousServiceTierByFamily,
+			);
+			codeModelPreparation?.rollback?.();
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}

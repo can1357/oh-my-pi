@@ -187,7 +187,9 @@ export interface AgentSessionConfig {
 		ctx: ExtensionContext,
 	) => Promise<SessionStopEventResult | undefined>;
 	/** Built-in code-model restoration that completes after public navigation acceptance and before mutation. */
-	codeModelBeforeNavigationHandler?: (ctx: ExtensionContext) => Promise<{ cancel?: boolean } | undefined>;
+	codeModelBeforeNavigationHandler?: (
+		ctx: ExtensionContext,
+	) => Promise<{ cancel?: boolean; rollback?: () => void } | undefined>;
 	/** Built-in code-model recovery that completes after navigation mutates the transcript. */
 	codeModelAfterNavigationHandler?: (ctx: ExtensionContext) => Promise<void>;
 	/** Returns the current enabled eval prelude definitions. */

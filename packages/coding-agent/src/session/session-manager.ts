@@ -482,6 +482,7 @@ export class SessionManager {
 	#sessionDir: string;
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
+	readonly #preparedSessionLoads = new Map<string, SessionLoadResult>();
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
@@ -1427,7 +1428,14 @@ export class SessionManager {
 		return {
 			cwd,
 			recordedCwd,
-			commit: () => this.#setSessionFile(resolvedSessionFile, loaded),
+			commit: async () => {
+				this.#preparedSessionLoads.set(resolvedSessionFile, loaded);
+				try {
+					await this.setSessionFile(resolvedSessionFile);
+				} finally {
+					this.#preparedSessionLoads.delete(resolvedSessionFile);
+				}
+			},
 		};
 	}
 
@@ -1442,7 +1450,10 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		const loaded =
+			loadedSession ??
+			this.#preparedSessionLoads.get(resolvedSessionFile) ??
+			(await loadSessionFile(resolvedSessionFile, this.#storage));
 		if (loaded.invalidHeader) {
 			throw new Error(
 				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
