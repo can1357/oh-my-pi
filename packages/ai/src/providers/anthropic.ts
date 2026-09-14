@@ -10,12 +10,15 @@ import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
+	CREDIBLE_RATE_LIMIT_HINT_MS,
+	extractRetryHint,
 	getInstallId,
 	isEnoent,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
 	readSseEvents,
+	MAX_RATE_LIMIT_ATTEMPTS,
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -1519,6 +1522,12 @@ const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
  * error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
  * structured type rather than incidental JSON substrings.
+ *
+ * A `rate_limit_error` frame rides a 200 stream, so it carries no HTTP status
+ * of its own. It is given one at construction: without it the failure reads as
+ * generic transient rate-limit text and the provider loop replays a saturated
+ * route up to {@link PROVIDER_MAX_RETRIES} times instead of handing it to
+ * session recovery, exactly as a wire 429 would be handled.
  */
 function createAnthropicSseStreamError(data: string): Error {
 	try {
@@ -1526,10 +1535,13 @@ function createAnthropicSseStreamError(data: string): Error {
 		const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
 		const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
 		if (message) {
-			return new AIError.ProviderResponseError(
-				errorType ? `Anthropic stream error (${errorType}): ${message}` : `Anthropic stream error: ${message}`,
-				{ provider: "anthropic", kind: "output" },
-			);
+			const detail = errorType
+				? `Anthropic stream error (${errorType}): ${message}`
+				: `Anthropic stream error: ${message}`;
+			if (errorType === "rate_limit_error") {
+				return new AIError.ProviderHttpError(detail, 429, { code: errorType });
+			}
+			return new AIError.ProviderResponseError(detail, { provider: "anthropic", kind: "output" });
 		}
 	} catch {
 		// Not a JSON envelope; fall through to the raw payload.
@@ -2455,6 +2467,7 @@ const streamAnthropicOnce = (
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
+			const transportOwnsRateLimitBudget = client instanceof AnthropicMessagesClient;
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
@@ -2642,6 +2655,7 @@ const streamAnthropicOnce = (
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
 			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
+			let providerRateLimitRetries = 0;
 			const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream timed out while waiting for the first event",
 			);
@@ -2690,6 +2704,7 @@ const streamAnthropicOnce = (
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
+					rateLimitBudget: true,
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
 				const anthropicRequest: unknown =
@@ -3390,12 +3405,33 @@ const streamAnthropicOnce = (
 					const isLocalIdleTimeout =
 						streamFailure === idleTimeoutAbortError ||
 						(streamFailure instanceof Error && streamFailure.message === idleTimeoutAbortError.message);
+					const rateLimited = AIError.status(streamFailure) === 429;
+					const headerRetryHintMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					const retryHintMs =
+						headerRetryHintMs ??
+						extractRetryHint(undefined, streamFailure instanceof Error ? streamFailure.message : undefined);
+					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
+					const rateLimitHintCapMs =
+						maxRetryDelayMs > 0
+							? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS)
+							: CREDIBLE_RATE_LIMIT_HINT_MS;
+					const transportSpentRateLimitBudget =
+						transportOwnsRateLimitBudget && streamFailure instanceof AIError.AnthropicApiError;
+					// Injected SDK failures and in-band rate-limit frames bypass
+					// the built-in HTTP transport budget. Spend the same budget here.
+					const canRetryUnspentRateLimit =
+						rateLimited &&
+						!transportSpentRateLimitBudget &&
+						!AIError.isUsageLimit(streamFailure) &&
+						providerRateLimitRetries < MAX_RATE_LIMIT_ATTEMPTS - 1 &&
+						retryHintMs !== undefined &&
+						retryHintMs <= rateLimitHintCapMs;
 					const canRetryTransientEnvelopeFailure = isTransientEnvelopeFailure && !streamedReplayUnsafeContent;
 					const canRetryProviderFailure =
 						!isLocalIdleTimeout &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						AIError.isProviderRetryableError(streamFailure);
+						(canRetryUnspentRateLimit || AIError.isProviderRetryableError(streamFailure));
 					if (
 						activeAbortTracker.wasCallerAbort() ||
 						providerRetryAttempt >= PROVIDER_MAX_RETRIES ||
@@ -3403,20 +3439,19 @@ const streamAnthropicOnce = (
 					) {
 						throw streamFailure;
 					}
+					if (rateLimited) providerRateLimitRetries++;
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
 					// 429/529-style failures: retrying sooner than the server asked is a
 					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
-					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-					if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
+					if (retryHintMs !== undefined && maxRetryDelayMs > 0 && retryHintMs > maxRetryDelayMs) {
 						throw streamFailure;
 					}
-					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
+					const delayMs = retryHintMs !== undefined ? Math.max(retryHintMs, backoffDelayMs) : backoffDelayMs;
 					if (options?.providerRetryWait) {
 						await options.providerRetryWait(delayMs, options.signal);
 					} else {
