@@ -1415,13 +1415,20 @@ export class SessionManager {
 		commit: () => Promise<void>;
 	}> {
 		const resolvedSessionFile = path.resolve(sessionFile);
+		const currentCwd = path.resolve(this.#cwd);
+		if (!this.#storage.existsSync(resolvedSessionFile)) {
+			return {
+				cwd: currentCwd,
+				recordedCwd: currentCwd,
+				commit: () => this.setSessionFile(resolvedSessionFile),
+			};
+		}
 		const loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
 		if (loaded.invalidHeader) {
 			throw new Error(
 				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
 			);
 		}
-		const currentCwd = path.resolve(this.#cwd);
 		const header = loaded.entries[0]?.type === "session" ? loaded.entries[0] : undefined;
 		const recordedCwd = header?.cwd ? path.resolve(header.cwd) : currentCwd;
 		const cwd = recordedCwd !== currentCwd && (await directoryIsEnterable(recordedCwd)) ? recordedCwd : currentCwd;
