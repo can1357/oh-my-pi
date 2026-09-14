@@ -1372,14 +1372,19 @@ export class RelayBridge {
 						this.#scheduleLiveSubscriptionReconcile(tab, [
 							{ key: subscriptionKey, previous: undefined, next: current },
 						]);
-					} else if (subscriptionKey && previousSubscription && this.#interruptedClearKey(msg)) {
-						// Recovery may have replayed the old journal entry before this clear
-						// completed on the detached root. Apply the successful clear to the
-						// replacement root as well, even though recording it removed `current`.
-						if (tab.restoring) tab.resumeSubscriptionReconcileAfterRestore = true;
-						this.#scheduleLiveSubscriptionReconcile(tab, [
-							{ key: subscriptionKey, previous: previousSubscription, next: undefined },
-						]);
+					} else if (subscriptionKey && previousSubscription) {
+						const clearedFields = subscriptionClearedFields(subscriptionKey, msg.params);
+						const clearsSubscription = this.#interruptedClearKey(msg) !== undefined;
+						if (clearsSubscription || clearedFields) {
+							// Recovery may have replayed the old journal entry before this clear
+							// completed on the detached root. Apply the successful clear to the
+							// replacement root as well, including field-level emulated-media clears.
+							const next = clearedFields ? this.#latestSubscriptionForKey(tab, subscriptionKey) : undefined;
+							if (tab.restoring) tab.resumeSubscriptionReconcileAfterRestore = true;
+							this.#scheduleLiveSubscriptionReconcile(tab, [
+								{ key: subscriptionKey, previous: previousSubscription, next },
+							]);
+						}
 					}
 				}
 			}

@@ -3334,6 +3334,106 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("reapplies a partial media clear that completes after root replacement", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+		const refresher = new FakeCdpSocket();
+		const refresherConn = bridge.cdpConnected(refresher);
+		const refresherSession = await attachPage(bridge, ext, refresher, refresherConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { media: "print", features: [{ name: "prefers-color-scheme", value: "dark" }] },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "initial media setter");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			refresherConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: refresherSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "hardware-concurrency override");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { media: "" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "in-flight media clear");
+
+		bridge.cdpClosed(refresherConn);
+		await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach");
+		ack(bridge, ext, "detach");
+		await waitFor(() => ext.pending("attach").length === 1, "replacement attach");
+		ack(bridge, ext, "attach");
+		await waitFor(
+			() =>
+				ext.pending("send").some(rpc => {
+					const params = rpc.params as { media?: string; features?: unknown[] } | undefined;
+					return rpc.method === "Emulation.setEmulatedMedia" && params?.media === "print";
+				}),
+			"stale media replay",
+		);
+		const replay = ext.pending("send").find(rpc => {
+			const params = rpc.params as { media?: string } | undefined;
+			return rpc.method === "Emulation.setEmulatedMedia" && params?.media === "print";
+		})!;
+		ext.markAcked(replay.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: replay.id, ok: true, result: {} }));
+		await flush();
+
+		const oldClear = ext.pending("send").find(rpc => {
+			const params = rpc.params as { media?: string; features?: unknown[] } | undefined;
+			return params?.media === "" && params.features === undefined;
+		})!;
+		ext.markAcked(oldClear.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: oldClear.id, ok: true, result: {} }));
+		await waitFor(
+			() =>
+				ext.pending("send").some(rpc => {
+					const params = rpc.params as { media?: string; features?: unknown[] } | undefined;
+					return rpc.id !== oldClear.id && params?.media === "" && Array.isArray(params.features);
+				}),
+			"replacement-root partial media clear",
+		);
+		expect(
+			ext.pending("send").find(rpc => {
+				const params = rpc.params as { media?: string; features?: unknown[] } | undefined;
+				return rpc.id !== oldClear.id && params?.media === "" && Array.isArray(params.features);
+			}),
+		).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+	});
+
 	it("preserves dispatch order when a full media reset reply arrives out of order", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
