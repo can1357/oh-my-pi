@@ -248,21 +248,23 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
-	/** Returns unique prompts ordered by their most recent submission, restricted to `scope`. */
+	/**
+	 * Returns unique prompts ordered by their most recent submission, restricted to `scope`.
+	 *
+	 * Throws when the handle is unusable or the statement fails, so a caller that can recover
+	 * does: the editor's history seed retries on the next browse instead of replacing the list
+	 * with an empty one. {@link search} deliberately keeps degrading to no results — its
+	 * `matchingSessionIds` caller ranks a picker and has nothing to retry.
+	 */
 	getRecent(limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		try {
-			const clause = this.#scopeClause(scope);
-			const rows = this.#prepare(
-				`SELECT id, prompt, created_at, cwd, session_id FROM history ${clause.where} ORDER BY created_at DESC, id DESC LIMIT ?`,
-			).all(...clause.params, safeLimit) as HistoryRow[];
-			return rows.map(row => this.#toEntry(row));
-		} catch (error) {
-			logger.error("HistoryStorage getRecent failed", { error: String(error) });
-			return [];
-		}
+		const clause = this.#scopeClause(scope);
+		const rows = this.#prepare(
+			`SELECT id, prompt, created_at, cwd, session_id FROM history ${clause.where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+		).all(...clause.params, safeLimit) as HistoryRow[];
+		return rows.map(row => this.#toEntry(row));
 	}
 
 	/** Finds unique prompts matching every query token, newest first, restricted to `scope`. */

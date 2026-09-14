@@ -137,6 +137,29 @@ describe("HistorySearchComponent", () => {
 		expect(render(component).plain).toContain("History (this session)");
 	});
 
+	it("contains a failing read instead of letting it escape a keystroke", () => {
+		const failing = {
+			getRecent: () => {
+				throw new Error("read failed");
+			},
+			search: () => {
+				throw new Error("read failed");
+			},
+		} as unknown as HistoryStorage;
+		const component = new HistorySearchComponent(
+			failing,
+			ALL_SCOPES,
+			() => {},
+			() => {},
+		);
+
+		// Switching scope re-reads: the panel must show its empty state, not throw out of the key
+		// handler it runs inside.
+		component.handleInput("\t");
+		type(component, "deploy");
+		expect(render(component).plain).toContain(`No matching history in ${HISTORY_SCOPE_LABELS.cwd}`);
+	});
+
 	it("drops the Tab hint when the ring has a single scope", () => {
 		const component = new HistorySearchComponent(
 			scopedStorage({}),

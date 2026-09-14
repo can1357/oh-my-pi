@@ -220,6 +220,8 @@ describe("Editor component", () => {
 					getRecent: () => {
 						if (failNextRead) {
 							failNextRead = false;
+							// `HistoryStorage.getRecent` reports a failed read by throwing, so a broken
+							// handle must not look like "this context has no history".
 							throw new Error("storage read failed");
 						}
 						return byKey[key] ?? [];
@@ -231,11 +233,13 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A");
 			expect(editor.getText()).toBe("prompt from the first context");
 
-			// The read fails while the context is moving: the failure must not pin the old data set.
 			key = "second";
 			failNextRead = true;
 			editor.setText("");
-			expect(() => editor.handleInput("\x1b[A")).toThrow("storage read failed");
+			// The failed read is contained: it neither escapes the keystroke handler nor clears the
+			// list, and its data set stays unpublished.
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the first context");
 
 			editor.handleInput("\x1b[A");
 			expect(editor.getText()).toBe("prompt from the second context");

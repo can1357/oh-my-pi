@@ -9,6 +9,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import {
 	matchesAppInterrupt,
@@ -304,9 +305,18 @@ export class HistorySearchComponent extends OverlayPanel {
 	#updateResults(): void {
 		const query = this.#searchInput.getValue().trim();
 		const scope = this.#scopeAt(this.#scopeIndex);
-		this.#results = query
-			? this.#historyStorage.search(query, this.#resultLimit, scope)
-			: this.#historyStorage.getRecent(this.#resultLimit, scope);
+		// A failing read must not surface inside this keystroke handler: the panel shows no results
+		// and the next keystroke tries again. `getRecent` reports its failure by throwing, which the
+		// editor's history seed uses to retry instead of clearing its list.
+		let results: HistoryEntry[] = [];
+		try {
+			results = query
+				? this.#historyStorage.search(query, this.#resultLimit, scope)
+				: this.#historyStorage.getRecent(this.#resultLimit, scope);
+		} catch (error) {
+			logger.warn("History search read failed", { error: String(error) });
+		}
+		this.#results = results;
 		this.#selectedIndex = 0;
 		const nextScope = HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind];
 		const widen = this.#scopes.length > 1 ? ` Press Tab for ${nextScope}.` : "";

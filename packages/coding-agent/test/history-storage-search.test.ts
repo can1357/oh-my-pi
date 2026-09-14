@@ -32,14 +32,15 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
-	it("returns no results instead of throwing once the handle is closed", async () => {
+	it("fails a closed handle as a thrown recent read and a quiet search", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["deploy the service"]);
 		HistoryStorage.close();
 
-		// Both read paths must degrade quietly: a throwing search would surface inside a
-		// keystroke handler of the history panel.
-		expect(storage.getRecent(10)).toEqual([]);
+		// `getRecent` reports its failure so the editor's seed can retry; `search` degrades quietly
+		// because its resume-picker caller has nothing to retry with. Neither may return the whole
+		// table or another scope's rows.
+		expect(() => storage.getRecent(10)).toThrow();
 		expect(storage.search("deploy", 10)).toEqual([]);
 	});
 

@@ -888,7 +888,9 @@ export class Editor implements Component, Focusable {
 		}
 		// Publish the key before the read so a storage that re-enters the editor cannot start a
 		// second seed for the same change, and put the previous one back if the read fails: the
-		// next browse must retry this data set rather than serve the list it was replacing.
+		// next browse must retry this data set rather than serve the list it was replacing. The
+		// failure is contained here — a read must never escape a keystroke handler — and the seed
+		// keeps the list it has until a read succeeds.
 		const previousKey = this.#historySourceKeyValue;
 		this.#historySourceKeyValue = key;
 		let recent: HistoryEntry[];
@@ -896,7 +898,8 @@ export class Editor implements Component, Focusable {
 			recent = storage.getRecent(HISTORY_LIMIT);
 		} catch (error) {
 			this.#historySourceKeyValue = previousKey;
-			throw error;
+			logger.warn("History re-seed failed", { error: String(error) });
+			return;
 		}
 		// Nothing below can fail, so the list and the key it belongs to change together.
 		const drafts = this.#history.filter(entry => entry.draft !== undefined);
