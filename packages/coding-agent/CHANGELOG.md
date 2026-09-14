@@ -7,6 +7,11 @@
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
+### Added
+
+- Added `omp sessions list` for listing saved sessions in the current project or all projects ([#11025](https://github.com/can1357/oh-my-pi/pull/11025) by [@kearril](https://github.com/kearril)).
+- Added `omp sessions roots` and `omp sessions list --cwd <path>` for browsing session work directories ([#11025](https://github.com/can1357/oh-my-pi/pull/11025) by [@kearril](https://github.com/kearril)).
+
 ### Changed
 
 - Pressing `c` on a `/btw` answer now shows a green "✓ Copied to clipboard" confirmation in the panel and history detail, and BTW history accepts `Ctrl+/` to switch panes ([#12052](https://github.com/can1357/oh-my-pi/pull/12052) by [@H4vC](https://github.com/H4vC)).
