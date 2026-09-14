@@ -66,6 +66,23 @@ describe("job renderer task-result preview", () => {
 		expect(output).not.toContain("<output>");
 	});
 
+	it("preserves merge summaries after the envelope output", () => {
+		const summary = prompt.render(taskSummaryTemplate, {
+			agentName: "task",
+			id: "MergedTask",
+			status: "completed",
+			duration: "12s",
+			preview: "Implemented the requested change.",
+			truncated: false,
+			mergeSummary: "Merged 2 files into the parent worktree.",
+		});
+		const output = renderLines(summary);
+		expect(output).toContain("Implemented the requested change.");
+		expect(output).toContain("Merged 2 files into the parent worktree.");
+		expect(output).not.toContain("<merge-summary>");
+		expect(output).not.toContain("<task-result");
+	});
+
 	it("previews the truncated <preview> body the same way", () => {
 		const summary = prompt.render(taskSummaryTemplate, {
 			agentName: "task",

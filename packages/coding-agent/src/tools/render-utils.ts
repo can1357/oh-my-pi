@@ -835,33 +835,57 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	}
 	return filePath;
 }
-
-/** Shorten home-prefixed paths inside free text, preserving surrounding
- * punctuation so error strings with embedded paths stay readable. */
-export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
-	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
-	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const homePattern = new RegExp(
-		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
-		windowsStyle ? "gi" : "g",
+/** Shortens home-directory prefixes embedded in display-only path tokens. */
+export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
+	if (!text) return text;
+	const home = homeDir ?? os.homedir();
+	if (!home) return text;
+	const windowsHome = /^[A-Za-z]:[\\/]|^\\\\/.test(home);
+	const escapedHome = windowsHome
+		? home
+				.split(/[\\/]/)
+				.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+				.join("[\\\\/]")
+		: home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const flags = windowsHome ? "gi" : "g";
+	const tokenBoundary = String.raw`[\s"'\x60([{=(:,;<>&|*_]`;
+	return text.replace(
+		new RegExp(
+			`(^|${tokenBoundary})${escapedHome}(?=$|[/\\\\\\s"'\\]),;:\\x60<>&|*_]|\\.(?=$|[\\s"'\\]),;:\\x60<>&|*_]))([/\\\\][^\\s"'\\x60<>&|:;,=([{*_]*)?`,
+			flags,
+		),
+		(_match, boundary: string, suffix = "") =>
+			`${boundary}~${windowsHome ? suffix.replaceAll(path.win32.sep, path.posix.sep) : suffix}`,
 	);
-	const textWithShortenedHome =
-		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
-	return textWithShortenedHome
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			const shortened = shortenPath(segment.slice(leading.length, end), homeDir);
-			const normalized = shortened.startsWith("~")
-				? shortened.replaceAll(path.win32.sep, path.posix.sep)
-				: shortened;
-			return `${leading}${normalized}${trailing}`;
-		})
-		.join(" ");
+}
+
+/** Shorten filesystem and command arguments without rewriting literal search patterns. */
+export function shortenToolArgumentPaths(text: string, key: string | undefined, homeDir?: string): string {
+	if (key === "url") {
+		try {
+			const url = new URL(text);
+			if (url.protocol === "file:") {
+				let decodedPath = url.pathname;
+				try {
+					decodedPath = decodeURIComponent(decodedPath);
+				} catch {
+					/* Retain malformed percent escapes as literal path bytes. */
+				}
+				const filePath = url.hostname
+					? `//${url.hostname}${decodedPath}`
+					: /^[A-Za-z]:$/.test(decodedPath.slice(1, 3))
+						? decodedPath.slice(1)
+						: decodedPath;
+				return shortenEmbeddedPaths(filePath, homeDir);
+			}
+		} catch {
+			// Preserve malformed and non-file URL arguments verbatim.
+		}
+		return text;
+	}
+	return key === "path" || key === "file_path" || key === "command" || key === "task" || key === "prompt"
+		? shortenEmbeddedPaths(text, homeDir)
+		: text;
 }
 
 /** Sanitize warning text before showing it in TUI, including embedded home paths. */

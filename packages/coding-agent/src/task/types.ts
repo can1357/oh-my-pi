@@ -426,8 +426,10 @@ export interface AgentProgress {
 	lastIntent?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
+	/** Argument key selected for the display preview, when known. */
+	currentToolArgsKey?: string;
 	currentToolStartMs?: number;
-	recentTools: Array<{ tool: string; args: string; endMs: number }>;
+	recentTools: Array<{ tool: string; args: string; argsKey?: string; isError?: boolean; endMs: number }>;
 	recentOutput: string[];
 	toolCount: number;
 	/** Count of assistant requests (assistant message_end events) across the run. Drives the soft request budget guard. */

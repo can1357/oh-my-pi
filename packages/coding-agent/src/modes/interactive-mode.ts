@@ -139,6 +139,7 @@ import {
 	replaceTabs,
 	shortenEmbeddedPaths,
 	shortenPath,
+	shortenToolArgumentPaths,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../tools/render-utils";
@@ -511,17 +512,28 @@ function isHudSubagent(session: ObservableSession): boolean {
  * from measured wrapped heights: continuation rows belong to the agent (or
  * toggle) whose logical row started them.
  */
+export interface SubagentHudLines extends Array<string> {
+	owners?: readonly (string | undefined)[];
+}
+
 export class SubagentHudComponent implements Component {
 	readonly #text: Text;
 	readonly #lines: readonly string[];
 	readonly #order: readonly string[];
 	readonly #toggleLine: number | undefined;
+	readonly #lineOwners: readonly (string | undefined)[] | undefined;
 	#physicalOwner: (string | undefined)[] = [];
-	constructor(lines: readonly string[], order: readonly string[], toggleRow?: number) {
+	constructor(
+		lines: readonly string[] & { readonly owners?: readonly (string | undefined)[] },
+		order: readonly string[],
+		toggleRow?: number,
+		lineOwners?: readonly (string | undefined)[],
+	) {
 		this.#text = new Text(lines.join("\n"), 1, 0);
 		this.#lines = lines;
 		this.#order = order;
 		this.#toggleLine = toggleRow;
+		this.#lineOwners = lineOwners ?? lines.owners;
 	}
 	render(width: number): readonly string[] {
 		const rows = this.#text.render(width);
@@ -531,32 +543,29 @@ export class SubagentHudComponent implements Component {
 	getClickAgentAtRow(row: number): string | undefined {
 		return row >= 0 && row < this.#physicalOwner.length ? this.#physicalOwner[row] : undefined;
 	}
-	// Native wrap splits paragraphs independently, so per-line wrapped
-	// heights compose exactly to the rendered row count. A length mismatch
-	// means the wrap contract drifted: fall back to one row per line (the
-	// old mapping) rather than misrouting clicks.
 	#rebuildHitMap(width: number, renderedRows: number): void {
 		const contentWidth = Math.max(1, width - getPaddingX(1) * 2);
 		const owner: (string | undefined)[] = [];
 		for (let index = 0; index < this.#lines.length; index++) {
 			const height = wrapTextWithAnsi(replaceTabs(this.#lines[index]!), contentWidth).length;
-			let id: string | undefined;
-			if (this.#toggleLine !== undefined && index === this.#toggleLine) id = PINNED_HUD_TOGGLE_ID;
-			else {
+			let id = this.#lineOwners?.[index];
+			if (id === undefined && this.#toggleLine !== undefined && index === this.#toggleLine)
+				id = PINNED_HUD_TOGGLE_ID;
+			if (id === undefined && this.#lineOwners === undefined) {
 				const orderIndex = index - 2;
 				id = orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
 			}
 			for (let row = 0; row < height; row++) owner.push(id);
 		}
-		if (owner.length !== renderedRows) {
-			this.#physicalOwner = this.#lines.map((_line, index) => {
-				if (this.#toggleLine !== undefined && index === this.#toggleLine) return PINNED_HUD_TOGGLE_ID;
-				const orderIndex = index - 2;
-				return orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
-			});
-			return;
-		}
-		this.#physicalOwner = owner;
+		this.#physicalOwner =
+			owner.length === renderedRows
+				? owner
+				: this.#lines.map((_line, index) => {
+						if (this.#lineOwners?.[index] !== undefined) return this.#lineOwners[index];
+						if (this.#toggleLine !== undefined && index === this.#toggleLine) return PINNED_HUD_TOGGLE_ID;
+						const orderIndex = index - 2;
+						return orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
+					});
 	}
 }
 
@@ -571,7 +580,7 @@ export interface PinnedHudLayout {
 	itemRows: number;
 	/** Expander direction, or undefined when the list fits without one. */
 	toggle: "expand" | "collapse" | undefined;
-	/** Viewport row of the expander within HUD lines (2 header rows + items). */
+	/** Toggle row for single-line items; multiline renderers provide explicit row ownership. */
 	toggleRow: number | undefined;
 }
 
@@ -601,14 +610,20 @@ export function layoutPinnedHud(runningTotal: number, expanded: boolean): Pinned
  * calls alike — so the pinned block doubles as a click jump list.
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number, expanded = false): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	expanded = false,
+	showResolvedModelBadge = isFeedModelBadgeEnabled(),
+): SubagentHudLines {
 	const running = sessions.filter(isHudSubagent);
 	if (running.length === 0) return [];
 	const layout = layoutPinnedHud(running.length, expanded);
 	const dot = theme.styledSymbol("status.done", "accent");
 	const items = running.slice(0, layout.itemRows);
-	const showModelBadge = isFeedModelBadgeEnabled();
+	const showModelBadge = showResolvedModelBadge;
 	const outerIndent = " ";
+	const lineOwners: (string | undefined)[] = [undefined, undefined];
 	const rows = renderTreeList(
 		{
 			items,
@@ -636,25 +651,47 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 					: "";
 				const modelLead = modelBadge ? `${modelBadge} ` : "";
 				let line = `${dot} ${modelLead}${theme.fg("accent", theme.bold(displayId))}${badge}`;
-				const description = session.description?.trim() || session.progress?.description?.trim();
-				const distinctDescription =
-					description && !labelEchoesHandle(session.id, description) ? description : undefined;
-				if (distinctDescription) {
+				let description = session.progress?.lastIntent?.trim();
+				if (!description || labelEchoesHandle(session.id, description))
+					description = session.progress?.description?.trim();
+				if (!description || labelEchoesHandle(session.id, description)) description = session.description?.trim();
+				if (!description || labelEchoesHandle(session.id, description))
+					description = session.progress?.assignment?.trim();
+				if (!description || labelEchoesHandle(session.id, description))
+					description = session.progress?.task?.trim();
+				if (description && labelEchoesHandle(session.id, description)) description = undefined;
+				if (description) {
 					const budget = Math.max(0, rowWidth - visibleWidth(line) - visibleWidth(": "));
-					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-					if (budget > 0) {
+					const formatted = replaceTabs(shortenEmbeddedPaths(sanitizeText(description))).replace(
+						/\s*[\r\n]+\s*/g,
+						" ",
+					);
+					if (budget > 0)
 						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
-					}
-				} else {
-					// No spawn description: fall back to a muted task preview, same as
-					// the inline task rows when a row has no label.
-					const taskPreview = session.progress?.task?.trim();
-					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
-						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
-						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
-					}
 				}
+				const currentTool = session.progress?.currentTool?.trim();
+				const lastTool = currentTool ? undefined : session.progress?.recentTools[0];
+				const toolName = currentTool || lastTool?.tool;
+				if (toolName) {
+					const rawArgs = currentTool ? session.progress?.currentToolArgs?.trim() : lastTool?.args.trim();
+					const args =
+						rawArgs === undefined ? undefined : replaceTabs(sanitizeText(rawArgs)).replace(/\s*[\r\n]+\s*/g, " ");
+					const argsKey = currentTool ? session.progress?.currentToolArgsKey : lastTool?.argsKey;
+					const displayArgs = shortenToolArgumentPaths(args ?? "", argsKey);
+					const cleanName = replaceTabs(sanitizeText(toolName)).replace(/\s*[\r\n]+\s*/g, " ");
+					const toolText = displayArgs ? `${cleanName}(${displayArgs})` : cleanName;
+					const toolLabel = lastTool
+						? `${theme.styledSymbol(lastTool.isError ? "status.error" : "status.success", lastTool.isError ? "error" : "success")} ${toolText}`
+						: toolText;
+					const lead = `${theme.tree.hook} `;
+					const itemRows = [
+						truncateToWidth(line, rowWidth, ""),
+						`${lead}${theme.fg("dim", truncateToWidth(toolLabel, Math.max(0, rowWidth - visibleWidth(lead)), ""))}`,
+					];
+					lineOwners.push(session.id, session.id);
+					return itemRows;
+				}
+				lineOwners.push(session.id);
 				return truncateToWidth(line, rowWidth, "");
 			},
 		},
@@ -673,12 +710,15 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 						"",
 					),
 				];
-	return [
+	const result: SubagentHudLines = [
 		"",
 		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), columns),
 		...rows.map(line => truncateToWidth(`${outerIndent}${line}`, columns, "")),
 		...toggleRow,
 	];
+	if (toggleRow.length > 0) lineOwners.push(PINNED_HUD_TOGGLE_ID);
+	result.owners = lineOwners;
+	return result;
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -1588,6 +1628,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			onStatusLineSessionAccentChanged(() => {
 				this.#syncStatusLineSettings();
 				this.#handleSessionAccentInputsChanged();
+			}),
+		);
+		this.#eventBusUnsubscribers.push(
+			this.settings.onEffectiveChange(path => {
+				if (path === "task.showResolvedModelBadge") {
+					this.#renderSubagentList();
+					this.ui.requestRender();
+				}
 			}),
 		);
 		// Resync the welcome banner to the live model: init-time reconciliations
@@ -2907,6 +2955,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
+		if (kind === "tool") {
+			if (this.#observerUiSyncTimer) {
+				clearTimeout(this.#observerUiSyncTimer);
+				this.#observerUiSyncTimer = undefined;
+			}
+			this.#flushObserverUiSync();
+			return;
+		}
 		if (kind !== "progress") {
 			this.#observerUiSyncNeedsTodoReconcile = true;
 		}
@@ -3170,11 +3226,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessions = this.#observerRegistry.getSessions();
 		const running = sessions.filter(isHudSubagent);
 		const expanded = this.#pinnedHudOverride ?? mode === "full";
-		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded);
+		const lines = renderSubagentHudLines(
+			sessions,
+			this.ui.terminal.columns,
+			expanded,
+			this.settings.get("task.showResolvedModelBadge"),
+		);
 		if (lines.length === 0) return;
-		const layout = layoutPinnedHud(running.length, expanded);
 		const order = running.map(session => session.id);
-		this.subagentContainer.addChild(new SubagentHudComponent(lines, order, layout.toggleRow));
+		this.subagentContainer.addChild(new SubagentHudComponent(lines, order));
 	}
 
 	#vibeParentSession(): VibeParentSession {

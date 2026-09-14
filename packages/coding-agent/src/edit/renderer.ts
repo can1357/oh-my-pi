@@ -656,6 +656,28 @@ function getHashlineInputSections(input: string): HashlineInputEntry[] {
 	return entries;
 }
 
+/** Extract display targets using the existing parsers for supported freeform edit modes. */
+export function getEditInputPaths(input: string, resolvedMode?: EditMode): readonly string[] {
+	const mode =
+		resolvedMode ??
+		(/^\*\*\* (?:Add|Update|Delete) File:/m.test(input)
+			? "apply_patch"
+			: /^\s*<SM:/im.test(input)
+				? "sloppy"
+				: undefined);
+	try {
+		const entries = mode && mode !== "hashline" ? inspectInputEntries(mode, input) : getHashlineInputSections(input);
+		const paths: string[] = [];
+		for (const entry of entries) {
+			if (entry.path) paths.push(entry.path);
+			if (entry.rename && entry.rename !== entry.path) paths.push(entry.rename);
+		}
+		return paths;
+	} catch {
+		return [];
+	}
+}
+
 function getHashlineInputRenderSummary(
 	args: EditRenderArgs,
 	editMode: EditMode | undefined,

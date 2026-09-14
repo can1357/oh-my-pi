@@ -20,6 +20,7 @@ import {
 	sanitizeDisplayWarnings,
 	shortenEmbeddedPaths,
 	shortenPath,
+	shortenToolArgumentPaths,
 	TRUNCATE_LENGTHS,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -29,6 +30,64 @@ import {
 	setKeybindings,
 	type KeybindingsManager as TuiKeybindingsManager,
 } from "@oh-my-pi/pi-tui";
+
+describe("embedded home path normalization", () => {
+	it("shortens every adjacent home path in path lists", () => {
+		expect(shortenEmbeddedPaths("PATH=/home/alice/bin:/home/alice/.local/bin", "/home/alice")).toBe(
+			"PATH=~/bin:~/.local/bin",
+		);
+		expect(shortenEmbeddedPaths("Compare /home/alice/a,/home/alice/b=/home/alice/c", "/home/alice")).toBe(
+			"Compare ~/a,~/b=~/c",
+		);
+		expect(shortenEmbeddedPaths("Compare /home/alice/a(/home/alice/b[/home/alice/c", "/home/alice")).toBe(
+			"Compare ~/a(~/b[~/c",
+		);
+	});
+	it("shortens local file URLs containing invalid percent escapes", () => {
+		expect(shortenToolArgumentPaths("file:///home/alice/100%.txt", "url", "/home/alice")).toBe("~/100%.txt");
+	});
+
+	it("shortens home paths enclosed in Markdown emphasis", () => {
+		expect(shortenEmbeddedPaths("Inspect **/home/alice/private/file**", "/home/alice")).toBe(
+			"Inspect **~/private/file**",
+		);
+		expect(shortenEmbeddedPaths("Inspect _/home/alice/private/file_", "/home/alice")).toBe(
+			"Inspect _~/private/file_",
+		);
+		expect(shortenEmbeddedPaths("Inspect **/home/alice**", "/home/alice")).toBe("Inspect **~**");
+		expect(shortenEmbeddedPaths("Inspect _/home/alice_", "/home/alice")).toBe("Inspect _~_");
+	});
+
+	it("recognizes compact shell control operators around home-directory tokens", () => {
+		expect(shortenEmbeddedPaths("cd /home/alice&& pwd", "/home/alice")).toBe("cd ~&& pwd");
+		expect(shortenEmbeddedPaths("cd /home/alice||/home/alice/bin/fallback", "/home/alice")).toBe(
+			"cd ~||~/bin/fallback",
+		);
+	});
+
+	it("shortens a sentence-ending home path without rewriting dotted sibling names", () => {
+		expect(shortenEmbeddedPaths("Working in /home/alice. Next command.", "/home/alice")).toBe(
+			"Working in ~. Next command.",
+		);
+		expect(shortenEmbeddedPaths("Working in /home/alice.", "/home/alice")).toBe("Working in ~.");
+		expect(shortenEmbeddedPaths("cd /home/alice.backup", "/home/alice")).toBe("cd /home/alice.backup");
+	});
+
+	it("recognizes mixed Windows separators without rewriting unrelated prefixes", () => {
+		const home = String.raw`C:\Users\Alice`;
+		expect(shortenEmbeddedPaths("type C:/Users/Alice/private.txt", home)).toBe("type ~/private.txt");
+		expect(shortenEmbeddedPaths(String.raw`type c:\users\ALICE/private.txt`, home)).toBe("type ~/private.txt");
+		expect(shortenEmbeddedPaths("type D:/backup/C:/Users/Alice/private.txt", home)).toBe(
+			"type D:/backup/C:/Users/Alice/private.txt",
+		);
+	});
+
+	it("recognizes slash-form UNC home paths", () => {
+		expect(shortenEmbeddedPaths("type //server/share/alice/private.txt", String.raw`\\SERVER\share\Alice`)).toBe(
+			"type ~/private.txt",
+		);
+	});
+});
 
 describe("feed model badges", () => {
 	let uiTheme: Theme;
@@ -563,6 +622,35 @@ describe("shortenEmbeddedPaths", () => {
 		const home = String.raw`C:\Users\Jane`;
 		const filePath = String.raw`C:\Users\Jane\projects\demo: failed`;
 		expect(shortenEmbeddedPaths(filePath, home)).toBe("~/projects/demo: failed");
+	});
+});
+
+describe("shortenToolArgumentPaths", () => {
+	it("normalizes and shortens Windows drive file URLs", () => {
+		const home = String.raw`C:\Users\Alice`;
+
+		expect(shortenToolArgumentPaths("file:///C:/Users/Alice/private.txt", "url", home)).toBe("~/private.txt");
+	});
+
+	it("normalizes and shortens POSIX file URLs", () => {
+		const home = "/home/alice";
+
+		expect(shortenToolArgumentPaths("file:///home/alice/private/encoded%20space.txt", "url", home)).toBe(
+			"~/private/encoded space.txt",
+		);
+	});
+
+	it("preserves UNC authority while shortening file URLs", () => {
+		const home = String.raw`\\server\share\Alice`;
+
+		expect(shortenToolArgumentPaths("file://server/share/Alice/private.txt", "url", home)).toBe("~/private.txt");
+	});
+
+	it("leaves network URLs unchanged", () => {
+		const home = "/example.com/private";
+		const url = "https://example.com/private/encoded%20space.txt";
+
+		expect(shortenToolArgumentPaths(url, "url", home)).toBe(url);
 	});
 });
 
