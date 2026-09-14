@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/mcp refresh` to re-fetch tools from connected MCP servers without reconnecting ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
@@ -13,6 +14,9 @@
 
 ### Fixed
 
+- MCP tools no longer stay missing for a whole session after a server's warmup lists none, keep showing tools a server has retired, or get stuck on a stale tool list from an out-of-order server response, and a `/mcp reload` during a reconnect no longer restores the disconnected server's tools ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- A locked or unwritable MCP tool-cache database no longer freezes the event loop while the cache retries to write it ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- A `/mcp refresh` that overlaps a server's initial tool load no longer leaves the session on the older tool roster, and `/status` no longer reports the superseded tool count for that server ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14
@@ -26,6 +30,10 @@
 - First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
+### Added
+
+### Fixed
 
 ## [18.1.20] - 2026-09-13
 
