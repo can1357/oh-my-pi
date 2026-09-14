@@ -4,24 +4,28 @@ import { searchSerply } from "@oh-my-pi/pi-coding-agent/web/search/providers/ser
 import type { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 describe("Serply web search provider", () => {
+	// `searchSerply` takes its key from the injected `authStorage` resolver, so the fixture
+	// holds it here instead of in `process.env` and the suite stays parallel-safe.
+	let apiKey: string | undefined;
+
 	beforeEach(() => {
-		process.env.SERPLY_API_KEY = "test-serply-key";
+		apiKey = "test-serply-key";
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		delete process.env.SERPLY_API_KEY;
+		apiKey = undefined;
 	});
 
 	const fakeAuthStorage = {
 		async getApiKey() {
-			return process.env.SERPLY_API_KEY ?? undefined;
+			return apiKey;
 		},
 		hasAuth() {
-			return Boolean(process.env.SERPLY_API_KEY);
+			return Boolean(apiKey);
 		},
 		resolver(_provider: string) {
-			return async () => process.env.SERPLY_API_KEY ?? undefined;
+			return async () => apiKey;
 		},
 		async rotateSessionCredential() {
 			return false;
@@ -142,7 +146,7 @@ describe("Serply web search provider", () => {
 	});
 
 	it("throws a clear error when Serply credentials are missing", async () => {
-		delete process.env.SERPLY_API_KEY;
+		apiKey = undefined;
 		await expect(searchSerply(makeParams("missing creds"))).rejects.toThrow(
 			'Serply credentials not found. Set SERPLY_API_KEY or configure an API key for provider "serply".',
 		);
