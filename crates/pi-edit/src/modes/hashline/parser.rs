@@ -35,11 +35,13 @@ const APPLY_PATCH_ADD_FILE_MARKER: &str = "*** Add File:";
 
 #[derive(Default)]
 pub(super) struct ForeignSyntax {
-	apply_patch:               bool,
-	apply_patch_existing_file: bool,
-	apply_patch_add_file:      bool,
-	unified_diff:              bool,
-	search_replace:            bool,
+	apply_patch:                bool,
+	apply_patch_existing_file:  bool,
+	apply_patch_add_file:       bool,
+	unified_diff:               bool,
+	unified_diff_add_file:      bool,
+	unified_diff_existing_file: bool,
+	search_replace:             bool,
 }
 
 impl ForeignSyntax {
@@ -48,11 +50,11 @@ impl ForeignSyntax {
 	}
 
 	pub(super) const fn needs_hashline_rewrite(&self) -> bool {
-		self.apply_patch_existing_file || self.unified_diff || self.search_replace
+		self.apply_patch_existing_file || self.unified_diff_existing_file || self.search_replace
 	}
 
 	pub(super) const fn has_add_file(&self) -> bool {
-		self.apply_patch_add_file
+		self.apply_patch_add_file || self.unified_diff_add_file
 	}
 
 	pub(super) fn labels(&self) -> String {
@@ -83,10 +85,15 @@ fn is_unified_hunk_line(line: &str) -> bool {
 		.is_some_and(|rest| rest.contains("@@"))
 }
 
+fn unified_header_is_dev_null(line: &str, marker: &str) -> Option<bool> {
+	let path = line.strip_prefix(marker)?.split_whitespace().next()?;
+	Some(path == "/dev/null")
+}
+
 pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
 	let mut syntax = ForeignSyntax::default();
-	let mut saw_unified_old_header = false;
-	let mut saw_unified_new_header = false;
+	let mut pending_unified_old = None;
+	let mut saw_unified_file_pair = false;
 	let mut saw_search_marker = false;
 	let mut saw_replace_marker = false;
 	for raw_line in input.lines() {
@@ -96,12 +103,26 @@ pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
 		syntax.apply_patch_existing_file |= existing_file_op;
 		syntax.apply_patch_add_file |= add_file;
 		syntax.unified_diff |= is_unified_hunk_line(line) || line.starts_with("diff --git ");
-		saw_unified_old_header |= line.starts_with("--- ");
-		saw_unified_new_header |= line.starts_with("+++ ");
+		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
+			pending_unified_old = Some(old_is_dev_null);
+		}
+		if let Some(new_is_dev_null) = unified_header_is_dev_null(line, "+++ ")
+			&& let Some(old_is_dev_null) = pending_unified_old.take()
+		{
+			syntax.unified_diff = true;
+			saw_unified_file_pair = true;
+			if old_is_dev_null && !new_is_dev_null {
+				syntax.unified_diff_add_file = true;
+			} else {
+				syntax.unified_diff_existing_file = true;
+			}
+		}
 		saw_search_marker |= line.starts_with("<<<<<<< SEARCH");
 		saw_replace_marker |= line.starts_with(">>>>>>> REPLACE");
 	}
-	syntax.unified_diff |= saw_unified_old_header && saw_unified_new_header;
+	if syntax.unified_diff && !saw_unified_file_pair {
+		syntax.unified_diff_existing_file = true;
+	}
 	syntax.search_replace = saw_search_marker && saw_replace_marker;
 	syntax
 }
