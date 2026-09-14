@@ -92,6 +92,18 @@ describe("native file-lock ownership", () => {
 		finalOwner.release();
 	});
 
+	test("win32 lock identity case-folds differently-cased spellings of one missing file", () => {
+		// A missing leaf cannot be canonicalized by the filesystem, and the
+		// native mutex name hashes the lock path byte-for-byte — so on a
+		// case-insensitive Windows filesystem, mcp.json and MCP.JSON must
+		// derive the SAME lock identity or two first-writers race. POSIX lock
+		// identity stays case-sensitive: those are genuinely different files.
+		expect(getLockPath("C:\\Users\\Me\\.omp\\MCP.JSON", "win32")).toBe(
+			getLockPath("c:\\users\\me\\.omp\\mcp.json", "win32"),
+		);
+		expect(getLockPath("/tmp/omp/MCP.JSON", "linux")).not.toBe(getLockPath("/tmp/omp/mcp.json", "linux"));
+	});
+
 	test("withFileLock serializes N concurrent writers without lost updates", async () => {
 		const root = await mkRoot();
 		const target = path.join(root, "counter.json");

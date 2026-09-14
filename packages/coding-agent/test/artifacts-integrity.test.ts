@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ArtifactManager, writeArtifact } from "@oh-my-pi/pi-coding-agent/session/artifacts";
@@ -30,7 +30,7 @@ describe("ArtifactManager write integrity", () => {
 
 	it("leaves no discoverable file when the staged write falls short", async () => {
 		const dir = freshDir();
-		await fs.mkdir(dir, { recursive: true });
+		await nodeFs.promises.mkdir(dir, { recursive: true });
 		const destination = path.join(dir, "Worker.md");
 		// Faithfully model a short write: partial bytes land on the staging file,
 		// and Bun.write reports fewer bytes than requested.
@@ -44,12 +44,12 @@ describe("ArtifactManager write integrity", () => {
 
 		// Neither the destination nor a leftover staging file survives, so
 		// agent:// / artifact:// scans cannot resolve a truncated artifact.
-		expect(await fs.readdir(dir)).toEqual([]);
+		expect(await nodeFs.promises.readdir(dir)).toEqual([]);
 	});
 
 	it("preserves the prior artifact when a follow-up write fails", async () => {
 		const dir = freshDir();
-		await fs.mkdir(dir, { recursive: true });
+		await nodeFs.promises.mkdir(dir, { recursive: true });
 		const destination = path.join(dir, "Worker.md");
 		await writeArtifact(destination, "original valid report");
 
@@ -62,18 +62,20 @@ describe("ArtifactManager write integrity", () => {
 		await expect(writeArtifact(destination, "replacement report")).rejects.toThrow("Artifact write incomplete");
 
 		expect(await Bun.file(destination).text()).toBe("original valid report");
-		expect(await fs.readdir(dir)).toEqual(["Worker.md"]);
+		expect(await nodeFs.promises.readdir(dir)).toEqual(["Worker.md"]);
 	});
 
 	it("replaces an existing artifact when Windows rejects rename-over-target", async () => {
 		const dir = freshDir();
-		await fs.mkdir(dir, { recursive: true });
+		await nodeFs.promises.mkdir(dir, { recursive: true });
 		const destination = path.join(dir, "Worker.md");
 		await writeArtifact(destination, "original report");
 
-		const rename = fs.rename.bind(fs);
+		const rename = nodeFs.promises.rename.bind(nodeFs.promises);
 		let injected = false;
-		vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+		// Spy on the fs.promises seam the atomic publisher actually calls;
+		// node:fs/promises is a separate namespace object in Bun.
+		vi.spyOn(nodeFs.promises, "rename").mockImplementation(async (source, target) => {
 			if (!injected && String(source).includes(".tmp-") && String(target) === destination) {
 				injected = true;
 				throw Object.assign(new Error("injected Windows replacement failure"), { code: "EEXIST" });
@@ -85,6 +87,6 @@ describe("ArtifactManager write integrity", () => {
 
 		expect(injected).toBe(true);
 		expect(await Bun.file(destination).text()).toBe("replacement report");
-		expect(await fs.readdir(dir)).toEqual(["Worker.md"]);
+		expect(await nodeFs.promises.readdir(dir)).toEqual(["Worker.md"]);
 	});
 });

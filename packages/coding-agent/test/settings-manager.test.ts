@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
+import { physicalTargetSegments } from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import {
-	__physicalTargetSegmentsForTesting,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -317,6 +316,50 @@ describe("Settings", () => {
 			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 2 });
 		});
 
+		it("migrates legacy settings through a dangling config.yml symlink, preserving the link", async () => {
+			// First run with config.yml symlinked into a dotfiles checkout that
+			// has not been created yet, plus legacy settings.json to migrate.
+			// The migration's atomic rename must land on the referent — staging
+			// it at the logical path would replace the user's link with a
+			// regular file and leave the referent missing.
+			const managedDir = tempDir.join("managed");
+			const managedConfigPath = path.join(managedDir, "config.yml");
+			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
+			await Bun.write(path.join(agentDir, "settings.json"), JSON.stringify({ setupVersion: 7 }));
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 7 });
+			expect(settings.get("setupVersion")).toBe(7);
+			// The materialized referent directory takes the hardened 0700 creation
+			// mode shared with the JSON config writers, not the umask default.
+			if (process.platform !== "win32") {
+				expect(fs.statSync(managedDir).mode & 0o777).toBe(0o700);
+			}
+		});
+
+		it("keeps a read-only symlinked referent owner-read-only through a settings save", async () => {
+			// A dotfiles-managed config.yml can be checked out read-only (0400).
+			// Every YAML save previously staged its replacement as a blanket
+			// 0600, silently making the managed file owner-writable; the write
+			// must clamp to the referent's owner bits like the MCP/SSH writers.
+			const managedConfigPath = tempDir.join("managed-config.yml");
+			await Bun.write(managedConfigPath, YAML.stringify({ setupVersion: 1 }, null, 2));
+			await fs.promises.chmod(managedConfigPath, 0o400);
+			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 9);
+			await settings.flush();
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			if (process.platform !== "win32") {
+				expect(fs.statSync(managedConfigPath).mode & 0o777).toBe(0o400);
+			}
+			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 9 });
+		});
+
 		it("writes through a dangling symlink chain to the final target, preserving every link", async () => {
 			// config.yml -> mid.yml -> final.yml where final.yml does not exist yet
 			// (first-run into a dotfiles/managed checkout). realpath throws ENOENT at
@@ -508,24 +551,45 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("does not write to an unrelated sibling when a non-final component is missing before ..", async () => {
-			// config.yml -> missing/../final.yml, where `missing` does not exist.
-			// Filesystem lookup fails at `missing`, so a following `..` must NOT
-			// pop a component that was never entered. Collapsing the target
-			// lexically instead pops `missing` and lands on <configdir>/final.yml,
-			// clobbering an unrelated sibling while the real (dangling) target is
-			// never written. The resolver must not escape to that sibling.
+		it("materializes a missing component named before .. in a dangling target", async () => {
+			// config.yml -> missing/../final-config.yml, where `missing` does
+			// not exist. The filesystem resolves `missing/..` to the config
+			// dir exactly when `missing` exists as a directory — which the
+			// write can create — so the resolver materializes `missing`, lands
+			// the write on final-config.yml beside it, and the link resolves
+			// through the recreated component afterwards. (Merely collapsing
+			// the `..` lexically would write the same file while the link
+			// stays dangling.)
 			await fs.promises.symlink("missing/../final-config.yml", getConfigPath(), "file");
-			const lexicalSibling = path.join(agentDir, "final-config.yml");
+			const finalPath = path.join(agentDir, "final-config.yml");
+			const repairedDir = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			settings.set("setupVersion", 10);
-			// The resolved path sits under the never-entered `missing` dir (fs
-			// semantics), whose parent does not exist, so the atomic write fails
-			// rather than clobbering the sibling.
+			await settings.flush();
+
+			expect(fs.statSync(repairedDir).isDirectory()).toBe(true);
+			// The link now LIVE-resolves to the file the write landed on.
+			expect(await fs.promises.realpath(getConfigPath())).toBe(finalPath);
+			expect(YAML.parse(await Bun.file(finalPath).text())).toEqual({ setupVersion: 10 });
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects a dangling target that resolves to a directory", async () => {
+			// config.yml -> managed/.. names the config DIRECTORY itself once
+			// `managed` exists. Publishing there would rename a file over the
+			// directory — EISDIR on POSIX, and on Windows the replacement
+			// fallback would move the whole config dir aside — so the write
+			// must reject without even creating `managed`.
+			await fs.promises.symlink("managed/..", getConfigPath(), "file");
+			const managed = path.join(agentDir, "managed");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 11);
 			await expect(settings.flush()).rejects.toThrow();
 
-			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			expect(fs.existsSync(managed)).toBe(false);
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
@@ -805,20 +869,19 @@ describe("Settings", () => {
 			// `C:\C:\managed\final.yml`, so flushing through a dangling absolute link
 			// fails. Drive the splitter with the win32 engine so the bug reproduces
 			// on this POSIX host.
-			const segments = __physicalTargetSegmentsForTesting("C:\\managed\\final.yml", path.win32).filter(
+			const segments = physicalTargetSegments("C:\\managed\\final.yml", path.win32).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(segments).toEqual(["managed", "final.yml"]);
 			// A UNC target seeds at the `\\server\share\` root, which must likewise
 			// be stripped rather than re-walked as `server` / `share` segments.
-			const uncSegments = __physicalTargetSegmentsForTesting(
-				"\\\\server\\share\\managed\\final.yml",
-				path.win32,
-			).filter(segment => segment !== "" && segment !== ".");
+			const uncSegments = physicalTargetSegments("\\\\server\\share\\managed\\final.yml", path.win32).filter(
+				segment => segment !== "" && segment !== ".",
+			);
 			expect(uncSegments).toEqual(["managed", "final.yml"]);
 			// A relative Windows target seeds at the link's real parent, so every
 			// segment is preserved unchanged.
-			expect(__physicalTargetSegmentsForTesting("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
+			expect(physicalTargetSegments("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
 		});
 
 		it("treats a backslash as a filename character on POSIX, not a separator", async () => {
@@ -827,10 +890,10 @@ describe("Settings", () => {
 			// `managed`/`config.yml` makes flush either fail on the missing dir or
 			// write an unrelated file while the real link stays dangling. Drive the
 			// splitter with the posix engine so the bug reproduces on any host.
-			expect(__physicalTargetSegmentsForTesting("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
+			expect(physicalTargetSegments("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
 			// Forward slashes still split, and the leading `/` of an absolute POSIX
 			// target strips to no extra segment (root seeded separately).
-			const absSegments = __physicalTargetSegmentsForTesting("/managed/final.yml", path.posix).filter(
+			const absSegments = physicalTargetSegments("/managed/final.yml", path.posix).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(absSegments).toEqual(["managed", "final.yml"]);
@@ -840,9 +903,11 @@ describe("Settings", () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const canonicalConfigPath = await fs.promises.realpath(getConfigPath());
-			const rename = fsp.rename.bind(fsp);
+			const rename = fs.promises.rename.bind(fs.promises);
 			let injected = false;
-			vi.spyOn(fsp, "rename").mockImplementation(async (source, target) => {
+			// Spy on the fs.promises seam the atomic publisher actually calls;
+			// node:fs/promises is a separate namespace object in Bun.
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
 				if (!injected && String(source).endsWith(".tmp") && String(target) === canonicalConfigPath) {
 					injected = true;
 					throw new FsCodeError("EPERM", "injected Windows replacement failure");
@@ -973,7 +1038,7 @@ describe("Settings", () => {
 			const overlayPath = tempDir.join("reload-overlay.yml");
 			await Bun.write(overlayPath, YAML.stringify({ task: { enableEffort: false } }, null, 2));
 			const reloadProjectDir = tempDir.join("reload-project");
-			await fsp.mkdir(reloadProjectDir, { recursive: true });
+			await fs.promises.mkdir(reloadProjectDir, { recursive: true });
 			const projectConfigPath = path.join(getProjectAgentDir(reloadProjectDir), "config.yml");
 			const settings = await Settings.loadIsolated({
 				cwd: reloadProjectDir,
@@ -1038,7 +1103,7 @@ describe("Settings", () => {
 			expect(settings.get("task.agentModelOverrides")).toEqual({});
 			expect(settings.get("retry.modelFallback")).toBe(true);
 
-			await fsp.rm(projectConfigPath);
+			await fs.promises.rm(projectConfigPath);
 			await settings.reloadFromDisk();
 
 			expect(settings.get("task.agentModelOverrides")).toEqual({});

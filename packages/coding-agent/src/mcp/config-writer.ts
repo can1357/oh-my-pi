@@ -3,12 +3,10 @@
  *
  * Utilities for reading/writing .omp/mcp.json files at user or project level.
  */
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
+import { publishSerializedConfig, resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
 
 import { validateServerConfig } from "./config";
 import { MCP_CONFIG_SCHEMA_URL, type MCPConfigFile, type MCPServerConfig } from "./types";
@@ -18,20 +16,6 @@ function withSchema(config: MCPConfigFile): MCPConfigFile {
 		$schema: config.$schema ?? MCP_CONFIG_SCHEMA_URL,
 		...config,
 	};
-}
-
-/**
- * Serialize a read-modify-write against one config file.
- *
- * Wraps {@link withFileLock} but first ensures the config's parent directory
- * exists, because the lock directory (`${filePath}.lock`) is created with a
- * non-recursive `mkdir` — without this the very first write (before the config
- * file or its parent exists) would fail to acquire the lock with ENOENT.
- */
-function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-	return fs.promises
-		.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
-		.then(() => withFileLock(filePath, fn));
 }
 
 /**
@@ -57,26 +41,21 @@ export async function readMCPConfigFile(filePath: string): Promise<MCPConfigFile
  * Creates parent directories if they don't exist.
  */
 export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile): Promise<void> {
-	// Ensure parent directory exists
-	const dir = path.dirname(filePath);
-	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-
-	// Write to a per-writer temp file, then atomically rename into place. The
-	// temp name is unique (pid + random) so two concurrent writers to the same
-	// config never share one `.tmp` path and rename each other's file out from
-	// under them (which surfaced as ENOENT or a clobbered final file).
-	const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-	const content = JSON.stringify(withSchema(config), null, 2);
-	try {
-		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-		// Rename to final path (atomic on most systems)
-		await fs.promises.rename(tmpPath, filePath);
-	} catch (error) {
-		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
-		throw error;
-	}
-	// Invalidate the capability fs cache so subsequent reads see the new content
+	const writePath = await resolveSymlinkWriteTarget(filePath);
+	await publishMCPConfig(writePath, config);
 	invalidateFsCache(filePath);
+	if (writePath !== filePath) invalidateFsCache(writePath);
+}
+
+/**
+ * Serialize and publish against an ALREADY-RESOLVED target — the path pinned
+ * by {@link withConfigFileLock}. No re-resolution happens here (see
+ * publishSerializedConfig), so a symlink swapped in at the target mid-lock
+ * cannot redirect the write to a file this lock does not cover.
+ */
+async function publishMCPConfig(writePath: string, config: MCPConfigFile): Promise<void> {
+	await publishSerializedConfig(writePath, JSON.stringify(withSchema(config), null, 2));
+	invalidateFsCache(writePath);
 }
 
 /**
@@ -123,8 +102,8 @@ export async function addMCPServer(filePath: string, name: string, config: MCPSe
 	// Serialize the read-modify-write under a per-file lock so a concurrent
 	// mutation cannot overwrite this one (lost update). The lock also guards
 	// against cross-process writers sharing the same config file.
-	await withConfigLock(filePath, async () => {
-		const existing = await readMCPConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		const existing = await readMCPConfigFile(writePath);
 
 		// Check for duplicate name
 		if (existing.mcpServers?.[name]) {
@@ -138,7 +117,10 @@ export async function addMCPServer(filePath: string, name: string, config: MCPSe
 				[name]: config,
 			},
 		};
-		await writeMCPConfigFile(filePath, updated);
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
+		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
 
@@ -162,8 +144,8 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
 	}
 
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
-		const existing = await readMCPConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		const existing = await readMCPConfigFile(writePath);
 
 		const updated: MCPConfigFile = {
 			...existing,
@@ -172,7 +154,10 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
 				[name]: config,
 			},
 		};
-		await writeMCPConfigFile(filePath, updated);
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
+		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
 
@@ -183,8 +168,8 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
  */
 export async function removeMCPServer(filePath: string, name: string): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
-		const existing = await readMCPConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		const existing = await readMCPConfigFile(writePath);
 
 		if (!existing.mcpServers?.[name]) {
 			throw new Error(`Server "${name}" not found in ${filePath}`);
@@ -195,7 +180,10 @@ export async function removeMCPServer(filePath: string, name: string): Promise<v
 			...existing,
 			mcpServers: remaining,
 		};
-		await writeMCPConfigFile(filePath, updated);
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
+		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
 
@@ -229,8 +217,8 @@ export async function readDisabledServers(filePath: string): Promise<string[]> {
  */
 export async function setServerDisabled(filePath: string, name: string, disabled: boolean): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
-		const config = await readMCPConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		const config = await readMCPConfigFile(writePath);
 		const current = new Set(config.disabledServers ?? []);
 
 		if (disabled) {
@@ -248,7 +236,10 @@ export async function setServerDisabled(filePath: string, name: string, disabled
 			delete updated.disabledServers;
 		}
 
-		await writeMCPConfigFile(filePath, updated);
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
+		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
 
@@ -268,8 +259,8 @@ export async function readEnabledServers(filePath: string): Promise<string[]> {
  */
 export async function setServerForceEnabled(filePath: string, name: string, force: boolean): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
-		const config = await readMCPConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		const config = await readMCPConfigFile(writePath);
 		const current = new Set(config.enabledServers ?? []);
 
 		if (force) {
@@ -287,7 +278,10 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 			delete updated.enabledServers;
 		}
 
-		await writeMCPConfigFile(filePath, updated);
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
+		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
 
