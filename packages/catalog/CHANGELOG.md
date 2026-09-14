@@ -79,6 +79,7 @@
 ### Added
 
 - Enabled assistant prefill support for Ollama models
+- Updated DEFAULT_ANTIGRAVITY_VERSION fallback to 2.13.0 matching current Cloud Code Assist releases ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
 
 ### Fixed
 

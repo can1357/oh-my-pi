@@ -342,6 +342,9 @@ describe("google-antigravity synthetic 429 systemInstruction fold retry", () => 
 		expect(sanitized).toMatch(
 			/<system-conventions id="[a-f0-9]{8}">\nRFC 2119: MUST, REQUIRED\n<\/system-conventions>/,
 		);
+		expect(sanitizeAntigravitySystemInstruction("<conventions>\nRFC 2119\n</conventions>")).toMatch(
+			/<conventions id="[a-f0-9]{8}">\nRFC 2119\n<\/conventions>/,
+		);
 		// Plain text without tag remains unchanged
 		expect(sanitizeAntigravitySystemInstruction("Plain system prompt")).toBe("Plain system prompt");
 	});

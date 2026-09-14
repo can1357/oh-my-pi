@@ -374,9 +374,18 @@ export function deriveAntigravityConventionsNonce(sessionId?: string): string {
 }
 
 export function sanitizeAntigravitySystemInstruction(text: string, nonce?: string): string {
-	if (!text.includes("<system-conventions>")) return text;
+	const hasSystemConventions = text.includes("<system-conventions>");
+	const hasConventions = text.includes("<conventions>");
+	if (!hasSystemConventions && !hasConventions) return text;
 	const resolvedNonce = nonce ?? randomUUID().slice(0, 8);
-	return text.replaceAll("<system-conventions>", `<system-conventions id="${resolvedNonce}">`);
+	let result = text;
+	if (hasSystemConventions) {
+		result = result.replaceAll("<system-conventions>", `<system-conventions id="${resolvedNonce}">`);
+	}
+	if (hasConventions) {
+		result = result.replaceAll("<conventions>", `<conventions id="${resolvedNonce}">`);
+	}
+	return result;
 }
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
