@@ -105,12 +105,12 @@ pub(super) fn write(
 	for (index, component) in absolute_components.iter().enumerate() {
 		current = open_or_create_directory(&current, component, None, cancel_token)?;
 		if fallback_anchor == Some(index) {
-			private_directory_device(current.as_raw_fd(), "fallback local-root anchor")?;
+			private_directory_device(current.as_raw_fd(), "fallback local-root anchor", None)?;
 		}
 	}
 
 	heartbeat(cancel_token)?;
-	let local_root_device = private_directory_device(current.as_raw_fd(), "local root")?;
+	let local_root_device = private_directory_device(current.as_raw_fd(), "local root", None)?;
 	let (target_name, parent_components) = target_components
 		.split_last()
 		.expect("target component validation rejects an empty list");
@@ -270,14 +270,11 @@ fn open_or_create_directory(
 		match open_directory_at(parent.as_raw_fd(), name, local_root_device.is_some()) {
 			Ok(directory) => {
 				if let Some(expected_device) = local_root_device {
-					let actual_device = directory_device(directory.as_raw_fd(), "descendant directory")?.st_dev;
-					if actual_device != expected_device {
-						return Err(AtomicWriteError::new(
-							AtomicWriteErrorCode::UnsafePath,
-							AtomicWriteCommitState::NotCommitted,
-							"a descendant directory crosses the local-root device boundary",
-						));
-					}
+					private_directory_device(
+						directory.as_raw_fd(),
+						"descendant directory",
+						Some(expected_device),
+					)?;
 				}
 				return Ok(directory);
 			},
@@ -354,7 +351,11 @@ fn openat2_is_unavailable(error: &io::Error) -> bool {
 	is_errno(error, libc::ENOSYS) || is_errno(error, libc::EINVAL)
 }
 
-fn directory_device(fd: RawFd, label: &str) -> std::result::Result<libc::stat, AtomicWriteError> {
+fn private_directory_device(
+	fd: RawFd,
+	label: &str,
+	expected_device: Option<libc::dev_t>,
+) -> std::result::Result<libc::dev_t, AtomicWriteError> {
 	let stat = fd_stat(fd).map_err(|error| precommit_io(&format!("inspecting {label}"), error))?;
 	if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
 		return Err(AtomicWriteError::new(
@@ -363,14 +364,13 @@ fn directory_device(fd: RawFd, label: &str) -> std::result::Result<libc::stat, A
 			format!("{label} is not a directory"),
 		));
 	}
-	Ok(stat)
-}
-
-fn private_directory_device(
-	fd: RawFd,
-	label: &str,
-) -> std::result::Result<libc::dev_t, AtomicWriteError> {
-	let stat = directory_device(fd, label)?;
+	if expected_device.is_some_and(|expected| stat.st_dev != expected) {
+		return Err(AtomicWriteError::new(
+			AtomicWriteErrorCode::UnsafePath,
+			AtomicWriteCommitState::NotCommitted,
+			"a descendant directory crosses the local-root device boundary",
+		));
+	}
 	let owner = unsafe { libc::geteuid() };
 	let permissions = stat.st_mode & 0o777;
 	if stat.st_uid != owner || permissions & 0o022 != 0 {
