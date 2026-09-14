@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+## [18.1.21] - 2026-09-14
+
 ### Fixed
 
 - Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling

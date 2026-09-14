@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+## [18.1.21] - 2026-09-14
+
 ### Added
 
 - Added `getBrowserProfilesDir()` (`~/.omp/browser-profiles`; XDG: `$XDG_STATE_HOME/omp/browser-profiles`) for profiles of Chromium browsers spawned by the browser tool.
