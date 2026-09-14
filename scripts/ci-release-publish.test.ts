@@ -69,6 +69,8 @@ describe("published legal payloads", () => {
 				"native/desktop-adapter.d.ts",
 				"native/loader-state.js",
 				"native/loader-state.d.ts",
+				"native/vcs.js",
+				"native/vcs.d.ts",
 				"native/embedded-addon.js",
 				"README.md",
 				"LICENSE",

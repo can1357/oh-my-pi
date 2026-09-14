@@ -45,6 +45,8 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 			moveTo,
 		},
 		settings: { flush },
+		prepareSessionSwitch: vi.fn(async () => {}),
+		resetObserverRegistry: vi.fn(),
 		clearTransientSessionUi: vi.fn(),
 		applyCwdChange,
 		updateEditorBorderColor: vi.fn(),

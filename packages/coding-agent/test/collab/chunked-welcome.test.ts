@@ -116,6 +116,7 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
 		reloadTodos: () => Promise.resolve(),
+		syncRunningSubagentBadge: () => {},
 		showStatus: () => {},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
@@ -194,6 +195,25 @@ afterEach(() => {
 });
 
 describe("collab chunked welcome (#3144)", () => {
+	it("releases join ownership when the transport constructor rejects", async () => {
+		const original = globalThis.WebSocket;
+		const failure = new Error("transport setup failed");
+		globalThis.WebSocket = class {
+			constructor() {
+				throw failure;
+			}
+		} as unknown as typeof WebSocket;
+		const ctx = makeCancelledSwitchGuestContext(async () => true, []);
+		const guest = new CollabGuestLink(ctx);
+		try {
+			await expect(guest.join(host.link)).rejects.toBe(failure);
+			expect(ctx.collabGuest).toBeUndefined();
+		} finally {
+			globalThis.WebSocket = original;
+			await guest.leave("test cleanup").catch(() => {});
+		}
+	});
+
 	it("delivers a small welcome before chunking the transcript across multiple frames", async () => {
 		const parsed = parseCollabLink(host.link);
 		if ("error" in parsed) throw new Error(parsed.error);

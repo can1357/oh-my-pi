@@ -1067,15 +1067,16 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 // Preserve-data helpers
 // ============================================================================
 
-const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
+/** Provider-native compaction payloads a snapcompact pass supersedes. */
+const PROVIDER_COMPACTION_PRESERVE_KEYS = ["openaiRemoteCompaction", "anthropicCompaction"] as const;
 
-function stripOpenAiRemoteCompactionPreserveData(
+function stripProviderCompactionPreserveData(
 	preserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	if (!preserveData || !(OPENAI_REMOTE_COMPACTION_PRESERVE_KEY in preserveData)) {
+	if (!preserveData || !PROVIDER_COMPACTION_PRESERVE_KEYS.some(key => key in preserveData)) {
 		return preserveData;
 	}
-	const { [OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: _removed, ...rest } = preserveData;
+	const { openaiRemoteCompaction: _openai, anthropicCompaction: _anthropic, ...rest } = preserveData;
 	return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
@@ -2157,9 +2158,10 @@ export async function compact<TMessage = Message>(
 		});
 	}
 
-	// A snapcompact pass replaces any provider-side replacement history; strip the
-	// OpenAI remote-compaction payload like the default summarizer path does.
-	const basePreserve = stripOpenAiRemoteCompactionPreserveData(previousPreserveData) ?? {};
+	// A snapcompact pass replaces any provider-side compaction payload; strip the
+	// OpenAI replacement history and the Anthropic compaction block like the
+	// default summarizer path does.
+	const basePreserve = stripProviderCompactionPreserveData(previousPreserveData) ?? {};
 	const persistedText =
 		layout.keptText.length > 0 && layout.textTail.length > 0
 			? `${layout.keptText.slice(0, layout.keptText.length - layout.textTail.length)}${textTail}`

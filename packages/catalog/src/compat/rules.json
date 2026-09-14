@@ -13,8 +13,10 @@
 		"auth/baseten.kdl",
 		"auth/bedrock-mantle.kdl",
 		"auth/cerebras.kdl",
+		"auth/charm-hyper.kdl",
 		"auth/cline-pass.kdl",
 		"auth/cloudflare-ai-gateway.kdl",
+		"auth/commandcode.kdl",
 		"auth/coreweave.kdl",
 		"auth/cursor.kdl",
 		"auth/deepinfra.kdl",
@@ -113,8 +115,10 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/charm-hyper.kdl",
 		"providers/cline-pass.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
+		"providers/commandcode.kdl",
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
 		"providers/deepseek.kdl",
@@ -3355,7 +3359,63 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:12",
+				"source": "classes/anthropic.kdl:15",
+				"class": "anthropic",
+				"family": "fable",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.0.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:20",
+				"class": "anthropic",
+				"family": "mythos",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.0.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:25",
+				"class": "anthropic",
+				"family": "opus",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "4.6.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:30",
+				"class": "anthropic",
+				"family": "sonnet",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "4.6.0"
+					}
+				],
+				"wire": {
+					"supportsServerCompaction": true
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:36",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3376,7 +3436,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:17",
+				"source": "classes/anthropic.kdl:41",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3395,7 +3455,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:22",
+				"source": "classes/anthropic.kdl:46",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3416,7 +3476,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:27",
+				"source": "classes/anthropic.kdl:51",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3435,7 +3495,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:32",
+				"source": "classes/anthropic.kdl:56",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3454,7 +3514,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:37",
+				"source": "classes/anthropic.kdl:61",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3475,7 +3535,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:42",
+				"source": "classes/anthropic.kdl:66",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3494,7 +3554,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:47",
+				"source": "classes/anthropic.kdl:71",
 				"class": "anthropic",
 				"providers": [
 					"aimlapi",
@@ -3514,7 +3574,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:53",
+				"source": "classes/anthropic.kdl:77",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3544,7 +3604,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:60",
+				"source": "classes/anthropic.kdl:84",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3562,7 +3622,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:67",
+				"source": "classes/anthropic.kdl:91",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3591,7 +3651,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:75",
+				"source": "classes/anthropic.kdl:99",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3625,7 +3685,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:82",
+				"source": "classes/anthropic.kdl:106",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3652,7 +3712,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:89",
+				"source": "classes/anthropic.kdl:113",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3678,7 +3738,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:96",
+				"source": "classes/anthropic.kdl:120",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3707,7 +3767,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:100",
+				"source": "classes/anthropic.kdl:124",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3735,7 +3795,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:106",
+				"source": "classes/anthropic.kdl:130",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3757,7 +3817,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:113",
+				"source": "classes/anthropic.kdl:137",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3790,7 +3850,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:120",
+				"source": "classes/anthropic.kdl:144",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3821,7 +3881,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:124",
+				"source": "classes/anthropic.kdl:148",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3847,7 +3907,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:131",
+				"source": "classes/anthropic.kdl:155",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3867,7 +3927,29 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:141",
+				"source": "classes/anthropic.kdl:181",
+				"class": "anthropic",
+				"providers": [
+					"anthropic"
+				],
+				"family": "fable",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "5.1.0"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cacheRead": 0.25,
+						"cacheWrite": 12.5
+					}
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:165",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3887,7 +3969,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:153",
+				"source": "classes/anthropic.kdl:194",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3907,7 +3989,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:171",
+				"source": "classes/anthropic.kdl:212",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3930,7 +4012,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:176",
+				"source": "classes/anthropic.kdl:217",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3950,7 +4032,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:182",
+				"source": "classes/anthropic.kdl:223",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3979,7 +4061,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:196",
+				"source": "classes/anthropic.kdl:237",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4003,7 +4085,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:202",
+				"source": "classes/anthropic.kdl:243",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4023,7 +4105,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:211",
+				"source": "classes/anthropic.kdl:252",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4048,7 +4130,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:217",
+				"source": "classes/anthropic.kdl:258",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4067,7 +4149,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:222",
+				"source": "classes/anthropic.kdl:263",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4090,7 +4172,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:227",
+				"source": "classes/anthropic.kdl:268",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4110,7 +4192,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:233",
+				"source": "classes/anthropic.kdl:274",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4129,7 +4211,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:238",
+				"source": "classes/anthropic.kdl:279",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4149,7 +4231,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:246",
+				"source": "classes/anthropic.kdl:287",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4168,7 +4250,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:251",
+				"source": "classes/anthropic.kdl:292",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4188,7 +4270,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:259",
+				"source": "classes/anthropic.kdl:300",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -4208,7 +4290,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:269",
+				"source": "classes/anthropic.kdl:310",
 				"class": "anthropic",
 				"family": "haiku",
 				"revision": [
@@ -4222,7 +4304,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:275",
+				"source": "classes/anthropic.kdl:316",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity",
@@ -4234,7 +4316,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:279",
+				"source": "classes/anthropic.kdl:320",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity"
@@ -4573,7 +4655,21 @@
 				}
 			},
 			{
-				"source": "classes/deepseek.kdl:76",
+				"source": "classes/deepseek.kdl:84",
+				"class": "deepseek",
+				"models": [
+					{
+						"kind": "glob",
+						"value": "*v4.1-flash*"
+					}
+				],
+				"priority": 10,
+				"wire": {
+					"stripImageInput": false
+				}
+			},
+			{
+				"source": "classes/deepseek.kdl:87",
 				"class": "deepseek",
 				"providers": [
 					"ollama-cloud",
@@ -5930,9 +6026,10 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:32",
+				"source": "classes/minimax.kdl:34",
 				"class": "minimax",
 				"providers": [
+					"charm-hyper",
 					"minimax",
 					"minimax-cn",
 					"minimax-code",
@@ -5942,6 +6039,10 @@
 					{
 						"kind": "exact",
 						"value": "MiniMax-M3"
+					},
+					{
+						"kind": "exact",
+						"value": "minimax-m3"
 					}
 				],
 				"catalog": {
@@ -5952,7 +6053,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:39",
+				"source": "classes/minimax.kdl:41",
 				"class": "minimax",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5965,7 +6066,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:44",
+				"source": "classes/minimax.kdl:46",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock",
@@ -5982,7 +6083,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:48",
+				"source": "classes/minimax.kdl:50",
 				"class": "minimax",
 				"providers": [
 					"kilo",
@@ -6000,7 +6101,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:54",
+				"source": "classes/minimax.kdl:56",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6017,7 +6118,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:62",
+				"source": "classes/minimax.kdl:64",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6039,7 +6140,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:52",
+				"source": "classes/minimax.kdl:54",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -6051,7 +6152,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:72",
+				"source": "classes/minimax.kdl:74",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -6063,7 +6164,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:76",
+				"source": "classes/minimax.kdl:78",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -7138,10 +7239,13 @@
 				],
 				"thinking": {
 					"mode": "effort"
+				},
+				"catalog": {
+					"requiresToolResultImageHoisting": true
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:19",
+				"source": "providers/amazon-bedrock.kdl:21",
 				"class": "deepseek",
 				"providers": [
 					"amazon-bedrock"
@@ -7159,7 +7263,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:24",
+				"source": "providers/amazon-bedrock.kdl:26",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock"
@@ -7170,7 +7274,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:28",
+				"source": "providers/amazon-bedrock.kdl:30",
 				"class": "unknown",
 				"providers": [
 					"amazon-bedrock"
@@ -7183,10 +7287,13 @@
 						"high"
 					],
 					"mode": "budget"
+				},
+				"catalog": {
+					"requiresToolResultImageHoisting": true
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:33",
+				"source": "providers/amazon-bedrock.kdl:40",
 				"providers": [
 					"amazon-bedrock"
 				],
@@ -7201,7 +7308,7 @@
 				}
 			},
 			{
-				"source": "providers/anthropic.kdl:5",
+				"source": "providers/anthropic.kdl:13",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -7227,7 +7334,7 @@
 				}
 			},
 			{
-				"source": "providers/anthropic.kdl:10",
+				"source": "providers/anthropic.kdl:18",
 				"providers": [
 					"anthropic"
 				],
@@ -7254,6 +7361,15 @@
 					"supportsLongCacheRetention": true,
 					"supportsMidConversationSystem": false,
 					"supportsSamplingParams": true
+				}
+			},
+			{
+				"source": "providers/anthropic.kdl:3",
+				"providers": [
+					"anthropic"
+				],
+				"wire": {
+					"firstPartyProvider": true
 				}
 			},
 			{
@@ -7518,6 +7634,55 @@
 				}
 			},
 			{
+				"source": "providers/charm-hyper.kdl:72",
+				"providers": [
+					"charm-hyper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "glm-5.1"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 20275
+					}
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:77",
+				"providers": [
+					"charm-hyper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "minimax-m2.7"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 26214
+					}
+				}
+			},
+			{
+				"source": "providers/charm-hyper.kdl:9",
+				"providers": [
+					"charm-hyper"
+				],
+				"wire": {
+					"supportsDeveloperRole": false,
+					"supportsStore": false,
+					"maxTokensField": "max_tokens",
+					"reasoningContentField": "reasoning_content"
+				},
+				"thinking": {
+					"mode": "effort"
+				}
+			},
+			{
 				"source": "providers/cline-pass.kdl:3",
 				"providers": [
 					"cline-pass"
@@ -7628,6 +7793,1623 @@
 				],
 				"thinking": {
 					"requiresEffort": true
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:27",
+				"class": "anthropic",
+				"providers": [
+					"commandcode"
+				],
+				"wire": {
+					"supportsEagerToolInputStreaming": false,
+					"supportsLongCacheRetention": false
+				},
+				"thinking": {
+					"mode": "anthropic-adaptive"
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:32",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-fable-5"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-fable-5-1"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-4-7"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-4-8"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-5"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-4-6"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-5"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:37",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-flash-vision-exp"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-pro"
+					},
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5.2"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"high",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:42",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-flash-fast"
+					},
+					{
+						"kind": "exact",
+						"value": "moonshotai/Kimi-K3"
+					},
+					{
+						"kind": "exact",
+						"value": "z-ai/glm-5.3-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5.3"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:47",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.1-flash-lite"
+					},
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.5-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.5-flash-lite"
+					},
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.6-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.7-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.8-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.4-mini"
+					},
+					{
+						"kind": "exact",
+						"value": "xai/grok-4.5"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:53",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.3-codex"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.4"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.5"
+					},
+					{
+						"kind": "exact",
+						"value": "xai/grok-4.6"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:57",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-luna"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-sol"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-terra"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:61",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.1"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.2"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.2-contributor"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.3"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.3-contributor"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:66",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-27B"
+					},
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-Flash"
+					},
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-Max"
+					},
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-Max-0902"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:70",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sakana/fugu-ultra"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:74",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "tencent/hy4-preview"
+					}
+				],
+				"wire": {
+					"supportsReasoningEffort": true
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high"
+					]
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:78",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-27B"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 32768
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:83",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "z-ai/glm-5.3-flash"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 131072
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:91",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.3-codex"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"contextWindow": 272000,
+						"maxTokens": 65536
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:112",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 10,
+						"cacheRead": 0.2,
+						"cacheWrite": 2.5
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:120",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-4-6"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 3,
+						"output": 15,
+						"cacheRead": 0.3,
+						"cacheWrite": 3.75
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:129",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-fable-5-1"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cacheRead": 0.25,
+						"cacheWrite": 12.5
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:137",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-fable-5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cacheRead": 1,
+						"cacheWrite": 12.5
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:145",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-opus-5"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-4-8"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-4-7"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 5,
+						"output": 25,
+						"cacheRead": 0.5,
+						"cacheWrite": 6.25
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:153",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-haiku-4-5-20251001"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1,
+						"output": 5,
+						"cacheRead": 0.1,
+						"cacheWrite": 1.25
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:161",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-sol"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 5,
+						"output": 30,
+						"cacheRead": 0.5,
+						"cacheWrite": 6.25
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:169",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-terra"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 12,
+						"cacheRead": 0.2,
+						"cacheWrite": 2.5
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:177",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-luna"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.2,
+						"output": 1.2,
+						"cacheRead": 0.02,
+						"cacheWrite": 0.25
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:185",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 5,
+						"output": 30,
+						"cacheRead": 0.5,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:193",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.4"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2.5,
+						"output": 15,
+						"cacheRead": 0.25,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:201",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.3-codex"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 8,
+						"cacheRead": 0.5,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:209",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.4-mini"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.75,
+						"output": 4.5,
+						"cacheRead": 0.075,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:220",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-pro"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.66,
+						"output": 1.98,
+						"cacheRead": 0.022,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:228",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-flash-vision-exp"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.22,
+						"output": 0.66,
+						"cacheRead": 0.007,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:236",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4-flash-fast"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.28,
+						"output": 0.56,
+						"cacheRead": 0.07,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:246",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek/deepseek-v4.1-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.15,
+						"output": 0.6,
+						"cacheRead": 0.003,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:254",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/Kimi-K3"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 3,
+						"output": 15,
+						"cacheRead": 0.3,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:262",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/Kimi-K2.7-Code"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.95,
+						"output": 4,
+						"cacheRead": 0.19,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:270",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/Kimi-K2.7-Code-Highspeed"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.9,
+						"output": 8,
+						"cacheRead": 0.38,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:278",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/Kimi-K2.6"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.95,
+						"output": 4,
+						"cacheRead": 0.16,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:286",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/Kimi-K2.5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.6,
+						"output": 3,
+						"cacheRead": 0.1,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:296",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "z-ai/glm-5.3-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.15,
+						"output": 0.5,
+						"cacheRead": 0.03,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:304",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5.3"
+					},
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5.2"
+					},
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5.1"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.4,
+						"output": 4.4,
+						"cacheRead": 0.26,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:312",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5.2-Fast"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 3,
+						"output": 10.25,
+						"cacheRead": 0.5,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:320",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "zai-org/GLM-5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1,
+						"output": 3.2,
+						"cacheRead": 0.2,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:329",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "MiniMaxAI/MiniMax-M3"
+					},
+					{
+						"kind": "exact",
+						"value": "MiniMaxAI/MiniMax-M2.7"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.3,
+						"output": 1.2,
+						"cacheRead": 0.06,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:337",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "MiniMaxAI/MiniMax-M2.5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.3,
+						"output": 1.2,
+						"cacheRead": 0.03,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:347",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "xiaomi/mimo-v2.5-pro"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.435,
+						"output": 0.87,
+						"cacheRead": 0.0036,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:355",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "xiaomi/mimo-v2.5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.14,
+						"output": 0.28,
+						"cacheRead": 0.0028,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:363",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-Max-0902"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 6,
+						"cacheRead": 0.25,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:371",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-Max"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 6,
+						"cacheRead": 0.25,
+						"cacheWrite": 2.5
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:379",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-27B"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.4,
+						"output": 3,
+						"cacheRead": 0.04,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:387",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.8-Flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.16,
+						"output": 0.47,
+						"cacheRead": 0.016,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:395",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.7-Max"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2.5,
+						"output": 7.5,
+						"cacheRead": 0.5,
+						"cacheWrite": 3.13
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:403",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.7-Plus"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.4,
+						"output": 1.6,
+						"cacheRead": 0.08,
+						"cacheWrite": 0.5
+					},
+					"longContext": {
+						"inputThreshold": 256000,
+						"input": 1.2,
+						"output": 4.8,
+						"cacheRead": 0.24,
+						"cacheWrite": 1.5
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:422",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.7-Flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.03,
+						"output": 0.13,
+						"cacheRead": 0.006,
+						"cacheWrite": 0.038
+					},
+					"longContext": {
+						"inputThreshold": 32000,
+						"input": 0.2,
+						"output": 0.8,
+						"cacheRead": 0.04,
+						"cacheWrite": 0.25
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:437",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.6-Max-Preview"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.3,
+						"output": 7.8,
+						"cacheRead": 0.26,
+						"cacheWrite": 1.63
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:445",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3.6-Plus"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.5,
+						"output": 3,
+						"cacheRead": 0.1,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:453",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "stepfun/Step-3.7-Flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.2,
+						"output": 1.15,
+						"cacheRead": 0.04,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:461",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "stepfun/Step-3.5-Flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.1,
+						"output": 0.3,
+						"cacheRead": 0.02,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:469",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "tencent/hy4-preview"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.834,
+						"output": 2.501,
+						"cacheRead": 0.042,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:477",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "tencent/hy3-paid"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.14,
+						"output": 0.58,
+						"cacheRead": 0.035,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:485",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.8-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.6-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.5,
+						"output": 7.5,
+						"cacheRead": 0.15,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:494",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.7-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.5,
+						"output": 7.5,
+						"cacheRead": 0.15,
+						"cacheWrite": 0.08334
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:502",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.5-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.5,
+						"output": 9,
+						"cacheRead": 0.15,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:510",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.5-flash-lite"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.3,
+						"output": 2.5,
+						"cacheRead": 0.03,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:518",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemini-3.1-flash-lite"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.25,
+						"output": 1.5,
+						"cacheRead": 0.03,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:526",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sakana/fugu-ultra"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 5,
+						"output": 30,
+						"cacheRead": 0.5,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:534",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "nvidia/nemotron-3-ultra-550b-a55b"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.6,
+						"output": 2.4,
+						"cacheRead": 0.12,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:542",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "thinkingmachines/inkling"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1,
+						"output": 4.05,
+						"cacheRead": 0.17,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:550",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "thinkingmachines/inkling-small"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.5,
+						"output": 1.2,
+						"cacheRead": 0.1,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:558",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.1"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.2"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.3"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.25,
+						"output": 4.25,
+						"cacheRead": 0.15,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:566",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.2-contributor"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.3-contributor"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.1,
+						"output": 0.2,
+						"cacheRead": 0.002,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:574",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "xai/grok-4.5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 6,
+						"cacheRead": 0.5,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:586",
+				"providers": [
+					"commandcode"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "xai/grok-4.6"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2,
+						"output": 6,
+						"cacheRead": 0.5,
+						"cacheWrite": 0
+					},
+					"longContext": {
+						"inputThreshold": 200000,
+						"input": 4,
+						"output": 12,
+						"cacheRead": 1,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/commandcode.kdl:8",
+				"providers": [
+					"commandcode"
+				],
+				"wire": {
+					"supportsDeveloperRole": false,
+					"supportsStore": false,
+					"supportsReasoningEffort": false,
+					"maxTokensField": "max_tokens"
+				},
+				"thinking": {
+					"upgradeNeutral": true,
+					"mode": "effort"
+				},
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 65536
+					}
 				}
 			},
 			{
@@ -7963,14 +9745,130 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:14",
+				"source": "providers/deepseek.kdl:18",
 				"providers": [
 					"deepseek"
 				],
 				"models": [
 					{
 						"kind": "exact",
+						"value": "deepseek-flash"
+					},
+					{
+						"kind": "exact",
 						"value": "deepseek-v4-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4-flash-vision-exp"
+					}
+				],
+				"wire": {
+					"clampOutputToModelMax": true
+				},
+				"catalog": {
+					"timeBased": {
+						"offPeakMultiplier": 0.5,
+						"peakWindows": {
+							"morning": {
+								"weekdays": "1,2,3,4,5",
+								"startMinute": 60,
+								"endMinute": 240
+							},
+							"afternoon": {
+								"weekdays": "1,2,3,4,5",
+								"startMinute": 360,
+								"endMinute": 600
+							}
+						}
+					},
+					"costPatch": {
+						"input": 0.3,
+						"output": 1.2,
+						"cacheRead": 0.006,
+						"cacheWrite": 0
+					}
+				}
+			},
+			{
+				"source": "providers/deepseek.kdl:45",
+				"providers": [
+					"deepseek"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"contextWindow": 1000000,
+						"maxTokens": 384000
+					}
+				}
+			},
+			{
+				"source": "providers/deepseek.kdl:52",
+				"providers": [
+					"deepseek"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-v4-pro"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.32,
+						"output": 3.96,
+						"cacheRead": 0.044,
+						"cacheWrite": 0
+					},
+					"timeBased": {
+						"offPeakMultiplier": 0.5,
+						"peakWindows": {
+							"morning": {
+								"weekdays": "1,2,3,4,5",
+								"startMinute": 60,
+								"endMinute": 240
+							},
+							"afternoon": {
+								"weekdays": "1,2,3,4,5",
+								"startMinute": 360,
+								"endMinute": 600
+							}
+						},
+						"effectiveRates": {
+							"flashPricing": {
+								"effectiveFrom": "2026-09-14T04:00:00Z",
+								"input": 0.3,
+								"output": 1.2,
+								"cacheRead": 0.006,
+								"cacheWrite": 0
+							}
+						}
+					}
+				}
+			},
+			{
+				"source": "providers/deepseek.kdl:89",
+				"providers": [
+					"deepseek"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4.1-flash-expires-on-0910"
 					}
 				],
 				"wire": {
@@ -7978,7 +9876,16 @@
 					"reasoningContentField": "reasoning_content",
 					"requiresAssistantContentForToolCalls": true,
 					"requiresReasoningContentForToolCalls": true,
+					"allowsSyntheticReasoningContentForToolCalls": false,
 					"supportsToolChoice": false
+				},
+				"thinking": {
+					"upgradeNeutral": true,
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
@@ -11227,7 +13134,32 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:15",
+				"source": "providers/opencode-go.kdl:10",
+				"providers": [
+					"opencode-go"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4.1-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/opencode-go.kdl:25",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -11238,7 +13170,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:13",
+				"source": "providers/opencode-go.kdl:23",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -11248,7 +13180,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:20",
+				"source": "providers/opencode-go.kdl:30",
 				"providers": [
 					"opencode-go"
 				],
@@ -11263,7 +13195,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:26",
+				"source": "providers/opencode-go.kdl:36",
 				"providers": [
 					"opencode-go"
 				],
@@ -11285,7 +13217,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:32",
+				"source": "providers/opencode-go.kdl:42",
 				"class": "glm",
 				"providers": [
 					"opencode-go"
@@ -11295,7 +13227,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:35",
+				"source": "providers/opencode-go.kdl:45",
 				"class": "kimi",
 				"providers": [
 					"opencode-go"
@@ -11305,7 +13237,19 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:39",
+				"source": "providers/opencode-go.kdl:55",
+				"class": "meta",
+				"providers": [
+					"opencode-go"
+				],
+				"family": "muse-spark",
+				"wire": {
+					"includeEncryptedReasoning": false,
+					"filterReasoningHistory": true
+				}
+			},
+			{
+				"source": "providers/opencode-go.kdl:61",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -11316,7 +13260,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:38",
+				"source": "providers/opencode-go.kdl:60",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -11326,7 +13270,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:46",
+				"source": "providers/opencode-go.kdl:68",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -11352,7 +13296,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:50",
+				"source": "providers/opencode-go.kdl:72",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -11378,7 +13322,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:56",
+				"source": "providers/opencode-go.kdl:78",
 				"providers": [
 					"opencode-go"
 				],
@@ -11403,7 +13347,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:61",
+				"source": "providers/opencode-go.kdl:83",
 				"providers": [
 					"opencode-go"
 				],
@@ -11423,7 +13367,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:66",
+				"source": "providers/opencode-go.kdl:88",
 				"providers": [
 					"opencode-go"
 				],
@@ -11445,7 +13389,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:71",
+				"source": "providers/opencode-go.kdl:93",
 				"providers": [
 					"opencode-go"
 				],
@@ -11466,7 +13410,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:75",
+				"source": "providers/opencode-go.kdl:97",
 				"providers": [
 					"opencode-go"
 				],
@@ -11493,7 +13437,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:79",
+				"source": "providers/opencode-go.kdl:101",
 				"providers": [
 					"opencode-go"
 				],
@@ -11515,7 +13459,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:84",
+				"source": "providers/opencode-go.kdl:106",
 				"providers": [
 					"opencode-go"
 				],
@@ -11530,7 +13474,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:88",
+				"source": "providers/opencode-go.kdl:110",
 				"providers": [
 					"opencode-go"
 				],
@@ -11622,7 +13566,19 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:30",
+				"source": "providers/opencode-zen.kdl:36",
+				"class": "meta",
+				"providers": [
+					"opencode-zen"
+				],
+				"family": "muse-spark",
+				"wire": {
+					"includeEncryptedReasoning": false,
+					"filterReasoningHistory": true
+				}
+			},
+			{
+				"source": "providers/opencode-zen.kdl:42",
 				"class": "mimo",
 				"providers": [
 					"opencode-zen"
@@ -11633,7 +13589,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:35",
+				"source": "providers/opencode-zen.kdl:47",
 				"class": "minimax",
 				"providers": [
 					"opencode-zen"
@@ -11644,7 +13600,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:40",
+				"source": "providers/opencode-zen.kdl:52",
 				"class": "openai",
 				"providers": [
 					"opencode-zen"
@@ -11664,7 +13620,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:44",
+				"source": "providers/opencode-zen.kdl:56",
 				"class": "unknown",
 				"providers": [
 					"opencode-zen"
@@ -11674,7 +13630,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:48",
+				"source": "providers/opencode-zen.kdl:60",
 				"class": "xai",
 				"providers": [
 					"opencode-zen"
@@ -11685,7 +13641,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:53",
+				"source": "providers/opencode-zen.kdl:65",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11707,7 +13663,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:58",
+				"source": "providers/opencode-zen.kdl:70",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11725,7 +13681,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:62",
+				"source": "providers/opencode-zen.kdl:74",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11782,7 +13738,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:67",
+				"source": "providers/opencode-zen.kdl:79",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11803,7 +13759,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:71",
+				"source": "providers/opencode-zen.kdl:83",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11827,7 +13783,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:75",
+				"source": "providers/opencode-zen.kdl:87",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11845,7 +13801,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:79",
+				"source": "providers/opencode-zen.kdl:91",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11868,7 +13824,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:84",
+				"source": "providers/opencode-zen.kdl:96",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11892,7 +13848,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:89",
+				"source": "providers/opencode-zen.kdl:101",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11912,7 +13868,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:99",
+				"source": "providers/opencode-zen.kdl:111",
 				"providers": [
 					"opencode-zen"
 				],
@@ -14516,6 +16472,20 @@
 				"default": "openai-completions"
 			},
 			{
+				"provider": "commandcode",
+				"routes": [
+					{
+						"api": "anthropic-messages",
+						"match": {
+							"prefix": [
+								"claude-"
+							]
+						}
+					}
+				],
+				"default": "openai-completions"
+			},
+			{
 				"provider": "zenmux",
 				"routes": [
 					{
@@ -14553,7 +16523,8 @@
 								"muse-spark-"
 							],
 							"exact": [
-								"muse-spark-1.3-contributor-free"
+								"muse-spark-1.3-contributor-free",
+								"gpt-6-astra"
 							]
 						}
 					},
@@ -16451,6 +18422,48 @@
 				}
 			},
 			{
+				"id": "commandcode",
+				"apiKeyFormat": "bearer",
+				"name": "Command Code",
+				"env": {
+					"vars": [
+						"COMMAND_CODE_API_KEY",
+						"COMMANDCODE_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://commandcode.ai/studio",
+					"instructions": "Create or copy a Provider API key from Command Code Studio",
+					"prompt": "Paste your Command Code API key",
+					"placeholder": "user_..."
+				}
+			},
+			{
+				"id": "charm-hyper",
+				"apiKeyFormat": "bearer",
+				"name": "Charm Hyper",
+				"env": {
+					"vars": [
+						"CHARM_HYPER_API_KEY",
+						"HYPER_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://hyper.charm.land/",
+					"instructions": "Create or copy an API key from the Charm Hyper dashboard",
+					"prompt": "Paste your Charm Hyper API key",
+					"placeholder": "sk-hyper-...",
+					"normalize": "strip-bearer",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Charm Hyper",
+						"url": "https://hyper.charm.land/v1/credits"
+					}
+				}
+			},
+			{
 				"id": "deepseek",
 				"apiKeyFormat": "bearer",
 				"name": "DeepSeek",
@@ -17122,7 +19135,10 @@
 				"name": "Amazon Bedrock",
 				"env": {
 					"hook": "aws-bedrock"
-				}
+				},
+				"nativeAuthApis": [
+					"bedrock-converse-stream"
+				]
 			},
 			{
 				"id": "azure",
@@ -17136,7 +19152,10 @@
 				"env": {
 					"hook": "aws-bedrock-mantle"
 				},
-				"allowsMissingApiKey": true
+				"allowsMissingApiKey": true,
+				"nativeAuthApis": [
+					"openai-responses"
+				]
 			},
 			{
 				"id": "google",

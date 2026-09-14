@@ -76,7 +76,10 @@ describe("read tool large artifact handling", () => {
 
 		expect(output).toContain("Unbounded raw read blocked for artifact://0");
 		expect(output).toContain("artifact://0:raw:1-3000");
-		expect(output).toContain(artifactDir);
+		// The notice must name the artifact file so it can be searched or copied.
+		// Only the directory prefix varies by host (a Windows temp dir sits under
+		// `%USERPROFILE%` and is displayed shortened), so match the path tail.
+		expect(output).toMatch(/session[/\\]0\.mcp\.log/);
 		expect(output).not.toContain("line-001");
 	});
 
@@ -199,9 +202,11 @@ describe("read tool large artifact handling", () => {
 		try {
 			const result = await tool.execute("call-raw-home", { path: "artifact://0:raw" });
 			const output = getTextOutput(result);
-			// artifactDir sits under the (mocked) home, so shortenPath rewrites the
-			// prefix to `~` — the notice must NOT leak the absolute artifact path.
-			expect(output).toContain(`~${path.sep}session`);
+			// artifactDir sits under the (mocked) home, so the notice must display it
+			// as `~`-relative (with `/` separators) and must NOT leak the absolute
+			// artifact path. Assert the exact displayed path rather than recomputing
+			// it with the production shortener.
+			expect(output).toContain("~/session/0.mcp.log");
 			expect(output).not.toContain(artifactDir);
 		} finally {
 			homeSpy.mockRestore();

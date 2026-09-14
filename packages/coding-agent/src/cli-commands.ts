@@ -57,6 +57,13 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.cleanseHelp,
 	},
 	{
+		name: "collab",
+		// Keep implementation imports behind the command boundary: this table is
+		// also imported before profile bootstrap and by native-free worker entries.
+		load: () => import("./commands/collab").then(m => m.default),
+		help: commandHelp.collabHelp,
+	},
+	{
 		name: "commit",
 		load: () => import("./commands/commit").then(m => m.default),
 		help: commandHelp.commitHelp,

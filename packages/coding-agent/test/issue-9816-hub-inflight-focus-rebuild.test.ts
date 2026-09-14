@@ -13,7 +13,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
@@ -198,6 +198,8 @@ interface SessionStub {
 	session: AgentSession;
 	hasListener(): boolean;
 	emitToolUpdate(event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>): Promise<void>;
+	emit(event: AgentSessionEvent): Promise<void>;
+	setLiveAssistant(message: AssistantMessage | null, results: ToolResultMessage[]): void;
 	stagePersistedCompletion(): () => void;
 }
 
@@ -211,12 +213,20 @@ function makeSession(
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let persistence = Promise.resolve();
 	const activeToolUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
+	let liveMessage: AssistantMessage | null = null;
+	let bufferedResults: ToolResultMessage[] = [];
 
 	const stub = {
 		get isStreaming() {
 			return streaming;
 		},
 		retryAttempt: 0,
+		agent: {
+			get state() {
+				return { streamMessage: liveMessage };
+			},
+			getPendingToolResults: () => bufferedResults,
+		},
 		subscribe(next: (event: AgentSessionEvent) => Promise<void> | void) {
 			listener = next;
 			return () => {
@@ -245,6 +255,14 @@ function makeSession(
 		emitToolUpdate: async event => {
 			activeToolUpdates.set(event.toolCallId, event);
 			await listener?.(event);
+		},
+		emit: async event => {
+			if (event.type === "message_end" && event.message.role === "assistant") liveMessage = null;
+			await listener?.(event);
+		},
+		setLiveAssistant: (message, results) => {
+			liveMessage = message;
+			bufferedResults = results;
 		},
 		stagePersistedCompletion: () => {
 			streaming = false;
@@ -277,6 +295,8 @@ function createFixture(main = makeSession([danglingHubWait], true)) {
 	ctx.clearTransientSessionUi = () => {
 		ctx.pendingMessagesContainer.disposeChildren();
 		ctx.pendingTools.clear();
+		ctx.streamingComponent = undefined;
+		ctx.streamingMessage = undefined;
 	};
 
 	const helpers = new UiHelpers(ctx);
@@ -398,5 +418,68 @@ describe("#10447 persisted background task board across a focus rebuild", () => 
 		await fixture.ctx.renderInitialMessages();
 
 		expect(fixture.ctx.pendingTools.has("task-bg")).toBe(false);
+	});
+});
+
+describe("live Cursor focus recovery without another delta", () => {
+	const paused: AssistantMessage = {
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking: "PAUSED_REASONING" },
+			{ type: "toolCall", id: "paused-grep", name: "grep", arguments: { pattern: "sample" } },
+			{ type: "text", text: "LAST_VISIBLE_TEXT" },
+		],
+		api: "cursor-agent",
+		provider: "cursor",
+		model: "cursor-grok-4.6",
+		stopReason: "stop",
+		usage,
+		timestamp: 1,
+	};
+	const result: ToolResultMessage = {
+		role: "toolResult",
+		toolCallId: "paused-grep",
+		toolName: "grep",
+		content: [{ type: "text", text: "COMPLETED_MATCH" }],
+		isError: false,
+		timestamp: 2,
+	};
+
+	it("restores the paused assistant and completed card before any later event", async () => {
+		const main = makeSession([], true);
+		main.setLiveAssistant(paused, [result]);
+		const { ctx, focus } = createFixture(main);
+		await focus.focusAgent("Worker");
+		await focus.unfocus();
+		const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		expect(rendered()).toContain("PAUSED_REASONING");
+		expect(rendered()).toContain("COMPLETED_MATCH");
+		expect(ctx.pendingTools.size).toBe(0);
+		await main.emit({ type: "message_end", message: paused });
+		expect(rendered().match(/LAST_VISIBLE_TEXT/g)).toHaveLength(1);
+		expect(rendered().match(/COMPLETED_MATCH/g)).toHaveLength(1);
+	});
+
+	it("materializes an orphaned terminal message without needing a message_update", async () => {
+		const main = makeSession([], true);
+		main.setLiveAssistant(null, [result]);
+		const { ctx, focus } = createFixture(main);
+		await focus.focusAgent("Worker");
+		await focus.unfocus();
+		await main.emit({ type: "message_end", message: paused });
+		const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		expect(rendered).toContain("LAST_VISIBLE_TEXT");
+		expect(rendered).toContain("COMPLETED_MATCH");
+		expect(ctx.pendingTools.size).toBe(0);
+	});
+
+	it("settles replay-created tool cards from buffered results", async () => {
+		const main = makeSession([paused], true);
+		main.setLiveAssistant(null, [result]);
+		const { ctx, focus } = createFixture(main);
+		await focus.focusAgent("Worker");
+		await focus.unfocus();
+		expect(Bun.stripANSI(ctx.chatContainer.render(120).join("\n"))).toContain("COMPLETED_MATCH");
+		expect(ctx.pendingTools.size).toBe(0);
 	});
 });

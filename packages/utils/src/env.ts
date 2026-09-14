@@ -110,7 +110,7 @@ function expandDotenvValues(values: Record<string, string>, env: Record<string, 
 /** Filters process env for child shells without launch-cwd dotenv values. */
 export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
-	cwd: string = process.cwd(),
+	cwd: string = getProjectDir(),
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);

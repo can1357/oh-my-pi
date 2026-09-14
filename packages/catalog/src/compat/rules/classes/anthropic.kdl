@@ -7,6 +7,30 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	// Server-side compaction (compact-2026-01-12) is a lineage capability: the
+	// documented model list is the adaptive-thinking generation onward (Opus
+	// 4.6+, Sonnet 4.6+, Fable/Mythos 5+). Whether a host delivers the beta is
+	// decided at request time from the effective endpoint, not here.
+	family "fable" {
+		revision ">=5" {
+			supports-server-compaction #true
+		}
+	}
+	family "mythos" {
+		revision ">=5" {
+			supports-server-compaction #true
+		}
+	}
+	family "opus" {
+		revision ">=4.6" {
+			supports-server-compaction #true
+		}
+	}
+	family "sonnet" {
+		revision ">=4.6" {
+			supports-server-compaction #true
+		}
+	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
 			revision ">=5" {
@@ -144,6 +168,23 @@ class "anthropic" {
 				output 50.0
 				cache-read 1.0
 				cache-write 12.5
+			}
+			// Fable 5.1 cut cache reads to $0.25/MTok, 0.025x input, a 75% rate
+			// unique to the 5.1 generation; Fable 5 stays at the 0.1x family
+			// default. https://www.anthropic.com/claude/fable
+			//
+			// `cost-patch` is an object axis, so the winning rule supplies the
+			// whole payload rather than merging field-wise over the family
+			// patch above. Restate input/output/cache-write, or a
+			// discovery-sourced 5.1 row (Anthropic's /v1/models omits pricing)
+			// would keep only the cache-read correction.
+			revision "=5.1" {
+				cost-patch {
+					input 10.0
+					output 50.0
+					cache-read 0.25
+					cache-write 12.5
+				}
 			}
 			limits-patch {
 				context-window 1000000

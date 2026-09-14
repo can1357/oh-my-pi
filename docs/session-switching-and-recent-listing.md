@@ -60,7 +60,7 @@ For `SessionInfo` list entries:
 
 - `title` is the fixed title-slot value when present, otherwise `header.title`, otherwise the last compaction `shortSummary` seen in the prefix
 - `firstMessage` is first user message text discoverable from the prefix or `"(no messages)"`
-- the picker also shows modified time, file size, lifecycle status (except `unknown`), fork marker, and cwd in all-projects scope
+- the picker also shows modified time, file size, a `current` marker on the live session, lifecycle status (except `unknown`), fork marker, and cwd in all-projects scope
 
 ## `--continue` resolution and terminal breadcrumb preference
 
@@ -134,7 +134,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 Flow:
 
 1. fetch current-folder sessions via `SessionManager.list(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
-2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, and pinned-session markers
+2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, pinned-session markers, and a current-session marker
 3. callbacks:
    - select -> lock picker input and call `handleResumeSession(sessionPath)`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
    - cancel -> hide overlay, restore editor focus, rerender
@@ -153,6 +153,7 @@ Flow:
 - Tab to toggle current-folder / all-projects scope
 - mouse wheel/click in the fullscreen picker
 - multi-token search across id/title/cwd/first message/prefix message text/path: literal matches lead by recency, then sufficiently strong fuzzy matches; prompt-history matches from `history.db` may be promoted after typing pauses
+- the live session (when `currentSessionPath` is supplied) is labeled `current` on its metadata line and focused on open and after a Tab scope toggle
 
 Empty-list render behavior:
 

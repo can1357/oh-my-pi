@@ -78,7 +78,7 @@ type BabelNode = { type: string; start: number; end: number; [key: string]: unkn
 // lazily and memoized.
 let babelParser: typeof BabelParser | undefined;
 
-async function loadBabelParser(): Promise<typeof BabelParser> {
+export async function loadBabelParser(): Promise<typeof BabelParser> {
 	if (!babelParser) {
 		babelParser = await import("@babel/parser");
 	}
@@ -182,6 +182,169 @@ function rewriteImportNode(node: BabelImportDeclaration): string {
 	if (namespaceName) return `const ${namespaceName} = await ${importCall};`;
 	if (defaultName) return `const ${defaultName} = (await ${importCall}).default;`;
 	return `await ${importCall};`;
+}
+
+function runtimeCallKind(node: BabelNode): "read" | undefined {
+	if (node.type !== "CallExpression") return undefined;
+	const callee = node.callee;
+	if (!callee || typeof callee !== "object") return undefined;
+	const calleeNode = callee as Record<string, unknown>;
+	if (calleeNode.type !== "MemberExpression" || calleeNode.computed === true) return undefined;
+	const object = calleeNode.object;
+	const property = calleeNode.property;
+	if (!object || typeof object !== "object" || !property || typeof property !== "object") return undefined;
+	const objectNode = object as Record<string, unknown>;
+	const propertyNode = property as Record<string, unknown>;
+	return objectNode.type === "Identifier" &&
+		objectNode.name === "tool" &&
+		propertyNode.type === "Identifier" &&
+		propertyNode.name === "read"
+		? "read"
+		: undefined;
+}
+function containsCallSiteUnsafeSyntax(value: unknown, root = true): boolean {
+	if (!value || typeof value !== "object") return false;
+	if (Array.isArray(value)) return value.some(item => containsCallSiteUnsafeSyntax(item, false));
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (!root && typeof type === "string" && isExecutionBoundary(type)) return false;
+	if (
+		type === "CallExpression" &&
+		typeof node.callee === "object" &&
+		node.callee !== null &&
+		(node.callee as Record<string, unknown>).type === "Identifier" &&
+		(node.callee as Record<string, unknown>).name === "eval"
+	) {
+		return true;
+	}
+	if (type === "AwaitExpression" || type === "YieldExpression") return true;
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		if (containsCallSiteUnsafeSyntax(node[key], false)) return true;
+	}
+	return false;
+}
+
+const CALL_SITE_HELPER = "__omp_with_call_site__";
+
+function patternBindsCallSiteHelper(pattern: unknown): boolean {
+	const names: string[] = [];
+	collectBindingNames(pattern, names);
+	return names.includes(CALL_SITE_HELPER);
+}
+
+function isCallSiteHelperIdentifier(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	const node = value as Record<string, unknown>;
+	return node.type === "Identifier" && node.name === CALL_SITE_HELPER;
+}
+
+// A bare textual mention of the helper (comment, string literal) must not suppress
+// instrumentation — comments never reach the walker and string contents are not
+// Identifier nodes. Only a real `__omp_with_call_site__(...)` call (already
+// instrumented code, where wrapping again would double-count the site) or a real
+// binding of the name (which would shadow the worker-injected helper, so fail
+// closed) skips instrumentation.
+export function containsCallSiteHelperSyntax(root: unknown): boolean {
+	let found = false;
+	walkNodes(root, node => {
+		if (found) return;
+		switch (node.type) {
+			case "CallExpression":
+				if (isCallSiteHelperIdentifier(node.callee)) found = true;
+				break;
+			case "VariableDeclarator":
+				if (patternBindsCallSiteHelper(node.id)) found = true;
+				break;
+			case "FunctionDeclaration":
+			case "FunctionExpression":
+			case "ArrowFunctionExpression":
+			case "ObjectMethod":
+			case "ClassMethod":
+			case "ClassPrivateMethod": {
+				if (isCallSiteHelperIdentifier(node.id)) {
+					found = true;
+				} else if (Array.isArray(node.params)) {
+					for (const param of node.params) {
+						if (patternBindsCallSiteHelper(param)) {
+							found = true;
+							break;
+						}
+					}
+				}
+				break;
+			}
+			case "ClassDeclaration":
+			case "ClassExpression":
+			case "TSEnumDeclaration":
+				if (isCallSiteHelperIdentifier(node.id)) found = true;
+				break;
+			case "ImportSpecifier":
+			case "ImportDefaultSpecifier":
+			case "ImportNamespaceSpecifier":
+				if (isCallSiteHelperIdentifier(node.local)) found = true;
+				break;
+			case "CatchClause":
+				if (patternBindsCallSiteHelper(node.param)) found = true;
+				break;
+			case "AssignmentExpression":
+				if (patternBindsCallSiteHelper(node.left)) found = true;
+				break;
+			case "UpdateExpression":
+				if (isCallSiteHelperIdentifier(node.argument)) found = true;
+				break;
+			case "ForInStatement":
+			case "ForOfStatement": {
+				const left = node.left;
+				if (left && typeof left === "object" && "type" in left && left.type === "VariableDeclaration") {
+					if ("declarations" in left && Array.isArray(left.declarations)) {
+						for (const declaration of left.declarations) {
+							if (
+								declaration &&
+								typeof declaration === "object" &&
+								"id" in declaration &&
+								patternBindsCallSiteHelper(declaration.id)
+							) {
+								found = true;
+								break;
+							}
+						}
+					}
+				} else if (patternBindsCallSiteHelper(left)) {
+					found = true;
+				}
+				break;
+			}
+			default:
+				break;
+		}
+	});
+	return found;
+}
+
+async function instrumentRuntimeCallSites(code: string): Promise<string> {
+	if (!code.includes("tool")) return code;
+	const ast = await parseProgram(code);
+	if (!ast) return code;
+	if (code.includes(CALL_SITE_HELPER) && containsCallSiteHelperSyntax(ast)) return code;
+	const edits: Array<{ offset: number; text: string; closing: boolean }> = [];
+	walkNodes(ast, node => {
+		if (!runtimeCallKind(node)) return;
+		if (containsCallSiteUnsafeSyntax(node)) return;
+		edits.push({
+			offset: node.start,
+			text: `__omp_with_call_site__(${JSON.stringify(`js:${node.start}`)}, () => `,
+			closing: false,
+		});
+		edits.push({ offset: node.end, text: ")", closing: true });
+	});
+	edits.sort((left, right) => right.offset - left.offset || Number(right.closing) - Number(left.closing));
+	let result = code;
+	for (const edit of edits) {
+		result = result.slice(0, edit.offset) + edit.text + result.slice(edit.offset);
+	}
+	return result;
 }
 
 export async function rewriteImports(code: string): Promise<string> {
@@ -531,7 +694,8 @@ const LOOKS_LIKE_TS =
 export async function wrapCode(
 	code: string,
 ): Promise<{ source: string; asyncWrapped: boolean; finalExpressionReturned: boolean }> {
-	const finalExpression = await returnFinalExpression(code);
+	const instrumented = await instrumentRuntimeCallSites(code);
+	const finalExpression = await returnFinalExpression(instrumented);
 	const stripped = stripTypeScript(finalExpression.source);
 	const importsRewritten = await rewriteImports(stripped);
 	const needsAsyncWrapper = await requiresAsyncWrapper(importsRewritten);

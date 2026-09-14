@@ -74,6 +74,17 @@ export class TtsrCoordinator {
 		this.#manager?.resetBuffer();
 	}
 
+	/**
+	 * Resets stream buffers when an assistant message begins. The agent loop
+	 * turns the first provider `start` of every response into `message_start`,
+	 * so this is the boundary between two responses inside one turn (an aborted
+	 * response and its retry, or a continuation after an interruption); without
+	 * it, text from the earlier response would combine with the later one.
+	 */
+	onAssistantMessageStart(): void {
+		this.#manager?.resetBuffer();
+	}
+
 	/** Advances repeat-after-gap tracking at turn end. */
 	onTurnEnd(): void {
 		this.#manager?.incrementMessageCount();
@@ -83,6 +94,12 @@ export class TtsrCoordinator {
 	async checkMessageUpdate(event: AgentEvent): Promise<boolean> {
 		if (event.type !== "message_update" || !this.#manager?.hasRules()) return false;
 		const assistantEvent = event.assistantMessageEvent;
+		// A later `start` inside one response restarts its partial; the buffers
+		// describe the discarded attempt and must not survive it.
+		if (assistantEvent.type === "start") {
+			this.#manager.resetBuffer();
+			return false;
+		}
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
 		let delta: string | undefined;

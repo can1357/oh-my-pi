@@ -249,6 +249,44 @@ describe("config CLI schema coverage", () => {
 		});
 	});
 
+	it("rechecks initially present absent-only settings under the YAML write lock", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		await Bun.write(configPath, "compaction:\n  enabled: false\n");
+		const settings = await Settings.init();
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			await Bun.write(filePath, "{}\n");
+			return await withFileLock(filePath, fn, options);
+		});
+
+		expect(await settings.setIfAbsent("compaction.enabled", true)).toBe(true);
+		expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({ compaction: { enabled: true } });
+	});
+
+	it("preserves ordinary settings staged during a guarded save", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+		const saveEntered = Promise.withResolvers<void>();
+		const releaseSave = Promise.withResolvers<void>();
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			saveEntered.resolve();
+			await releaseSave.promise;
+			return await withFileLock(filePath, fn, options);
+		});
+
+		const guardedSave = settings.setIfAbsent("compaction.enabled", true);
+		await saveEntered.promise;
+		settings.set("compaction.idleTimeoutSeconds", 600);
+		releaseSave.resolve();
+		expect(await guardedSave).toBe(true);
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toMatchObject({
+			compaction: { enabled: true, idleTimeoutSeconds: 600 },
+		});
+	});
+
 	it("accepts --if-absent only for config set", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const { exitCode, error } = await runCliProcess(["config", "get", "compaction.enabled", "--if-absent"], {

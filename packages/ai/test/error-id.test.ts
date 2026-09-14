@@ -51,6 +51,105 @@ describe("error-id classification", () => {
 		}
 	});
 
+	it.each([
+		"Transport error reading Codex response body: error decoding response body",
+		"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body",
+	])("retries Codex HTTP body transport failures: %s", errorMessage => {
+		const error = new AIError.ProviderResponseError(errorMessage, { provider: "anthropic", kind: "output" });
+		for (const id of [
+			AIError.classify(error, "anthropic-messages"),
+			AIError.classifyMessage(message({ errorMessage })),
+		]) {
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(false);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+		expect(AIError.isProviderRetryableError(error)).toBe(true);
+		expect(AIError.isStreamReadErrorText(errorMessage)).toBe(false);
+	});
+
+	it.each([400, 401, 403])("keeps Codex body-read diagnostics on HTTP %s terminal", errorStatus => {
+		const errorMessage = "Transport error reading Codex response body: error decoding response body";
+		const error = new AIError.ProviderHttpError(errorMessage, errorStatus);
+		const wrapped = new AIError.ProviderHttpError("Request rejected", errorStatus, {
+			cause: new Error(errorMessage),
+		});
+		for (const id of [
+			AIError.classify(error, "anthropic-messages"),
+			AIError.classify(wrapped, "anthropic-messages"),
+			AIError.classifyMessage(message({ errorMessage, errorStatus })),
+			AIError.classifyMessage(message({ errorMessage: `${errorStatus} ${errorMessage}` })),
+		]) {
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+		expect(AIError.isProviderRetryableError(error)).toBe(false);
+	});
+
+	it.each([408, 429, 500])("allows Codex body-read recovery on HTTP %s", errorStatus => {
+		const errorMessage = "Transport error reading Codex response body: error decoding response body";
+		const error = new AIError.ProviderHttpError(errorMessage, errorStatus);
+		expect(AIError.retriable(AIError.classifyMessage(message({ errorMessage, errorStatus })))).toBe(true);
+		expect(AIError.isProviderRetryableError(error)).toBe(true);
+	});
+
+	it.each([
+		"error decoding response body",
+		"Anthropic stream error (api_error): invalid response",
+		"Failed to parse tool call arguments as JSON",
+		"Anthropic stream error (authentication_error): 401 Unauthorized",
+	])("does not infer a transport retry from unrelated failures: %s", errorMessage => {
+		const error = new AIError.ProviderResponseError(errorMessage, { provider: "anthropic", kind: "output" });
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+		expect(AIError.isProviderRetryableError(error)).toBe(false);
+	});
+
+	it("classifies bare stream-truncation diagnostics as transient + retryable", () => {
+		for (const errorMessage of ["unexpected EOF", "unexpected end of json input", "eof while parsing"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps a truncation phrase riding on a terminal 4xx terminal", () => {
+		const messages = [
+			message({ errorStatus: 400, errorMessage: "unexpected EOF" }),
+			message({ errorMessage: "HTTP 400: unexpected EOF" }),
+			message({ errorMessage: "400 Bad Request: eof while parsing" }),
+		];
+		for (const assistant of messages) {
+			const id = AIError.classifyMessage(assistant);
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it("keeps a truncation on a retryable 408/429 status transient + retryable", () => {
+		for (const errorStatus of [408, 429]) {
+			const id = AIError.classifyMessage(message({ errorStatus, errorMessage: "unexpected EOF" }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps low-signal truncation words unclassified on persisted text", () => {
+		for (const errorMessage of ["truncated", "end of file"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it("keeps Flag.Timeout when a timeout message also reads as a truncation", () => {
+		const id = AIError.classifyMessage(message({ errorMessage: "read timed out: unexpected EOF" }));
+		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
 	it("keeps authenticated connection rejections non-retryable", () => {
 		const assistant = message({
 			errorMessage: "Unable to connect: 401 Unauthorized",
@@ -239,6 +338,49 @@ describe("error-id classification", () => {
 			const id = AIError.classifyMessage(assistant);
 			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("retries remote Python HTTP/2 internal and refused stream resets", () => {
+		for (const code of [2, 7]) {
+			const assistant = message({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorId: 0,
+				errorMessage: `Codex error event: <StreamReset stream_id:1283, error_code:${code}, remote_reset:True> (code=api_error)`,
+			});
+			expect(AIError.retriable(AIError.classifyMessage(assistant))).toBe(true);
+		}
+	});
+
+	it("keeps other Python stream resets outside transient recovery", () => {
+		for (const details of [
+			"error_code:8, remote_reset:True",
+			"error_code:20, remote_reset:True",
+			"error_code:2, remote_reset:False",
+			"error_code:2",
+		]) {
+			const assistant = message({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorMessage: `Codex error event: <StreamReset stream_id:1283, ${details}> (code=api_error)`,
+			});
+			expect(AIError.retriable(AIError.classifyMessage(assistant))).toBe(false);
+		}
+	});
+
+	it("keeps generic API and chunk-format errors outside transient recovery", () => {
+		for (const errorMessage of [
+			"Codex error event: invalid chunk header (code=api_error)",
+			"Codex error event: malformed chunk footer (code=api_error)",
+			"Codex error event: invalid request body (code=api_error)",
+		]) {
+			const assistant = message({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorMessage,
+			});
+			expect(AIError.retriable(AIError.classifyMessage(assistant))).toBe(false);
 		}
 	});
 

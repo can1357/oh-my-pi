@@ -37,6 +37,14 @@ export interface ProviderDescriptor {
 	dynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration. Only providers with this field participate in generate-models.ts. */
 	catalogDiscovery?: CatalogDiscoveryConfig;
+	/**
+	 * When true, generator backfills never copy reasoning/input/limits from
+	 * same-id rows on other providers into this provider's rows. Set for
+	 * providers whose endpoint discovery is the deployment truth and whose
+	 * corrections live in KDL, so a stencil.so or canonical-family reference
+	 * cannot reintroduce foreign metadata.
+	 */
+	skipCrossProviderReferenceFills?: boolean;
 }
 
 /** A provider descriptor that has catalog discovery configured. */
@@ -77,6 +85,13 @@ export interface ProviderCatalogEntry {
 	readonly dynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration for generate-models.ts. */
 	readonly catalogDiscovery?: CatalogDiscoveryConfig;
+	/**
+	 * When true, generator backfills never copy reasoning/input/limits from
+	 * same-id rows on other providers into this provider's rows. Set for
+	 * providers whose endpoint discovery is the deployment truth and whose
+	 * corrections live in KDL.
+	 */
+	readonly skipCrossProviderReferenceFills?: boolean;
 	/**
 	 * Built bespoke by the coding-agent runtime (OAuth-token-driven managers);
 	 * excluded from `PROVIDER_DESCRIPTORS` even though models are discoverable.
