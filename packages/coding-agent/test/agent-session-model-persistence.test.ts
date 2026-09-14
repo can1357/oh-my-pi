@@ -108,8 +108,10 @@ describe("AgentSession model persistence", () => {
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
 		codeModelBeforeNavigationHandler?: AgentSessionConfig["codeModelBeforeNavigationHandler"];
+		codeModelAfterNavigationHandler?: AgentSessionConfig["codeModelAfterNavigationHandler"];
 		persist?: boolean;
 		onSessionSwitch?: (ctx: ExtensionContext) => void;
+		onSessionBeforeSwitch?: () => { cancel: true };
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -140,12 +142,20 @@ describe("AgentSession model persistence", () => {
 			? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
 			: SessionManager.inMemory();
 		let extensionRunner: ExtensionRunner | undefined;
-		if (options?.onSessionSwitch || options?.codeModelBeforeNavigationHandler) {
+		if (
+			options?.onSessionSwitch ||
+			options?.onSessionBeforeSwitch ||
+			options?.codeModelBeforeNavigationHandler ||
+			options?.codeModelAfterNavigationHandler
+		) {
 			const runtime = new ExtensionRuntime();
 			const extension = await loadExtensionFromFactory(
 				pi => {
 					if (options.onSessionSwitch) {
 						pi.on("session_switch", (_event, ctx) => options.onSessionSwitch?.(ctx));
+					}
+					if (options.onSessionBeforeSwitch) {
+						pi.on("session_before_switch", () => options.onSessionBeforeSwitch?.());
 					}
 				},
 				tempDir.path(),
@@ -161,6 +171,7 @@ describe("AgentSession model persistence", () => {
 			settings: sessionSettings,
 			modelRegistry,
 			codeModelBeforeNavigationHandler: options?.codeModelBeforeNavigationHandler,
+			codeModelAfterNavigationHandler: options?.codeModelAfterNavigationHandler,
 			extensionRunner,
 		});
 
@@ -233,6 +244,56 @@ describe("AgentSession model persistence", () => {
 			if (!sessionFile) throw new Error("Expected a persisted session path");
 			expect(await created.session.switchSession(sessionFile)).toBe(false);
 			expect(created.session.sessionManager.getSessionId()).toBe(destinationSessionId);
+		} finally {
+			release.resolve();
+			await navigation;
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
+	});
+
+	it("preserves the outgoing phase when a public navigation handler cancels", async () => {
+		let outgoingRestorations = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				outgoingRestorations++;
+				return undefined;
+			},
+			onSessionBeforeSwitch: () => ({ cancel: true }),
+		});
+		const beforeSessionId = created.session.sessionManager.getSessionId();
+		expect(await created.session.newSession()).toBe(false);
+		expect(outgoingRestorations).toBe(0);
+		expect(created.session.sessionManager.getSessionId()).toBe(beforeSessionId);
+	});
+
+	it("awaits destination recovery beyond the extension timeout", async () => {
+		const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const previousModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const targetModelValue = modelValue(targetModel);
+		const targetSessionFile = await writeRoleModelSession(targetModelValue, targetModelValue, "default");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const created = await createSession({
+			initialModel: previousModel,
+			codeModelAfterNavigationHandler: async () => {
+				entered.resolve();
+				await release.promise;
+			},
+			persist: true,
+		});
+		testSetExtensionHandlerTimeoutMs(5);
+		let settled = false;
+		const navigation = created.session.switchSession(targetSessionFile).then(result => {
+			settled = true;
+			return result;
+		});
+		try {
+			await entered.promise;
+			await Bun.sleep(20);
+			expect(settled).toBe(false);
+			release.resolve();
+			expect(await navigation).toBe(true);
+			expect(created.session.sessionManager.getSessionFile()).toBe(targetSessionFile);
 		} finally {
 			release.resolve();
 			await navigation;

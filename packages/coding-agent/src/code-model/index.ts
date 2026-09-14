@@ -5,7 +5,11 @@ import { runCodeModelMenu } from "./model-menu";
 import { installCodeModelSession, type CodeModelSessionHooks } from "./session-mode";
 
 export type CodeModelExtensionHooks = CodeModelSessionHooks;
-export type { CodeModelBeforeIdleHandler, CodeModelBeforeNavigationHandler } from "./session-mode";
+export type {
+	CodeModelAfterNavigationHandler,
+	CodeModelBeforeIdleHandler,
+	CodeModelBeforeNavigationHandler,
+} from "./session-mode";
 
 export function createCodeModelExtension(settings: Settings, hooks: CodeModelExtensionHooks = {}): ExtensionFactory {
 	return pi => {

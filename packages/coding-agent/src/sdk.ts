@@ -54,6 +54,7 @@ import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/con
 import { createAutoresearchExtension } from "./autoresearch";
 import {
 	createCodeModelExtension,
+	type CodeModelAfterNavigationHandler,
 	type CodeModelBeforeIdleHandler,
 	type CodeModelBeforeNavigationHandler,
 } from "./code-model";
@@ -1735,6 +1736,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let session!: AgentSession;
 	let codeModelBeforeIdleHandler: CodeModelBeforeIdleHandler | undefined;
 	let codeModelBeforeNavigationHandler: CodeModelBeforeNavigationHandler | undefined;
+	let codeModelAfterNavigationHandler: CodeModelAfterNavigationHandler | undefined;
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -2167,6 +2169,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						},
 						registerBeforeNavigation: handler => {
 							codeModelBeforeNavigationHandler = handler;
+						},
+						registerAfterNavigation: handler => {
+							codeModelAfterNavigationHandler = handler;
 						},
 					}),
 				);
@@ -3832,6 +3837,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionRunner,
 			codeModelBeforeIdleHandler,
 			codeModelBeforeNavigationHandler,
+			codeModelAfterNavigationHandler,
 			getEvalPreludes,
 			customCommands: customCommandsResult.commands,
 			skills,

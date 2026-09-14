@@ -47,6 +47,7 @@ export type CodeModelBeforeIdleHandler = (
 ) => Promise<SessionStopEventResult | undefined>;
 
 export type CodeModelBeforeNavigationHandler = (ctx: ExtensionContext) => Promise<{ cancel?: boolean } | undefined>;
+export type CodeModelAfterNavigationHandler = (ctx: ExtensionContext) => Promise<void>;
 
 export interface CodeModelSessionHooks {
 	getRetryFallbackPrimary?: () =>
@@ -58,6 +59,7 @@ export interface CodeModelSessionHooks {
 		| undefined;
 	registerBeforeIdle?: (handler: CodeModelBeforeIdleHandler) => void;
 	registerBeforeNavigation?: (handler: CodeModelBeforeNavigationHandler) => void;
+	registerAfterNavigation?: (handler: CodeModelAfterNavigationHandler) => void;
 }
 
 function sameModel(model: Model | undefined, state: ModelState): boolean {
@@ -373,10 +375,14 @@ export function installCodeModelSession(
 		}
 	}
 
-	pi.on("session_start", recover);
-	pi.on("session_switch", recover);
-	pi.on("session_tree", recover);
-	pi.on("session_branch", recover);
+	if (hooks.registerAfterNavigation) {
+		hooks.registerAfterNavigation(ctx => recover(undefined, ctx));
+	} else {
+		pi.on("session_start", recover);
+		pi.on("session_switch", recover);
+		pi.on("session_tree", recover);
+		pi.on("session_branch", recover);
+	}
 	if (hooks.registerBeforeNavigation) {
 		hooks.registerBeforeNavigation(prepareNavigation);
 	} else {

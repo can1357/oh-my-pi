@@ -711,6 +711,7 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#codeModelBeforeIdleHandler: AgentSessionConfig["codeModelBeforeIdleHandler"];
 	#codeModelBeforeNavigationHandler: AgentSessionConfig["codeModelBeforeNavigationHandler"];
+	#codeModelAfterNavigationHandler: AgentSessionConfig["codeModelAfterNavigationHandler"];
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	/**
@@ -1378,6 +1379,7 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#codeModelBeforeIdleHandler = config.codeModelBeforeIdleHandler;
 		this.#codeModelBeforeNavigationHandler = config.codeModelBeforeNavigationHandler;
+		this.#codeModelAfterNavigationHandler = config.codeModelAfterNavigationHandler;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#customCommands = config.customCommands ?? [];
@@ -2125,6 +2127,11 @@ export class AgentSession {
 		if (!this.#codeModelBeforeNavigationHandler || !this.#extensionRunner) return false;
 		const result = await this.#codeModelBeforeNavigationHandler(this.#extensionRunner.createContext());
 		return result?.cancel === true;
+	}
+
+	async runCodeModelAfterNavigation(): Promise<void> {
+		if (!this.#codeModelAfterNavigationHandler || !this.#extensionRunner) return;
+		await this.#codeModelAfterNavigationHandler(this.#extensionRunner.createContext());
 	}
 
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
@@ -7932,7 +7939,6 @@ export class AgentSession {
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
-		if (await this.#codeModelBlocksNavigation()) return false;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -7945,6 +7951,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		if (await this.#codeModelBlocksNavigation()) return false;
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
@@ -8027,6 +8034,7 @@ export class AgentSession {
 			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
 
+			await this.runCodeModelAfterNavigation();
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -8064,7 +8072,6 @@ export class AgentSession {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
-		if (await this.#codeModelBlocksNavigation()) return false;
 
 		// Emit session_before_switch event with reason "fork" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -8077,6 +8084,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		if (await this.#codeModelBlocksNavigation()) return false;
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -8121,6 +8129,7 @@ export class AgentSession {
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
 
+			await this.runCodeModelAfterNavigation();
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -9117,7 +9126,6 @@ export class AgentSession {
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
-		if (await this.#codeModelBlocksNavigation()) return false;
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -9130,6 +9138,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		if (await this.#codeModelBlocksNavigation()) return false;
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -9320,6 +9329,7 @@ export class AgentSession {
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
+			await this.runCodeModelAfterNavigation();
 			// Emit session_switch event to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -9481,7 +9491,6 @@ export class AgentSession {
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
 		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
 
-		if (await this.#codeModelBlocksNavigation()) return { selectedText, selectedImages, cancelled: true };
 		let skipConversationRestore = false;
 
 		// Emit session_before_branch event (can be cancelled)
@@ -9496,6 +9505,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+		if (await this.#codeModelBlocksNavigation()) return { selectedText, selectedImages, cancelled: true };
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -9542,6 +9552,7 @@ export class AgentSession {
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
+			await this.runCodeModelAfterNavigation();
 			// Reload messages from entries (works for both file and in-memory mode)
 			const sessionContext = this.buildDisplaySessionContext();
 
@@ -9598,9 +9609,6 @@ export class AgentSession {
 		) {
 			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
 		}
-		if (await this.#codeModelBlocksNavigation()) {
-			return { cancelled: true, sessionFile: previousSessionFile };
-		}
 
 		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -9611,6 +9619,9 @@ export class AgentSession {
 			if (result?.cancel) {
 				return { cancelled: true, sessionFile: previousSessionFile };
 			}
+		}
+		if (await this.#codeModelBlocksNavigation()) {
+			return { cancelled: true, sessionFile: previousSessionFile };
 		}
 
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
@@ -9680,6 +9691,7 @@ export class AgentSession {
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
+			await this.runCodeModelAfterNavigation();
 			const sessionContext = this.buildDisplaySessionContext();
 
 			if (this.#extensionRunner) {
@@ -9825,7 +9837,6 @@ export class AgentSession {
 			// Original arguments couldn't be recovered (corrupted/legacy session
 			// data) — fall through to a plain leaf move so navigation still works.
 		}
-		if (await this.#codeModelBlocksNavigation()) return { cancelled: true };
 
 		// Collect entries to summarize (from old leaf to common ancestor). For an
 		// `ask` re-answer completion, the branch point is `targetEntry.parentId`
@@ -9878,6 +9889,7 @@ export class AgentSession {
 				fromExtension = true;
 			}
 		}
+		if (await this.#codeModelBlocksNavigation()) return { cancelled: true };
 
 		// Run default summarizer if needed
 		let summaryText: string | undefined;
@@ -10007,6 +10019,7 @@ export class AgentSession {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}
 
+		await this.runCodeModelAfterNavigation();
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext();
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);

@@ -309,6 +309,8 @@ export class ExtensionUiController {
 			this.showExtensionError(error.extensionPath, error.error);
 		});
 
+		await this.ctx.session.runCodeModelAfterNavigation();
+
 		// Emit session_start event
 		await extensionRunner.emit({
 			type: "session_start",
