@@ -153,7 +153,7 @@ hindsight:
   bankIdTemplate: coding-agent::{gitProject}
 ```
 
-Both project-scoped modes name the project the same way: take the repository's primary checkout root (so every linked worktree of one repository resolves to the same directory), then lowercase its basename. A checkout at `~/code/General` therefore tags `project:general`. Tags are matched literally, so this fold is what keeps one repository in one memory scope no matter how the path is capitalised.
+Both project-scoped modes resolve the repository from its primary checkout root, so every linked worktree shares one memory scope. The `{gitProject}` template preserves the checkout basename exactly to match the external coding-agent integration. OMP's legacy per-project IDs and `project:<name>` tags continue to lowercase that basename, preserving their existing behavior; a checkout at `~/code/General` therefore still tags `project:general`.
 
 The primary session recalls on its first model turn (`hindsight.autoRecall: true`) and automatically retains completed conversation turns every three user turns by default. `/memory enqueue` flushes queued tool retains and forces retention of the current session. At agent end, the primary state schedules cadence-based retention and flushes the retain queue; session disposal drains that queue before releasing the state. Request failures and configured timeouts are logged and leave the coding session usable. Subagents alias the parent's client, bank, and scope for explicit `recall`, `retain`, and `reflect` calls, but do not run their own automatic recall or retention.
 

@@ -347,6 +347,15 @@ describe("computeBankScope", () => {
 				"project:casedrepo",
 			]);
 		});
+
+		it("preserves the primary checkout case in the {gitProject} template", () => {
+			const config = baseConfig({
+				scoping: "per-project",
+				bankIdTemplate: "coding-agent::{gitProject}",
+			});
+			expect(computeBankScope(config, primaryRoot)).toEqual({ bankId: "coding-agent::CasedRepo" });
+			expect(computeBankScope(config, worktreeRoot)).toEqual(computeBankScope(config, primaryRoot));
+		});
 	});
 });
 

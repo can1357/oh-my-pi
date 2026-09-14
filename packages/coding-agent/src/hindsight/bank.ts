@@ -62,37 +62,23 @@ function renderProjectBankId(template: string | null, gitProject: string): strin
 
 /**
  * Worktree-aware repository name matching Hindsight's `{gitProject}` placeholder.
- * Preserve the checkout basename's case so the generated bank ID is byte-for-byte
- * compatible with the external coding-agent integration.
+ *
+ * When `directory` lives inside a repository we resolve the primary checkout
+ * root (or the shared common dir for bare-repo worktrees) via the native VCS
+ * adapter and basename that, so every linked worktree of one repo shares the
+ * same name. Outside a repo (or when resolution fails), fall back to the cwd
+ * basename. Preserve case here because the external coding-agent integration's
+ * `{gitProject}` placeholder does; legacy IDs and project tags fold case at
+ * their call sites to retain their existing behavior.
+ *
+ * Sync only: this runs on the hot path of `computeBankScope`, which is exposed
+ * as a sync API to callers like `backend.ts` and must stay sync. Native
+ * repository discovery never launches a subprocess.
  */
-function gitProjectLabel(directory: string): string {
+function projectName(directory: string): string {
 	if (!directory) return UNKNOWN_PROJECT;
 	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
 	return path.basename(primary ?? directory) || UNKNOWN_PROJECT;
-}
-
-/**
- * Best-effort project label from a working-directory path.
- *
- * When `directory` lives inside a repository we resolve the primary
- * checkout root (or the shared common dir for bare-repo worktrees) via
- * the native VCS adapter and basename that, so every linked
- * worktree of one repo shares the same `project:<name>` tag.
- * Outside a repo (or when resolution fails), fall back to the cwd basename.
- *
- * The basename is lowercased. The label becomes a tag, and Hindsight matches
- * tags literally, so a checkout at `.../General` would otherwise retain into a
- * `project:General` scope that never meets the `project:general` scope every
- * other client of the same bank reads and writes.
- *
- * Sync only: this runs on the hot path of `computeBankScope`, which is
- * exposed as a sync API to callers like `backend.ts` and must stay sync.
- * Native repository discovery never launches a subprocess.
- */
-function projectLabel(directory: string): string {
-	if (!directory) return UNKNOWN_PROJECT;
-	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
-	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;
 }
 
 /**
@@ -107,12 +93,12 @@ export function computeBankScope(config: HindsightConfig, directory: string): Ba
 		case "global":
 			return { bankId: base };
 		case "per-project": {
-			const project = projectLabel(directory);
-			const templated = renderProjectBankId(config.bankIdTemplate, gitProjectLabel(directory));
-			return { bankId: templated ?? `${base}-${project}` };
+			const gitProject = projectName(directory);
+			const templated = renderProjectBankId(config.bankIdTemplate, gitProject);
+			return { bankId: templated ?? `${base}-${gitProject.toLowerCase()}` };
 		}
 		case "per-project-tagged": {
-			const tag = `${PROJECT_TAG_PREFIX}${projectLabel(directory)}`;
+			const tag = `${PROJECT_TAG_PREFIX}${projectName(directory).toLowerCase()}`;
 			return {
 				bankId: base,
 				retainTags: [tag],
