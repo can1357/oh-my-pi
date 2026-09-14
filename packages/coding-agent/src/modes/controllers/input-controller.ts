@@ -697,7 +697,7 @@ export class InputController {
 	// empty (resize transactions) or the row falls outside it: routing stale
 	// spans would highlight or focus an unrelated agent from old rows.
 	#viewportCandidates(screenRow: number): string[] {
-		const viewport = this.ctx.ui.getMutableViewport();
+		const viewport = this.ctx.ui.getMutableViewport(screenRow);
 		const local = screenRow - viewport.top;
 		if (viewport.length === 0 || local < 0 || local >= viewport.length) return [];
 		return this.ctx.resolveViewportClickCandidates(local);

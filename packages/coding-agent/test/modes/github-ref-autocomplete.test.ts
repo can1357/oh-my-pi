@@ -128,6 +128,7 @@ describe("github-ref autocomplete — provider integration", () => {
 
 		expect(suggestions).toEqual({
 			prefix: "#123",
+			commandArgument: true,
 			items: [
 				{ value: "pr://123", label: "PR #123", description: "GitHub pull request" },
 				{ value: "issue://123", label: "Issue #123", description: "GitHub issue" },

@@ -359,6 +359,23 @@ describe("CombinedAutocompleteProvider", () => {
 			}
 		});
 
+		it.each([false, true])("preserves forced file provenance for allowArgs=%s", async allowArgs => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-force-args-"));
+			try {
+				fs.writeFileSync(path.join(baseDir, "candidate.txt"), "content");
+				const provider = new CombinedAutocompleteProvider(
+					[{ name: "command", description: "Command", allowArgs }],
+					baseDir,
+				);
+				const line = "/command ./cand";
+				const result = await provider.getForceFileSuggestions([line], 0, line.length);
+				expect(result?.items.map(item => item.label)).toContain("candidate.txt");
+				expect(result?.commandArgument === true).toBe(allowArgs);
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
+
 		it("returns slash command argument completions instead of @ file references when the command defines them", async () => {
 			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-rename-args-"));
 			try {
@@ -382,6 +399,7 @@ describe("CombinedAutocompleteProvider", () => {
 
 				expect(result).toEqual({
 					prefix: "repro @",
+					commandArgument: true,
 					items: [{ value: "repro @literal", label: "Keep @ in the title" }],
 				});
 			} finally {

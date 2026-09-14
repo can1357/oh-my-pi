@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { type Component, Container, type RenderScheduler, visibleWidth } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, type Component, Container, type RenderScheduler, visibleWidth } from "@oh-my-pi/pi-tui";
 import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
@@ -381,5 +381,50 @@ describe("composer welcome native-history resize", () => {
 
 		expect(transcript.blockStates()).toEqual(["committed"]);
 		expect(plainBuffer(terminal)).toContain("block-1@40");
+	});
+
+	it("completes an empty replay and resumes the mutable viewport after popup damage", async () => {
+		const terminal = new VirtualTerminal(40, 8);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		const tail = {
+			status: "initial",
+			popup: true,
+			render() {
+				composer.ui.setCursorOverlay(
+					this.popup ? () => ["STALE POPUP", "STALE POPUP", "STALE POPUP", "STALE POPUP"] : undefined,
+					0,
+					1,
+				);
+				return ["row1", "row2", "row3", "row4", "row5", `${CURSOR_MARKER}${this.status}`];
+			},
+		};
+		composer.setRuntimeChildren([transcript, tail]);
+		composer.start({ playWelcomeIntro: false });
+		await scheduler.settle(terminal);
+		composer.ui.requestRender();
+		await scheduler.settle(terminal);
+		expect(plainBuffer(terminal).join("\n")).toContain("STALE POPUP");
+
+		// A resize while the overlay is painted forces the destructive replay
+		// path that must wait for even an empty replay acknowledgement.
+		terminal.resize(40, 4);
+		await scheduler.advance(terminal, 160);
+
+		tail.status = "resumed";
+		tail.popup = false;
+		composer.ui.requestRender();
+		await scheduler.settle(terminal);
+
+		const output = plainBuffer(terminal).join("\n");
+		expect(output).not.toContain("STALE POPUP");
+		expect(output).toContain("resumed");
+		expect(composer.ui.getMutableViewport().length).toBeGreaterThan(0);
+		composer.ui.stop();
 	});
 });

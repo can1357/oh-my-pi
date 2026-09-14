@@ -96,6 +96,7 @@ type SelectItemLayout =
 
 export class SelectList implements Component, MouseRoutable {
 	#maxVisible: number;
+	#maxVisibleIncludesStatus = false;
 	#filteredItems: ReadonlyArray<SelectItem>;
 	#filterQuery = "";
 	#selectedIndex: number = 0;
@@ -130,8 +131,9 @@ export class SelectList implements Component, MouseRoutable {
 		};
 	}
 
-	/** Refit the visible row budget (hosts clamp the list to available height). */
-	setMaxVisible(rows: number): void {
+	/** Refit the row budget; bounded hosts may include the search status in it. */
+	setMaxVisible(rows: number, includeSearchStatus = false): void {
+		this.#maxVisibleIncludesStatus = includeSearchStatus;
 		this.#maxVisible = Math.max(1, Math.trunc(rows));
 	}
 
@@ -184,7 +186,8 @@ export class SelectList implements Component, MouseRoutable {
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
 		this.#hitRows = [];
-		const showSearchStatus = this.#shouldRenderSearchStatus();
+		const showSearchStatus =
+			this.#shouldRenderSearchStatus() && (!this.#maxVisibleIncludesStatus || this.#maxVisible > 1);
 
 		// If no items match filter, show message
 		if (this.#filteredItems.length === 0) {
@@ -200,7 +203,7 @@ export class SelectList implements Component, MouseRoutable {
 		const wrapEnabled = this.layout.wrapDescription === true;
 		// `maxVisible` is the picker's visual row budget. For non-wrap layouts
 		// every item is one row, so the budget matches the original item count.
-		const visualBudget = this.#maxVisible;
+		const visualBudget = this.#maxVisible - (this.#maxVisibleIncludesStatus && showSearchStatus ? 1 : 0);
 
 		// Compute per-item visual row counts at the conservative width (i.e.
 		// assume the scrollbar column might be reserved). For non-wrap layouts

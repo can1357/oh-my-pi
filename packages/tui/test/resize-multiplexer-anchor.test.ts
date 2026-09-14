@@ -131,6 +131,23 @@ describe("resize anchoring inside a terminal multiplexer", () => {
 		else Bun.env.TMUX = previousTmux;
 	});
 
+	it("restores popup backing at the clipping anchor when stopped before CPR", () => {
+		const { terminal, tui, provider, writes } = startRig(0);
+		Object.assign(provider, {
+			beginHistoryReplay: () => {
+				throw new Error("Unexpected destructive replay");
+			},
+		});
+		tui.setCursorOverlay(() => ["MENU"], 0, 1);
+		tui.renderNow();
+		terminal.resize(40, 10);
+		writes.length = 0;
+		tui.stop();
+		const output = writes.join("");
+		expect(output).toMatch(/\x1b\[5;1H[^\n]*live-1/);
+		expect(output).not.toMatch(/\x1b\[(?:2|3)J/);
+	});
+
 	it("skips the SIGWINCH-side erase so a racing re-layout cannot blank popped scrollback", () => {
 		const { terminal, tui, renderScheduler, writes } = startRig();
 		writes.length = 0;
