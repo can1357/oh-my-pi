@@ -88,6 +88,56 @@ test("renders profile plus compact metric status line", () => {
 	expect(rendered).not.toContain("100K");
 });
 
+test("reserves token breakdown widths in startup placeholders", () => {
+	const component = new StatusLineComponent({
+		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+		messages: [],
+		model: { name: "M", contextWindow: 100000 },
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		settings: { get: () => false },
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getSessionName: () => "status demo",
+			getUsageStatistics: () => ({
+				input: 25000,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 25005,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+		},
+		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["token_total"],
+		rightSegments: [],
+		separator: "none",
+		transparent: true,
+		segmentOptions: { token_total: { breakdown: true } },
+	});
+
+	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(14, "plain-left"));
+	const rendered = stripVTControlCharacters(component.renderBottomBar(14, "left"));
+	expect(startup).toContain("in:…   out:…");
+	expect(rendered).toContain("in:25K out:5");
+});
+
 test("compact context percentage preserves an explicitly configured context total", () => {
 	const component = new StatusLineComponent({
 		state: { messages: [], model: { name: "M", contextWindow: 100000 } },

@@ -33,7 +33,8 @@ function withIcon(icon: string, text: string): string {
 }
 
 function statusValue(ctx: SegmentContext, value: string): string {
-	return ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : value;
+	if (!ctx.startupPlaceholder) return value;
+	return `${STARTUP_PLACEHOLDER}${" ".repeat(Math.max(0, Bun.stringWidth(value) - 1))}`;
 }
 /**
  * Hash-derived accent ANSI for the session title (or preview stand-in title).
