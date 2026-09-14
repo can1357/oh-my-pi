@@ -104,6 +104,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.synthetic,
 		load: async () => new (await import("./providers/synthetic")).SyntheticProvider(),
 	},
+	serply: {
+		id: "serply",
+		label: SEARCH_PROVIDER_LABELS.serply,
+		load: async () => new (await import("./providers/serply")).SerplyProvider(),
+	},
 	searxng: {
 		id: "searxng",
 		label: SEARCH_PROVIDER_LABELS.searxng,
