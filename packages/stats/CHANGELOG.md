@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added a redesigned /stats overview: an instrument-panel layout with per-section show/hide (localStorage persistence + presets), a `today` range anchored to local midnight with hourly buckets, and correct day/bucket accounting across DST transitions.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed
@@ -34,6 +36,12 @@
 ### Fixed
 
 - Fixed inconsistent model colors between the Model Preference chart and Model Statistics table.
+### Added
+
+- Added a Today time range to the dashboard and stats API that anchors the chart to local midnight, so just-after-midnight activity is labeled on the correct day in any timezone.
+- Added a versioned public query API (`/api/v1/*`) with parameter validation and a framework-neutral TypeScript client SDK.
+- Added `omp stats create-site` scaffolding for embedding the stats dashboard into other pages.
+- Added a redesigned dashboard with overview and per-section inner pages, named dashboard layouts, density modes, and a command palette.
 
 ## [18.0.4] - 2026-08-24
 

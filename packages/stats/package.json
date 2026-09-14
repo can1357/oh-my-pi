@@ -83,10 +83,14 @@
       "types": "./src/client/*.ts",
       "import": "./src/client/*.ts"
     },
-    "./client/components/*": {
-      "types": "./src/client/components/*.ts",
-      "import": "./src/client/components/*.ts"
-    },
-    "./*.js": "./src/*.ts"
-  }
+    		"./client/components/*": {
+			"types": "./src/client/components/*.ts",
+			"import": "./src/client/components/*.ts"
+		},
+		"./client-sdk": {
+			"types": "./src/client-sdk.ts",
+			"import": "./src/client-sdk.ts"
+		},
+		"./*.js": "./src/*.ts"
+	}
 }

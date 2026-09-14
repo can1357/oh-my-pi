@@ -16,7 +16,7 @@ const VALID_SECTIONS: DashboardSection[] = [
 	"gain",
 ];
 
-const VALID_RANGES: TimeRange[] = ["1h", "24h", "7d", "30d", "90d", "all"];
+const VALID_RANGES: TimeRange[] = ["today", "1h", "24h", "7d", "30d", "90d", "all"];
 
 function parseHash(hash: string): { section: DashboardSection; range: TimeRange; session: string | null } {
 	const cleanHash = hash.replace(/^#\/?/, "");
