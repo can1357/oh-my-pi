@@ -194,6 +194,19 @@ function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
 	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
 }
 
+/**
+ * True when an `agent_end` is a scheduled continuation, not the session's final
+ * settle. `AgentSession` tags a queued steer, IRC wake, yield delivery, or
+ * barrier continuation with `isTerminal: false` (see `#flushPendingAgentEnd` in
+ * agent-session.ts) and streams a successor turn right after it; a client that
+ * resolved on such an end would report completion before that turn runs. The
+ * field rides the wire event but is absent from the core `AgentEvent` type, so
+ * read it defensively off the runtime object.
+ */
+function isNonterminalAgentEnd(event: AgentEvent): boolean {
+	return event.type === "agent_end" && "isTerminal" in event && event.isTerminal === false;
+}
+
 function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "subagent_lifecycle" && isRecord(value.payload);
@@ -998,7 +1011,7 @@ export class RpcClient {
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let settled = false;
 		const unsubscribe = this.onEvent(event => {
-			if (event.type === "agent_end") {
+			if (event.type === "agent_end" && !isNonterminalAgentEnd(event)) {
 				settled = true;
 				unsubscribe();
 				clearTimeout(timeoutId);
@@ -1024,7 +1037,7 @@ export class RpcClient {
 		let settled = false;
 		const unsubscribe = this.onEvent(event => {
 			events.push(event);
-			if (event.type === "agent_end") {
+			if (event.type === "agent_end" && !isNonterminalAgentEnd(event)) {
 				settled = true;
 				unsubscribe();
 				clearTimeout(timeoutId);

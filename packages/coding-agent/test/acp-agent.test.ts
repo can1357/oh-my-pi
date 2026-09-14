@@ -1366,6 +1366,78 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("keeps the prompt open on a nonterminal agent_end and delivers the successor turn", async () => {
+		// The session emits `agent_end` with `isTerminal: false` when a scheduled
+		// continuation (queued steer, IRC wake, yield delivery, barrier resume)
+		// will run a successor turn right after. `#handlePromptEvent` must ignore
+		// that end: settling the ACP prompt there resolves `session/prompt` early
+		// and unsubscribes, so the successor turn's output is lost.
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("session not registered");
+
+		const firstMessage = makeAssistantMessage("First turn answer.");
+		const successorMessage = makeAssistantMessage("Successor turn answer.");
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			// First turn ends, but a continuation is scheduled: isTerminal false.
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: firstMessage,
+					assistantMessageEvent: { type: "text_delta", delta: "First turn answer." },
+				} as AgentSessionEvent);
+			}
+			session.sessionManager.appendMessage(firstMessage);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [firstMessage], isTerminal: false } as AgentSessionEvent);
+			}
+			// Drain the fire-and-forget prompt-event handlers so a consumer that
+			// wrongly settles on the nonterminal end has finished + unsubscribed
+			// BEFORE the successor turn is emitted — the deterministic condition
+			// under which the bug drops the successor. Microtasks only; no timers.
+			for (let i = 0; i < 50; i++) await Promise.resolve();
+			// Successor turn: its output must still reach this prompt.
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: successorMessage,
+					assistantMessageEvent: { type: "text_delta", delta: "Successor turn answer." },
+				} as AgentSessionEvent);
+			}
+			session.sessionManager.appendMessage(successorMessage);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [successorMessage], isTerminal: true } as AgentSessionEvent);
+			}
+			session.isStreaming = false;
+			return true;
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "Say hello" }],
+		});
+		expectAcpStructure(zPromptResponse, response);
+		expect(response.stopReason).toBe("end_turn");
+
+		const messageChunkTexts = harness.updates
+			.filter(update => update.sessionId === created.sessionId)
+			.flatMap(update =>
+				update.update.sessionUpdate === "agent_message_chunk" && update.update.content.type === "text"
+					? [update.update.content.text]
+					: [],
+			);
+		// Both turns delivered, in order: the nonterminal end did not truncate
+		// the request at the first turn.
+		expect(messageChunkTexts).toEqual(["First turn answer.", "Successor turn answer."]);
+		expectAcpNotifications(harness.updates);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("surfaces a provider error that reaches the client only via agent_end", async () => {
 		// A request that fails before streaming any assistant events (e.g.
 		// GitHub Copilot's HTTP 400 model_not_supported) emits no

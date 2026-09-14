@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an opt-in agent-callable `compact` tool (`compact.enabled`, default off) that lets the agent compact its own context at a turn boundary. A prompt arriving mid-compaction waits for the rewrite, and interrupting the requesting turn cancels it. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
@@ -13,6 +14,9 @@
 
 ### Fixed
 
+- Fixed the `compact` tool reporting the session idle when a steer or follow-up arrived during the compaction, so an RPC/ACP client could prompt into a turn that was already starting. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- An RPC/ACP client no longer hangs waiting for a completion when a prompt queued during a compaction exits before it runs, such as a failed API-key or model validation, a denied usage preflight, or a superseded generation ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- An RPC/ACP request no longer finishes early and drops the next turn's output when a queued steer, follow-up, IRC wake, or yield delivery continues the run ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14
@@ -26,6 +30,10 @@
 - First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
+### Added
+
+### Fixed
 
 ## [18.1.20] - 2026-09-13
 

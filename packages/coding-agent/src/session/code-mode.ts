@@ -20,13 +20,18 @@ export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
 	todo: true,
 	yield: true,
 	think: true,
-	// checkpoint/rewind results drive session state machinery keyed on the
-	// toolResult's toolName (see session/checkpoint-entries.ts); wrapped inside
-	// an eval result they are invisible to it, so they must stay direct.
+	// checkpoint/rewind/compact results drive session state machinery keyed on
+	// the toolResult's toolName (see session/checkpoint-entries.ts, and the
+	// turn-end scan for a `compact` result in session/agent-session.ts); wrapped
+	// inside an eval result they are invisible to it, so they must stay direct.
+	// A bridged call would report success — "Compaction scheduled" — while no
+	// rewrite ever happens, because the completed outer tool result is named
+	// `eval`.
 	checkpoint: true,
 	rewind: true,
 	// Rollover requests likewise depend on the direct toolResult's toolName.
 	new_context: true,
+	compact: true,
 	__agent__: true,
 	__budget__: true,
 	__completion__: true,

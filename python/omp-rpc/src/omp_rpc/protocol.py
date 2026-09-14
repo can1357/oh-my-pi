@@ -136,7 +136,7 @@ _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"threshold", "overflow", "idle", "incomplete"}
 )
 _AUTO_COMPACTION_ACTION_VALUES: Final[frozenset[str]] = frozenset(
-    {"context-full", "handoff", "shake", "snapcompact"}
+    {"context-full", "remote", "handoff", "shake", "snapcompact", "requested"}
 )
 
 
@@ -1069,13 +1069,13 @@ class ToolExecutionEndEvent:
 @dataclass(slots=True, frozen=True)
 class AutoCompactionStartEvent:
     reason: Literal["threshold", "overflow", "idle", "incomplete"]
-    action: Literal["context-full", "handoff", "shake", "snapcompact"]
+    action: Literal["context-full", "remote", "handoff", "shake", "snapcompact", "requested"]
     type: Literal["auto_compaction_start"] = "auto_compaction_start"
 
 
 @dataclass(slots=True, frozen=True)
 class AutoCompactionEndEvent:
-    action: Literal["context-full", "handoff", "shake", "snapcompact"]
+    action: Literal["context-full", "remote", "handoff", "shake", "snapcompact", "requested"]
     result: CompactionResult | None
     aborted: bool
     will_retry: bool
@@ -1752,7 +1752,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                 ),
             ),
             action=cast(
-                Literal["context-full", "handoff", "shake", "snapcompact"],
+                Literal["context-full", "remote", "handoff", "shake", "snapcompact", "requested"],
                 _require_literal(
                     payload.get("action", "context-full"),
                     _AUTO_COMPACTION_ACTION_VALUES,
@@ -1764,7 +1764,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         result_payload = payload.get("result")
         return AutoCompactionEndEvent(
             action=cast(
-                Literal["context-full", "handoff", "shake", "snapcompact"],
+                Literal["context-full", "remote", "handoff", "shake", "snapcompact", "requested"],
                 _require_literal(
                     payload.get("action", "context-full"),
                     _AUTO_COMPACTION_ACTION_VALUES,

@@ -219,6 +219,34 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertIsNone(legacy.message_count)
         self.assertIsNone(legacy.is_terminal)
 
+    def test_parse_requested_and_remote_compaction_actions(self) -> None:
+        # `_require_literal` raises on an unknown action, and the client's reader
+        # loop answers that by closing the connection — so an action the TS side
+        # emits but this enum omits terminates the session instead of delivering
+        # the result. `requested` is the agent-callable compact tool; `remote`
+        # was already emitted and already missing here.
+        start = parse_notification(
+            {
+                "type": "auto_compaction_start",
+                "reason": "incomplete",
+                "action": "requested",
+            }
+        )
+        end = parse_notification(
+            {
+                "type": "auto_compaction_end",
+                "action": "remote",
+                "result": None,
+                "aborted": False,
+                "willRetry": False,
+            }
+        )
+
+        self.assertIsInstance(start, AutoCompactionStartEvent)
+        self.assertEqual(start.action, "requested")
+        self.assertIsInstance(end, AutoCompactionEndEvent)
+        self.assertEqual(end.action, "remote")
+
     def test_parse_current_compaction_variants(self) -> None:
         start = parse_notification(
             {

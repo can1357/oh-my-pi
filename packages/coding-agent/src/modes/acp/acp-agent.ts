@@ -1463,7 +1463,7 @@ export class AcpAgent implements Agent {
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
-		if (event.type === "agent_end") {
+		if (event.type === "agent_end" && event.isTerminal !== false) {
 			await this.#flushMissedFinalAssistantText(record, event);
 			await this.#flushUnreportedTurnError(record, event);
 			await this.#emitEndOfTurnUpdates(record);
