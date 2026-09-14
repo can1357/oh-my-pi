@@ -1,0 +1,5 @@
+advisors:
+  - name: default
+    enabled: false
+  - name: Advisor 2
+    model: openrouter/meta/muse-spark-1.3-contributor

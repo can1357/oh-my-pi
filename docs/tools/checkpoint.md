@@ -86,3 +86,7 @@ You are in an active checkpoint. You MUST call rewind with your investigation fi
   - artifacts or blob-store contents
   - SQLite prompt-history rows from `packages/coding-agent/src/session/history-storage.ts`
   - auth or agent records from `packages/coding-agent/src/session/agent-storage.ts`
+
+## See also
+
+- The `checkpoint`/`rewind` *tools* documented here capture **conversation/session metadata only** and never touch git or the filesystem. For git-backed **workspace** snapshots and rollback (distinct commands `/checkpoint` and `/rollback`, gated by `checkpoints.enabled`), see [workspace-checkpoints.md](../workspace-checkpoints.md).
