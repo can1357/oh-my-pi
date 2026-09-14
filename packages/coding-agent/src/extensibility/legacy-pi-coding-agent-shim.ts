@@ -31,6 +31,7 @@ import {
 	getAgentDir,
 	getProjectDir,
 	isCompiledBinary,
+	logger,
 	parseFrontmatter as parseOmpFrontmatter,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
@@ -325,7 +326,10 @@ function legacyEditTool(cwd: string): ToolDefinition {
 				repaired = await attemptEditAutoRepair({ session, snapshot, writethrough, signal });
 				if (repaired) getEditStore(session).invalidate(filePath);
 			} catch (error) {
-				console.warn("Edit auto-repair failed", filePath, error instanceof Error ? error.message : String(error));
+				logger.warn("Edit auto-repair failed", {
+					path: filePath,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 			const display = path.relative(cwd, filePath) || filePath;
 			return repaired
@@ -388,7 +392,14 @@ function legacyEditTool(cwd: string): ToolDefinition {
 						`edits[${i}] oldText was not found in ${batchPath}. It must match the current file content exactly.`,
 					);
 				}
-				const occurrences = normalized.split(normalizeToLF(oldText)).length - 1;
+				// Overlapping-aware count: "aaa".split("aa") reports one occurrence,
+				// but a second `aa` overlaps the first and makes the replacement
+				// ambiguous. Count every start position.
+				const needleText = normalizeToLF(oldText);
+				let occurrences = 0;
+				for (let at = normalized.indexOf(needleText); at !== -1; at = normalized.indexOf(needleText, at + 1)) {
+					occurrences++;
+				}
 				if (occurrences > 1) {
 					throw new Error(
 						`edits[${i}] oldText matches ${occurrences} locations in ${batchPath}. It must be unique in the original file; include more surrounding context.`,
@@ -415,11 +426,14 @@ function legacyEditTool(cwd: string): ToolDefinition {
 			updated += normalized.slice(cursor);
 			const ending = detectLineEnding(body);
 			const written = bom + restoreLineEndings(updated, ending);
-			await Bun.write(batchPath, written);
+			// Commit through the shared LSP writethrough so watched-file
+			// notifications, format-on-write, and post-write cache invalidation
+			// behave exactly like the single-edit replace path.
+			const { finalContent } = await writethrough(batchPath, written, signal);
 			const content: AgentToolResult["content"] = [
 				{ type: "text", text: `Successfully replaced ${replacement.length} blocks in ${batchPath}.` },
 			];
-			const note = await parseRegressionNote(batchPath, body, written, signal);
+			const note = await parseRegressionNote(batchPath, body, finalContent, signal);
 			if (note) content.push({ type: "text", text: note });
 			return { content } satisfies AgentToolResult;
 		},
@@ -1739,7 +1753,14 @@ export function sessionEntryToContextMessages(entry: CompactionSessionEntry): Ag
 	}
 	if (entry.type === "custom_message") {
 		return [
-			createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp),
+			createCustomMessage(
+				entry.customType,
+				entry.content ?? [],
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.attribution,
+			),
 		];
 	}
 	if (entry.type === "branch_summary" && entry.summary) {

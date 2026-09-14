@@ -363,3 +363,55 @@ describe("legacy shim terminal safety and parse regression", () => {
 		}
 	});
 });
+
+// Fourth review round: batches must flow through the LSP writethrough (watched-file
+// notifications + post-write invalidation), ambiguous overlapping occurrences must be
+// rejected, and the legacy entry converter must keep custom-message attribution.
+describe("legacy shim batch writethrough and ambiguity", () => {
+	it("rejects an oldText whose occurrences overlap (aaa with oldText aa)", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-overlap-"));
+		try {
+			const file = path.join(dir, "overlap.txt");
+			const before = "aaa\nzzz\n";
+			await fs.writeFile(file, before);
+			const edit = shim.createEditTool(dir).execute!;
+			await expect(
+				edit(
+					"overlap-1",
+					{
+						path: file,
+						edits: [
+							{ oldText: "aa", newText: "bb" },
+							{ oldText: "zzz", newText: "yyy" },
+						],
+					},
+					undefined,
+					undefined,
+					{ cwd: dir } as never,
+				),
+			).rejects.toThrow(/matches 2 locations/);
+			expect(await fs.readFile(file, "utf8")).toBe(before);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps attribution on converted custom_message entries", () => {
+		const messages = (
+			shim as unknown as {
+				sessionEntryToContextMessages: (entry: unknown) => Array<{ role: string; attribution?: string }>;
+			}
+		).sessionEntryToContextMessages({
+			type: "custom_message",
+			id: "cm",
+			parentId: null,
+			timestamp: "0",
+			customType: "note",
+			content: "hello",
+			display: true,
+			attribution: "user",
+		});
+		expect(messages).toHaveLength(1);
+		expect(messages[0]!.attribution).toBe("user");
+	});
+});
