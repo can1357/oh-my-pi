@@ -463,7 +463,11 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 
 	let error = Patch::parse("@@ -1,3 +1,3 @@\nPUT <1:\n+x", &SplitOptions::default())
 		.expect_err("rejects unified-diff hunk headers on the first line");
-	assert!(error.to_string().contains("unified-diff hunk header"));
+	assert!(
+		error
+			.to_string()
+			.contains("Detected incompatible unified diff syntax")
+	);
 
 	let aborted = Patch::parse(
 		"[a.ts]\nPUT >1:\n+a-payload\n*** Abort\n[b.ts]\nPUT >1:\n+never",
