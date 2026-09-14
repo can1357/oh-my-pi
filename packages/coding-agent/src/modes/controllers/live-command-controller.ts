@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import { LIVE_ACTIVITY_EVENT_CHANNEL, type LiveActivityEvent } from "../../live/activity-events";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
 import { LiveVisualizer } from "../../live/visualizer";
@@ -24,6 +25,10 @@ const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
 function errorFrom(cause: unknown): Error {
 	return cause instanceof Error ? cause : new Error(String(cause));
 }
+function normalizeLiveActivityLevel(level: number): number {
+	if (!Number.isFinite(level) || level <= 0) return 0;
+	return Math.min(1, level);
+}
 
 /** Owns the editor-replacing visualizer and realtime session lifecycle for `/live`. */
 export class LiveCommandController {
@@ -41,6 +46,10 @@ export class LiveCommandController {
 	#assistantTranscriptComponent: AssistantMessageComponent | undefined;
 	#assistantTranscriptTurn = 0;
 	#assistantTranscriptStartedAt = 0;
+	#livePhase: LiveActivityEvent["phase"] = "connecting";
+	#inputLevel = 0;
+	#outputLevel = 0;
+	#lastLiveActivity: LiveActivityEvent | undefined;
 
 	constructor(ctx: InteractiveModeContext, createSession?: LiveSessionFactory) {
 		this.#ctx = ctx;
@@ -94,6 +103,9 @@ export class LiveCommandController {
 	async #start(): Promise<void> {
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
+		this.#livePhase = "connecting";
+		this.#inputLevel = 0;
+		this.#outputLevel = 0;
 		const visualizer = new LiveVisualizer({
 			onStop: () => {
 				void this.stop().catch(cause => this.#ctx.showError(errorFrom(cause).message));
@@ -110,11 +122,15 @@ export class LiveCommandController {
 			callbacks: {
 				onPhase: phase => {
 					if (this.#visualizer !== visualizer) return;
+					this.#livePhase = phase;
+					this.#publishLiveActivity();
 					visualizer.setPhase(phase);
 					this.#ctx.ui.requestComponentRender(visualizer);
 				},
-				onLevels: input => {
+				onLevels: (input, output) => {
 					if (this.#visualizer !== visualizer) return;
+					this.#inputLevel = normalizeLiveActivityLevel(input);
+					this.#outputLevel = normalizeLiveActivityLevel(output);
 					visualizer.setInputLevel(input);
 					this.#ctx.ui.requestComponentRender(visualizer);
 				},
@@ -135,6 +151,7 @@ export class LiveCommandController {
 		};
 		const session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
 		this.#session = session;
+		this.#publishLiveActivity();
 
 		try {
 			await session.start();
@@ -214,6 +231,7 @@ export class LiveCommandController {
 			frame += 1;
 			visualizer.setFrame(frame);
 			this.#ctx.ui.requestComponentRender(visualizer);
+			this.#publishLiveActivity();
 		}, ANIMATION_INTERVAL_MS);
 		this.#ctx.ui.requestRender();
 	}
@@ -221,6 +239,10 @@ export class LiveCommandController {
 	#finish(session: LiveSessionController, error?: Error): void {
 		if (this.#session !== session) return;
 		this.#session = undefined;
+		this.#livePhase = "inactive";
+		this.#inputLevel = 0;
+		this.#outputLevel = 0;
+		this.#publishLiveActivity();
 		this.#restoreEditor();
 		if (error) this.#ctx.showError(error.message);
 		const settling = session.stop().catch(cause => {
@@ -230,6 +252,26 @@ export class LiveCommandController {
 		void settling.finally(() => {
 			if (this.#settling === settling) this.#settling = undefined;
 		});
+	}
+
+	#publishLiveActivity(): void {
+		const eventBus = this.#ctx.eventBus;
+		if (!eventBus) return;
+		const previous = this.#lastLiveActivity;
+		if (
+			previous?.phase === this.#livePhase &&
+			previous.inputLevel === this.#inputLevel &&
+			previous.outputLevel === this.#outputLevel
+		) {
+			return;
+		}
+		const next: LiveActivityEvent = {
+			phase: this.#livePhase,
+			inputLevel: this.#inputLevel,
+			outputLevel: this.#outputLevel,
+		};
+		this.#lastLiveActivity = next;
+		eventBus.emitLatest(LIVE_ACTIVITY_EVENT_CHANNEL, next);
 	}
 
 	#restoreEditor(): void {
