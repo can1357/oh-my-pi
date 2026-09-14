@@ -789,6 +789,12 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
 export interface UsageLimitMarkResult {
 	switched: boolean;
 	retryAtMs?: number;
+	/**
+	 * Whether {@link retryAtMs} traces to provider-stated timing — the earliest
+	 * blocked sibling was parked by a `providerTimed` mark. Callers that report
+	 * the chosen wait's provenance need this alongside the deadline.
+	 */
+	retryAtTimed?: boolean;
 	blockedUntilMs?: number;
 	priorBlockedUntilMs?: number;
 	priorBlockedUntilTimed?: boolean;
@@ -4743,6 +4749,10 @@ export class AuthStorage {
 			);
 
 		let retryAtMs: number | undefined;
+		// Provenance of {@link retryAtMs}: true while the earliest sibling
+		// deadline is still held by a provider-structured block. A later
+		// untimed sibling must not inherit an earlier timed one's claim.
+		let retryAtTimed = false;
 		for (const candidate of remainingCredentials) {
 			// Sibling availability must use the same scope set selection reads, or
 			// this reports a sibling as free that selection will then refuse.
@@ -4759,11 +4769,20 @@ export class AuthStorage {
 					priorBlockedUntilMs,
 					priorBlockedUntilTimed,
 				};
-			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) {
+				retryAtMs = candidateBlockedUntil;
+				retryAtTimed = this.#isProviderTimedBlock(
+					routing.providerKey,
+					routing.siblingBlockScopes,
+					candidate.index,
+					candidateBlockedUntil,
+				);
+			}
 		}
 		return {
 			switched: false,
 			retryAtMs,
+			retryAtTimed,
 			blockedUntilMs: mergedBlockedUntil,
 			priorBlockedUntilMs,
 			priorBlockedUntilTimed,
