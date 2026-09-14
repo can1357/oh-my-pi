@@ -2,6 +2,8 @@
 
 provider "ollama-cloud" {
 	thinking-mode "effort"
+	// Same runtime as local Ollama: a trailing assistant turn is continued verbatim.
+	supports-assistant-prefill #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}
