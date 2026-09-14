@@ -341,12 +341,27 @@ export class AuthBrokerClient {
 		});
 	}
 
-	async disableCredential(id: number, cause: string, signal?: AbortSignal): Promise<CredentialDisableResponse> {
+	/**
+	 * `POST /v1/credential/:id/disable`. With `expectedAccessFingerprint` the
+	 * disable is conditional (`If-Match`): pass `fingerprintCredentialForDisable`
+	 * for an OAuth bearer or stored API key. A different credential answers 412.
+	 * The bare `AbortSignal` form predates the options object and is still honoured.
+	 */
+	async disableCredential(
+		id: number,
+		cause: string,
+		opts: AbortSignal | { signal?: AbortSignal; expectedAccessFingerprint?: string } = {},
+	): Promise<CredentialDisableResponse> {
+		const options = opts instanceof AbortSignal ? { signal: opts } : opts;
 		const body: CredentialDisableRequest = { cause };
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: "credentialDisableResponseSchema",
-			signal,
+			headers:
+				options.expectedAccessFingerprint !== undefined
+					? { "If-Match": `"${options.expectedAccessFingerprint}"` }
+					: undefined,
+			signal: options.signal,
 		});
 	}
 
@@ -365,8 +380,19 @@ export class AuthBrokerClient {
 	 * Returns an empty list against brokers predating `GET
 	 * /v1/credentials/disabled` (404), unless requireSupported is set.
 	 */
-	/** Latched once the broker answers 404/501 — the gap is permanent for this connection. */
+	/** Latched once the broker answers 501 — the gap is a property of this broker incarnation. */
 	#disabledHistoryUnsupported = false;
+
+	/**
+	 * Forget the 501 latch. Callers invoke this when they observe a new broker
+	 * incarnation — a fresh stream connection or a generation that ran backwards
+	 * — because a restarted or reconfigured broker may now keep tombstones, and
+	 * a latch held for the client's whole life would silently suppress every
+	 * later startup replay and streamed-removal classification.
+	 */
+	resetDisabledHistoryProbe(): void {
+		this.#disabledHistoryUnsupported = false;
+	}
 
 	async listDisabledCredentials(
 		provider?: string,

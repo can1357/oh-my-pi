@@ -14,6 +14,7 @@ import {
 	isAutomaticDisableCause,
 	isOAuthCredentialIdentityRecovered,
 	isDeliberateRemovalCause,
+	normalizeDisabledCause,
 	resolveOAuthCredentialIdentity,
 } from "../auth/sqlite-credential-store";
 import {
@@ -377,6 +378,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#applySnapshot(snapshot: SnapshotResponse, generation: number, resetFromGeneration?: number): void {
 		// Broker generations restart with the process. A pull or stream bootstrap
 		// may resync backwards only if nothing advanced while it was in flight.
+		// A generation that ran backwards is the broker's restart signature; a
+		// polling client sees the new incarnation only here.
+		if (generation < this.#generation) this.#client.resetDisabledHistoryProbe();
 		if (generation < this.#generation && resetFromGeneration !== this.#generation) {
 			logger.debug("auth-broker snapshot older than local; ignoring", {
 				local: this.#generation,
@@ -391,9 +395,19 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// removal diff below reads them, not after.
 		if (generation <= this.#generation) this.#streamAdditions.clear();
 		const nowMs = Date.now();
+		// Release the guard only when an authoritative snapshot actually omits the
+		// row. A numerically newer generation proves nothing on its own: an
+		// unrelated broker mutation can advance it without having observed this
+		// client's disable, and dropping the guard then lets a pre-disable
+		// snapshot restore the dead bearer.
+		const snapshotIds = new Set(snapshot.credentials.map(entry => entry.id));
+		for (const disabledId of this.#locallyDisabledAt.keys()) {
+			if (!snapshotIds.has(disabledId)) this.#locallyDisabledAt.delete(disabledId);
+		}
 		this.#replaceBrokerUsageAccounts(snapshot.credentials);
 		const previousCredentials = this.#snapshot.credentials;
 		const credentials = snapshot.credentials
+			.filter(entry => !this.#locallyDisabledAt.has(entry.id))
 			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
 			.map(entry => this.#normalizeSnapshotEntryBlocks(entry, nowMs));
 		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
@@ -418,7 +432,20 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
-			onSnapshot(snapshot, generation);
+			// This snapshot is persisted to the on-disk broker cache, so a row this
+			// client just disabled must not travel with it: a restart before the
+			// removal generation arrives would otherwise accept the cached row and
+			// issue a request with the dead bearer. Account-pool filtering stays
+			// out of it — hidden rows still belong in the cache.
+			onSnapshot(
+				this.#locallyDisabledAt.size === 0
+					? snapshot
+					: {
+							...snapshot,
+							credentials: snapshot.credentials.filter(entry => !this.#locallyDisabledAt.has(entry.id)),
+						},
+				generation,
+			);
 		} catch (error) {
 			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
 		}
@@ -635,6 +662,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				// therefore be lower than the previous stream's last value.
 				// Subsequent entry/removal frames remain guarded against reordering
 				// relative to this new baseline below.
+				// A fresh connection may be to a restarted or reconfigured broker, so
+				// re-probe capabilities this client latched off against the previous
+				// incarnation.
+				this.#client.resetDisabledHistoryProbe();
 				const { kind: _kind, ...snapshot } = event;
 				this.#applySnapshot(snapshot, snapshot.generation, initialGeneration);
 				return;
@@ -659,6 +690,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * part of that transition and is never one of its pre-existing siblings.
 	 */
 	#streamAdditions = new Map<number, number>();
+	/**
+	 * Rows this client successfully disabled, keyed to the generation in effect
+	 * when the removal landed. A full-snapshot request that was already in flight
+	 * carries an older-or-equal generation and would otherwise resurrect the row;
+	 * the later stream removal then announces the same teardown a second time.
+	 */
+	#locallyDisabledAt = new Map<number, number>();
 
 	/**
 	 * API-key rows of `provider` that were already live before this teardown,
@@ -700,6 +738,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, { retainBrokerUsageAccount: true });
 			return;
 		}
+		// Same guard the snapshot path applies: an `entry` frame still in transit
+		// when this client's disable landed would otherwise re-add the dead bearer,
+		// and the broker sends `removed` only after entries. The row returns when a
+		// newer generation observes it.
+		// The guard is released by a snapshot that omits the row, not by a newer
+		// generation, so an in-transit `entry` frame cannot re-add a dead bearer.
+		if (this.#locallyDisabledAt.has(entry.id)) return;
 		const incoming = this.#normalizeSnapshotEntryBlocks(entry, Date.now());
 		const index = this.#snapshot.credentials.findIndex(candidate => candidate.id === incoming.id);
 		const previousBlocks = index === -1 ? undefined : this.#snapshot.credentials[index]?.blocks;
@@ -942,6 +987,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
 		this.#streamAdditions.delete(id);
+		// The guard exists to stop an in-transit `entry` frame or an older
+		// snapshot from resurrecting a row this client disabled; this frame is the
+		// broker's own confirmation that the row is gone, so nothing is left to
+		// resurrect. Releasing it here is what bounds the map on a healthy stream,
+		// which skips the full snapshot that would otherwise clear it — and stops
+		// a rebuilt broker reusing the id from being suppressed.
+		this.#locallyDisabledAt.delete(id);
 		this.#snapshotReceivedAt = Date.now();
 		this.#refreshCredentialRevision();
 		if (removed && !options?.retainBrokerUsageAccount) {
@@ -1168,11 +1220,26 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return held;
 	}
 
-	async deleteAuthCredentialRemote(id: number, disabledCause: string, signal?: AbortSignal): Promise<boolean> {
+	/**
+	 * Await the broker disable, conditional on the access/key when a fingerprint
+	 * from `fingerprintCredentialForDisable` is supplied. A lost CAS — a peer
+	 * replaced the credential (412) or removed the row
+	 * before the broker handled this request (404) — returns false without
+	 * removing the local entry, after re-fetching the snapshot so the caller's
+	 * follow-up `reload()` already sees the peer's outcome instead of the
+	 * stale row it attempted.
+	 */
+	async deleteAuthCredentialRemote(
+		id: number,
+		disabledCause: string,
+		expectedAccessFingerprint?: string,
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		this.#noteActivity();
+		const cause = normalizeDisabledCause(disabledCause);
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
 		if (!found) {
-			if (!isDeliberateRemovalCause(disabledCause.trim())) return false;
+			if (!isDeliberateRemovalCause(cause)) return false;
 			// A refresh can remove a peer-disabled row before a failed logout is retried.
 			// Only tombstones visible through this client account pool may be removed.
 			const disabled = await this.listDisabledCredentials(undefined, signal);
@@ -1180,7 +1247,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			// logout complete rather than telling the caller it was skipped.
 			if (!disabled.some(entry => entry.id === id)) return this.#vanishedCredentialIds.has(id);
 		}
-		const disabling = this.#client.disableCredential(id, disabledCause, signal);
+		const disabling = this.#client.disableCredential(id, cause, { expectedAccessFingerprint, signal });
 		let localDisable = this.#localDisables.get(id);
 		if (!localDisable) {
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -1191,36 +1258,47 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			await disabling;
 			localDisable.succeeded = true;
+			// Only guard a row the stream has not already retired. When its `removed`
+			// frame beats this response the guard would be re-added right after the
+			// only thing that clears it, and an active stream never revisits it —
+			// the map would grow per disable and suppress a reused id for good.
+			if (this.#snapshot.credentials.some(entry => entry.id === id)) {
+				this.#locallyDisabledAt.set(id, this.#generation);
+			}
 			this.#removeCredentialById(id);
 			this.#maybeRefreshSnapshot("delete credential");
 			return true;
 		} catch (error) {
 			// Two requests can exhaust the same bearer and both pass the `found`
-			// check above; the broker answers the loser with 404. That is a lost
-			// race, not a failure: report no transition and re-read authoritatively
-			// so the caller judges retryability on the real pool. Anything else
-			// propagates — a caller must not drop a row on an unknown error.
-			if (error instanceof AuthBrokerError && error.status === 404) {
+			// check above; the broker answers the loser with 404, and 412 is the
+			// conditional-disable equivalent. Either is a lost race, not a failure:
+			// report no transition and reconcile authoritatively so the caller
+			// judges retryability on the real pool. Anything else propagates — a
+			// caller must not drop a row on an unknown error.
+			if (error instanceof AuthBrokerError && (error.status === 412 || error.status === 404)) {
 				logger.debug("auth-broker disable lost to a peer", { id, status: error.status });
-				// 404 means the row is gone server-side. Drop it from the cached
-				// snapshot — leaving it would let a failed follow-up refresh strand
-				// the retired bearer in the pool `#adoptPoolAfterDisable` falls back
-				// to — but announce the departure first. This call reports no
-				// transition, so `AuthStorage` emits nothing, and removing the row
-				// silently would also deprive the later snapshot diff of the
-				// previous entry it needs: the sign-out would vanish entirely.
-				const departed = this.#snapshot.credentials.find(entry => entry.id === id);
-				if (departed) {
-					this.#notifyCredentialRemoved(
-						departed,
-						this.#siblingApiKeyIds(departed, this.#snapshot.credentials, this.#generation),
-					);
+				// 404 means the row is gone server-side: announce the departure, then
+				// drop it. This call reports no transition, so `AuthStorage` emits
+				// nothing, and removing the row silently would also deprive the later
+				// snapshot diff of the previous entry — the sign-out would vanish.
+				// Leaving it instead would let a failed refresh strand the retired
+				// bearer in the pool `#adoptPoolAfterDisable` falls back to.
+				// 412 is the opposite: the row is still there under a peer's rotated
+				// bearer, so its cached copy must survive and nothing departed.
+				if (error.status === 404) {
+					const departed = this.#snapshot.credentials.find(entry => entry.id === id);
+					if (departed) {
+						this.#notifyCredentialRemoved(
+							departed,
+							this.#siblingApiKeyIds(departed, this.#snapshot.credentials, this.#generation),
+						);
+					}
+					this.#removeCredentialById(id);
 				}
-				this.#removeCredentialById(id);
-				// Schedule the re-read rather than awaiting it: this hook carries no
-				// caller signal, so an awaited round-trip here would hold an aborted
-				// turn open for the client's whole timeout-and-retry budget.
-				this.#maybeRefreshSnapshot("disable lost to a peer");
+				// This hook takes the caller's signal, so the re-read is awaited and
+				// cancellable: a conditional disable must not report a CAS loss from
+				// a snapshot it has not refreshed.
+				await this.#reconcileAfterRejectedDisable(signal);
 				return false;
 			}
 			throw error;
@@ -1232,12 +1310,28 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	tryDisableAuthCredentialIfMatches(id: number, _expectedData: string, disabledCause: string): boolean {
-		this.#noteActivity();
-		const found = this.#snapshot.credentials.find(entry => entry.id === id);
-		if (!found) return false;
-		this.deleteAuthCredential(id, disabledCause);
-		return true;
+	/**
+	 * The broker refused to disable because its row moved on; nothing changed
+	 * server-side, so no stream push is coming — fetch the current snapshot
+	 * explicitly. Failure must propagate: returning a clean CAS loss would let
+	 * callers reload and select the rejected bearer from the stale snapshot.
+	 */
+	async #reconcileAfterRejectedDisable(signal?: AbortSignal): Promise<void> {
+		try {
+			await this.refreshSnapshot(signal);
+		} catch (error) {
+			logger.debug("auth-broker snapshot refresh after rejected disable failed", {
+				error: String(error),
+			});
+			throw error;
+		}
+	}
+
+	/** Remote CAS must await the broker's decision; synchronous success cannot represent it. */
+	tryDisableAuthCredentialIfMatches(_id: number, _expectedData: string, _disabledCause: string): boolean {
+		throw new AIError.AuthBrokerError(
+			"RemoteAuthCredentialStore does not support synchronous conditional disables. Await deleteAuthCredentialRemote instead.",
+		);
 	}
 
 	async waitForFreshSnapshot(maxWaitMs: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
