@@ -779,9 +779,9 @@ export class SessionResolutionError extends Error {
 	}
 }
 
-function exitForSessionResolutionError(error: SessionResolutionError | SessionStorageConfigError): never {
+function exitForSessionResolutionError(error: SessionResolutionError): never {
 	process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
-	if (error instanceof SessionResolutionError && error.hint) {
+	if (error.hint) {
 		process.stderr.write(`${chalk.dim(error.hint)}\n`);
 	}
 	process.exit(1);
@@ -1817,6 +1817,22 @@ export async function runRootCommand(
 		const settingsInstance = await settingsPromise;
 		// Process-lifetime: broker/account-policy edits reconfigure the shared credential store.
 		createAuthStorageSettingsSync(settingsInstance, authStorage);
+		// Install the configured session storage before anything lists or opens a
+		// session — the startup composer's recent-sessions load and every
+		// SessionManager below read through this default. A refusal names only the
+		// variable or setting and the path; it never echoes the connection string.
+		try {
+			setDefaultSessionStorage(
+				await logger.time("resolveSessionStorage", resolveSessionStorage, {
+					settings: settingsInstance,
+					env: process.env,
+				}),
+			);
+		} catch (error) {
+			if (!(error instanceof SessionStorageConfigError)) throw error;
+			process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
+			process.exit(1);
+		}
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -1928,18 +1944,11 @@ export async function runRootCommand(
 		// id from UUID-shaped values owned by later extension flags.
 		normalizeContinueSessionArgs(parsedArgs, rawArgs);
 
-		// Install the configured session storage before any SessionManager exists,
-		// then resolve native resume/fork flags or import one foreign transcript
-		// into a fresh persisted OMP session before constructing the AgentSession.
+		// Resolve native resume/fork flags or import one foreign transcript into a
+		// fresh persisted OMP session before constructing the AgentSession.
 		let sessionManager: SessionManager | undefined;
 		let foreignSource: ForeignSessionSource | undefined;
 		try {
-			setDefaultSessionStorage(
-				await logger.time("resolveSessionStorage", resolveSessionStorage, {
-					settings: settingsInstance,
-					env: process.env,
-				}),
-			);
 			foreignSource = resolveForeignSessionSource(parsedArgs);
 			if (foreignSource) {
 				if (isProtocolMode) {
@@ -2010,7 +2019,7 @@ export async function runRootCommand(
 				);
 			}
 		} catch (error: unknown) {
-			if (error instanceof SessionResolutionError || error instanceof SessionStorageConfigError) {
+			if (error instanceof SessionResolutionError) {
 				exitForSessionResolutionError(error);
 			}
 			throw error;
