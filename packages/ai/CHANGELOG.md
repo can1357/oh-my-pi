@@ -38,6 +38,7 @@
 - Fixed Devin gateway failures leaking raw proxy HTML into turn errors; HTTP status and retry metadata remain available for recovery ([#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
 ### Fixed
 - An OAuth credential the auth layer disables automatically (definitive refresh failure, upstream token invalidation, Copilot hard-401 retirement, broker disable) is now logged with its provider, account, and cause and reported through `credential_disabled`, so a session can no longer degrade to a sibling account with no record of what happened. Display surfaces name a classified cause (`sign-in expired`, `token revoked`, …) rather than provider-controlled text, and a managed MCP provider id loses its URL query structurally; the verbatim cause stays in the store ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- When every signed-in account is denied a Codex ChatGPT-account or Cursor plan model, the request now fails with the accounts that were tried, any account signed out recently, and the `/login` step, instead of the provider's bare denial. The verdict is withheld unless the current credential pool is proven exhausted ([#11913](https://github.com/can1357/oh-my-pi/pull/11913) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.2.0] - 2026-09-15
 

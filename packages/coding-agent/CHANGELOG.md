@@ -14,6 +14,7 @@
 - Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — when it happens, and again at startup until that account signs in — instead of silently degrading to a sibling account; SDK consumers get the same replay from `session.getDisabledCredentialNotices()` ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - `omp usage` now lists accounts the auth layer disabled, and `--redact` keeps distinct providers distinct in both usage and history JSON instead of collapsing them onto one masked key ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - Copilot terminal auth errors no longer log out the entire provider after the failed request has settled, preserving a concurrent re-login and unrelated accounts ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- A request for a model no signed-in Codex or Cursor account is entitled to now fails with which accounts were tried, who was signed out recently, and the `/login` step, instead of the provider's bare denial ([#11913](https://github.com/can1357/oh-my-pi/pull/11913) by [@alphastorm](https://github.com/alphastorm)).
 
 ### Added
 
@@ -474,6 +475,9 @@
 - Notified Collab guests when admitted prompts are discarded, including room retirement during a session change ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
 - Preserved pending Collab dialog answers across session-switch rollback without accepting them after commit, stop, or writer departure ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
 - Fixed prompts awaiting setup crossing a fork, branch, or tree-navigation commit, multi-question extension dialogs moving later questions to a replacement Collab room, and stale rooms blocking `/collab` or `/join` after a failed session change ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
+
+### Fixed
+
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
 - Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
 

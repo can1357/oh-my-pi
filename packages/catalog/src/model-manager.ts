@@ -1,4 +1,4 @@
-import { VERSION } from "@oh-my-pi/pi-utils";
+import { logger, truncate, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
@@ -10,6 +10,8 @@ import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
+const MAX_DROPPED_MODEL_LOG_NAMES = 10;
+const MAX_DISCOVERY_LOG_LABEL_LENGTH = 200;
 
 /**
  * Controls when dynamic endpoint models should be fetched.
@@ -332,6 +334,29 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
+		if (authoritativeDynamicFetchSucceeded && cache?.authoritative) {
+			// An authoritative catalog that shrinks is how an account that lost
+			// (or was signed out of) an entitlement shows up in the model list;
+			// say so instead of letting the model vanish from the picker.
+			const retained = new Set(models.map(model => model.id));
+			const dropped: string[] = [];
+			let droppedCount = 0;
+			for (const model of usableCachedModels) {
+				if (retained.has(model.id)) continue;
+				droppedCount++;
+				if (dropped.length < MAX_DROPPED_MODEL_LOG_NAMES) {
+					dropped.push(truncate(model.id, MAX_DISCOVERY_LOG_LABEL_LENGTH));
+				}
+			}
+			if (droppedCount > 0) {
+				logger.warn("Model discovery dropped models the previous catalog advertised", {
+					provider: truncate(options.providerId, MAX_DISCOVERY_LOG_LABEL_LENGTH),
+					dropped,
+					droppedCount,
+					omittedCount: droppedCount - dropped.length,
+				});
+			}
+		}
 		if (anyRemoteFetchSucceeded) {
 			writeModelCache(
 				cacheProviderId,
