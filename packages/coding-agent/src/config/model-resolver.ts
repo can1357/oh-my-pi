@@ -1059,20 +1059,34 @@ export function parseModelPattern(
 	);
 }
 
-/** Restore a transcript's exact provider/id identity and optional upstream route. */
+/** Restore an exact provider/id, optional upstream route and explicit effort suffix. */
 export function parsePersistedModelSelector(selector: string, availableModels: Model<Api>[]): ParsedModelResult {
 	const exact = (value: string) => availableModels.find(model => `${model.provider}/${model.id}` === value);
-	let model = exact(selector);
-	let upstream: string | undefined;
-	if (!model) {
-		const routing = splitUpstreamRouting(selector);
-		const base = routing && exact(routing.base);
-		if (routing && base && supportsUpstreamRouting(base)) {
-			model = applyUpstreamRouting(base, routing.upstream);
-			upstream = routing.upstream;
+	const suffix = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	const candidates = suffix.level === undefined ? [selector] : [selector, suffix.base];
+	for (const candidate of candidates) {
+		let model = exact(candidate);
+		let upstream: string | undefined;
+		if (!model) {
+			const routing = splitUpstreamRouting(candidate);
+			const base = routing && exact(routing.base);
+			if (routing && base && supportsUpstreamRouting(base)) {
+				model = applyUpstreamRouting(base, routing.upstream);
+				upstream = routing.upstream;
+			}
+		}
+		if (model) {
+			const thinkingLevel = candidate === selector ? undefined : suffix.level;
+			return {
+				model,
+				upstream,
+				thinkingLevel,
+				warning: undefined,
+				explicitThinkingLevel: thinkingLevel !== undefined,
+			};
 		}
 	}
-	return { model, upstream, warning: undefined, explicitThinkingLevel: false };
+	return { model: undefined, warning: undefined, explicitThinkingLevel: false };
 }
 
 const DEFAULT_MODEL_ROLE = "default";
