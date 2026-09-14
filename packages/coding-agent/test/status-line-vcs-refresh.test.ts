@@ -771,6 +771,10 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		// Prime the branch cache off the initial HEAD. The status/default mocks
 		// never resolve, so this cold paint cannot fire #onBranchChange itself.
 		component.getTopBorder(80);
+		// watchFile establishes its initial stat snapshot asynchronously. Replacing
+		// HEAD immediately can become that baseline rather than a change, leaving
+		// the event-driven assertion waiting forever on a busy runner.
+		await Bun.sleep(vcs.HEAD_WATCH_INTERVAL_MS * 2);
 
 		const switchTo = async (branchName: string) => {
 			const gitDir = path.join(repoDir, ".git");

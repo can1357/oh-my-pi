@@ -13,6 +13,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { AdvisorScope } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
 import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -320,12 +321,24 @@ describe("runSubprocess soft request budget", () => {
 			}
 		});
 		const advisorActive = vi.spyOn(handle.session, "isAdvisorActive");
-		mockCreateAgentSession(handle.session);
+		const createSession = mockCreateAgentSession(handle.session);
+		const originalParentScope = new AdvisorScope();
+		const currentParentScope = new AdvisorScope();
+		let liveParentScope = originalParentScope;
+		const parentSession = {
+			...createSessionDefaults(),
+			get advisorScope() {
+				return liveParentScope;
+			},
+		} as unknown as AgentSession;
+		registerRunning("Parent", parentSession);
 		registerRunning(id, handle.session);
 
 		const result = await runSubprocess({
 			...baseOptions(id, eventBus),
 			agent: { ...baseAgent, advisor: true },
+			parentAgentId: "Parent",
+			advisorScope: originalParentScope,
 		});
 
 		expect(result.aborted).toBe(true);
@@ -364,6 +377,8 @@ describe("runSubprocess soft request budget", () => {
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+		liveParentScope = currentParentScope;
+		currentParentScope.setSuppressed(true);
 		frames.length = 0;
 		// Parking can rebuild an unadvised session; don't retain the prior turn's marker.
 		advisorActive.mockReturnValue(false);
@@ -372,6 +387,10 @@ describe("runSubprocess soft request budget", () => {
 		expect(revivedReceipt.outcome).toBe("revived");
 		await revivedTerminal;
 		expectRpcTurn(false);
+		const revivedScope = new AdvisorScope(createSession.mock.calls.at(-1)?.[0]?.advisorScope);
+		expect(revivedScope.suppressed).toBe(true);
+		currentParentScope.setSuppressed(false);
+		expect(revivedScope.suppressed).toBe(false);
 		rpcRegistry.dispose();
 	});
 

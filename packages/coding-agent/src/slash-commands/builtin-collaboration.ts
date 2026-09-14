@@ -82,6 +82,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				const configured = runtime.session.isAdvisorEnabled();
 				if (active) {
 					await runtime.output("Advisor enabled.");
+				} else if (runtime.session.isAdvisorSuppressedByParent()) {
+					await runtime.output("Advisor is disabled by its parent session.");
 				} else if (configured) {
 					await runtime.output("Advisor setting enabled, but no model is assigned to the 'advisor' role.");
 				} else {
@@ -92,7 +94,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			if (verb === "on") {
 				const active = runtime.session.setAdvisorEnabled(true);
 				await runtime.output(
-					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
+					active
+						? "Advisor enabled."
+						: runtime.session.isAdvisorSuppressedByParent()
+							? "Advisor is disabled by its parent session."
+							: "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
 				return commandConsumed();
 			}
@@ -126,6 +132,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				const configured = runtime.ctx.session.isAdvisorEnabled();
 				if (active) {
 					runtime.ctx.showStatus("Advisor enabled.");
+				} else if (runtime.ctx.session.isAdvisorSuppressedByParent()) {
+					runtime.ctx.showStatus("Advisor is disabled by its parent session.");
 				} else if (configured) {
 					runtime.ctx.showStatus("Advisor setting enabled, but no model is assigned to the 'advisor' role.");
 				} else {
@@ -138,7 +146,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			if (verb === "on") {
 				const active = runtime.ctx.session.setAdvisorEnabled(true);
 				runtime.ctx.showStatus(
-					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
+					active
+						? "Advisor enabled."
+						: runtime.ctx.session.isAdvisorSuppressedByParent()
+							? "Advisor is disabled by its parent session."
+							: "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
 				refreshStatusLine(runtime.ctx);
 				runtime.ctx.editor.setText("");

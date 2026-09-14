@@ -257,8 +257,7 @@ const modelSegment: StatusLineSegment = {
 		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
-		// dim = everything paused/no-model. Per-advisor detail lives in
-		// `/advisor status`.
+		// dim = everything paused/no-model. Per-advisor detail lives in `(adv)` status.
 		// Optional chaining: lightweight session doubles (test mocks) that don't
 		// implement getAdvisorStatusOverview skip the badge instead of crashing.
 		const advisorStats = ctx.session.getAdvisorStatusOverview?.();
@@ -271,11 +270,50 @@ const modelSegment: StatusLineSegment = {
 					: statuses.includes("running")
 						? "success"
 						: "dim";
-			// Closed eye once every advisor has finished reviewing the yielded
-			// turn — no more comments until a new primary turn starts.
-			const allYielded = advisorStats.advisors.every(a => a.yielded);
-			const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
-			if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
+			// Nerd preset: one eye per advisor — open (success) while it still has
+			// review work on the current turn, closed once it yielded or cannot run
+			// (dim = paused/no-model/done, warning = quota, error = failed).
+			// Other presets keep the single eye badge plus per-advisor dots.
+			const nerd = theme.getSymbolPreset() === "nerd" && theme.icon.advisor && theme.icon.advisorClosed;
+			const eyeOpen = theme.icon.advisor;
+			const eyeClosed = theme.icon.advisorClosed || theme.icon.advisor;
+			if (!nerd) {
+				const allYielded = advisorStats.advisors.every(a => a.yielded);
+				const advisorIcon = allYielded ? eyeClosed : eyeOpen;
+				if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
+			}
+			const advisorGlyphs: string[] = [];
+			for (const a of advisorStats.advisors.slice(0, 4)) {
+				switch (a.status) {
+					case "running":
+						advisorGlyphs.push(
+							nerd
+								? a.yielded
+									? theme.fg("dim", eyeClosed)
+									: theme.fg("success", eyeOpen)
+								: theme.fg("success", theme.getSymbolPreset() === "ascii" ? "*" : "●"),
+						);
+						break;
+					case "paused":
+					case "no_model":
+						advisorGlyphs.push(
+							theme.fg("dim", nerd ? eyeClosed : theme.getSymbolPreset() === "ascii" ? "-" : "○"),
+						);
+						break;
+					case "quota_exhausted":
+						advisorGlyphs.push(
+							theme.fg("warning", nerd ? eyeClosed : theme.getSymbolPreset() === "ascii" ? "x" : "✕"),
+						);
+						break;
+					case "error":
+						advisorGlyphs.push(
+							theme.fg("error", nerd ? eyeClosed : theme.getSymbolPreset() === "ascii" ? "x" : "✕"),
+						);
+						break;
+				}
+			}
+			if (advisorStats.advisors.length > 4) advisorGlyphs.push(theme.fg("dim", "+"));
+			content += ` ${theme.fg("dim", "(")}${advisorGlyphs.join(" ")}${theme.fg("dim", ")")}`;
 		}
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);

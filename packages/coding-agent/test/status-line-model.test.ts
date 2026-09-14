@@ -60,67 +60,59 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 	};
 }
 
-describe("status line model segment advisor badge", () => {
-	it("appends a success-colored advisor symbol when all advisors run", () => {
+describe("status line model segment advisor glyphs", () => {
+	it("renders one success dot per running advisor", () => {
 		const rendered = renderSegment("model", createModelContext(true));
 		expect(rendered.content).toContain("Test Model");
-		expect(rendered.content).toContain(theme.fg("success", ` ${theme.icon.advisor}`));
+		expect(rendered.content).toContain(theme.fg("success", "●"));
+		expect(rendered.content).not.toContain("++");
 	});
 
-	it("colors the badge by the worst roster status", () => {
+	it("colors each dot by its own advisor status", () => {
 		const ctx = createModelContext(true);
 		ctx.session.getAdvisorStatusOverview = () => ({
 			configured: true,
 			advisors: [
 				{ name: "a", status: "running", yielded: false },
 				{ name: "b", status: "quota_exhausted", yielded: false },
+				{ name: "c", status: "error", yielded: false },
+				{ name: "d", status: "paused", yielded: false },
 			],
 		});
-		expect(renderSegment("model", ctx).content).toContain(theme.fg("warning", ` ${theme.icon.advisor}`));
-		ctx.session.getAdvisorStatusOverview = () => ({
-			configured: true,
-			advisors: [
-				{ name: "a", status: "error", yielded: false },
-				{ name: "b", status: "quota_exhausted", yielded: false },
-			],
-		});
-		expect(renderSegment("model", ctx).content).toContain(theme.fg("error", ` ${theme.icon.advisor}`));
+		const plain = Bun.stripANSI(renderSegment("model", ctx).content);
+		expect(plain).toMatch(/\(● ✕ ✕ ○\)/);
 	});
-	it("closes the eye once every advisor has yielded its review", () => {
+
+	it("truncates rosters beyond four to four glyphs plus an overflow marker", () => {
 		const ctx = createModelContext(true);
 		ctx.session.getAdvisorStatusOverview = () => ({
 			configured: true,
-			advisors: [{ name: "default", status: "running", yielded: true }],
+			advisors: Array.from({ length: 6 }, (_, i) => ({ name: `a${i}`, status: "running" as const, yielded: false })),
 		});
-		const rendered = renderSegment("model", ctx).content;
-		expect(rendered).toContain(theme.fg("success", ` ${theme.icon.advisorClosed}`));
-		// ASCII mode resolves both icons to `(adv)`, so absence is only provable
-		// when the two tokens differ.
-		if (theme.icon.advisorClosed !== theme.icon.advisor) {
-			expect(rendered).not.toContain(theme.icon.advisor);
-		}
+		const plain = Bun.stripANSI(renderSegment("model", ctx).content);
+		expect(plain).toContain("(● ● ● ● +)");
 	});
 
-	it("keeps the eye open while any advisor may still comment", () => {
-		const ctx = createModelContext(true);
-		ctx.session.getAdvisorStatusOverview = () => ({
-			configured: true,
-			advisors: [
-				{ name: "a", status: "running", yielded: true },
-				{ name: "b", status: "running", yielded: false },
-			],
-		});
-		const rendered = renderSegment("model", ctx).content;
-		expect(rendered).toContain(theme.fg("success", ` ${theme.icon.advisor}`));
-		if (theme.icon.advisorClosed !== theme.icon.advisor) {
-			expect(rendered).not.toContain(theme.icon.advisorClosed);
-		}
+	it("omits the glyphs when the advisor is inactive", () => {
+		const plain = Bun.stripANSI(renderSegment("model", createModelContext(false)).content);
+		expect(plain).not.toMatch(/[●○✕]/);
 	});
+});
 
-	it("omits the badge when the advisor is inactive", () => {
-		const rendered = renderSegment("model", createModelContext(false));
-		expect(rendered.content).toContain("Test Model");
-		expect(rendered.content).not.toContain(theme.icon.advisor);
+describe("status line model segment real symbol presets", () => {
+	it("uses preset-backed glyphs for yielded advisors", async () => {
+		for (const preset of ["ascii", "nerd"] as const) {
+			await initTheme(false, preset);
+			const ctx = createModelContext(true);
+			ctx.session.getAdvisorStatusOverview = () => ({
+				configured: true,
+				advisors: [{ name: "yielded", status: "paused", yielded: true }],
+			});
+			const plain = Bun.stripANSI(renderSegment("model", ctx).content);
+			const expected = preset === "ascii" ? "-" : theme.icon.advisorClosed;
+			expect(plain).toContain(expected);
+		}
+		await initTheme(false);
 	});
 });
 

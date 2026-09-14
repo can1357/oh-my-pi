@@ -13,6 +13,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { AdvisorScope } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -400,6 +401,47 @@ describe("persisted subagent revival", () => {
 		expect(roleAdvised.get("advisor.enabled")).toBe(true);
 		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
 		expect(unadvised.get("advisor.enabled")).toBe(false);
+	});
+
+	it.each([false, true])("inherits the nearest live ancestor scope across a parked parent=%s", async parkedParent => {
+		AgentRegistry.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-advisor-scope-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, "on");
+		const parentScope = new AdvisorScope();
+		parentScope.setSuppressed(true);
+		const parentSession = { ...createSessionDefaults(), advisorScope: parentScope } as unknown as AgentSession;
+		AgentRegistry.global().register({
+			id: "revived-parent",
+			displayName: "Revived Parent",
+			kind: "sub",
+			parentId: "Main",
+			status: "idle",
+			session: parentSession,
+		});
+		if (parkedParent) {
+			AgentRegistry.global().register({
+				id: "parked-parent",
+				displayName: "Parked Parent",
+				kind: "sub",
+				parentId: "revived-parent",
+				status: "parked",
+				session: null,
+			});
+		}
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const ref = { ...createRef(sessionFile), parentId: parkedParent ? "parked-parent" : "revived-parent" };
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+		expect(capturedOptions?.advisorScope).toBe(parentScope);
+		const descendantScope = new AdvisorScope(capturedOptions?.advisorScope);
+		expect(descendantScope.suppressed).toBe(true);
+		parentScope.setSuppressed(false);
+		expect(descendantScope.suppressed).toBe(false);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {
