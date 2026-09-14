@@ -688,6 +688,35 @@ fn input_routes_apply_patch_add_file_to_write() {
 }
 
 #[test]
+fn input_routes_unified_diff_add_file_to_write() {
+	let error = Patch::parse(
+		"diff --git a/new.ts b/new.ts\nnew file mode 100644\n--- /dev/null\n+++ b/new.ts\n@@ -0,0 \
+		 +1 @@\n+export const value = 1;",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("Detected incompatible unified diff syntax"), "{error}");
+	assert!(error.contains("use the `write` tool"), "{error}");
+	assert!(!error.contains("[PATH#HASH]"), "{error}");
+	assert!(!error.contains("Copy `HASH`"), "{error}");
+}
+
+#[test]
+fn input_reports_both_recovery_paths_for_mixed_unified_diff() {
+	let error = Patch::parse(
+		"--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1 @@\n+new\n--- a/existing.ts\n+++ b/existing.ts\n@@ \
+		 -1 +1 @@\n-old\n+new",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("use the `write` tool"), "{error}");
+	assert!(error.contains("rewrite existing-file changes as Hashline"), "{error}");
+	assert!(error.contains("Copy `HASH`"), "{error}");
+}
+
+#[test]
 fn input_supports_fallback_path_and_absolute_paths_in_cwd() {
 	let fallback = SplitOptions { cwd: None, path: Some("a.ts") };
 	let patch = Patch::parse("PUT <1:\n+x", &fallback).unwrap();

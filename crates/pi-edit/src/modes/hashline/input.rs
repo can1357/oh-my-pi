@@ -30,7 +30,7 @@ const FOREIGN_REWRITE_GUIDANCE: &str =
 	 Use `REM` to delete a file and `MV DEST` to move or rename it. Copy `HASH` and the original \
 	 line numbers from the latest `read`/`search` output.";
 const ADD_FILE_GUIDANCE: &str =
-	"For `*** Add File:` sections, use the `write` tool because new files have no snapshot hash.";
+	"For new-file sections, use the `write` tool because new files have no snapshot hash.";
 
 static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(
