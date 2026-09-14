@@ -48,6 +48,13 @@
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
+### Added
+
+- Added an opt-in Popup Background Fill setting; inline model popups keep their unfilled appearance by default ([#11958](https://github.com/can1357/oh-my-pi/pull/11958) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
+- Added an optional Inline Model Picker in Appearance → Display that keeps model search in the chat input area while preserving the statusline and extension content ([#11958](https://github.com/can1357/oh-my-pi/pull/11958) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
+### Changed
 ## [18.1.20] - 2026-09-13
 
 ### Added

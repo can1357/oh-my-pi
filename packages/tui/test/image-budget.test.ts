@@ -313,7 +313,7 @@ describe("tmux Kitty graphics passthrough", () => {
 		expect(encodeKitty("AA==", { columns: 1, rows: 1 })).toBe(expected("\x1b_Ga=T,f=100,q=2,C=1,c=1,r=1;AA==\x1b\\"));
 		expect(encodeKittyTransmit("AA==", 9)).toBe(expected("\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\"));
 		expect(encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 })).toBe(
-			expected("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\"),
+			expected("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2,z=-2147483648\x1b\\"),
 		);
 		expect(encodeKittyVirtualPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 })).toBe(
 			expected("\x1b_Ga=p,U=1,q=2,i=9,p=9,c=3,r=2\x1b\\"),
@@ -996,7 +996,7 @@ describe("kitty transmit / placement encoding", () => {
 
 	it("encodeKittyPlacement displays a transmitted image by id with a stable placement id", () => {
 		const seq = encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 });
-		expect(seq).toBe("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\");
+		expect(seq).toBe("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2,z=-2147483648\x1b\\");
 		expect(seq).not.toContain(BASE64_ONE_PIXEL_PNG);
 	});
 });

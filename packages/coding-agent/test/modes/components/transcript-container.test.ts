@@ -278,8 +278,21 @@ describe("TranscriptContainer", () => {
 		expect(transcript.emittedStableRows()).toEqual([0]);
 
 		transcript.beginReplay();
-		expect(transcript.peekReplayBatch(80)).toBeUndefined();
+		const replay = transcript.peekReplayBatch(80);
+		expect(replay?.rows).toEqual([]);
+		transcript.acknowledgeFinalizedBatch(replay!.id);
 		expect(transcript.renderViewport(80, 5, frame)).toEqual(["answer"]);
+	});
+
+	it("offers an acknowledged empty replay when the committed ledger is empty", () => {
+		const transcript = new TranscriptContainer();
+
+		transcript.beginReplay();
+		const replay = transcript.peekReplayBatch(80);
+
+		expect(replay).toEqual({ id: 1, rows: [], kind: "replay" });
+		transcript.acknowledgeFinalizedBatch(replay!.id);
+		expect(transcript.peekReplayBatch(80)).toBeUndefined();
 	});
 
 	beforeAll(async () => {

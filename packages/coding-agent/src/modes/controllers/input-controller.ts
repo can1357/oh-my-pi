@@ -14,6 +14,7 @@ import { resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "../../modes/components/ask-dialog";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { extractImagePathFromText } from "../../modes/components/custom-editor";
+import { ModelPickerComponent } from "../../modes/components/model-picker";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
@@ -340,6 +341,7 @@ export class InputController {
 				if (this.ctx.ui.getFocused() instanceof TreeSelectorComponent && matchesKey(data, "ctrl+o"))
 					return undefined;
 				const focused = this.ctx.ui.getFocused();
+				if (focused instanceof ModelPickerComponent) return undefined;
 				// A truncated ask question lives in the editor slot, not chat
 				// transcript, so expand it in-place instead of (or before)
 				// toggling tool-output previews.
@@ -673,6 +675,7 @@ export class InputController {
 		if (!data.startsWith("\x1b[<")) return undefined;
 		if (!settings.get("tui.mouse")) return undefined;
 		if (this.ctx.ui.hasOverlay()) return undefined;
+		if (this.ctx.ui.getFocused() instanceof ModelPickerComponent) return { consume: true };
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
 		if (event.motion) this.#updateHoverHighlight(event.row);
@@ -697,7 +700,7 @@ export class InputController {
 	// empty (resize transactions) or the row falls outside it: routing stale
 	// spans would highlight or focus an unrelated agent from old rows.
 	#viewportCandidates(screenRow: number): string[] {
-		const viewport = this.ctx.ui.getMutableViewport();
+		const viewport = this.ctx.ui.getMutableViewport(screenRow);
 		const local = screenRow - viewport.top;
 		if (viewport.length === 0 || local < 0 || local >= viewport.length) return [];
 		return this.ctx.resolveViewportClickCandidates(local);

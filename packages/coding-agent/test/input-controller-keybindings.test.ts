@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
+import { ModelPickerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -753,6 +754,13 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 		const { ctx, listeners, setOverlayVisible } = await setup();
 		setOverlayVisible(true);
 
+		expect(dispatchInput(listeners, CTRL_O)).toBeUndefined();
+		expect(ctx.toolOutputExpanded).toBe(false);
+	});
+
+	it("leaves transcript expansion unchanged while an inline model picker owns focus", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		setFocused(Object.create(ModelPickerComponent.prototype));
 		expect(dispatchInput(listeners, CTRL_O)).toBeUndefined();
 		expect(ctx.toolOutputExpanded).toBe(false);
 	});

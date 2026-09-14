@@ -432,6 +432,9 @@ function padLeftVisible(text: string, width: number): string {
 
 /** Behavior switches for {@link ModelBrowser}. */
 export interface ModelBrowserOptions {
+	/** Input prefix for hosts that provide their own search chrome. */
+	searchPrompt?: string;
+	searchFocused?: boolean;
 	/** Render the dim `provider/` prefix before model ids. Default true. */
 	showProvider?: boolean;
 	/** Session token count used to flag models whose context window is exceeded. */
@@ -493,6 +496,8 @@ export class ModelBrowser implements Component {
 
 	constructor(settings: Settings, options: ModelBrowserOptions = {}) {
 		this.#settings = settings;
+		this.#searchInput.prompt = options.searchPrompt ?? "> ";
+		this.#searchInput.focused = options.searchFocused ?? false;
 		this.#showProvider = options.showProvider ?? true;
 		const tokens = options.currentContextTokens ?? 0;
 		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
@@ -555,6 +560,14 @@ export class ModelBrowser implements Component {
 	/** Focused: accent cursor + selected-row background band. Unfocused: dim cursor, no band. */
 	setFocused(focused: boolean): void {
 		this.#focused = focused;
+	}
+
+	setSearchFocused(focused: boolean): void {
+		this.#searchInput.focused = focused;
+	}
+
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#searchInput.setUseTerminalCursor(useTerminalCursor);
 	}
 
 	/** Total rendered height for the current `maxVisible` (host layout budgeting). */
@@ -837,6 +850,16 @@ export class ModelBrowser implements Component {
 		}
 	}
 
+	pasteText(text: string): void {
+		const before = this.#searchInput.getValue();
+		this.#searchInput.pasteText(text);
+		const after = this.#searchInput.getValue();
+		if (after !== before) {
+			this.#applyQuery("reset-changed-prefix");
+			this.onQueryChange?.(after);
+		}
+	}
+
 	/** Cancel-key ladder: clear a non-empty query first, then bubble to the host. */
 	handleCancel(): void {
 		if (this.#searchInput.getValue().length > 0) {
@@ -1023,8 +1046,9 @@ export class ModelBrowser implements Component {
 	render(width: number): string[] {
 		const lines: string[] = [];
 
-		const searchIcon = theme.fg("accent", theme.symbol("icon.search"));
-		const inputWidth = Math.max(4, width - visibleWidth(theme.symbol("icon.search")) - 2);
+		const icon = theme.symbol("icon.search");
+		const searchIcon = theme.fg("accent", icon);
+		const inputWidth = Math.max(4, width - visibleWidth(icon) - 2);
 		lines.push(` ${searchIcon} ${this.#searchInput.render(inputWidth)[0] ?? ""}`);
 		lines.push("");
 

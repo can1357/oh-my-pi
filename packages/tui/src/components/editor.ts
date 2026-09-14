@@ -826,6 +826,19 @@ export class Editor implements Component, Focusable {
 		// Don't reset scrollOffset — #updateScrollOffset will clamp it on next render
 	}
 
+	/** Render temporary compact chrome without changing the draft's scroll position or height limit. */
+	renderWithMaxContentRows(width: number, contentRows: number, emitCursorMarker = this.focused): readonly string[] {
+		const previousMaxHeight = this.#maxHeight;
+		const previousScrollOffset = this.#scrollOffset;
+		this.#maxHeight = this.#effectiveStyle().verticalChrome + Math.max(1, contentRows);
+		try {
+			return this.render(width, emitCursorMarker);
+		} finally {
+			this.#maxHeight = previousMaxHeight;
+			this.#scrollOffset = previousScrollOffset;
+		}
+	}
+
 	/** Enable/disable the right-border scrollbar. Only shown when content overflows. */
 	setScrollbarVisible(visible: boolean): void {
 		this.#scrollbarVisible = visible;
@@ -1187,7 +1200,7 @@ export class Editor implements Component, Focusable {
 		this.#scrollOffset = Math.min(this.#scrollOffset, maxOffset);
 	}
 
-	render(width: number): readonly string[] {
+	render(width: number, emitCursorMarker = this.focused): readonly string[] {
 		const style = this.#effectiveStyle();
 		const paddingX = this.#getEditorPaddingX();
 		const isSideBordered = style.sideBorders;
@@ -1252,7 +1265,6 @@ export class Editor implements Component, Focusable {
 		// Render each layout line
 		// Keep the hardware cursor at the text insertion point while autocomplete
 		// rows render below it; terminals use that position to anchor IME candidates.
-		const emitCursorMarker = this.focused;
 		const lineContentWidth = contentAreaWidth;
 
 		// Compute inline hint text (dim ghost text after cursor)
@@ -4049,6 +4061,12 @@ export class Editor implements Component, Focusable {
 		if (notifyCancel && wasAutocompleting) {
 			this.onAutocompleteCancel?.();
 		}
+	}
+
+	/** Dismiss pending and visible completions without changing the draft or cursor. */
+	dismissAutocomplete(): void {
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
 	}
 
 	isShowingAutocomplete(): boolean {
