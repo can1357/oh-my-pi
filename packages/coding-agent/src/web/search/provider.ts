@@ -59,6 +59,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.exa,
 		load: async () => new (await import("./providers/exa")).ExaProvider(),
 	},
+	keenable: {
+		id: "keenable",
+		label: SEARCH_PROVIDER_LABELS.keenable,
+		load: async () => new (await import("./providers/keenable")).KeenableProvider(),
+	},
 	tinyfish: {
 		id: "tinyfish",
 		label: SEARCH_PROVIDER_LABELS.tinyfish,

@@ -25,6 +25,7 @@
   - `packages/coding-agent/src/web/search/providers/google.ts` — Google browser-backed SERP scraper.
   - `packages/coding-agent/src/web/search/providers/jina.ts` — Jina Reader search adapter.
   - `packages/coding-agent/src/web/search/providers/kagi.ts` — Kagi provider wrapper.
+  - `packages/coding-agent/src/web/search/providers/keenable.ts` — Keenable search REST adapter (keyed or keyless public endpoint).
   - `packages/coding-agent/src/web/search/providers/kimi.ts` — Kimi search adapter.
   - `packages/coding-agent/src/web/search/providers/mojeek.ts` — Mojeek browser-backed scraper (independent index).
   - `packages/coding-agent/src/web/search/providers/parallel.ts` — Parallel provider wrapper.
@@ -46,7 +47,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Raw query. The orchestrator parses Google-style directives (`site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `filetype:`, quoted phrases, exclusions, and `OR`) so providers can map them to native filters or supported syntax; the original string remains available to adapters. |
-| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
+| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, Keenable, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
 | `limit` | `number` | No | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`. |
 | `max_tokens` | `number` | No | Passed through as provider token caps (`maxOutputTokens`, `max_tokens`, or xAI `max_output_tokens`) only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
 | `temperature` | `number` | No | Passed through only by Anthropic models that support sampling parameters, Gemini, xAI, and Perplexity API-key mode. Ignored or omitted by the other provider/model paths. |
@@ -106,9 +107,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 ## Modes / Variants
 - **Provider selection**
   - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
-  - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
+  - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, Keenable, and Firecrawl can use their unauthenticated/keyless paths.
   - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
-  - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
+  - **Default auto chain order** (24 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `keenable`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
@@ -158,6 +159,13 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Querying: POST `https://api.exa.ai/search` with the resolved Exa API key, otherwise JSON-RPC `tools/call` against `https://mcp.exa.ai/mcp` for remote MCP tool `web_search_exa`.
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output: synthesized `answer` from up to 3 result summaries, `sources`, `requestId`.
+  - **Keenable** — `packages/coding-agent/src/web/search/providers/keenable.ts`
+    - Availability: `KEENABLE_API_KEY` or a stored credential for `keenable` (`/login keenable`) admits Keenable to the auto chain. Explicit selection (listing `keenable` in `providers.webSearchOrder`, or a forced `provider: keenable`) runs without a credential against the keyless public endpoint, which is rate limited per IP.
+    - Querying: POST `https://api.keenable.ai/v1/search` with `X-API-Key`, otherwise POST `https://api.keenable.ai/v1/search/public` with the required `X-Keenable-Title: oh-my-pi` app identifier. Directive queries re-emit only quoted phrases and `-exclusions`; a single `site:` host maps to the native `site` filter (multiple `site:` and every `-site:` are left to the central post-filter); `after:`/`before:` map to `published_after`/`published_before` (the exclusive `before:` bound is sent as a midnight timestamp).
+    - `recency` maps to a relative `published_after` delta (`1d`/`7d`/`1mo`/`1y`) when no absolute bounds are present. Because the publish-date filter drops pages without a known `published_at`, an empty filtered response is retried once without time filters.
+    - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..50`, default `10`.
+    - Ignores `max_tokens` and `temperature`.
+    - Output: `sources` (`snippet` falls back to `description`; `published_at` becomes `publishedDate`/`ageSeconds`), `requestId` from `x-request-id` when present, `authMode: "api_key" | "keyless"`.
   - **TinyFish** — `packages/coding-agent/src/web/search/providers/tinyfish.ts`
     - Availability: `TINYFISH_API_KEY` or `agent.db` credential for `tinyfish`.
     - Querying: GET `https://api.search.tinyfish.ai` with `X-API-Key` and `query`; `recency` maps to `recency_minutes`.
@@ -255,6 +263,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Startpage / Google / Ecosia / Mojeek result count: default `10`, max `20` (their `providers/*.ts` modules).
 - Public Web result count: default `15`, max `30`; fan-out soft deadline `5s`, hard cap `30s` (`packages/coding-agent/src/web/search/providers/public.ts`).
 - Tavily result count: default `5`, max `20` (`packages/coding-agent/src/web/search/providers/tavily.ts`).
+- Keenable result count: default `10`, max `50` (`packages/coding-agent/src/web/search/providers/keenable.ts`).
 - Firecrawl result count: default `10`, max `100` (`packages/coding-agent/src/web/search/providers/firecrawl.ts`).
 - Kimi result count: default `10`, max `20`; request timeout field fixed to `30` seconds (`packages/coding-agent/src/web/search/providers/kimi.ts`).
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
@@ -282,7 +291,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - The model-facing schema does not expose `provider`, but internal callers can force one through `SearchQueryParams`.
 - `executeSearch()` walks `resolveProviderCandidates()` lazily; `resolveProviderChain()` remains a compatibility helper that loads every candidate. Provider instances are cached, and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
-- `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.
+- `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, Keenable, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.
 - `packages/coding-agent/src/config/settings-schema.ts` uses the shared `SEARCH_PROVIDER_PREFERENCES` / `SEARCH_PROVIDER_OPTIONS` metadata, so the settings selector and setup wizard expose `auto` plus every provider in the auto chain.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.
+- `/login keenable` stores the pasted key in AuthStorage; Keenable resolves stored or environment credentials before the keyless `https://api.keenable.ai/v1/search/public` fallback.

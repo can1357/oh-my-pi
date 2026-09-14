@@ -47,6 +47,7 @@ export function getExtraHelpText(): string {
 
   ${chalk.dim("# Search & Tools")}
   EXA_API_KEY                - Exa web search
+  KEENABLE_API_KEY           - Keenable web search (optional; keyless public tier when explicitly selected)
   BRAVE_API_KEY              - Brave web search
   PERPLEXITY_API_KEY         - Perplexity web search API key (optional; anonymous fallback)
   PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
