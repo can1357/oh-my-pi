@@ -9,6 +9,7 @@
 - First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+- Fixed `local://` URLs reading the wrong file or rejecting valid filenames when names contain literal percent signs or percent-encoded text.
 
 ## [18.1.20] - 2026-09-13
 
