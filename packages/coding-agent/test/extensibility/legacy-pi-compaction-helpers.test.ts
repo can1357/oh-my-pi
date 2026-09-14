@@ -5,7 +5,9 @@ import {
 	calculateContextTokens,
 	compact,
 	estimateTokens,
+	findCutPoint,
 	serializeConversation,
+	sessionEntryToContextMessages,
 } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 
 // Issue #6583: pi extensions import `estimateTokens` from
@@ -59,5 +61,73 @@ describe("legacy shim compaction helpers", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 		expect(calculateContextTokens(usage)).toBe(115);
+	});
+
+	// SoL-Pi's online-context-compact imports `findCutPoint` with the legacy
+	// 4-arg shape (no leading tokenizer) and `sessionEntryToContextMessages`
+	// from the package root. Their absence made the whole sol-pi extension fail
+	// to load ("Export named 'findCutPoint' not found").
+	it("exposes findCutPoint with the legacy 4-arg signature", () => {
+		expect(typeof findCutPoint).toBe("function");
+		const entries = [
+			{
+				type: "message",
+				id: "a",
+				parentId: null,
+				timestamp: "0",
+				message: { role: "user", content: "one", timestamp: 0 },
+			},
+			{
+				type: "message",
+				id: "b",
+				parentId: "a",
+				timestamp: "0",
+				message: { role: "assistant", content: "two", timestamp: 0 },
+			},
+		] as never[];
+		const cut = findCutPoint(entries, 0, entries.length, 1);
+		expect(cut).toHaveProperty("firstKeptEntryIndex");
+		expect(cut).toHaveProperty("turnStartIndex");
+		expect(cut).toHaveProperty("isSplitTurn");
+	});
+
+	it("converts session entries to context messages with upstream semantics", () => {
+		expect(typeof sessionEntryToContextMessages).toBe("function");
+		const message = sessionEntryToContextMessages({
+			type: "message",
+			id: "a",
+			parentId: null,
+			timestamp: "0",
+			message: { role: "user", content: "hi", timestamp: 0 },
+		} as never);
+		expect(message).toHaveLength(1);
+		expect((message[0] as { role: string }).role).toBe("user");
+
+		// Null-content messages normalize to an empty content array (old/hand-edited sessions).
+		const repaired = sessionEntryToContextMessages({
+			type: "message",
+			id: "b",
+			parentId: "a",
+			timestamp: "0",
+			message: { role: "assistant", content: null, timestamp: 0 },
+		} as never);
+		expect(repaired).toHaveLength(1);
+		expect((repaired[0] as { content: unknown[] }).content).toEqual([]);
+
+		// Compaction entries surface as compaction-summary messages; markers produce none.
+		const compaction = sessionEntryToContextMessages({
+			type: "compaction",
+			id: "c",
+			parentId: "b",
+			timestamp: "0",
+			summary: "summary text",
+			tokensBefore: 100,
+		} as never);
+		expect(compaction).toHaveLength(1);
+		expect((compaction[0] as { role: string }).role).toBe("compactionSummary");
+
+		expect(
+			sessionEntryToContextMessages({ type: "label", id: "d", parentId: "c", timestamp: "0", label: "x" } as never),
+		).toEqual([]);
 	});
 });

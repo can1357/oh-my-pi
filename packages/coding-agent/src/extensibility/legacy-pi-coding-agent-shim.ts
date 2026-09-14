@@ -1694,6 +1694,62 @@ export function getPackageDir(): string {
 // not forward them, so legacy extensions importing them fail Bun's static
 // export check during validation (issues #6583, #7174, #7403, #10278).
 export { calculateContextTokens, compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	type CutPointResult,
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+	findCutPoint as compactionFindCutPoint,
+	type SessionEntry as CompactionSessionEntry,
+} from "@oh-my-pi/pi-agent-core/compaction";
+
+// Upstream pi exported `findCutPoint(entries, startIndex, endIndex, keepRecentTokens)`
+// from the package root; omp's compaction core gained a leading `tokenizer` argument
+// (issue #2275 era). SoL-Pi's online-context-compact calls the 4-arg legacy shape, so
+// adapt in the shim rather than forcing extensions onto the new signature.
+export function findCutPoint(
+	entries: CompactionSessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+): CutPointResult {
+	return compactionFindCutPoint(entries, legacyTokenizer, startIndex, endIndex, keepRecentTokens);
+}
+
+/**
+ * Legacy `sessionEntryToContextMessages(entry)` export: upstream converted one
+ * session entry into its context messages. omp folds that conversion into
+ * `buildSessionContext`; expose a per-entry adapter with the same semantics
+ * (message → itself with a null-content guard, custom_message / branch_summary /
+ * compaction → their builder messages, everything else → none).
+ */
+export function sessionEntryToContextMessages(entry: CompactionSessionEntry): AgentMessage[] {
+	if (entry.type === "message") {
+		const message = entry.message;
+		if (
+			(message.role === "user" ||
+				message.role === "assistant" ||
+				message.role === "toolResult" ||
+				message.role === "custom") &&
+			message.content == null
+		) {
+			return [{ ...message, content: [] }];
+		}
+		return [message];
+	}
+	if (entry.type === "custom_message") {
+		return [
+			createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp),
+		];
+	}
+	if (entry.type === "branch_summary" && entry.summary) {
+		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
+	}
+	if (entry.type === "compaction") {
+		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+	}
+	return [];
+}
 
 const legacyTokenizer = new Tokenizer();
 
