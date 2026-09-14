@@ -241,4 +241,43 @@ describe("streamDevin router assignment", () => {
 		}).result();
 		expect(on.recorded.chat?.disableParallelToolCalls).toBe(false);
 	});
+
+	it("mirrors native completion defaults and caps larger catalog output limits", async () => {
+		const edge = fakeDevin({});
+		const model = { ...devinModel({}, "deepseek-v4-flash-low"), maxTokens: 384_000 };
+
+		await streamDevin(model, context, { apiKey: "token", fetch: edge.fetch }).result();
+
+		expect(edge.recorded.chat?.configuration).toMatchObject({
+			numCompletions: 1n,
+			maxTokens: 128_000n,
+			maxNewlines: 400n,
+			temperature: 1,
+			firstTemperature: 0,
+			topK: 40n,
+			stopPatterns: [],
+			fimEotProbThreshold: 0,
+		});
+		expect(edge.recorded.chat?.configuration?.topP).toBeCloseTo(0.95);
+	});
+
+	it("preserves explicit completion overrides without adding native stop patterns", async () => {
+		const edge = fakeDevin({});
+
+		await streamDevin(devinModel({}, "gpt-5-6-sol-medium"), context, {
+			apiKey: "token",
+			fetch: edge.fetch,
+			maxTokens: 32_000,
+			temperature: 0.2,
+			topP: 0.8,
+			stopSequences: ["END"],
+		}).result();
+
+		expect(edge.recorded.chat?.configuration).toMatchObject({
+			maxTokens: 32_000n,
+			temperature: 0.2,
+			topP: 0.8,
+			stopPatterns: ["END"],
+		});
+	});
 });
