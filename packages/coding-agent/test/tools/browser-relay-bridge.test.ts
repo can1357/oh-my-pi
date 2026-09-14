@@ -3956,6 +3956,19 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.pending("send").find(rpc => rpc.method === "Runtime.evaluate")?.params).toMatchObject({
 			contextId: 102,
 		});
+		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
+		await flush();
+		expect(
+			ext2.rpcs("send").filter(rpc => {
+				if (rpc.method !== "Page.addScriptToEvaluateOnNewDocument") return false;
+				const params = rpc.params as { source?: string; runImmediately?: boolean } | undefined;
+				return params?.runImmediately === true && params.source?.includes("window.__relayInjected");
+			}),
+		).toHaveLength(0);
 	});
 
 	it("runs a preload once and clears its marker in every existing frame during handoff", async () => {

@@ -3715,13 +3715,15 @@ export class RelayBridge {
 	): Promise<void> {
 		const enabledForProbe = !tab.rootRuntimeEnabled;
 		const contexts = enabledForProbe ? new Map<number, Record<string, unknown>>() : tab.runtimeContexts;
-		if (enabledForProbe) {
-			tab.preloadContextProbe = contexts;
-			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
-			this.#assertExtensionCurrent(expectedExt);
-		}
+		let probeEnabled = false;
 		try {
+			if (enabledForProbe) {
+				tab.preloadContextProbe = contexts;
+				this.#assertExtensionCurrent(expectedExt);
+				await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+				this.#assertExtensionCurrent(expectedExt);
+				probeEnabled = true;
+			}
 			for (const frameId of frameIds) {
 				const match = [...contexts].find(([, context]) => {
 					const auxData = context.auxData;
@@ -3744,8 +3746,10 @@ export class RelayBridge {
 		} finally {
 			if (enabledForProbe) {
 				tab.preloadContextProbe = null;
-				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+				if (probeEnabled) {
+					this.#assertExtensionCurrent(expectedExt);
+					await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+				}
 			}
 		}
 	}
