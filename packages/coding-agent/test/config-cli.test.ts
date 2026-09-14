@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { YAML } from "bun";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
-import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { onAppendOnlyModeChanged, resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -184,6 +187,209 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.key).toBe("defaultThinkingLevel");
 		expect(parsed.type).toBe("enum");
 		expect(parsed.value).toBe("max");
+	});
+	it("sets an absent raw global setting even when an overlay supplies the effective value", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
+
+		const { exitCode, output, error } = await runCliProcess(
+			["config", "set", "compaction.enabled", "true", "--if-absent", "--json"],
+			{
+				PI_CODING_AGENT_DIR: testAgentDir.path(),
+				PI_CONFIG_FILES: overlayPath,
+			},
+		);
+
+		expect(error).toBe("");
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(output)).toEqual({ key: "compaction.enabled", value: true, applied: true });
+		expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({ compaction: { enabled: true } });
+	});
+
+	it("preserves explicit raw global false, empty, and null values", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		const cases = [
+			{ key: "compaction.enabled", value: "true", yaml: "compaction:\n  enabled: false\n", expected: false },
+			{
+				key: "hindsight.apiUrl",
+				value: "https://hindsight.example.test",
+				yaml: "hindsight:\n  apiUrl: ''\n",
+				expected: "",
+			},
+			{ key: "compaction.enabled", value: "true", yaml: "compaction:\n  enabled: null\n", expected: null },
+		];
+
+		for (const scenario of cases) {
+			await Bun.write(configPath, scenario.yaml);
+			const { exitCode, output, error } = await runCliProcess(
+				["config", "set", scenario.key, scenario.value, "--if-absent", "--json"],
+				{ PI_CODING_AGENT_DIR: testAgentDir.path() },
+			);
+
+			expect(error).toBe("");
+			expect(exitCode).toBe(0);
+			expect(JSON.parse(output)).toEqual({ key: scenario.key, value: scenario.expected, applied: false });
+		}
+	});
+
+	it("serializes concurrent absent-only writes for different keys", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+
+		expect(
+			await Promise.all([
+				settings.setIfAbsent("compaction.enabled", true),
+				settings.setIfAbsent("compaction.idleTimeoutSeconds", 600),
+			]),
+		).toEqual([true, true]);
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toMatchObject({
+			compaction: { enabled: true, idleTimeoutSeconds: 600 },
+		});
+	});
+
+	it("does not publish guarded settings that lose under the write lock", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+		const onChange = vi.fn();
+		const observedAppendOnlyModes: string[] = [];
+		const unsubscribe = onAppendOnlyModeChanged(mode => observedAppendOnlyModes.push(mode));
+		settings.onEffectiveChange(onChange);
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			await Bun.write(filePath, "provider:\n  appendOnlyContext: auto\n");
+			return await withFileLock(filePath, fn, options);
+		});
+
+		expect(await settings.setIfAbsent("provider.appendOnlyContext", "on")).toBe(false);
+		unsubscribe();
+		expect(onChange).not.toHaveBeenCalled();
+		expect(observedAppendOnlyModes).toEqual([]);
+	});
+
+	it("preserves model-role mutations staged during atomic YAML I/O", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+		const writeStarted = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		const open = fs.promises.open;
+		vi.spyOn(fs.promises, "open").mockImplementationOnce(async (...args) => {
+			const handle = await open(...args);
+			const writeFile = handle.writeFile.bind(handle);
+			vi.spyOn(handle, "writeFile").mockImplementationOnce(async data => {
+				writeStarted.resolve();
+				await releaseWrite.promise;
+				await writeFile(data);
+			});
+			return handle;
+		});
+
+		const guardedSave = settings.setIfAbsent("compaction.enabled", false);
+		await writeStarted.promise;
+		settings.setModelRole("advisor", "moonshot/kimi-k3:max");
+		releaseWrite.resolve();
+		expect(await guardedSave).toBe(true);
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toMatchObject({
+			compaction: { enabled: false },
+			modelRoles: { advisor: "moonshot/kimi-k3:max" },
+		});
+	});
+
+	it("rechecks initially present absent-only settings under the YAML write lock", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		await Bun.write(configPath, "compaction:\n  enabled: false\n");
+		const settings = await Settings.init();
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			await Bun.write(filePath, "{}\n");
+			return await withFileLock(filePath, fn, options);
+		});
+
+		expect(await settings.setIfAbsent("compaction.enabled", true)).toBe(true);
+		expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({ compaction: { enabled: true } });
+	});
+
+	it("preserves ordinary settings staged during a guarded save", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+		const saveEntered = Promise.withResolvers<void>();
+		const releaseSave = Promise.withResolvers<void>();
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			saveEntered.resolve();
+			await releaseSave.promise;
+			return await withFileLock(filePath, fn, options);
+		});
+
+		const guardedSave = settings.setIfAbsent("compaction.enabled", true);
+		await saveEntered.promise;
+		settings.set("compaction.idleTimeoutSeconds", 600);
+		releaseSave.resolve();
+		expect(await guardedSave).toBe(true);
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toMatchObject({
+			compaction: { enabled: true, idleTimeoutSeconds: 600 },
+		});
+	});
+
+	it("accepts --if-absent only for config set", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const { exitCode, error } = await runCliProcess(["config", "get", "compaction.enabled", "--if-absent"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+		});
+
+		expect(exitCode).toBe(1);
+		expect(error).toContain("--if-absent is only valid for `omp config set`");
+	});
+
+	it("keeps ordinary config set unconditional with its existing JSON shape", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		await Bun.write(path.join(testAgentDir.path(), "config.yml"), "compaction:\n  enabled: false\n");
+
+		const { exitCode, output, error } = await runCliProcess(
+			["config", "set", "compaction.enabled", "true", "--json"],
+			{
+				PI_CODING_AGENT_DIR: testAgentDir.path(),
+			},
+		);
+
+		expect(exitCode).toBe(0);
+		expect(error).toBe("");
+		expect(JSON.parse(output)).toEqual({ key: "compaction.enabled", value: true });
+	});
+
+	it.each([
+		["a different value", false],
+		["the requested value", true],
+	])("preserves a competitor write of %s made before the locked save", async (_description, competitorValue) => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			await Bun.write(filePath, `compaction:\n  enabled: ${competitorValue}\n`);
+			return await withFileLock(filePath, fn, options);
+		});
+
+		await runConfigCommand({
+			action: "set",
+			key: "compaction.enabled",
+			value: "true",
+			flags: { json: true, ifAbsent: true },
+		});
+
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+			key: "compaction.enabled",
+			value: competitorValue,
+			applied: false,
+		});
+		expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({
+			compaction: { enabled: competitorValue },
+		});
 	});
 	it("fully flushes JSON larger than a pipe buffer", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");

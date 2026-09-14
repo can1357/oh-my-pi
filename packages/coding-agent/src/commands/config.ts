@@ -2,7 +2,7 @@
  * Manage configuration settings.
  */
 
-import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { configHelp as commandHelp } from "../cli/command-help";
 import { type ConfigAction, type ConfigCommandArgs, runConfigCommand } from "../cli/config-cli";
 import { initTheme } from "../modes/theme/theme";
@@ -30,11 +30,15 @@ export default class Config extends Command {
 
 	static flags = {
 		json: Flags.boolean({ description: "Output JSON" }),
+		"if-absent": Flags.boolean({ description: "Set only if the raw global setting is absent (set only)" }),
 	};
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Config);
 		const action = (args.action ?? "list") as ConfigAction;
+		if (flags["if-absent"] && action !== "set") {
+			throw new CliUsageError("--if-absent is only valid for `omp config set`");
+		}
 		const value = Array.isArray(args.value) ? args.value.join(" ") : args.value;
 
 		const cmd: ConfigCommandArgs = {
@@ -43,6 +47,7 @@ export default class Config extends Command {
 			value,
 			flags: {
 				json: flags.json,
+				ifAbsent: flags["if-absent"],
 			},
 		};
 
