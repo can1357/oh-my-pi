@@ -27,7 +27,8 @@ const ENVELOPE_MARKERS: [&str; 3] = [BEGIN_PATCH_MARKER, END_PATCH_MARKER, ABORT
 const FOREIGN_REWRITE_GUIDANCE: &str =
 	"Discard the incompatible body and rewrite existing-file changes as Hashline: `[PATH#HASH]`, \
 	 then operations such as `PUT N.=M:` followed by `+TEXT`, `CUT N.=M`, `PUT <N:`, or `PUT >N:`. \
-	 Copy `HASH` and the original line numbers from the latest `read`/`search` output.";
+	 Use `REM` to delete a file and `MV DEST` to move or rename it. Copy `HASH` and the original \
+	 line numbers from the latest `read`/`search` output.";
 const ADD_FILE_GUIDANCE: &str =
 	"For `*** Add File:` sections, use the `write` tool because new files have no snapshot hash.";
 
