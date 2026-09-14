@@ -3223,6 +3223,117 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("reapplies a clear that completes after root replacement", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+		const refresher = new FakeCdpSocket();
+		const refresherConn = bridge.cdpConnected(refresher);
+		const refresherSession = await attachPage(bridge, ext, refresher, refresherConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "Asia/Shanghai" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "initial timezone setter");
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(
+			refresherConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: refresherSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "hardware-concurrency override");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "in-flight timezone clear");
+
+		// Removing the hardware-override owner forces a same-socket root refresh
+		// while the timezone clear is still pending. Recovery snapshots and replays
+		// the old timezone before the old-root clear result arrives.
+		bridge.cdpClosed(refresherConn);
+		await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach");
+		ack(bridge, ext, "detach");
+		await waitFor(() => ext.pending("attach").length === 1, "replacement attach");
+		ack(bridge, ext, "attach");
+		await waitFor(
+			() =>
+				ext
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.method === "Emulation.setTimezoneOverride" &&
+							(rpc.params as { timezoneId?: string } | undefined)?.timezoneId === "Asia/Shanghai",
+					),
+			"stale timezone replay",
+		);
+		const replay = ext
+			.pending("send")
+			.find(rpc => (rpc.params as { timezoneId?: string } | undefined)?.timezoneId === "Asia/Shanghai")!;
+		expect(replay).toMatchObject({
+			method: "Emulation.setTimezoneOverride",
+			params: { timezoneId: "Asia/Shanghai" },
+		});
+		ext.markAcked(replay.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: replay.id, ok: true, result: {} }));
+		await flush();
+
+		// Simulate the old root returning success late. The clear must now also run
+		// on the replacement root so its replayed override does not survive.
+		const oldClear = ext
+			.pending("send")
+			.find(rpc => (rpc.params as { timezoneId?: string } | undefined)?.timezoneId === "")!;
+		ext.markAcked(oldClear.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: oldClear.id, ok: true, result: {} }));
+		await waitFor(
+			() =>
+				ext
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.id !== oldClear.id &&
+							rpc.method === "Emulation.setTimezoneOverride" &&
+							(rpc.params as { timezoneId?: string } | undefined)?.timezoneId === "",
+					),
+			"replacement-root timezone clear",
+		);
+		expect(
+			ext
+				.pending("send")
+				.find(
+					rpc => rpc.id !== oldClear.id && (rpc.params as { timezoneId?: string } | undefined)?.timezoneId === "",
+				),
+		).toMatchObject({
+			method: "Emulation.setTimezoneOverride",
+			params: { timezoneId: "" },
+		});
+	});
+
 	it("preserves dispatch order when a full media reset reply arrives out of order", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

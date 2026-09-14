@@ -1337,7 +1337,11 @@ export class RelayBridge {
 			return;
 		}
 		const pendingSubscription = pageRef && msg.sessionId ? this.#trackPendingSubscription(tabId, msg) : null;
-		const rootGeneration = this.#tabs.get(tabId)?.runtimeGeneration;
+		const initialTab = this.#tabs.get(tabId);
+		const rootGeneration = initialTab?.runtimeGeneration;
+		const subscriptionKey = pendingSubscription ? this.#subscriptionTrackingKey(msg) : undefined;
+		const previousSubscription =
+			initialTab && subscriptionKey ? this.#latestSubscriptionForKey(initialTab, subscriptionKey) : undefined;
 		try {
 			const result = await this.#rpc({
 				op: "send",
@@ -1362,11 +1366,20 @@ export class RelayBridge {
 					rootGeneration !== undefined &&
 					tab.runtimeGeneration !== rootGeneration
 				) {
-					const key = this.#subscriptionTrackingKey(msg);
-					const current = key ? this.#latestSubscriptionForKey(tab, key) : undefined;
-					if (key && current?.sequence === pendingSubscription.sequence) {
+					const current = subscriptionKey ? this.#latestSubscriptionForKey(tab, subscriptionKey) : undefined;
+					if (subscriptionKey && current?.sequence === pendingSubscription.sequence) {
 						if (tab.restoring) tab.resumeSubscriptionReconcileAfterRestore = true;
-						this.#scheduleLiveSubscriptionReconcile(tab, [{ key, previous: undefined, next: current }]);
+						this.#scheduleLiveSubscriptionReconcile(tab, [
+							{ key: subscriptionKey, previous: undefined, next: current },
+						]);
+					} else if (subscriptionKey && previousSubscription && this.#interruptedClearKey(msg)) {
+						// Recovery may have replayed the old journal entry before this clear
+						// completed on the detached root. Apply the successful clear to the
+						// replacement root as well, even though recording it removed `current`.
+						if (tab.restoring) tab.resumeSubscriptionReconcileAfterRestore = true;
+						this.#scheduleLiveSubscriptionReconcile(tab, [
+							{ key: subscriptionKey, previous: previousSubscription, next: undefined },
+						]);
 					}
 				}
 			}
