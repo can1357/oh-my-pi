@@ -61,5 +61,7 @@ export type SttWorkerOutbound =
  */
 export interface SttTransport {
 	send(message: SttWorkerOutbound): void;
+	/** Awaits the underlying IPC write; use before releasing CUDA lease busy state. */
+	sendAndFlush(message: SttWorkerOutbound): Promise<void>;
 	onMessage(handler: (message: SttWorkerInbound) => void): () => void;
 }

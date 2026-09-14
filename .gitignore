@@ -93,3 +93,4 @@ packages/coding-agent/bench/boot-baseline.json
 /.bazelrc.user
 
 .parity/
+scripts/reapply-stt-fix.sh
