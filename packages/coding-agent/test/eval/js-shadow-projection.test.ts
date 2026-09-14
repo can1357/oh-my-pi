@@ -414,7 +414,9 @@ tool.read({ path: selected });
 		// Pristine realm: array templates, snapshot templates, and plus-concat
 		// all project from identical host/authoritative conversions.
 		for (const code of [
+			// oxlint-disable-next-line no-template-curly-in-string -- literal template source fed to the shadow planner
 			'await tool.read({ path: `${["secret.txt"]}` })',
+			// oxlint-disable-next-line no-template-curly-in-string -- literal template source fed to the shadow planner
 			"await tool.read({ path: `${name}.txt` })",
 			'await tool.read({ path: ["secret"] + ".txt" })',
 		]) {
@@ -427,6 +429,7 @@ tool.read({ path: selected });
 		}
 		// A replaced join changes what array coercions produce.
 		for (const code of [
+			// oxlint-disable-next-line no-template-curly-in-string -- literal template source fed to the shadow planner
 			'await tool.read({ path: `${["secret.txt"]}` })',
 			'await tool.read({ path: ["secret"] + ".txt" })',
 		]) {
@@ -439,6 +442,7 @@ tool.read({ path: selected });
 		}
 		// Opaque snapshot values may reach `toString` (directly, or through
 		// array elements), so they refuse without its flag too.
+		// oxlint-disable-next-line no-template-curly-in-string -- literal template source fed to the shadow planner
 		const spoofed = await projectJavaScriptShadowPlan("await tool.read({ path: `${name}.txt` })", {
 			snapshot: { name: "secret" },
 			initialGlobals: { ...intact, "Object.prototype.toString": false },
