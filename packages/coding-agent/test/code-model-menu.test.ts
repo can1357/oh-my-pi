@@ -92,6 +92,26 @@ describe("code-model menu configuration", () => {
 		expect(writes).toEqual([{ scope: "project", value: "provider/coder:high" }]);
 	});
 
+	it("preserves the configured upstream route when saving and changing effort", async () => {
+		const coding = {
+			...model("openrouter", "glm-4.7"),
+			api: "openai-completions",
+			baseUrl: "https://openrouter.ai/api/v1",
+		} as Model;
+		for (const scope of ["global", "project"] as const) {
+			const original = "openrouter/glm-4.7@cerebras:high";
+			const state = settingsStub(original, scope);
+			const selection = resolveCodeModelSelection(state.settings, [coding]);
+			if (!selection) throw new Error("The routed coding model must resolve.");
+			await saveCodeModelSelection(state.settings, selection, original);
+			await saveCodeModelSelection(state.settings, { ...selection, effort: ThinkingLevel.Low }, original);
+			expect(state.writes).toEqual([
+				{ scope, value: original },
+				{ scope, value: "openrouter/glm-4.7@cerebras:low" },
+			]);
+		}
+	});
+
 	it("detects a same-role concurrent edit before saving", async () => {
 		const coding = model("provider", "coder");
 		const state = settingsStub("provider/old:low");

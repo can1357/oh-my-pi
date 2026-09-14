@@ -114,10 +114,8 @@ export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void 
 	sessionShutdownHandlerTimeoutMs = timeoutMs;
 }
 
-/** Per-event handler budget. `session_before_idle` holds the idle gate until
- * handlers complete; `session_shutdown` uses its own short teardown cap. */
-function handlerTimeoutForEvent(eventType: string): number | undefined {
-	if (eventType === "session_before_idle") return undefined;
+/** Per-event handler budget. `session_shutdown` uses its own short teardown cap. */
+function handlerTimeoutForEvent(eventType: string): number {
 	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
 }
 

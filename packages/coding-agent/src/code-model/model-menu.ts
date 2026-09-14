@@ -1,6 +1,6 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { formatModelSelectorValue, formatModelString, resolveModelRoleValue } from "../config/model-resolver";
+import { formatModelSelectorValue, formatModelStringWithRouting, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { ExtensionCommandContext, ExtensionContext } from "../extensibility/extensions/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
@@ -129,7 +129,7 @@ export function resolveCodeModelSelection(settings: Settings, models: Model[]): 
 }
 
 function describeSelection(selection: CodeModelSelection): string {
-	return `${selection.model.provider}/${selection.model.id} · ${selection.effort}`;
+	return `${formatModelStringWithRouting(selection.model)} · ${selection.effort}`;
 }
 
 function storageScope(settings: Settings): "global" | "project" {
@@ -142,7 +142,7 @@ export async function saveCodeModelSelection(
 	expectedRoleValue: string | undefined,
 ): Promise<void> {
 	if (settings.getModelRole("code") !== expectedRoleValue) throw new Error("CODE_MODEL_CONFIG_CONFLICT");
-	const value = formatModelSelectorValue(formatModelString(selection.model), selection.effort);
+	const value = formatModelSelectorValue(formatModelStringWithRouting(selection.model), selection.effort);
 	if (storageScope(settings) === "project") settings.setProjectModelRole("code", value);
 	else settings.setModelRole("code", value);
 	await settings.flush();
@@ -267,7 +267,7 @@ export async function runCodeModelMenu(args: string, ctx: ExtensionCommandContex
 				t.menuTitle,
 				[
 					{ label: t.tabProvider, description: provider ?? t.notSelected },
-					{ label: t.tabModel, description: staged ? formatModelString(staged.model) : t.notSelected },
+					{ label: t.tabModel, description: staged ? formatModelStringWithRouting(staged.model) : t.notSelected },
 					{ label: t.tabEffort, description: staged?.effort ?? t.notSelected },
 					{ label: t.tabSave, description: staged ? describeSelection(staged) : t.pendingSelection },
 				],

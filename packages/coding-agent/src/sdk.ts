@@ -52,7 +52,7 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
-import { createCodeModelExtension } from "./code-model";
+import { createCodeModelExtension, type CodeModelBeforeIdleHandler } from "./code-model";
 import { loadCapability } from "./capability";
 import {
 	MAIN_AGENT_RULE_NAME,
@@ -1730,6 +1730,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let agent: Agent;
 	let session!: AgentSession;
+	let codeModelBeforeIdleHandler: CodeModelBeforeIdleHandler | undefined;
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -2144,7 +2145,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
-			if (!options.parentTaskPrefix) inlineExtensions.push(createCodeModelExtension(settings));
+			if (!options.parentTaskPrefix) {
+				inlineExtensions.push(
+					createCodeModelExtension(settings, {
+						getRetryFallbackPrimary: () => {
+							const primary = session?.getActiveRetryFallbackPrimary();
+							return primary
+								? {
+										selector: primary.originalSelector,
+										effort: primary.originalThinkingLevel,
+									}
+								: undefined;
+						},
+						registerBeforeIdle: handler => {
+							codeModelBeforeIdleHandler = handler;
+						},
+					}),
+				);
+			}
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
 			}
@@ -3808,6 +3826,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			codeModelBeforeIdleHandler,
 			getEvalPreludes,
 			customCommands: customCommandsResult.commands,
 			skills,

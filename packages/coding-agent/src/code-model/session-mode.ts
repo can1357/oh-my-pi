@@ -1,7 +1,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import type { ExtensionAPI, ExtensionContext } from "../extensibility/extensions/types";
+import type { ExtensionAPI, ExtensionContext, SessionBeforeIdleEvent } from "../extensibility/extensions/types";
 import type { ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
 import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
@@ -33,6 +33,18 @@ export interface CodeModelResult {
 
 export interface CodeModelSessionController {
 	run(action: "start" | "finish" | "status", ctx: ExtensionContext, signal?: AbortSignal): Promise<CodeModelResult>;
+}
+
+export type CodeModelBeforeIdleHandler = (
+	event: SessionBeforeIdleEvent,
+	ctx: ExtensionContext,
+) => Promise<void>;
+
+export interface CodeModelSessionHooks {
+	getRetryFallbackPrimary?: () =>
+		| { selector: string; effort: ConfiguredThinkingLevel | undefined }
+		| undefined;
+	registerBeforeIdle?: (handler: CodeModelBeforeIdleHandler) => void;
 }
 
 function sameModel(model: Model | undefined, state: ModelState): boolean {
@@ -79,7 +91,11 @@ function isPhaseState(value: unknown): value is PhaseState {
 	);
 }
 
-export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): CodeModelSessionController {
+export function installCodeModelSession(
+	pi: ExtensionAPI,
+	settings: Settings,
+	hooks: CodeModelSessionHooks = {},
+): CodeModelSessionController {
 	let state: PhaseState | undefined;
 	let busy = false;
 
@@ -91,10 +107,19 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 	}
 
 	function snapshot(ctx: ExtensionContext): ModelState {
-		const model = ctx.models.current();
-		if (!model) throw new Error("The current session requires a valid model.");
+		const fallbackPrimary = hooks.getRetryFallbackPrimary?.();
+		const model = fallbackPrimary ? ctx.models.resolve(fallbackPrimary.selector) : ctx.models.current();
+		if (!model) {
+			const identifier = fallbackPrimary?.selector ?? "the current session model";
+			throw new Error(`The available model catalogue must contain ${identifier}.`);
+		}
 		const selector = formatModelStringWithRouting(model);
-		return { provider: model.provider, id: model.id, selector, effort: configuredThinkingLevel() };
+		return {
+			provider: model.provider,
+			id: model.id,
+			selector,
+			effort: fallbackPrimary?.effort ?? configuredThinkingLevel(),
+		};
 	}
 
 	function currentMatches(ctx: ExtensionContext, target: ModelState): boolean {
@@ -284,7 +309,7 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 			return { continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT };
 		}
 	});
-	pi.on("session_before_idle", async (event, ctx) => {
+	const beforeIdle: CodeModelBeforeIdleHandler = async (event, ctx) => {
 		if (!state || busy || event.willContinue) return;
 		try {
 			const result = await guarded(() => restore(ctx));
@@ -293,7 +318,9 @@ export function installCodeModelSession(pi: ExtensionAPI, settings: Settings): C
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Coding phase recovery failed: ${message} Run /code-model finish to retry.`, "error");
 		}
-	});
+	};
+	if (hooks.registerBeforeIdle) hooks.registerBeforeIdle(beforeIdle);
+	else pi.on("session_before_idle", beforeIdle);
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (!state || busy) return;
 		try {

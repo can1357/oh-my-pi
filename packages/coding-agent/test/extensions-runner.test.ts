@@ -1547,19 +1547,14 @@ describe("ExtensionRunner", () => {
 			});
 		});
 
-		it("awaits session_before_idle handlers past the generic timeout before opening the idle gate", async () => {
+		it("bounds public session_before_idle handlers with the generic timeout", async () => {
 			const extensionPath = path.join(tempDir.path(), "slow-before-idle.ts");
-			const markerPath = path.join(tempDir.path(), "slow-before-idle-marker.txt");
 			fs.writeFileSync(
 				extensionPath,
 				`
-					import * as fs from "node:fs";
 					export default function(pi) {
 						pi.on("session_before_idle", async () => {
-							const { promise, resolve } = Promise.withResolvers<void>();
-							setTimeout(resolve, 50);
-							await promise;
-							fs.writeFileSync(${JSON.stringify(markerPath)}, "done\\n");
+							await new Promise(() => {});
 						});
 					}
 				`,
@@ -1580,11 +1575,22 @@ describe("ExtensionRunner", () => {
 			});
 			testSetExtensionHandlerTimeoutMs(10);
 
+			const startedAt = performance.now();
 			await runner.emit({ type: "session_before_idle", messages: [], willContinue: false });
+			const elapsedMs = performance.now() - startedAt;
 
-			expect(fs.readFileSync(markerPath, "utf8")).toBe("done\n");
-			expect(warnSpy).not.toHaveBeenCalled();
-			expect(errors).toEqual([]);
+			expect(elapsedMs).toBeGreaterThanOrEqual(8);
+			expect(elapsedMs).toBeLessThan(150);
+			expect(errors).toContainEqual({
+				extensionPath,
+				event: "session_before_idle",
+				error: "handler timed out after 10ms",
+			});
+			expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+				extensionPath,
+				event: "session_before_idle",
+				timeoutMs: 10,
+			});
 
 			warnSpy.mockRestore();
 		});

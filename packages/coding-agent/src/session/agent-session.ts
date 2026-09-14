@@ -347,7 +347,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
-import type { ServingModel } from "./retry-fallback-chains";
+import type { ActiveRetryFallbackState, ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
@@ -709,6 +709,7 @@ export class AgentSession {
 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
+	#codeModelBeforeIdleHandler: AgentSessionConfig["codeModelBeforeIdleHandler"];
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	/**
@@ -1374,6 +1375,7 @@ export class AgentSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#codeModelBeforeIdleHandler = config.codeModelBeforeIdleHandler;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#customCommands = config.customCommands ?? [];
@@ -3313,11 +3315,16 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				await this.#extensionRunner?.emit({
-					type: "session_before_idle",
+				const beforeIdleEvent = {
+					type: "session_before_idle" as const,
 					messages: [...activeMessages],
 					willContinue: options?.willContinue === true,
-				});
+				};
+				const runner = this.#extensionRunner;
+				if (this.#codeModelBeforeIdleHandler && runner) {
+					await this.#codeModelBeforeIdleHandler(beforeIdleEvent, runner.createContext());
+				}
+				await runner?.emit(beforeIdleEvent);
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
@@ -8109,6 +8116,14 @@ export class AgentSession {
 	// =========================================================================
 	// Model Management
 	// =========================================================================
+
+	/** Primary selector retained while retry fallback routing owns the current model. */
+	getActiveRetryFallbackPrimary(): Pick<
+		ActiveRetryFallbackState,
+		"originalSelector" | "originalThinkingLevel"
+	> | undefined {
+		return this.#recovery.getActiveRetryFallbackPrimary();
+	}
 
 	/**
 	 * Set model directly.

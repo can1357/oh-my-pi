@@ -4,10 +4,12 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	CODE_MODEL_REVIEW_PROMPT,
 	CODE_MODEL_STATE_TYPE,
+	type CodeModelBeforeIdleHandler,
 	installCodeModelSession,
 } from "../src/code-model/session-mode";
 import { createCodeModelExtension } from "../src/code-model";
 import type { Settings } from "../src/config/settings";
+import { formatModelStringWithRouting } from "../src/config/model-resolver";
 import type { ExtensionAPI, ExtensionContext } from "../src/extensibility/extensions/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../src/thinking";
 
@@ -86,7 +88,7 @@ function harness(
 		async setModel(next: Model) {
 			if (!setModelAllowed) return false;
 			current = next;
-			branch.push({ type: "model_change", model: `${next.provider}/${next.id}` });
+			branch.push({ type: "model_change", model: formatModelStringWithRouting(next) });
 			return true;
 		},
 		getThinkingLevel() {
@@ -142,7 +144,7 @@ function harness(
 			current = next;
 			effort = nextEffort;
 			effectiveEffort = nextEffort === AUTO_THINKING ? ThinkingLevel.Medium : nextEffort;
-			branch.push({ type: "model_change", model: `${next.provider}/${next.id}` });
+			branch.push({ type: "model_change", model: formatModelStringWithRouting(next) });
 			branch.push({
 				type: "thinking_level_change",
 				thinkingLevel: effectiveEffort,
@@ -192,6 +194,23 @@ describe("code-model session phase", () => {
 		expect(state.current()).toBe(state.main);
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
+
+	it("restores the retry primary when a fallback starts the coding phase", async () => {
+		const state = harness();
+		state.setFallback();
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () => ({
+				selector: `${state.main.provider}/${state.main.id}`,
+				effort: ThinkingLevel.Low,
+			}),
+		});
+		await session.run("start", state.ctx);
+		expect(state.current()).toBe(state.coding);
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
 	it("preserves manual effort when an automatic retry fallback occurs", async () => {
 		const state = harness();
 		const session = installCodeModelSession(state.pi, state.settings);
@@ -232,6 +251,10 @@ describe("code-model session phase", () => {
 		expect(finished.changed).toBe(true);
 		expect(state.current()).toBe(state.main);
 		expect(state.effort()).toBe(ThinkingLevel.Low);
+		expect(state.branch).toContainEqual({
+			type: "model_change",
+			model: "openrouter/glm-4.7@cerebras",
+		});
 	});
 
 	it("keeps a manually selected model when finishing", async () => {
@@ -272,12 +295,17 @@ describe("code-model session phase", () => {
 		expect(state.current()).toBe(state.main);
 	});
 
-	it("awaits terminal restoration immediately before idle", async () => {
+	it("awaits the internal terminal restoration immediately before idle", async () => {
 		const state = harness();
-		const session = installCodeModelSession(state.pi, state.settings);
+		let finalizer: CodeModelBeforeIdleHandler | undefined;
+		const session = installCodeModelSession(state.pi, state.settings, {
+			registerBeforeIdle: handler => {
+				finalizer = handler;
+			},
+		});
 		await session.run("start", state.ctx);
-		const finalizer = state.handlers.get("session_before_idle");
 		expect(finalizer).toBeDefined();
+		expect(state.handlers.has("session_before_idle")).toBe(false);
 		await finalizer?.({ type: "session_before_idle", messages: [], willContinue: true }, state.ctx);
 		expect(state.current()).toBe(state.coding);
 		await finalizer?.({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx);
@@ -356,7 +384,13 @@ describe("code-model session phase", () => {
 
 	it("runs the registered tool through the built-in extension lifecycle", async () => {
 		const state = harness();
-		createCodeModelExtension(state.settings)(state.pi);
+		let beforeIdle: CodeModelBeforeIdleHandler | undefined;
+		createCodeModelExtension(state.settings, {
+			registerBeforeIdle: handler => {
+				beforeIdle = handler;
+			},
+		})(state.pi);
+		expect(state.handlers.has("session_before_idle")).toBe(false);
 		expect(state.tools.map(tool => tool.name)).toEqual(["code-model"]);
 		const tool = state.tools[0];
 		if (!tool) throw new Error("The code-model tool must be registered.");
@@ -373,6 +407,7 @@ describe("code-model session phase", () => {
 		expect(finished.details.changed).toBe(true);
 		expect(finished.content[0]?.text).toContain(CODE_MODEL_REVIEW_PROMPT);
 		expect(state.current()).toBe(state.main);
+		expect(beforeIdle).toBeDefined();
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 });

@@ -32,7 +32,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { ContextUsage, ExtensionContext, SessionBeforeIdleEvent } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -176,6 +176,8 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/** Built-in code-model restoration that completes before public idle hooks run. */
+	codeModelBeforeIdleHandler?: (event: SessionBeforeIdleEvent, ctx: ExtensionContext) => Promise<void>;
 	/** Returns the current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Loaded skills already discovered by the SDK. */

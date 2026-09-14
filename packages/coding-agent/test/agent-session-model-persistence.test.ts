@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -181,6 +182,26 @@ describe("AgentSession model persistence", () => {
 
 		await created.session.setModel(nextModel);
 		expect(modelChangedCount).toBe(1);
+	});
+
+	it("records routed model identity in session history", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) throw new Error("Expected the routed OpenRouter fixture to exist");
+		const routed = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routed) throw new Error("Expected the routed OpenRouter fixture to resolve");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+		});
+
+		await created.session.setModel(routed);
+
+		expect(created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+			type: "model_change",
+			model: "openrouter/z-ai/glm-4.7@cerebras",
+		});
 	});
 
 	it("persists the default role when explicitly requested", async () => {

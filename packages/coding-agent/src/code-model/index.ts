@@ -2,11 +2,14 @@ import type { Settings } from "../config/settings";
 import type { ExtensionFactory } from "../extensibility/extensions";
 import codeModelToolPrompt from "../prompts/system/code-model-tool.md" with { type: "text" };
 import { runCodeModelMenu } from "./model-menu";
-import { installCodeModelSession } from "./session-mode";
+import { installCodeModelSession, type CodeModelSessionHooks } from "./session-mode";
 
-export function createCodeModelExtension(settings: Settings): ExtensionFactory {
+export type CodeModelExtensionHooks = CodeModelSessionHooks;
+export type { CodeModelBeforeIdleHandler } from "./session-mode";
+
+export function createCodeModelExtension(settings: Settings, hooks: CodeModelExtensionHooks = {}): ExtensionFactory {
 	return pi => {
-		const session = installCodeModelSession(pi, settings);
+		const session = installCodeModelSession(pi, settings, hooks);
 		pi.registerTool({
 			name: "code-model",
 			label: "Code Phase Model",
