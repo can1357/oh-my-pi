@@ -1,11 +1,12 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type {
-	HistoryEntry,
-	HistoryScope,
-	HistoryScopeKind,
-	HistoryStorage,
+import {
+	HISTORY_SCOPE_LABELS,
+	type HistoryEntry,
+	type HistoryScope,
+	type HistoryScopeKind,
+	type HistoryStorage,
 } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 
 beforeAll(async () => {
@@ -151,5 +152,28 @@ describe("HistorySearchComponent", () => {
 		expect(footer).toBeDefined();
 		expect(footer).not.toContain("tab");
 		expect(plain).not.toContain("Press Tab for");
+	});
+
+	it("names the scope it reads in the empty state and points at the next one", () => {
+		const component = new HistorySearchComponent(
+			scopedStorage({}),
+			ALL_SCOPES,
+			() => {},
+			() => {},
+		);
+
+		// Anchored to the pointer line and written with the same labels the panel renders, so this
+		// pins "the empty state names the scope it read and the one Tab reaches", not the copy.
+		const pointerLine = () =>
+			render(component)
+				.plain.split("\n")
+				.find(line => line.includes("Press Tab for"));
+
+		expect(pointerLine()).toContain(`No history in ${HISTORY_SCOPE_LABELS.session}`);
+		expect(pointerLine()).toContain(`Press Tab for ${HISTORY_SCOPE_LABELS.cwd}`);
+
+		component.handleInput("\t");
+		expect(pointerLine()).toContain(`No history in ${HISTORY_SCOPE_LABELS.cwd}`);
+		expect(pointerLine()).toContain(`Press Tab for ${HISTORY_SCOPE_LABELS.global}`);
 	});
 });
