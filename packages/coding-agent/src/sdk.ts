@@ -2152,6 +2152,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								? {
 										selector: primary.originalSelector,
 										effort: primary.originalThinkingLevel,
+										fallbackEffort: primary.lastAppliedFallbackThinkingLevel,
 									}
 								: undefined;
 						},

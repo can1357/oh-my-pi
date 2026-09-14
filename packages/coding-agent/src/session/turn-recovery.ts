@@ -1517,15 +1517,19 @@ export class TurnRecovery {
 		return getRetryFallbackRevertPolicy(this.#host.settings);
 	}
 
-	/** Primary selector retained while the current model belongs to a retry fallback chain. */
+	/** Primary selector and applied fallback effort retained while a retry fallback chain owns the current model. */
 	getActiveRetryFallbackPrimary():
-		| Pick<ActiveRetryFallbackState, "originalSelector" | "originalThinkingLevel">
+		| Pick<
+				ActiveRetryFallbackState,
+				"originalSelector" | "originalThinkingLevel" | "lastAppliedFallbackThinkingLevel"
+		  >
 		| undefined {
 		const state = this.#activeRetryFallback;
 		if (!state) return undefined;
 		return {
 			originalSelector: state.originalSelector,
 			originalThinkingLevel: state.originalThinkingLevel,
+			lastAppliedFallbackThinkingLevel: state.lastAppliedFallbackThinkingLevel,
 		};
 	}
 

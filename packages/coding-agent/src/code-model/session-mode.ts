@@ -46,7 +46,13 @@ export type CodeModelBeforeIdleHandler = (
 ) => Promise<SessionStopEventResult | undefined>;
 
 export interface CodeModelSessionHooks {
-	getRetryFallbackPrimary?: () => { selector: string; effort: ConfiguredThinkingLevel | undefined } | undefined;
+	getRetryFallbackPrimary?: () =>
+		| {
+				selector: string;
+				effort: ConfiguredThinkingLevel | undefined;
+				fallbackEffort?: ConfiguredThinkingLevel;
+		  }
+		| undefined;
 	registerBeforeIdle?: (handler: CodeModelBeforeIdleHandler) => void;
 }
 
@@ -177,9 +183,13 @@ export function installCodeModelSession(
 		const active = ctx.models.current();
 		const interrupted =
 			previous.phase !== "coding" && (sameModel(active, previous.original) || sameModel(active, previous.coding));
+		const effort = configuredThinkingLevel();
+		const retryFallback = hooks.getRetryFallbackPrimary?.();
+		const fallbackEffort =
+			retryFallback && "fallbackEffort" in retryFallback ? retryFallback.fallbackEffort : previous.coding.effort;
 		const codingStateMatches =
-			(sameModel(active, previous.coding) || retryFallbackIsActive(ctx)) &&
-			configuredThinkingLevel() === previous.coding.effort;
+			(sameModel(active, previous.coding) && effort === previous.coding.effort) ||
+			(retryFallbackIsActive(ctx) && effort === fallbackEffort);
 		if (!options.force && !interrupted && !codingStateMatches && !currentMatches(ctx, previous.original)) {
 			save(undefined);
 			return {
@@ -281,6 +291,7 @@ export function installCodeModelSession(
 		return guarded(async () => {
 			if (action === "start") return start(ctx, signal);
 			const result = await restore(ctx);
+			reviewPending = false;
 			ctx.ui.notify(result.message, "info");
 			return {
 				...result,

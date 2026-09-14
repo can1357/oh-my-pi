@@ -200,6 +200,27 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
+	it("restores the main model when a retry fallback applies its own effort", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () =>
+				state.current() === state.fallback
+					? {
+							selector: `${state.main.provider}/${state.main.id}`,
+							effort: ThinkingLevel.Low,
+							fallbackEffort: ThinkingLevel.Low,
+						}
+					: undefined,
+		});
+		await session.run("start", state.ctx);
+		state.setCurrent(state.fallback, ThinkingLevel.Low);
+		state.setFallback();
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
+
 	it("restores the retry primary when a fallback starts the coding phase", async () => {
 		const state = harness();
 		state.setFallback();
@@ -374,6 +395,43 @@ describe("code-model session phase", () => {
 		expect(await idlePromise).toEqual({ continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT });
 		expect(state.current()).toBe(state.main);
 		expect(idleSettled).toBe(true);
+	});
+
+	it("consumes a pending review when explicit finish recovers restoration", async () => {
+		const state = harness();
+		let finalizer: CodeModelBeforeIdleHandler | undefined;
+		const session = installCodeModelSession(state.pi, state.settings, {
+			registerBeforeIdle: handler => {
+				finalizer = handler;
+			},
+		});
+		await session.run("start", state.ctx);
+		state.setModelAllowed(false);
+		const stop = state.handlers.get("session_stop");
+		if (!stop || !finalizer) throw new Error("Expected terminal restoration handlers");
+		await expect(
+			stop(
+				{
+					type: "session_stop",
+					messages: [],
+					last_assistant_message: {
+						role: "assistant",
+						stopReason: "stop",
+						content: [],
+						timestamp: Date.now(),
+					},
+					signal: new AbortController().signal,
+				},
+				state.ctx,
+			),
+		).rejects.toThrow("authentication");
+		state.setModelAllowed(true);
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(
+			await finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx),
+		).toBeUndefined();
 	});
 
 	it("restores a persisted coding phase when the session resumes", async () => {
