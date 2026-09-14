@@ -296,22 +296,32 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 //
 // Nesting is decided by the member name that follows, never by the punctuation
 // that joins them: validators serialize the same path as `.ttl`, `["ttl"]`,
-// `/ttl`, `[:ttl]` or `","ttl"`, and that set of syntaxes is unbounded while
-// `CacheControlEphemeral`'s members are not (`type`, `ttl`, `scope` — see
-// `anthropic-wire.ts`). The budget therefore counts separator characters only:
-// three is the widest real joiner (a JSON location array's `","`), and the
-// whitespace around each of them is unbounded because a pretty-printer may put
-// any indentation — or a newline — inside the very same joiner.
+// `"]["ttl"`, `/ttl`, `[:ttl]` or `","ttl"`, and that set of syntaxes is
+// unbounded while `CacheControlEphemeral`'s members are not (`type`, `ttl`,
+// `scope` — see `anthropic-wire.ts`). So the lookahead skips an unbounded run
+// of non-alphanumeric characters and asks only what the next token is. There
+// is deliberately no length budget: sizing one means enumerating joiner
+// shapes, which has now been reported wrong three times, and a count adds
+// nothing the separator class does not already guarantee.
 //
-// Letters and digits are excluded from the separator class, so an intervening
-// word still ends the joiner and no later sentence can supply the member name.
-// What unbounded whitespace does admit is a member name that is the next token
-// after `cache_control` across a line break — an error body serializing
-// `"param": "cache_control"` next to a sibling `"type"` member. That false
-// veto is accepted: it costs one failed turn, whereas a false field-level
-// match latches `cacheControlUnsupported` through a *succeeding* replay and
-// suppresses supported 5m caching for the rest of the session.
-const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?!\s*(?:[^\sA-Za-z0-9]\s*){1,3}(?:type|ttl|scope)\b)/i;
+// That class carries the whole invariant. Letters and digits are excluded from
+// it, so any run of punctuation and whitespace between the field name and a
+// member name means the member IS the next token — an intervening word ends
+// the run, and no later sentence can supply the name. `_` is in the class, but
+// `\bcache_control\b` cannot match when a word character follows it, so the
+// run can never begin with one; an `_` only appears after punctuation has
+// already terminated the field name.
+//
+// What an unbounded run does admit is a member name reached across an
+// arbitrarily wide joiner — an error object whose `loc` array ends at
+// `cache_control` and whose next key is `type`, as in
+// `…,"cache_control"],"type":"extra_forbidden"`. Neither Pydantic v1
+// (`loc`, `msg`, `type`) nor v2 (`type`, `loc`, `msg`) orders its keys that
+// way; both put words between the two. That false veto is accepted anyway: it
+// costs one failed turn, whereas a false field-level match latches
+// `cacheControlUnsupported` through a *succeeding* replay and suppresses
+// supported 5m caching for the rest of the session.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?![^A-Za-z0-9]*(?:type|ttl|scope)\b)/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
 	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
 // Strict JSON decoders and OpenAI-compatible validators express the same schema
