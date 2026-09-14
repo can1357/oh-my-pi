@@ -1,6 +1,14 @@
 // Provider-wire compat for "anthropic"; regenerated from the frozen census using deployment contract selectors.
 
 provider "anthropic" {
+	// First-party provider: models served through this provider reach the
+	// official API unless rerouted. A dedicated axis rather than
+	// `official-endpoint`, which stays URL-derived: a custom `baseUrl` on this
+	// provider must keep `officialEndpoint: false` (SDK `X-Api-Key`
+	// suppression and friends read that flag). The compaction transport
+	// combines this fact with a per-request effective-URL check, so it never
+	// authorizes a block on its own.
+	first-party-provider #true
 	class "anthropic" {
 		revision ">=3.7 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

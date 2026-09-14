@@ -1,0 +1,82 @@
+// Charm Hyper gateway deployment contract.
+//
+// Capability data is NOT restated here: `GET /v1/models` publishes each row's
+// context window, output cap, vision flag, effort vocabulary and per-million
+// tariff, and `charmHyperModelManagerOptions` maps all of it verbatim —
+// including `reasoningDisableMode`, which is derived per model from whether
+// the advertised vocabulary contains `none`. Only facts the gateway does not
+// publish, or publishes wrongly, belong in this file.
+provider "charm-hyper" {
+	// OpenAI-dialect gateway in front of open-weight and third-party models.
+	// `developer` and `store` are accepted (HTTP 200) but the gateway accepts
+	// every unknown field it is handed, so acceptance is not evidence the
+	// semantics are honored; both stay off and system prompts ride the
+	// `system` role, matching every sibling gateway. The wire takes
+	// `max_tokens` (verified 2026-09-11).
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_tokens"
+	thinking-mode "effort"
+	// Reasoning arrives as `reasoning_content` on both the streamed delta and
+	// the final message (verified 2026-09-11).
+	reasoning-content-field "reasoning_content"
+	// ---------------------------------------------------------------------------
+	// Blockless rows are left non-reasoning on purpose.
+	//
+	// Four ids serve a thinking model while publishing no `reasoning` block:
+	// glm-5, glm-5.1, kimi-k2-thinking and minimax-m2.7 each returned
+	// populated `reasoning_content` and non-zero `reasoning_tokens` on a
+	// multi-step prompt (2026-09-11). The other blockless rows
+	// (gemma-4-26b-a4b-it, kimi-k2.5, kimi-k2.7-code, llama-3.3-70b-instruct,
+	// llama-4-maverick-17b-128e-instruct-fp8,
+	// qwen3-coder-480b-a35b-instruct-int4-mixed-ar, qwen3-next-80b-a3b-instruct)
+	// returned none.
+	//
+	// No rule restores them, because none can be written honestly. Those four
+	// expose no effort dial, and `ThinkingConfig.efforts` is documented as
+	// never empty — a reasoning model without a controllable surface carries
+	// `thinking: undefined`, which no KDL axis can express (the only upgrade
+	// path is an exact `thinking-efforts` ladder). Synthesizing a ladder would
+	// add silent no-op rungs: the gateway answers 200 to efforts it never
+	// advertised and simply ignores them, and a repeat measurement of effort
+	// sensitivity on these ids came back non-monotonic, i.e. sampling noise
+	// rather than a hidden dial.
+	//
+	// The cost is narrow and was checked: streamed `reasoning_content` is
+	// parsed and displayed with no `model.reasoning` gate, the effort
+	// parameter is moot without a dial, and the developer-role and
+	// zai-replay paths are already disabled for this provider.
+	// ---------------------------------------------------------------------------
+	// Residue: misreported output caps. The gateway derives
+	// `max_output_tokens` as a flat fraction of the context window rather
+	// than reporting a real ceiling — 10% on 9 rows, the dominant
+	// convention — and the values are advisory, not enforced: glm-5.1
+	// publishes 3276 yet produced 14066 tokens, and minimax-m2.7 publishes
+	// 6553 yet produced 8418, both stopping on `finish_reason: "stop"`
+	// rather than `length`. An over-stated cap is never rejected either
+	// (`max_tokens: 200000` returns 200), so the risk is one-sided:
+	// over-stating costs only the context share 10% already reserves
+	// everywhere else, while under-stating truncates real output.
+	//
+	// Both corrections take a same-window peer's published value rather than
+	// inventing a ceiling, and both clear the measured floor:
+	//   glm-5.1      (202750) is 1.6%; sibling glm-5 (202752) publishes 20275.
+	//   minimax-m2.7 (262100) is 2.5%, the lone outlier in its window class;
+	//                kimi-k2.5 (262144), kimi-k2.6 (262000) and
+	//                qwen3-next-80b (262144) all publish 26214.
+	//
+	// deepseek-v4.1-flash is the only other 2.5% row and is deliberately left
+	// alone: its 1M window has no peer group that agrees on a fraction, and a
+	// long generation stopped naturally at 8504, well inside the published
+	// 26214. Measured 2026-09-11.
+	models "glm-5.1" {
+		limits-patch {
+			max-tokens 20275
+		}
+	}
+	models "minimax-m2.7" {
+		limits-patch {
+			max-tokens 26214
+		}
+	}
+}

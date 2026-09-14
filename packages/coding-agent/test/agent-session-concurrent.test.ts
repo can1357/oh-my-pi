@@ -1304,6 +1304,208 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(toolResultText(matchedToolCallContent.id)).toBe("");
 	});
 
+	it("does not join text across an assistant message boundary while a message_start handler stalls", async () => {
+		// Two assistant responses inside ONE agent turn: a Harmony leak in the first
+		// response makes the loop abort it and stream again without a new turn_start
+		// (agent-loop abort_retry). The first response streams half of a rule's
+		// condition; the retry streams the other half while a message_start
+		// extension handler is still awaiting. The halves must not meet: the
+		// buffer reset runs before the awaited fan-out, and message_update skips it.
+		collapseSchedulerSettleDelays();
+		// A bundled Harmony-mitigation target, so the leak marker takes the
+		// abort_retry path instead of streaming through as ordinary text.
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol")!;
+		const splitRule: Rule = {
+			name: "split-phrase",
+			path: "/tmp/split-phrase.md",
+			content: "Do not say the phrase",
+			condition: ["FORBIDDEN"],
+			scope: ["text"],
+			_source: { provider: "test", providerName: "test", path: "/tmp/split-phrase.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(splitRule);
+
+		// `entered` resolves when the retry's message_start handler is running;
+		// `released` lets it finish. The retry's delta is pushed in between, so it
+		// is processed while message_start still awaits its fan-out.
+		const retryStartEntered = Promise.withResolvers<void>();
+		const retryStartReleased = Promise.withResolvers<void>();
+		const leak = "<|channel|>analysis ";
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				const first = ++streamCallCount === 1;
+				queueMicrotask(() => {
+					if (first) {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: leak, partial: makeMsg(leak) });
+						stream.push({
+							type: "text_delta",
+							contentIndex: 0,
+							delta: "FORBID",
+							partial: makeMsg(`${leak}FORBID`),
+						});
+						stream.push({ type: "done", reason: "stop", message: makeMsg(`${leak}FORBID`) });
+					} else {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						void retryStartEntered.promise.then(() => {
+							stream.push({ type: "text_delta", contentIndex: 0, delta: "DEN", partial: makeMsg("DEN") });
+							setTimeout(() => {
+								retryStartReleased.resolve();
+								stream.push({ type: "done", reason: "stop", message: makeMsg("DEN") });
+							}, 10);
+						});
+					}
+				});
+				return stream;
+			},
+		});
+
+		let assistantStarts = 0;
+		const extensionRunner = {
+			emit: vi.fn(async (event: { type: string; message?: { role?: string } }) => {
+				if (event.type === "message_start" && event.message?.role === "assistant" && ++assistantStarts === 2) {
+					retryStartEntered.resolve();
+					await retryStartReleased.promise;
+				}
+				return undefined;
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "message_start"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager, extensionRunner });
+
+		const triggered: string[] = [];
+		let turnStarts = 0;
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered") triggered.push(...event.rules.map(rule => rule.name));
+			if (event.type === "turn_start") turnStarts++;
+		});
+
+		await session.prompt("Say the phrase across two responses");
+		await session.waitForIdle();
+
+		expect(triggered).toEqual([]);
+		expect(turnStarts).toBe(1);
+		expect(assistantStarts).toBe(2);
+		expect(streamCallCount).toBe(2);
+	});
+
+	it("still catches a phrase split across deltas of one message while a turn_start handler stalls", async () => {
+		// The mirror image: the turn-start reset must also run before the awaited
+		// fan-out, or a turn_start handler still awaiting as streaming begins lets
+		// the late reset wipe deltas already buffered for the current message.
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const splitRule: Rule = {
+			name: "split-phrase",
+			path: "/tmp/split-phrase.md",
+			content: "Do not say the phrase",
+			condition: ["FORBIDDEN"],
+			scope: ["text"],
+			_source: { provider: "test", providerName: "test", path: "/tmp/split-phrase.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(splitRule);
+
+		// The turn_start handler is held open until the first half has streamed;
+		// the second half is pushed only after the handler has finished, so a
+		// reset misplaced behind the fan-out would wipe the first half in between.
+		const turnStartEntered = Promise.withResolvers<void>();
+		const turnStartReleased = Promise.withResolvers<void>();
+		const turnStartFinished = Promise.withResolvers<void>();
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				if (++streamCallCount === 1) {
+					const signal = options?.signal;
+					void turnStartEntered.promise.then(() => {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "FORBID", partial: makeMsg("FORBID") });
+						setTimeout(() => turnStartReleased.resolve(), 10);
+						void turnStartFinished.promise.then(() => {
+							setTimeout(() => {
+								stream.push({
+									type: "text_delta",
+									contentIndex: 0,
+									delta: "DEN",
+									partial: makeMsg("FORBIDDEN"),
+								});
+							}, 10);
+						});
+						if (signal) {
+							signal.addEventListener(
+								"abort",
+								() => stream.push({ type: "error", reason: "aborted", error: makeMsg("FORBIDDEN", "aborted") }),
+								{ once: true },
+							);
+						}
+					});
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const extensionRunner = {
+			emit: vi.fn(async (event: { type: string }) => {
+				if (event.type === "turn_start") {
+					turnStartEntered.resolve();
+					await turnStartReleased.promise;
+					turnStartFinished.resolve();
+				}
+				return undefined;
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "turn_start"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager, extensionRunner });
+
+		const triggered: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered") triggered.push(...event.rules.map(rule => rule.name));
+		});
+
+		await session.prompt("Say the phrase");
+		await session.waitForIdle();
+
+		expect(triggered).toEqual(["split-phrase"]);
+		expect(streamCallCount).toBe(2);
+	});
+
 	it("relativizes the rule file path in the TTSR interrupt injection (no absolute leak)", async () => {
 		collapseSchedulerSettleDelays();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;

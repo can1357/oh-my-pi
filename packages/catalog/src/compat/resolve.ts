@@ -843,6 +843,8 @@ function resolveAnthropicPolicy(
 		officialEndpoint: official,
 		signingEndpoint,
 		supportsContextManagement: true,
+		supportsServerCompaction: false,
+		firstPartyProvider: false,
 		supportsOutputEffort: true,
 		disableStrictTools: isAzure,
 		disableAdaptiveThinking: false,

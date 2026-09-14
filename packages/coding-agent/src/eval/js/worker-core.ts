@@ -1,5 +1,5 @@
 import { ToolError } from "../../tools/tool-errors";
-import { JsRuntime, type RuntimeHooks } from "./shared/runtime";
+import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
 	SessionSnapshot,
@@ -239,6 +239,58 @@ export class WorkerCore {
 			case "tool":
 				void this.#invokeTool(msg);
 				return;
+			case "shadow-snapshot": {
+				if (this.#runs.size > 0) {
+					this.#transport.send({
+						type: "shadow-snapshot",
+						id: msg.id,
+						eligible: false,
+						reason: "runtime is busy",
+					});
+					return;
+				}
+				try {
+					const runtime = this.#ensureRuntime(msg.snapshot);
+					this.#transport.send({
+						type: "shadow-snapshot",
+						id: msg.id,
+						eligible: true,
+						snapshot: runtime.snapshotUserGlobals(),
+					});
+				} catch (error) {
+					this.#transport.send({
+						type: "shadow-snapshot",
+						id: msg.id,
+						eligible: false,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return;
+			}
+			case "run-if-snapshot-matches": {
+				if (this.#runs.size > 0) {
+					this.#transport.send({ type: "shadow-run", id: msg.id, eligible: false, reason: "runtime is busy" });
+					return;
+				}
+				try {
+					const runtime = this.#ensureRuntime(msg.snapshot);
+					const current = runtime.snapshotUserGlobals();
+					if (current.revision !== msg.expectedRevision || shadowSnapshotDigest(current) !== msg.expectedDigest) {
+						this.#transport.send({ type: "shadow-run", id: msg.id, eligible: false, reason: "snapshot changed" });
+						return;
+					}
+					this.#transport.send({ type: "shadow-run", id: msg.id, eligible: true });
+					void this.#runOne(msg.runId, msg.code, msg.filename, msg.snapshot);
+				} catch (error) {
+					this.#transport.send({
+						type: "shadow-run",
+						id: msg.id,
+						eligible: false,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return;
+			}
 			case "tool-reply":
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
@@ -303,7 +355,7 @@ export class WorkerCore {
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
 			onDisplay: output => this.#transport.send({ type: "display", runId, output }),
-			callTool: (name, args) => this.#callTool(active, name, args),
+			callTool: (name, args, identity) => this.#callTool(active, name, args, identity),
 		};
 		let result: RunResult;
 		try {
@@ -396,12 +448,12 @@ export class WorkerCore {
 		}
 	}
 
-	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
+	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {
 		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		active.pendingTools.set(id, { runId: active.runId, resolve, reject });
 		try {
-			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args });
+			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args, identity });
 		} catch (error) {
 			// Non-serializable args (DataCloneError from postMessage / IPC send).
 			// No reply will ever arrive; fail this call instead of stranding a

@@ -2,7 +2,8 @@ import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
 	ApiKeyResolveContext,
 	AssistantMessage,
@@ -15,7 +16,7 @@ import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
@@ -33,6 +34,8 @@ type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 
 const RETRY_CAP_MOCK_API_SOURCE = "agent-session-retry-cap-test";
+const CODEX_BODY_READ_ERROR =
+	"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body";
 const CYBER_POLICY_ERROR =
 	"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)";
 const CYBER_POLICY_FAILURE: MockResponse = {
@@ -2373,45 +2376,82 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("stop");
 	});
 
-	it("auto-retries a timeout after streaming a complete unexecuted write tool call", async () => {
+	it.each([
+		["a timeout after streaming a complete unexecuted write tool call", "The operation timed out.", ["complete"]],
+		["a Codex body-read error with incomplete args", CODEX_BODY_READ_ERROR, ["partial"]],
+		["a Codex body-read error with a completed unexecuted call", CODEX_BODY_READ_ERROR, ["complete"]],
+		["a Codex body-read error with toolcall_end after partial args", CODEX_BODY_READ_ERROR, ["partial-ended"]],
+		["a Codex body-read error with a complete+partial batch", CODEX_BODY_READ_ERROR, ["complete", "partial"]],
+	] as const)("auto-retries %s", async (_scenario, errorMessage, callStates) => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
-		const toolCall: ToolCall = {
+		const oldCalls: ToolCall[] = callStates.map((state, index) => ({
 			type: "toolCall",
-			id: "tc-write",
+			id: `tc-old-${index}`,
 			name: "write",
-			arguments: { path: "doc/report.md", content: "large report chunk" },
+			arguments:
+				state === "complete" ? { path: "doc/report.md", content: "large report chunk" } : { path: "doc/report.md" },
+			...(state !== "complete" ? { [kStreamingPartialJson]: '{"path":"doc/report.md","content":' } : {}),
+		}));
+		const freshCall: ToolCall = {
+			type: "toolCall",
+			id: "tc-fresh",
+			name: "write",
+			arguments: { path: "doc/report.md", content: "complete recovered report" },
+		};
+		const executedIds: string[] = [];
+		const countingTool: AgentTool = {
+			name: "write",
+			label: "Count writes",
+			description: "Records invocations without writing files",
+			// Accept partial args so an unsafe execution cannot hide behind schema validation.
+			parameters: type({ "path?": "string", "content?": "string" }),
+			execute: async id => {
+				executedIds.push(id);
+				return { content: [{ type: "text", text: "Counted write" }] };
+			},
 		};
 		let streamCalls = 0;
-		let resumedWithSyntheticResult = false;
+		let resumedWithSafeHistory = false;
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: [],
+				tools: [countingTool],
 				messages: [],
 			},
 			streamFn: (requestedModel, context, options) => {
 				streamCalls += 1;
 				if (streamCalls > 1) {
-					const matchingResult = context.messages.find(
-						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-					);
-					resumedWithSyntheticResult =
-						matchingResult?.role === "toolResult" &&
-						typeof matchingResult.details === "object" &&
-						matchingResult.details !== null &&
-						"executed" in matchingResult.details &&
-						matchingResult.details.executed === false;
+					if (streamCalls === 2) {
+						resumedWithSafeHistory = oldCalls.every((toolCall, index) => {
+							if (callStates[index] === "partial") {
+								return !context.messages.some(
+									message =>
+										message.role === "assistant" &&
+										message.content.some(block => block.type === "toolCall" && block.id === toolCall.id),
+								);
+							}
+							return context.messages.some(
+								message =>
+									message.role === "toolResult" &&
+									message.toolCallId === toolCall.id &&
+									typeof message.details === "object" &&
+									message.details !== null &&
+									"executed" in message.details &&
+									message.details.executed === false,
+							);
+						});
+					}
 					const recoveryModel = createMockModel({
 						id: requestedModel.id,
 						provider: requestedModel.provider,
 					});
-					recoveryModel.push({ content: ["Recovered after timeout"] });
+					recoveryModel.push({ content: streamCalls === 2 ? [freshCall] : ["Recovered after transport error"] });
 					return recoveryModel.stream(recoveryModel, context, options);
 				}
 
@@ -2434,23 +2474,27 @@ describe("AgentSession retry delay cap", () => {
 						stopReason: "stop",
 						timestamp: Date.now(),
 					};
-					partial.content.push(toolCall);
 					stream.push({ type: "start", partial });
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(toolCall.arguments),
-						partial,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					for (const [contentIndex, toolCall] of oldCalls.entries()) {
+						partial.content.push(toolCall);
+						stream.push({ type: "toolcall_start", contentIndex, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex,
+							delta: toolCall[kStreamingPartialJson] ?? JSON.stringify(toolCall.arguments),
+							partial,
+						});
+						if (callStates[contentIndex] !== "partial") {
+							stream.push({ type: "toolcall_end", contentIndex, toolCall, partial });
+						}
+					}
 					stream.push({
 						type: "error",
 						reason: "error",
 						error: {
 							...partial,
 							stopReason: "error",
-							errorMessage: "The operation timed out.",
+							errorMessage,
 							duration: 1000,
 						},
 					});
@@ -2483,13 +2527,14 @@ describe("AgentSession retry delay cap", () => {
 		await session.prompt("Write a large report");
 		await session.waitForIdle();
 
-		expect(streamCalls).toBe(2);
-		expect(resumedWithSyntheticResult).toBe(true);
+		expect(streamCalls).toBe(3);
+		expect(executedIds).toEqual([freshCall.id]);
+		expect(resumedWithSafeHistory).toBe(true);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
-			text: "Recovered after timeout",
+			text: "Recovered after transport error",
 		});
 	});
 

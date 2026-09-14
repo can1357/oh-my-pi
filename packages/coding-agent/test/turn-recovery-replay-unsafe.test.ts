@@ -614,13 +614,19 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	// none of them ran, the turn is replay-safe the same way a post-call
 	// classifier refusal is, so the configured retry/fallback policy gets its
 	// chance instead of surfacing the socket error as terminal.
-	describe("transport error with emitted tool calls", () => {
-		const socketClose =
-			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
-
+	describe.each([
+		[
+			"socket close",
+			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+		],
+		[
+			"Codex body-read error",
+			"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body",
+		],
+	])("%s with emitted tool calls", (_label, errorMessage) => {
 		function transportError(content: AssistantMessage["content"]): AssistantMessage {
 			const message = makeMessage(content, model);
-			message.errorMessage = socketClose;
+			message.errorMessage = errorMessage;
 			return message;
 		}
 
@@ -662,7 +668,16 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 		it("does not retry when the tool call produced a real result", () => {
 			const message = transportError([toolCall("call-1")]);
-			expect(recoveryForTransport(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+			const recovery = recoveryForTransport(message, [realResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not retry when a synthetic result is followed by a real result for the same call", () => {
+			const message = transportError([toolCall("call-1")]);
+			const recovery = recoveryForTransport(message, [syntheticResult("call-1"), realResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 		});
 
 		it("does not retry when only some tool calls went unexecuted", () => {
@@ -679,6 +694,30 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		it("does not retry when the tool call has no result at all", () => {
 			const message = transportError([toolCall("call-1")]);
 			expect(recoveryForTransport(message, []).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when one call is synthetic-paired and another has no result", () => {
+			const message = transportError([toolCall("call-1"), toolCall("call-2")]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry generated images beside a provably unexecuted call", () => {
+			const message = transportError([
+				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+				toolCall("call-1"),
+			]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry Anthropic server tools beside a provably unexecuted call", () => {
+			const message = transportError([
+				{
+					type: "anthropicServerTool",
+					block: { type: "server_tool_use", id: "srv-1", name: "web_search", input: { query: "status" } },
+				},
+				toolCall("call-1"),
+			]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
 		});
 	});
 

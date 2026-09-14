@@ -237,7 +237,8 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 				model.contextWindow = reference.contextWindow;
 			}
 			if (model.maxTokens === null && reference.maxTokens !== null) {
-				model.maxTokens = reference.maxTokens;
+				model.maxTokens =
+					model.contextWindow !== null ? Math.min(model.contextWindow, reference.maxTokens) : reference.maxTokens;
 			}
 			if (model.contextWindow !== null && model.maxTokens !== null) {
 				break;

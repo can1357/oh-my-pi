@@ -1987,8 +1987,7 @@ export class StatusLineComponent implements Component {
 
 	#subagentBadgeText(): string | undefined {
 		if (this.#subagentCount === 0) return undefined;
-		const noun = this.#subagentCount === 1 ? "agent" : "agents";
-		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount} ${noun}`);
+		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount}`);
 	}
 
 	/**
