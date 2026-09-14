@@ -504,15 +504,17 @@ export class Sidebar {
 	/** Stage/unstage action for a file, dir, or section-header row; dirs and sections batch every file underneath. */
 	#stageActionFor(target: FileTarget | SectionTarget): SidebarAction | null {
 		if (target.kind === "section") return target.area === "unstaged" ? { type: "stage" } : { type: "unstage" };
-		const selection = this.#selectionFor(target);
-		if (!selection) return null;
-		return selection.area === "unstaged" ? { type: "stage", selection } : { type: "unstage", selection };
+		const selected = this.#selectionFor(target);
+		if (!selected) return null;
+		const { area, ...selection } = selected;
+		return area === "unstaged" ? { type: "stage", selection } : { type: "unstage", selection };
 	}
 
 	/** Discard action for a file or dir row; null on a commit-area row. */
 	#discardActionFor(target: FileTarget): SidebarAction | null {
-		const selection = this.#selectionFor(target);
-		return selection ? { type: "discard", selection } : null;
+		const selected = this.#selectionFor(target);
+		if (!selected) return null;
+		return { type: "discard", selection: { files: selected.files, label: selected.label } };
 	}
 
 	/** Files under a file/dir row plus a status-line label; null outside the unstaged/staged sections. */
