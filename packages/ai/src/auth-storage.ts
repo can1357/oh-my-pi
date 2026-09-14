@@ -102,7 +102,7 @@ const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 
 /** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
-function fingerprintOAuthBearer(bearer: string): string {
+export function fingerprintOAuthBearer(bearer: string): string {
 	return createHash("sha256").update(bearer).digest("base64url");
 }
 const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
@@ -131,6 +131,18 @@ export type OAuthCredential = {
 } & OAuthCredentials;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
+
+/**
+ * Broker disable condition: preserve the OAuth bearer fingerprint on the wire,
+ * and tag API-key hashes so equal key/access strings cannot match across kinds.
+ * API keys compare the stored key representation, not an environment variable
+ * or command's resolved value; changing only that value does not version the row.
+ */
+export function fingerprintCredentialForDisable(credential: AuthCredential): string {
+	return credential.type === "oauth"
+		? fingerprintOAuthBearer(credential.access)
+		: `api_key:${fingerprintOAuthBearer(credential.key)}`;
+}
 
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
@@ -759,8 +771,15 @@ export interface AuthCredentialStore {
 	/**
 	 * Optional async write hook for disabling one stored credential. Remote stores
 	 * use it to await broker persistence before AuthStorage updates its snapshot.
+	 * A condition from `fingerprintCredentialForDisable` guards the access/key;
+	 * `false` means the broker found a replacement (or the row is missing).
 	 */
-	deleteAuthCredentialRemote?(id: number, disabledCause: string, signal?: AbortSignal): Promise<boolean>;
+	deleteAuthCredentialRemote?(
+		id: number,
+		disabledCause: string,
+		expectedAccessFingerprint?: string,
+		signal?: AbortSignal,
+	): Promise<boolean>;
 	/**
 	 * Optional async write hook for deliberate whole-provider logout, clearing
 	 * prior disabled history as well as active credentials. When present,
@@ -2923,31 +2942,42 @@ export class AuthStorage {
 	}
 
 	/**
-	 * CAS-style disable used when OAuth refresh definitively fails: only disables
-	 * persisted `data` still matches the credential we attempted to refresh.
+	 * CAS-style disable for definitive refresh failure or upstream invalidation:
+	 * only disables when persisted `data` (or the broker-held access/key) still
+	 * matches the failed credential.
 	 * Returns `false` when a peer rotated the row between our pre-check and the
 	 * disable, so the caller can reload and retry instead of clobbering the
 	 * freshly-rotated credential.
 	 */
-	#tryDisableCredentialAtIfMatches(
+	async #tryDisableCredentialAtIfMatches(
 		provider: string,
 		index: number,
 		expectedCredential: AuthCredential,
 		disabledCause: string,
-	): boolean {
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const entries = this.#getStoredCredentials(provider);
 		if (index < 0 || index >= entries.length) return false;
 		const target = entries[index];
-		const serialized = serializeCredential(provider, expectedCredential);
-		if (!serialized) return false;
-		const disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
+		const cause = normalizeDisabledCause(disabledCause);
+		let disabled: boolean;
+		if (this.#store.deleteAuthCredentialRemote) {
+			const expectedAccessFingerprint = fingerprintCredentialForDisable(expectedCredential);
+			disabled = await this.#store.deleteAuthCredentialRemote(target.id, cause, expectedAccessFingerprint, signal);
+		} else {
+			const serialized = serializeCredential(provider, expectedCredential);
+			if (!serialized) return false;
+			disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, cause);
+		}
 		if (!disabled) return false;
-		const updated = entries.filter((_value, idx) => idx !== index);
+		const updated = this.#getStoredCredentials(provider).filter(entry => entry.id !== target.id);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
-		this.#emitCredentialDisabled(
-			credentialDisabledEvent(provider, target.id, expectedCredential, disabledCause, this.#liveApiKeyIds(provider)),
-		);
+		if (isAutomaticDisableCause(cause)) {
+			this.#emitCredentialDisabled(
+				credentialDisabledEvent(provider, target.id, expectedCredential, cause, this.#liveApiKeyIds(provider)),
+			);
+		}
 		return true;
 	}
 
@@ -3011,16 +3041,17 @@ export class AuthStorage {
 	 * Addresses the row by id (re-resolved here, then matched on `data` in the
 	 * store) so a concurrent reorder can't tear down the wrong credential.
 	 */
-	#disableCredentialByIdIfMatches(
+	async #disableCredentialByIdIfMatches(
 		provider: string,
 		id: number,
 		expected: AuthCredential,
 		disabledCause: string,
-	): boolean {
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const entries = this.#getStoredCredentials(provider);
 		const index = entries.findIndex(entry => entry.id === id);
 		if (index === -1) return false;
-		return this.#tryDisableCredentialAtIfMatches(provider, index, expected, disabledCause);
+		return await this.#tryDisableCredentialAtIfMatches(provider, index, expected, disabledCause, signal);
 	}
 
 	#emitCredentialDisabled(event: CredentialDisabledEvent): void {
@@ -3261,38 +3292,46 @@ export class AuthStorage {
 					refreshed = await options.refresh(current, refreshAbort.signal);
 				} catch (error) {
 					if (options.isDefinitiveFailure?.(error)) {
-						const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
-						const disabled = this.#store.tryDisableAuthCredentialIfMatches(
-							row.id,
-							serialized.data,
-							disabledCause,
-							leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
+						const disabledCause = normalizeDisabledCause(
+							options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`,
 						);
+						const disabled = this.#store.deleteAuthCredentialRemote
+							? await this.#store.deleteAuthCredentialRemote(
+									row.id,
+									disabledCause,
+									fingerprintCredentialForDisable(current),
+									options.signal,
+								)
+							: this.#store.tryDisableAuthCredentialIfMatches(
+									row.id,
+									serialized.data,
+									disabledCause,
+									leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
+								);
 						if (disabled) {
-							// Filter the snapshot in place rather than re-reading: candidate
-							// preflights run concurrently on positional indices, so this path
-							// must not await a store round-trip that could reorder the pool
-							// under a sibling's in-flight index.
+							// Filter the live in-memory rows rather than re-reading the store:
+							// candidate preflights run concurrently on positional indices, so
+							// this path must not await a round-trip that could reorder the
+							// pool under a sibling's in-flight index. It must not rebuild from
+							// the `rows` captured before the refresh either — the broker
+							// disable above is awaited, and a sibling that rotated during it
+							// would be overwritten with the token it had before.
 							this.#setStoredCredentials(
 								provider,
-								rows
-									.filter(entry => entry.id !== row.id)
-									.map(entry => ({
-										id: entry.id,
-										credential: entry.credential,
-										identityKey: entry.identityKey,
-									})),
+								this.#getStoredCredentials(provider).filter(entry => entry.id !== row.id),
 							);
 							this.#resetProviderAssignments(provider);
-							this.#emitCredentialDisabled(
-								credentialDisabledEvent(
-									provider,
-									row.id,
-									current,
-									disabledCause,
-									this.#liveApiKeyIds(provider),
-								),
-							);
+							if (isAutomaticDisableCause(disabledCause)) {
+								this.#emitCredentialDisabled(
+									credentialDisabledEvent(
+										provider,
+										row.id,
+										current,
+										disabledCause,
+										this.#liveApiKeyIds(provider),
+									),
+								);
+							}
 							return { credential: undefined, refreshed: false, removed: true };
 						}
 						await this.reload();
@@ -5748,7 +5787,14 @@ export class AuthStorage {
 		const hasPlanRequirement = planRequirement !== "none";
 		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
-		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		let sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		// Captured before any teardown compacts the array: the index is positional
+		// and a definitive preflight failure shifts it, so the pin has to be
+		// rebound by row id rather than trusting the number.
+		const sessionPreferredId =
+			sessionPreferredIndex !== undefined
+				? this.#getStoredCredentials(provider)[sessionPreferredIndex]?.id
+				: undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
 				? credentials.find(entry => entry.index === sessionPreferredIndex)?.credential
@@ -5812,6 +5858,8 @@ export class AuthStorage {
 						usageChecked: false,
 					}));
 		const preflightFailures = new Set<OAuthCandidate>();
+		// Row id per candidate, captured before any teardown can compact the array.
+		const preflightCredentialIds = new Map<OAuthCandidate, number>();
 
 		// On the warm skip path the candidate list follows the round-robin `order`, not the pin, so
 		// hoist the pinned credential to the front to actually reuse it. When ranking ran, the pin is
@@ -5838,6 +5886,7 @@ export class AuthStorage {
 			candidates.map(async candidate => {
 				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
 				const initialCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				if (initialCredentialId !== undefined) preflightCredentialIds.set(candidate, initialCredentialId);
 				let syncedPeerCredential = false;
 				if (initialCredentialId !== undefined) {
 					const beforeSync = candidate.selection.credential;
@@ -5946,6 +5995,26 @@ export class AuthStorage {
 				}
 			}),
 		);
+
+		// A definitive preflight teardown compacts this provider's array, so every
+		// surviving candidate's captured index can now point at a different row —
+		// or past the end. Rebind by row id before the final pass, or a healthy
+		// sibling is skipped and the request fails with the original auth error.
+		if (preflightFailures.size > 0) {
+			const rowIndexById = new Map(this.#getStoredCredentials(provider).map((row, at) => [row.id, at]));
+			for (const candidate of candidates) {
+				if (preflightFailures.has(candidate)) continue;
+				const candidateId = preflightCredentialIds.get(candidate);
+				if (candidateId === undefined) continue;
+				const rebound = rowIndexById.get(candidateId);
+				if (rebound === undefined) preflightFailures.add(candidate);
+				else candidate.selection.index = rebound;
+			}
+			// The session pin is positional too. Left alone it would name whichever
+			// row now occupies the old slot, and the plan-gated promotion below
+			// would hoist that stranger over the ranked order.
+			if (sessionPreferredId !== undefined) sessionPreferredIndex = rowIndexById.get(sessionPreferredId);
+		}
 
 		// Enforce a tier only when at least one account is confirmed eligible. If
 		// every report is unknown or ineligible, preserve trial/grandfathered access
@@ -6065,17 +6134,19 @@ export class AuthStorage {
 		// this disable doesn't soft-delete the freshly-rotated row.
 		const disabled =
 			credentialId !== undefined
-				? this.#disableCredentialByIdIfMatches(
+				? await this.#disableCredentialByIdIfMatches(
 						provider,
 						credentialId,
 						attemptedCredential,
 						`oauth refresh failed: ${errorMsg}`,
+						signal,
 					)
-				: this.#tryDisableCredentialAtIfMatches(
+				: await this.#tryDisableCredentialAtIfMatches(
 						provider,
 						index,
 						attemptedCredential,
 						`oauth refresh failed: ${errorMsg}`,
+						signal,
 					);
 		if (!disabled) {
 			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", {
@@ -7632,8 +7703,13 @@ export class AuthStorage {
 			status === 401 &&
 			!AIError.isGitHubCopilotPolicyDenial(provider, status, message) &&
 			!isConcurrencyCapExclusion(status, message);
+		const invalidatedToken = AIError.isInvalidatedOAuthTokenError(error);
+		// Both branches below retire a stored row, so both must prove the failed
+		// request actually ran on it. A credential id or a sticky selection names
+		// a slot, not the credential version that failed, and a pinned
+		// runtime/config key never rotated through the stored pool at all.
 		if (
-			retireOnHard401 &&
+			(retireOnHard401 || invalidatedToken) &&
 			(options?.apiKey === undefined ||
 				this.#runtimeOverrides.has(provider) ||
 				this.#configOverrides.has(provider) ||
@@ -7642,30 +7718,23 @@ export class AuthStorage {
 			return false;
 		}
 
-		if (retireOnHard401 || AIError.isInvalidatedOAuthTokenError(error)) {
+		if (retireOnHard401 || invalidatedToken) {
 			const reason = retireOnHard401
 				? "upstream rejected OAuth bearer after refresh and retry"
 				: "upstream reported invalidated OAuth token";
 			const disabledCause = message ? `${reason}: ${message}` : reason;
 			// Do not block before the conditional disable: a peer replacement must
 			// remain usable when it wins the race against this failed request.
-			const deleted = this.#store.deleteAuthCredentialRemote
-				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause, options?.signal)
-				: this.#disableCredentialByIdIfMatches(provider, target.id, target.credential, disabledCause);
-			if (deleted && this.#store.deleteAuthCredentialRemote) {
-				// The broker persists and logs on its own host; this session still
-				// observed the invalidation and announces it to its own subscribers.
-				this.#loadStoredCredentials(provider);
-				this.#emitCredentialDisabled(
-					credentialDisabledEvent(
-						provider,
-						target.id,
-						target.credential,
-						disabledCause,
-						this.#liveApiKeyIds(provider),
-					),
-				);
-			}
+			// The shared CAS path announces only an accepted disable, both here
+			// and on the broker host; a peer rotation/removal must stay silent.
+			const deleted = await this.#disableCredentialByIdIfMatches(
+				provider,
+				target.id,
+				target.credential,
+				disabledCause,
+				options?.signal,
+			);
+			if (!deleted) await this.reload();
 			// Whether *this* call did the removing is irrelevant to whether the
 			// request can retry, so the outcome is judged on the pool, not on
 			// `deleted`: a peer that removed the row first leaves a distinct-row
@@ -8062,12 +8131,13 @@ export class AuthStorage {
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.
 					if (
-						!this.#disableCredentialByIdIfMatches(
+						!(await this.#disableCredentialByIdIfMatches(
 							provider,
 							id,
 							attempted,
 							`oauth refresh failed: ${String(error)}`,
-						)
+							signal,
+						))
 					) {
 						await this.reload();
 					}
@@ -8111,6 +8181,29 @@ export class AuthStorage {
 			};
 		}
 		throw new AIError.ValidationError(`No credential with id=${id}`);
+	}
+
+	/**
+	 * Disable a credential only while its access/key fingerprint still matches. Used by
+	 * the auth-broker server to honour `If-Match` on `POST /v1/credential/:id/disable`.
+	 */
+	async disableCredentialIfFingerprintMatches(
+		id: number,
+		expectedAccessFingerprint: string,
+		disabledCause: string,
+	): Promise<"disabled" | "stale" | "missing"> {
+		for (const [provider, entries] of this.#data) {
+			const target = entries.find(entry => entry.id === id);
+			if (!target) continue;
+			const credential = target.credential;
+			if (fingerprintCredentialForDisable(credential) !== expectedAccessFingerprint) {
+				return "stale";
+			}
+			if (await this.#disableCredentialByIdIfMatches(provider, id, credential, disabledCause)) return "disabled";
+			await this.reload();
+			return "stale";
+		}
+		return "missing";
 	}
 
 	/**

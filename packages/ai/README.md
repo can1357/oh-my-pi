@@ -1086,6 +1086,10 @@ Credentials are saved to `agent.db` in the agent directory. `/login qianfan` ope
 
 If SQLite reports corruption during startup, the damaged database and remaining journal sidecars are preserved beside it as private `agent.db.corrupt-<timestamp>-<id>*` backups before a fresh database is created. The log records the backup path. This restores startup, not unreadable credentials: log in again; retain the backups for manual data recovery. Lock contention and other non-corruption errors never reset the database.
 
+Automatic invalidation compares the failed stored credential before disabling it. With a conditional-disable-capable auth broker, OAuth conditions use the access-token fingerprint and API-key conditions a kind-tagged hash of the stored key string, so a stale request cannot disable a replacement API key, nor an OAuth row whose bearer a peer has since rotated. The condition covers the material a client can observe: a peer that rotated only the refresh token behind an unchanged access token is not distinguished, because client snapshots never hold refresh tokens. Rejected disables await snapshot reconciliation and do not announce a removal.
+
+Retiring a stored row always requires the failed bearer. A credential id or a session-sticky selection names a slot, not the credential version that failed, so a report that cannot name its bearer retires nothing. For environment or `!command` references, the condition protects changes to the stored reference, not changes in its resolved output. Runtime/config/environment overrides without a stored row are outside this row-level comparison. No raw key is sent in the condition.
+
 `login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
 
 For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.

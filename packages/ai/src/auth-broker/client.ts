@@ -55,6 +55,13 @@ import {
 } from "./wire-schemas";
 
 /** Response schema per endpoint, keyed by the name `#request` callers pass. */
+/**
+ * How long a 501 for disabled history suppresses further probes. Long enough
+ * that a session's two startup lookups cost one round trip, short enough that a
+ * broker replaced with a tombstone-capable store recovers on its own.
+ */
+const DISABLED_HISTORY_PROBE_TTL_MS = 5 * 60_000;
+
 const RESPONSE_SCHEMAS = {
 	clientUsageReportResponseSchema,
 	clientUsageSummaryResponseSchema,
@@ -341,12 +348,27 @@ export class AuthBrokerClient {
 		});
 	}
 
-	async disableCredential(id: number, cause: string, signal?: AbortSignal): Promise<CredentialDisableResponse> {
+	/**
+	 * `POST /v1/credential/:id/disable`. With `expectedAccessFingerprint` the
+	 * disable is conditional (`If-Match`): pass `fingerprintCredentialForDisable`
+	 * for an OAuth bearer or stored API key. A different credential answers 412.
+	 * The bare `AbortSignal` form predates the options object and is still honoured.
+	 */
+	async disableCredential(
+		id: number,
+		cause: string,
+		opts: AbortSignal | { signal?: AbortSignal; expectedAccessFingerprint?: string } = {},
+	): Promise<CredentialDisableResponse> {
+		const options = opts instanceof AbortSignal ? { signal: opts } : opts;
 		const body: CredentialDisableRequest = { cause };
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: "credentialDisableResponseSchema",
-			signal,
+			headers:
+				options.expectedAccessFingerprint !== undefined
+					? { "If-Match": `"${options.expectedAccessFingerprint}"` }
+					: undefined,
+			signal: options.signal,
 		});
 	}
 
@@ -365,8 +387,31 @@ export class AuthBrokerClient {
 	 * Returns an empty list against brokers predating `GET
 	 * /v1/credentials/disabled` (404), unless requireSupported is set.
 	 */
-	/** Latched once the broker answers 404/501 — the gap is permanent for this connection. */
-	#disabledHistoryUnsupported = false;
+	/**
+	 * When this client last saw a 501 for disabled history. The gap is a property
+	 * of a broker incarnation, and a client outlives one: rather than detecting
+	 * every restart shape — a replacement can even resume at the same generation
+	 * — the latch simply expires, so the worst case is one stale window instead
+	 * of history staying dark for the process's life.
+	 */
+	#disabledHistoryUnsupportedAt: number | undefined;
+
+	/**
+	 * Forget the 501 latch. Callers invoke this when they observe a new broker
+	 * incarnation — a fresh stream connection or a generation that ran backwards
+	 * — because a restarted or reconfigured broker may now keep tombstones, and
+	 * a latch held for the client's whole life would silently suppress every
+	 * later startup replay and streamed-removal classification.
+	 */
+	resetDisabledHistoryProbe(): void {
+		this.#disabledHistoryUnsupportedAt = undefined;
+	}
+
+	/** Whether the 501 latch is still in force. */
+	get #disabledHistoryUnsupported(): boolean {
+		const latchedAt = this.#disabledHistoryUnsupportedAt;
+		return latchedAt !== undefined && Date.now() - latchedAt < DISABLED_HISTORY_PROBE_TTL_MS;
+	}
 
 	async listDisabledCredentials(
 		provider?: string,
@@ -399,7 +444,7 @@ export class AuthBrokerClient {
 			// 404 is per-provider: a broker that 404s one provider still answers
 			// another authoritatively, so only 501 — "this store keeps no
 			// tombstones" — is latched for the connection.
-			if (error instanceof AuthBrokerError && error.status === 501) this.#disabledHistoryUnsupported = true;
+			if (error instanceof AuthBrokerError && error.status === 501) this.#disabledHistoryUnsupportedAt = Date.now();
 			if (
 				!options.requireSupported &&
 				error instanceof AuthBrokerError &&
