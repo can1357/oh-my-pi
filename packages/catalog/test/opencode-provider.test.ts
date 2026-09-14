@@ -679,6 +679,20 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
+	test("routes gateway-listed OpenCode Zen GPT-6 Astra to Responses (#12030)", async () => {
+		const options = opencodeZenModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["gpt-6-astra"]),
+		});
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.find(model => model.id === "gpt-6-astra")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/v1",
+		});
+		expect(options.dropCachedModelIdsOnStaticMismatch).toContain("gpt-6-astra");
+	});
+
 	test("routes unbundled future muse-spark revisions to responses on both gateways", async () => {
 		// Both gateways serve every Muse Spark SKU at /responses; a revision
 		// that neither models.dev nor the exact pins know yet must not fall

@@ -8,6 +8,7 @@ import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
+import { withBridgeTimeoutPause } from "../bridge-timeout";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
@@ -190,12 +191,18 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
 		try {
-			const result = await invokeEvalPrelude(request.name, request.parameters, {
-				session: options.session,
-				toolCallId,
-				signal: options.signal,
-				context: options.session.getToolContext?.(),
-			});
+			// Browser/computer operations own their deadlines. Charging their host
+			// wait to Eval as well can kill its kernel during a first-use browser
+			// install or an explicitly longer navigation. Caller abort still flows
+			// through; only the runtime-work watchdog is paused.
+			const result = await withBridgeTimeoutPause(options.emitStatus, () =>
+				invokeEvalPrelude(request.name, request.parameters, {
+					session: options.session,
+					toolCallId,
+					signal: options.signal,
+					context: options.session.getToolContext?.(),
+				}),
+			);
 			return normalizeAgentToolResult(request.name, request.parameters, result, options);
 		} catch (error) {
 			options.emitStatus?.({

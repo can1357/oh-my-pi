@@ -31,6 +31,8 @@ export type SidebarAction =
 	/** `selection` omitted → whole tree; `label` names the target for the status line. */
 	| { type: "stage"; selection?: { files: ChangedFile[]; label: string } }
 	| { type: "unstage"; selection?: { files: ChangedFile[]; label: string } }
+	/** `delete`: throw away the row's changes (a dir batches every file underneath). */
+	| { type: "discard"; selection: { files: ChangedFile[]; label: string } }
 	| { type: "generate" }
 	/** Wand pill: AI-filter the unstaged tree against a natural-language prompt. */
 	| { type: "stage-ai"; prompt: string }
@@ -502,11 +504,23 @@ export class Sidebar {
 	/** Stage/unstage action for a file, dir, or section-header row; dirs and sections batch every file underneath. */
 	#stageActionFor(target: FileTarget | SectionTarget): SidebarAction | null {
 		if (target.kind === "section") return target.area === "unstaged" ? { type: "stage" } : { type: "unstage" };
+		const selection = this.#selectionFor(target);
+		if (!selection) return null;
+		return selection.area === "unstaged" ? { type: "stage", selection } : { type: "unstage", selection };
+	}
+
+	/** Discard action for a file or dir row; null on a commit-area row. */
+	#discardActionFor(target: FileTarget): SidebarAction | null {
+		const selection = this.#selectionFor(target);
+		return selection ? { type: "discard", selection } : null;
+	}
+
+	/** Files under a file/dir row plus a status-line label; null outside the unstaged/staged sections. */
+	#selectionFor(target: FileTarget): { files: ChangedFile[]; label: string; area: "unstaged" | "staged" } | null {
 		if (target.kind === "file") {
-			const selection = { files: [target.file], label: target.file.path };
-			if (target.file.area === "unstaged") return { type: "stage", selection };
-			if (target.file.area === "staged") return { type: "unstage", selection };
-			return null;
+			const area = target.file.area;
+			if (area !== "unstaged" && area !== "staged") return null;
+			return { files: [target.file], label: target.file.path, area };
 		}
 		// Dir keys are `<section>:<path from repo root>` (see #fileEntries).
 		const sep = target.key.indexOf(":");
@@ -517,8 +531,7 @@ export class Sidebar {
 			file.path.startsWith(`${dirPath}/`),
 		);
 		if (files.length === 0) return null;
-		const selection = { files, label: `${dirPath}/` };
-		return area === "unstaged" ? { type: "stage", selection } : { type: "unstage", selection };
+		return { files, label: `${dirPath}/`, area };
 	}
 
 	/** Open the AI staging textbox under the unstaged header and focus it. */
@@ -757,6 +770,9 @@ export class Sidebar {
 		) {
 			const action = this.#stageActionFor(target);
 			if (action?.type === (data === "s" ? "stage" : "unstage")) this.#onAction(action);
+		} else if (matchesKey(data, "delete") && (target?.kind === "file" || target?.kind === "dir")) {
+			const action = this.#discardActionFor(target);
+			if (action) this.#onAction(action);
 		} else if (data === "t") {
 			this.viewStyle = this.viewStyle === "path" ? "tree" : "path";
 			this.#treeVersion++;

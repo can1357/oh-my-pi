@@ -3,7 +3,7 @@ type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networki
 
 /** Browser application or attachment selection. */
 interface BrowserAppOptions {
-	/** Absolute or cwd-relative browser/Electron executable to spawn. */
+	/** Absolute or cwd-relative browser/Electron executable to spawn. Chromium-family browsers launch on an omp-owned profile unless `args` sets `--user-data-dir`. */
 	path?: string;
 	/** HTTP Chrome DevTools Protocol discovery endpoint to attach to. */
 	cdp_url?: string;
@@ -41,7 +41,7 @@ interface BrowserOpenOptions {
 	dialogs?: "accept" | "dismiss";
 	/** Keep the tab live across turn settle and idle close (default false). */
 	persist?: boolean;
-	/** Whole-operation timeout in seconds. */
+	/** Open timeout in seconds, excluding first-use browser installation. */
 	timeout?: number;
 }
 
