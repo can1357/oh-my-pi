@@ -682,7 +682,13 @@ export class Settings {
 	async setIfAbsent<P extends SettingPath>(path: P, value: SettingValue<P>): Promise<boolean> {
 		const previousSave = this.#savePromise;
 		const saveIfAbsent = async (): Promise<boolean> => {
-			const mutation = this.#stageGlobalMutation(path, value, true);
+			if (!this.#persist || !this.#configPath) {
+				const segments = path.split(".");
+				if (hasByPath(this.#global, segments)) return false;
+				this.#stageGlobalMutation(path, value);
+				return true;
+			}
+			const mutation = this.#stageGlobalMutation(path, value, true, false);
 			if (!mutation?.ifAbsent) return true;
 			await this.#saveNow();
 			return mutation.ifAbsent.applied;
@@ -706,6 +712,7 @@ export class Settings {
 		path: P,
 		value: SettingValue<P>,
 		ifAbsent = false,
+		publish = true,
 	): PendingYamlMutation | undefined {
 		const prev = this.get(path);
 		const segments = path.split(".");
@@ -718,6 +725,7 @@ export class Settings {
 		setByPath(this.#global, segments, value);
 		this.#persistedMutationGeneration++;
 		this.#modified.add(path);
+		if (!publish) return mutation;
 		this.#rebuildMerged();
 		const next = this.get(path);
 		this.#queueSave();
@@ -2903,6 +2911,18 @@ export class Settings {
 
 				if (shouldWrite) {
 					await this.#writeYamlAtomically(writePath, current);
+				}
+				if (this.#modifiedGlobalModelRoles.size > 0) {
+					const pendingGlobalRoles = this.#modelRolesFromLayer(this.#global);
+					const retainedRoles = this.#modelRolesFromLayer(current);
+					for (const role of this.#modifiedGlobalModelRoles) {
+						if (Object.hasOwn(pendingGlobalRoles, role)) {
+							retainedRoles[role] = pendingGlobalRoles[role];
+						} else {
+							delete retainedRoles[role];
+						}
+					}
+					setByPath(current, ["modelRoles"], retainedRoles);
 				}
 				for (const modPath of this.#modified) {
 					const segments = modPath.split(".");

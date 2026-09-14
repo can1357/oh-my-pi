@@ -5,6 +5,10 @@
 ### Added
 
 - `omp config set <key> <value> --if-absent` now applies global defaults without replacing explicitly configured values.
+### Changed
+
+- Pressing `c` on a `/btw` answer now shows a green "✓ Copied to clipboard" confirmation in the panel and history detail, and BTW history accepts `Ctrl+/` to switch panes ([#12052](https://github.com/can1357/oh-my-pi/pull/12052) by [@H4vC](https://github.com/H4vC)).
+
 ## [18.1.21] - 2026-09-14
 
 ### Fixed

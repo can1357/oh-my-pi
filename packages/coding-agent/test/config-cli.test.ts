@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { YAML } from "bun";
+import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseConfigArgs, runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
+import { onAppendOnlyModeChanged, resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
@@ -249,6 +250,54 @@ describe("config CLI schema coverage", () => {
 		});
 	});
 
+	it("does not publish guarded settings that lose under the write lock", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+		const onChange = vi.fn();
+		const observedAppendOnlyModes: string[] = [];
+		const unsubscribe = onAppendOnlyModeChanged(mode => observedAppendOnlyModes.push(mode));
+		settings.onEffectiveChange(onChange);
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			await Bun.write(filePath, "provider:\n  appendOnlyContext: auto\n");
+			return await withFileLock(filePath, fn, options);
+		});
+
+		expect(await settings.setIfAbsent("provider.appendOnlyContext", "on")).toBe(false);
+		unsubscribe();
+		expect(onChange).not.toHaveBeenCalled();
+		expect(observedAppendOnlyModes).toEqual([]);
+	});
+
+	it("preserves model-role mutations staged during atomic YAML I/O", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+		const writeStarted = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		const open = fs.promises.open;
+		vi.spyOn(fs.promises, "open").mockImplementationOnce(async (...args) => {
+			const handle = await open(...args);
+			const writeFile = handle.writeFile.bind(handle);
+			vi.spyOn(handle, "writeFile").mockImplementationOnce(async data => {
+				writeStarted.resolve();
+				await releaseWrite.promise;
+				await writeFile(data);
+			});
+			return handle;
+		});
+
+		const guardedSave = settings.setIfAbsent("compaction.enabled", false);
+		await writeStarted.promise;
+		settings.setModelRole("advisor", "moonshot/kimi-k3:max");
+		releaseWrite.resolve();
+		expect(await guardedSave).toBe(true);
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toMatchObject({
+			compaction: { enabled: false },
+			modelRoles: { advisor: "moonshot/kimi-k3:max" },
+		});
+	});
+
 	it("rechecks initially present absent-only settings under the YAML write lock", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const configPath = path.join(testAgentDir.path(), "config.yml");
@@ -295,19 +344,6 @@ describe("config CLI schema coverage", () => {
 
 		expect(exitCode).toBe(1);
 		expect(error).toContain("--if-absent is only valid for `omp config set`");
-	});
-
-	it("rejects --if-absent outside set in the direct config parser", () => {
-		vi.spyOn(console, "error").mockImplementation(() => {});
-		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
-			throw new Error("process.exit");
-		}) as typeof process.exit);
-
-		expect(() => parseConfigArgs(["config", "get", "compaction.enabled", "--if-absent"])).toThrow("process.exit");
-		expect(exitSpy).toHaveBeenCalledWith(1);
-		expect(console.error).toHaveBeenCalledWith(
-			expect.stringContaining("--if-absent is only valid for `omp config set`"),
-		);
 	});
 
 	it("keeps ordinary config set unconditional with its existing JSON shape", async () => {
