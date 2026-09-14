@@ -4427,6 +4427,91 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
 	});
 
+	it("reruns an immediate preload when a child navigates before recovery registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before", parentId: "main" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before", parentId: "main" } }],
+			},
+		});
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+			recoveryLoaderIds: { "1": "main-loader" },
+			recoveryFrameLoaderIds: { "1": { main: "main-loader", child: "child-before" } },
+		});
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-before", parentId: "main" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+
+		// The replacement root sees a child navigation before the preserved script is
+		// registered. This event must not advance the old root's coverage baseline.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Page.frameNavigated",
+				params: { frame: { id: "child", loaderId: "child-after", parentId: "main" } },
+			}),
+		);
+		ack(bridge, ext2, "send", { identifier: "root-script-after-recovery" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-after", parentId: "main" } }],
+			},
+		});
+		await waitFor(
+			() =>
+				ext2
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
+							(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
+					),
+			"immediate replay for the navigated child",
+		);
+	});
+
 	it("keeps navigation coverage while replacing a missed preload", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -10513,6 +10598,57 @@ describe("RelayBridge attachment release", () => {
 		ack(bridge, ext, "send", { result: { type: "undefined" } });
 		await flush();
 		expect(cdp.messages.find(message => message.id === commandId)?.error).toBeUndefined();
+	});
+
+	it("does not let a superseded recovery failure retract a replacement session", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
+		await waitFor(() => ext.pending("attach").length === 1, "initial auto-attach");
+		ack(bridge, ext, "attach");
+		await flush();
+
+		bridge.extClosed(ext);
+		const recovering = new FakeExtSocket();
+		connect(bridge, recovering, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => recovering.pending("attach").length === 1, "first recovery attach");
+		const staleAttach = recovering.pending("attach")[0]!;
+
+		// A navigation cancels recovery A and starts replacement recovery B on the
+		// same socket before A's attach result arrives.
+		bridge.extMessage(recovering, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
+		bridge.extMessage(
+			recovering,
+			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, url: "https://example.com/next" }) }),
+		);
+		await waitFor(() => recovering.pending("attach").length === 2, "replacement recovery attach");
+		const replacementAttach = recovering.pending("attach").find(rpc => rpc.id !== staleAttach.id);
+		if (!replacementAttach) throw new Error("replacement recovery did not issue an attach");
+		recovering.markAcked(replacementAttach.id);
+		bridge.extMessage(recovering, JSON.stringify({ t: "rpcResult", id: replacementAttach.id, ok: true, result: {} }));
+		await flush();
+		const replacementSession = cdp.attachedSessions().findLast(sessionId => sessionId.startsWith("ST"));
+		if (!replacementSession) throw new Error("replacement recovery did not mint a tab session");
+
+		// A fails after B has minted its replacement session. The stale continuation
+		// must not retract B's target; the recovery generation identifies its owner.
+		recovering.markAcked(staleAttach.id);
+		bridge.extMessage(
+			recovering,
+			JSON.stringify({ t: "rpcResult", id: staleAttach.id, ok: false, error: "attach canceled" }),
+		);
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, sessionId: replacementSession, method: "Target.setAutoAttach" }),
+		);
+		await flush();
+		expect(cdp.messages.find(message => message.id === commandId)?.result).toEqual({});
 	});
 
 	it("clears an in-flight detach immediately when the extension socket is replaced", async () => {

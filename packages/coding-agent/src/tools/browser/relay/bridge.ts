@@ -85,6 +85,8 @@ interface PreservedPreloadScript {
 	loaderId?: string;
 	/** Frame/loader snapshot that already received the immediate invocation. */
 	frameLoaderIds?: Record<string, string>;
+	/** Debugger-root generation that owns the loader baselines above. */
+	rootGeneration: number;
 	sequence: number;
 }
 
@@ -427,6 +429,8 @@ class TabState {
 	restoring: Promise<void> | null = null;
 	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
 	restoringExt: RelaySocket | null = null;
+	/** Monotonic token that prevents a superseded recovery from mutating newer state. */
+	recoveryGeneration = 0;
 	/** Serializes live root-state cleanup after owner loss while the tab stays attached. */
 	subscriptionReconciling: Promise<void> | null = null;
 	/** Live root-state cleanup interrupted by extension replacement; retry on the next hello. */
@@ -1100,6 +1104,7 @@ export class RelayBridge {
 					clientIdentifier: rootIdentifier,
 					rootIdentifier,
 					params: msg.params,
+					rootGeneration,
 					sequence: 0,
 				},
 			]);
@@ -1911,6 +1916,7 @@ export class RelayBridge {
 			params,
 			loaderId,
 			frameLoaderIds,
+			rootGeneration: tab.runtimeGeneration,
 			sequence: ++this.#subscriptionSeq,
 		});
 	}
@@ -2880,7 +2886,9 @@ export class RelayBridge {
 				if (frameId !== undefined && loaderId !== undefined) {
 					for (const scripts of tab.preloadScripts.values()) {
 						for (const script of scripts.values()) {
-							if (script.frameLoaderIds) script.frameLoaderIds[frameId] = loaderId;
+							if (script.rootGeneration === tab.runtimeGeneration && script.frameLoaderIds) {
+								script.frameLoaderIds[frameId] = loaderId;
+							}
 						}
 					}
 				}
@@ -3065,6 +3073,7 @@ export class RelayBridge {
 		// reconciliation, so a `false` here is a retryable transport swap — not a
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
+		const recoveryGeneration = ++tab.recoveryGeneration;
 		let refreshedRoot = false;
 		let forceFreshRoot = false;
 		const contextGenerationBeforeRecovery = tab.contextGeneration;
@@ -3088,6 +3097,7 @@ export class RelayBridge {
 				// (forceFreshRootBeforeReplay) intact so the replacement hello can
 				// finish the reattach instead of stranding the holder.
 				if (isExtensionTransportInterrupted(err)) return;
+				if (tab.recoveryGeneration !== recoveryGeneration) return;
 				this.#log("fresh-root recovery detach failed", {
 					tabId: tab.tabId,
 					error: err instanceof Error ? err.message : String(err),
@@ -3104,6 +3114,7 @@ export class RelayBridge {
 				this.#detachIfUnheld(tab.tabId, true);
 				return;
 			}
+			if (tab.recoveryGeneration !== recoveryGeneration) return;
 			if (!ok) {
 				if (this.#ext !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
@@ -3157,6 +3168,7 @@ export class RelayBridge {
 					// complete replay even when Chrome still reports the root attached,
 					// repairing interruptions such as Runtime.disable without enable.
 					if (this.#ext !== ext || err instanceof ExtensionReplacedError) return;
+					if (tab.recoveryGeneration !== recoveryGeneration) return;
 					this.#log("subscription recovery failed", {
 						tabId: tab.tabId,
 						error: err instanceof Error ? err.message : String(err),
@@ -3171,6 +3183,7 @@ export class RelayBridge {
 					this.#detachIfUnheld(tab.tabId, true);
 					return;
 				}
+				if (tab.recoveryGeneration !== recoveryGeneration) return;
 				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
 				tab.recoveryStartUrl = null;
@@ -3578,6 +3591,7 @@ export class RelayBridge {
 			current.rootIdentifier = rootIdentifier;
 			current.cleanupRootIdentifier = cleanupRootIdentifier;
 			current.applicationMarker = applicationMarker;
+			current.rootGeneration = tab.runtimeGeneration;
 			// A successful replay replaces the prior root registration. Its private
 			// marker can no longer identify an internal exception, so retaining it
 			// would suppress a matching page exception forever across recoveries.
