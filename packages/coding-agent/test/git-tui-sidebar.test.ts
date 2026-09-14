@@ -98,13 +98,12 @@ describe("git tui sidebar staging", () => {
 
 			sidebar.handleInput(" ");
 			const action = actions.at(-1);
-			expect(action).toEqual({
-				type: "stage",
-				selection: {
-					files: [expect.objectContaining({ path: "a/one.txt", area: "unstaged" })],
-					label: "a/one.txt",
-				},
-			});
+			expect(action?.type).toBe("stage");
+			if (action?.type !== "stage") throw new Error("expected stage action");
+			expect(action.selection?.label).toBe("a/one.txt");
+			expect(action.selection?.files.map(({ path, area }) => ({ path, area }))).toEqual([
+				{ path: "a/one.txt", area: "unstaged" },
+			]);
 			await model.stage(action?.type === "stage" ? action.selection?.files : undefined);
 			await model.refresh();
 			sidebar.reconcile();
@@ -120,13 +119,14 @@ describe("git tui sidebar staging", () => {
 			const { sidebar, model, actions } = harness;
 			sidebar.handleInput("j"); // dir a/
 			sidebar.handleInput(" ");
-			expect(actions.at(-1)).toEqual({
-				type: "stage",
-				selection: {
-					files: [expect.objectContaining({ path: "a/one.txt" }), expect.objectContaining({ path: "a/two.txt" })],
-					label: "a/",
-				},
-			});
+			const action = actions.at(-1);
+			expect(action?.type).toBe("stage");
+			if (action?.type !== "stage") throw new Error("expected stage action");
+			expect(action.selection?.label).toBe("a/");
+			expect(action.selection?.files.map(({ path, area }) => ({ path, area }))).toEqual([
+				{ path: "a/one.txt", area: "unstaged" },
+				{ path: "a/two.txt", area: "unstaged" },
+			]);
 			await harness.applyLastAction();
 
 			expect(model.staged.map(file => file.path).sort()).toEqual(["a/one.txt", "a/two.txt"]);
@@ -154,16 +154,14 @@ describe("git tui sidebar staging", () => {
 			expect(harness.actions.length).toBe(before);
 
 			sidebar.handleInput("u");
-			expect(harness.actions.at(-1)).toEqual({
-				type: "unstage",
-				selection: {
-					files: [
-						expect.objectContaining({ path: "a/one.txt", area: "staged" }),
-						expect.objectContaining({ path: "a/two.txt", area: "staged" }),
-					],
-					label: "a/",
-				},
-			});
+			const action = harness.actions.at(-1);
+			expect(action?.type).toBe("unstage");
+			if (action?.type !== "unstage") throw new Error("expected unstage action");
+			expect(action.selection?.label).toBe("a/");
+			expect(action.selection?.files.map(({ path, area }) => ({ path, area }))).toEqual([
+				{ path: "a/one.txt", area: "staged" },
+				{ path: "a/two.txt", area: "staged" },
+			]);
 			await harness.applyLastAction();
 			expect(model.staged).toEqual([]);
 			expect(model.unstaged.map(file => file.path).sort()).toEqual(["a/one.txt", "a/two.txt", "b/three.txt"]);
@@ -184,16 +182,14 @@ describe("git tui sidebar staging", () => {
 			sidebar.handleInput("k");
 			sidebar.handleInput("k");
 			sidebar.handleInput(" ");
-			expect(actions.at(-1)).toEqual({
-				type: "stage",
-				selection: {
-					files: [
-						expect.objectContaining({ path: "a/tracked.txt" }),
-						expect.objectContaining({ path: "a/new.txt" }),
-					],
-					label: "a/",
-				},
-			});
+			const action = actions.at(-1);
+			expect(action?.type).toBe("stage");
+			if (action?.type !== "stage") throw new Error("expected stage action");
+			expect(action.selection?.label).toBe("a/");
+			expect(action.selection?.files.map(({ path, area }) => ({ path, area }))).toEqual([
+				{ path: "a/tracked.txt", area: "unstaged" },
+				{ path: "a/new.txt", area: "unstaged" },
+			]);
 			await harness.applyLastAction();
 			expect(model.staged.map(file => file.path).sort()).toEqual(["a/new.txt", "a/tracked.txt"]);
 			expect(model.unstaged).toEqual([]);
