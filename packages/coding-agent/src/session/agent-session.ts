@@ -8087,6 +8087,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		if (!previousSessionFile) return false;
 		if (await this.#codeModelBlocksNavigation()) return false;
 
 		await this.#bash.flushPending();

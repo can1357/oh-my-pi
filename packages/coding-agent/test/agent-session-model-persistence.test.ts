@@ -269,6 +269,19 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.sessionManager.getSessionId()).toBe(beforeSessionId);
 	});
 
+	it("preserves the outgoing phase when the session has no fork file", async () => {
+		let outgoingRestorations = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				outgoingRestorations++;
+				return undefined;
+			},
+		});
+
+		expect(await created.session.fork()).toBe(false);
+		expect(outgoingRestorations).toBe(0);
+	});
+
 	it("preserves the outgoing phase when destination cwd requires approval", async () => {
 		const targetCwd = TempDir.createSync("@pi-model-persistence-target-");
 		try {

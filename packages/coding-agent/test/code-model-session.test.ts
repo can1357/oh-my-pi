@@ -243,7 +243,7 @@ describe("code-model session phase", () => {
 			getRetryFallbackPrimary: () =>
 				state.current() === state.fallback
 					? {
-							selector: `${state.main.provider}/${state.main.id}`,
+							selector: `${state.coding.provider}/${state.coding.id}`,
 							effort: ThinkingLevel.Low,
 							fallbackEffort: ThinkingLevel.Low,
 						}
@@ -256,6 +256,31 @@ describe("code-model session phase", () => {
 		expect(finished.changed).toBe(true);
 		expect(state.current()).toBe(state.main);
 		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
+
+	it("preserves a manual retry primary selected during the coding phase", async () => {
+		const state = harness();
+		let retryPrimary = `${state.coding.provider}/${state.coding.id}`;
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () =>
+				state.current() === state.fallback
+					? {
+							selector: retryPrimary,
+							effort: ThinkingLevel.Low,
+							fallbackEffort: ThinkingLevel.High,
+						}
+					: undefined,
+		});
+		await session.run("start", state.ctx);
+		state.setCurrent(state.manual, ThinkingLevel.Low);
+		retryPrimary = `${state.manual.provider}/${state.manual.id}`;
+		state.setCurrent(state.fallback, ThinkingLevel.High);
+		state.setFallback();
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(false);
+		expect(state.current()).toBe(state.fallback);
+		expect(state.effort()).toBe(ThinkingLevel.High);
 	});
 
 	it("restores the retry primary when a fallback starts the coding phase", async () => {

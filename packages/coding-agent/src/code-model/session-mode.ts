@@ -237,9 +237,14 @@ export function installCodeModelSession(
 		const latest = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
 		// Legacy phase snapshots predate explicit role attribution.
 		const codingRoleMatches = previous.original.role === undefined || latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE;
+		const retryPrimaryMatchesCoding =
+			retryFallback === undefined ||
+			(previous.coding.selector !== undefined
+				? retryFallback.selector === previous.coding.selector
+				: sameModel(ctx.models.resolve(retryFallback.selector), previous.coding));
 		const codingStateMatches =
 			(codingRoleMatches && sameModel(active, previous.coding) && effort === previous.coding.effort) ||
-			(retryFallbackIsActive(ctx) && effort === fallbackEffort);
+			(retryPrimaryMatchesCoding && retryFallbackIsActive(ctx) && effort === fallbackEffort);
 		if (!options.force && !interrupted && !codingStateMatches && !currentMatches(ctx, previous.original)) {
 			save(undefined);
 			return {
