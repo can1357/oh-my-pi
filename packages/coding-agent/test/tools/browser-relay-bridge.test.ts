@@ -5898,6 +5898,74 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(0);
 	});
 
+	it("does not remove a companion preload after its debugger root detaches", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const pageSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script", "loader-before");
+		const addReply = owner.messages.find(message => message.id === msgSeq);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		const oldRootRemoval = ext
+			.pending("send")
+			.find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")!;
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1);
+		ack(bridge, ext, "detach");
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		const adopterSessionPromise = attachPage(bridge, ext, adopter, adopterConn, 1);
+		await waitFor(() => ext.pending("attach").length === 1);
+		ack(bridge, ext, "attach");
+		await adopterSessionPromise;
+
+		ext.markAcked(oldRootRemoval.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: oldRootRemoval.id, ok: true, result: {} }));
+		await flush();
+
+		// The companion identifier was allocated by the detached root and must
+		// not be sent after a replacement root has adopted the same tab.
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(1);
+	});
+
 	it("retires the application marker after an interrupted preload removal", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

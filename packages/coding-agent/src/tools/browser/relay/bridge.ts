@@ -1150,6 +1150,7 @@ export class RelayBridge {
 		const clientIdentifier = typeof msg.params?.identifier === "string" ? msg.params.identifier : undefined;
 		const script = clientIdentifier ? this.#preloadScript(tab, sessionId, clientIdentifier) : undefined;
 		const params = script && clientIdentifier ? { ...msg.params, identifier: script.rootIdentifier } : msg.params;
+		const rootGeneration = tab.runtimeGeneration;
 		try {
 			await this.#rpc({
 				op: "send",
@@ -1157,7 +1158,10 @@ export class RelayBridge {
 				method: msg.method,
 				params,
 			});
-			if (script?.cleanupRootIdentifier) {
+			// Both identifiers belong to the same debugger root. The primary
+			// removal can race a final-holder detach, so never send its companion
+			// against a replacement root where Chrome may reuse the identifier.
+			if (script?.cleanupRootIdentifier && tab.runtimeGeneration === rootGeneration) {
 				try {
 					await this.#rpc({
 						op: "send",
