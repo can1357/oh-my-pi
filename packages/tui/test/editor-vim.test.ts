@@ -674,4 +674,28 @@ describe("Editor vim mode", () => {
 			expect(cursor(editor)).toEqual({ line: 2, col: 17 });
 		});
 	});
+
+	describe("pointer caret placement", () => {
+		it("rests the caret on a grapheme in normal mode", () => {
+			const editor = vimEditor("abc");
+			editor.render(80);
+			editor.setViewportPaintRow(0);
+
+			// A click far right of the text would land one past the end, which
+			// normal mode forbids: it rests on the last grapheme like `$` does.
+			expect(editor.placeCursorAtViewportCell(1, 40)).toBe(true);
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+		});
+
+		it("may sit one past the end in insert mode", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.setText("abc");
+			editor.render(80);
+			editor.setViewportPaintRow(0);
+
+			expect(editor.placeCursorAtViewportCell(1, 40)).toBe(true);
+			expect(cursor(editor)).toEqual({ line: 0, col: 3 });
+		});
+	});
 });

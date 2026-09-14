@@ -1287,7 +1287,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Mouse Click-to-Focus",
 			description:
-				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and Option-click in the prompt box moves the caret. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
 		},
 	},
 	"tui.tight": {

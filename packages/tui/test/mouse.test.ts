@@ -24,7 +24,25 @@ describe("parseSgrMouse", () => {
 			wheel: null,
 			motion: false,
 			leftClick: true,
+			shift: false,
+			alt: false,
+			ctrl: false,
 		});
+	});
+
+	it("decodes the modifier bits the button code carries", () => {
+		// 4/8/16 are Shift/Alt/Ctrl; an Option-click is an ordinary left press
+		// whose `alt` bit is set, which is what routes it to caret placement.
+		const optionClick = parseSgrMouse("\x1b[<8;5;9M");
+		expect(optionClick?.leftClick).toBe(true);
+		expect(optionClick?.alt).toBe(true);
+		expect(optionClick?.shift).toBe(false);
+		expect(optionClick?.ctrl).toBe(false);
+
+		const ctrlShift = parseSgrMouse("\x1b[<20;5;9M");
+		expect(ctrlShift?.ctrl).toBe(true);
+		expect(ctrlShift?.shift).toBe(true);
+		expect(ctrlShift?.alt).toBe(false);
 	});
 
 	it("decodes releases as non-clicks", () => {
@@ -106,6 +124,9 @@ describe("routeSelectListMouse", () => {
 		wheel: null,
 		motion: false,
 		leftClick: false,
+		shift: false,
+		alt: false,
+		ctrl: false,
 	};
 
 	it("forwards wheel notches", () => {

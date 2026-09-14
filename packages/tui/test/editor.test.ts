@@ -3044,4 +3044,110 @@ describe("Editor component", () => {
 			}
 		});
 	});
+
+	describe("pointer caret placement", () => {
+		/** The box style insets content by its left border plus `paddingX` (2). */
+		const CHROME = 3;
+
+		it("maps a viewport cell onto the buffer column under it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello world");
+			editor.render(80);
+			// Viewport row 10 is the top border, so content row 0 is row 11.
+			editor.setViewportPaintRow(10);
+
+			expect(editor.placeCursorAtViewportCell(11, CHROME + 6)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+		});
+
+		it("picks the row it clicked across a multi-line draft", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("First line\nSecond line\nThird line");
+			editor.render(80);
+			editor.setViewportPaintRow(0);
+
+			expect(editor.placeCursorAtViewportCell(2, CHROME + 7)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 1, col: 7 });
+
+			// Past the row's text lands on its end, not the next row.
+			expect(editor.placeCursorAtViewportCell(2, 60)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 1, col: 11 });
+
+			// Left of the text is the row start, not a negative column.
+			expect(editor.placeCursorAtViewportCell(2, 1)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 1, col: 0 });
+		});
+
+		it("resolves a wrapped row to its own buffer offset, not the line start", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("0123456789ABCDEFGHIJ");
+			// 20 columns leave a 14-column layout, so the token wraps at 14.
+			editor.render(20);
+			editor.setViewportPaintRow(0);
+
+			expect(editor.placeCursorAtViewportCell(2, CHROME + 1)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 15 });
+		});
+
+		it("refuses rows outside its painted ones so other targets stay reachable", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello");
+			editor.render(80);
+			editor.setViewportPaintRow(5);
+
+			// The top border, and the row below the single content row.
+			expect(editor.placeCursorAtViewportCell(5, CHROME + 1)).toBe(false);
+			expect(editor.placeCursorAtViewportCell(7, CHROME + 1)).toBe(false);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
+		});
+
+		it("does nothing until a viewport publishes the editor's row", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello");
+			editor.render(80);
+
+			expect(editor.placeCursorAtViewportCell(1, CHROME + 1)).toBe(false);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
+		});
+
+		it("stays signed so a clipped top row keeps its lower rows addressable", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("First line\nSecond line\nThird line");
+			editor.render(80);
+			// Top border and the first content row scrolled above the viewport,
+			// so viewport row 1 holds the third content row.
+			editor.setViewportPaintRow(-2);
+
+			expect(editor.placeCursorAtViewportCell(1, CHROME + 7)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 2, col: 7 });
+		});
+
+		it("parks the caret on the nearer edge of an atomic token", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.atomicTokenPattern = /\[Image #\d+\]/g;
+			editor.setText("See [Image #1] here");
+			editor.render(80);
+			editor.setViewportPaintRow(0);
+
+			// `[Image #1]` covers columns 4..14; snap to the nearer edge.
+			expect(editor.placeCursorAtViewportCell(1, CHROME + 6)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 4 });
+			expect(editor.placeCursorAtViewportCell(1, CHROME + 13)).toBe(true);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 14 });
+		});
+
+		it("moves only the caret, never reporting a document mutation", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const onChange = vi.fn();
+			editor.setText("Hello world");
+			editor.onChange = onChange;
+			editor.render(80);
+			editor.setViewportPaintRow(0);
+
+			expect(editor.placeCursorAtViewportCell(1, CHROME + 6)).toBe(true);
+
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+			expect(onChange).not.toHaveBeenCalled();
+		});
+	});
 });

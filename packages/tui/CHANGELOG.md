@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Editor.placeCursorAtViewportCell(row, col)` moves the caret to a pointer cell published by its host (`setViewportPaintRow`), resolving wrapped rows to their own buffer offset, clamping to line and atomic-token edges, and reporting no document mutation. `SgrMouseEvent` now decodes the `shift`/`alt`/`ctrl` modifier bits.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
