@@ -217,6 +217,7 @@ export interface ModelPatch {
 	contextPromotionTarget?: string;
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	contextManagement?: Model<Api>["contextManagement"];
 	premiumMultiplier?: number;
 }
 
@@ -246,6 +247,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.remoteCompaction !== undefined) {
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
 	}
+	if (patch.contextManagement !== undefined) result.contextManagement = patch.contextManagement;
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
 	if (patch.cost) {
 		const longContext = patch.cost.longContext ?? base.cost.longContext;

@@ -111,6 +111,12 @@ export interface Usage {
 	totalTokens: number;
 	/** Provider-reported occupied context tokens when the value is authoritative but not a billable input/output bucket. */
 	contextTokens?: number;
+	/**
+	 * `provider` means contextTokens describes provider-private native conversation
+	 * state and is only reusable while that provider remains active.
+	 * undefined = existing transcript semantics.
+	 */
+	contextTokensScope?: "provider";
 	/** Provider-side orchestration tokens, billed but not part of the conversation prompt/cache buckets. */
 	orchestration?: {
 		/** Non-cached orchestration input tokens. */
@@ -1030,6 +1036,11 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+/** Who owns automatic context maintenance for a model. Unset means `host`. */
+export interface ContextManagementConfig {
+	owner: "host" | "provider";
+}
+
 /** Per-million-token rates for one model pricing tier. */
 export interface TokenCost {
 	input: number;
@@ -1202,6 +1213,8 @@ export interface Model<TApi extends Api = Api> {
 	useResponsesLite?: boolean;
 	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */
 	toolMode?: "code_mode_only";
+	/** Who owns automatic context maintenance. Unset means the host may rewrite history. */
+	contextManagement?: ContextManagementConfig;
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
 	contextPromotionTarget?: string;
 	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */

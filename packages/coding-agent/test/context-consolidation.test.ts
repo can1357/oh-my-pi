@@ -181,6 +181,58 @@ describe("Context usage consolidation", () => {
 		await tempDir.remove();
 	});
 
+	it("skips provider-scoped occupancy from a foreign provider", async () => {
+		const tempDir = TempDir.createSync("@foreign-scope-");
+		const { session, sessionManager, agent } = createSession(tempDir);
+
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 1000 } as Message);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "host response" }],
+			api: mockModel.api,
+			provider: mockModel.provider,
+			model: mockModel.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: 10 },
+			timestamp: 2000,
+		} as AssistantMessage);
+		sessionManager.appendMessage({ role: "user", content: "switch", timestamp: 3000 } as Message);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "cursor occupancy" }],
+			api: "cursor-sdk-agent",
+			provider: "cursor-sdk",
+			model: "composer-2.5",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				contextTokens: 47_231,
+				contextTokensScope: "provider",
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 4000,
+		} as AssistantMessage);
+
+		syncSession(session, agent);
+		const breakdown = session.getContextBreakdown();
+		expect(breakdown?.anchored).toBe(true);
+		expect(breakdown?.usedTokens).not.toBe(47_231);
+
+		await tempDir.remove();
+	});
+
 	it("recovers correct anchor after rollback", async () => {
 		const tempDir = TempDir.createSync("@rollback-");
 		const { session, sessionManager, agent } = createSession(tempDir);

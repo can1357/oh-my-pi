@@ -1617,6 +1617,8 @@ export interface ProviderModelConfig {
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */
 	compat?: ModelSpec<Api>["compat"];
+	/** Who owns automatic context maintenance; unset means the host. */
+	contextManagement?: Model["contextManagement"];
 }
 
 /** Extension factory function type. Supports both sync and async initialization. */

@@ -7,7 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
-import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
+import { COMPACTION_CHECK_NONE, SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
@@ -508,5 +508,17 @@ describe("async speculative compaction", () => {
 		maintenance = createMaintenance({ methodOrder: ["snapcompact", "soft"] });
 		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1, CONTEXT_WINDOW)).toBe(false);
 		expect(maintenance.speculationState).toBe("idle");
+	});
+
+	it("skips automatic history rewrite when the model owns context", async () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+		model = { ...defaultModel, contextManagement: { owner: "provider" } };
+		maintenance = createMaintenance();
+		maintenance.maybeStartSpeculativeCompaction(THRESHOLD + 1, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("idle");
+		expect(await maintenance.checkCompaction(assistantMessage("final response", model))).toEqual(COMPACTION_CHECK_NONE);
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD + 1 });
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
 	});
 });

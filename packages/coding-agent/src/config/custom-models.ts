@@ -98,6 +98,7 @@ export function buildCustomModelOverlay(
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
 		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
+		contextManagement: modelDef.contextManagement,
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
@@ -143,6 +144,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		contextPromotionTarget: resolvedModel.contextPromotionTarget,
 		compactionModel: resolvedModel.compactionModel,
 		remoteCompaction: resolvedModel.remoteCompaction,
+		contextManagement: resolvedModel.contextManagement,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);

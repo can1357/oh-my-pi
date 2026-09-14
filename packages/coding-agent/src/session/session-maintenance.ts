@@ -417,6 +417,10 @@ export class SessionMaintenance {
 		);
 	}
 
+	#providerOwnsContextMaintenance(): boolean {
+		return this.#model?.contextManagement?.owner === "provider";
+	}
+
 	/**
 	 * The notebook prompt is deliberately single-shot per rollover window. It is
 	 * injected by the owner at the next normal aside boundary, never by rewriting
@@ -1608,6 +1612,7 @@ export class SessionMaintenance {
 	 */
 	maybeStartSpeculativeCompaction(contextTokens: number, contextWindow: number): void {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return;
+		if (this.#providerOwnsContextMaintenance()) return;
 		const settings = this.#host.settings.getGroup("compaction");
 		if (this.#usesExperimentalContextManagement()) {
 			this.#maybeQueueExperimentalNotesReminder(contextTokens, contextWindow);
@@ -1672,6 +1677,7 @@ export class SessionMaintenance {
 	 */
 	deferThresholdCompactionToSpeculation(contextTokens: number, contextWindow: number): boolean {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return false;
+		if (this.#providerOwnsContextMaintenance()) return false;
 		const settings = this.#host.settings.getGroup("compaction");
 		if (this.#usesExperimentalContextManagement()) return false;
 		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
@@ -1981,6 +1987,7 @@ export class SessionMaintenance {
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
+		if (this.#providerOwnsContextMaintenance()) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -2061,6 +2068,7 @@ export class SessionMaintenance {
 			!context?.willContinue
 		)
 			return;
+		if (this.#providerOwnsContextMaintenance()) return;
 
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
@@ -2115,7 +2123,10 @@ export class SessionMaintenance {
 		// will actually rewrite history; awaiting it on every ordinary tool turn lets
 		// a slow message_end listener leave the TUI "generating" with no provider
 		// request or tool running.
-		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
+		const billedContextTokens =
+			lastAssistant.usage.contextTokensScope === "provider" && lastAssistant.provider !== model?.provider
+				? 0
+				: calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
@@ -2231,6 +2242,7 @@ export class SessionMaintenance {
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
+		if (this.#providerOwnsContextMaintenance()) return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
 		// A turn that produced actionable output means the incomplete-recovery loop
@@ -2570,6 +2582,7 @@ export class SessionMaintenance {
 	 * ({@link runPrePromptCompactionIfNeeded}).
 	 */
 	async #promoteContextModel(): Promise<boolean> {
+		if (this.#providerOwnsContextMaintenance()) return false;
 		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
 		if (!promotionSettings.enabled) return false;
 		const currentModel = this.#model;
@@ -3433,6 +3446,7 @@ export class SessionMaintenance {
 			explicitNewContextRequest?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
+		if (this.#providerOwnsContextMaintenance()) return COMPACTION_CHECK_NONE;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
 		// automatic threshold rollover stays gated exactly as before.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Models with `contextManagement.owner = "provider"` skip automatic history rewrite (compaction, prune, shake, speculation, promotion). Manual `/compact` is unchanged. Provider-scoped `usage.contextTokens` only anchors context stats while that provider remains active.
+
 ## [18.1.21] - 2026-09-14
 
 ### Fixed

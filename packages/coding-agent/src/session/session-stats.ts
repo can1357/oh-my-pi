@@ -1,7 +1,6 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	calculatePromptTokens,
-	findTranscriptUsageAnchor,
 	isTranscriptUsageAnchor,
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -54,6 +53,12 @@ function isUsageWindowBoundary(entry: SessionEntry): boolean {
 		entry.type === "compaction" ||
 		entry.type === "reset_boundary"
 	);
+}
+
+function canUseAnchor(message: AgentMessage, activeModel: Model | undefined): message is AssistantMessage {
+	if (!isTranscriptUsageAnchor(message)) return false;
+	if (message.usage.contextTokensScope !== "provider") return true;
+	return activeModel !== undefined && message.provider === activeModel.provider;
 }
 
 /** Model calls belonging to the same active transcript window as `agent.state.messages`. */
@@ -220,7 +225,7 @@ export class SessionStatsTracker {
 		let anchorEntry: SessionMessageEntry | undefined;
 		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
 			const entry = branchEntries[index];
-			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+			if (entry.type !== "message" || !canUseAnchor(entry.message, this.#host.model())) continue;
 			anchorEntry = entry;
 			break;
 		}
@@ -270,20 +275,22 @@ export class SessionStatsTracker {
 		}
 
 		if (!anchored && !pending && branchEntries.length === 0) {
-			const liveAnchor = findTranscriptUsageAnchor(activeMessages);
-			if (liveAnchor) {
+			for (let index = activeMessages.length - 1; index >= 0; index--) {
+				const message = activeMessages[index];
+				if (!canUseAnchor(message, this.#host.model())) continue;
 				const nonMessageTokens =
-					liveAnchor.message.contextSnapshot?.nonMessageTokens ??
+					message.contextSnapshot?.nonMessageTokens ??
 					computeNonMessageTokens(this.#host.session, this.#tokenizer);
 				usedTokens = this.#anchoredUsedTokens(
-					correctedPromptTokens(liveAnchor.message),
+					correctedPromptTokens(message),
 					nonMessageTokens,
 					currentNonMessageTokens,
-					liveAnchor.index + 1,
+					index + 1,
 					activeMessages,
 					pendingTokens,
 				);
 				anchored = true;
+				break;
 			}
 		}
 		if (!anchored) {
@@ -348,7 +355,7 @@ export class SessionStatsTracker {
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
 			const entry = branchEntries[index];
-			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+			if (entry.type !== "message" || !canUseAnchor(entry.message, this.#host.model())) continue;
 			const assistant = entry.message;
 
 			if (!assistant.contextSnapshot) {

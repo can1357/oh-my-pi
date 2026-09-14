@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ContextManagementConfig` (`Model.contextManagement.owner`) and `Usage.contextTokensScope` so provider-private occupancy cannot drive host auto-maintenance or another provider's transcript anchor.
+
 ## [18.1.20] - 2026-09-13
 
 ### Fixed
