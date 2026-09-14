@@ -8,8 +8,18 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
+import * as os from "node:os";
 import { credentialRetirementFor, planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, getAgentDbPath, logger, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$envExact,
+	formatDuration,
+	getAgentDbPath,
+	logger,
+	sanitizeText,
+	untilAborted,
+	withTimeout,
+} from "@oh-my-pi/pi-utils";
 import {
 	copyOAuthCredentialIdentity,
 	isAutomaticDisableCause,
@@ -390,6 +400,47 @@ export function credentialAccountLabel(
 	const org = identity.orgName ?? identity.orgId;
 	if (!org || org === base) return mask(base);
 	return `${mask(base)} · ${mask(org)}`;
+}
+
+/** Bounds, in terminal columns, for provider-controlled text inside a {@link AIError.ModelEntitlementError} message. */
+const ENTITLEMENT_DIAGNOSTIC_LABEL_MAX = 60;
+const ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX = 80;
+const ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX = 200;
+
+/** The assembled verdict: one terminal paragraph, not the sum of its bounded parts. */
+const ENTITLEMENT_DIAGNOSTIC_MESSAGE_MAX = 600;
+/** Shared budget for entitlement diagnostics, snapshot revalidation, and asynchronous bearer matching. */
+const ENTITLEMENT_LOOKUP_BUDGET_MS = 2_000;
+/** Accounts named in a verdict before the rest are counted; large broker pools must not overflow the renderer. */
+const ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX = 8;
+
+/** Grapheme segmentation so a cut never lands inside a joined emoji sequence. */
+const DIAGNOSTIC_GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * One line of provider-controlled text, safe for a terminal error renderer and
+ * no wider than `maxColumns`. Measured in display columns (wide CJK glyphs and
+ * emoji count double) and cut at a grapheme cluster, so a zero-width joiner
+ * sequence is kept or dropped whole rather than left as a broken fragment.
+ */
+function boundedDiagnostic(text: string, maxColumns: number): string {
+	// Identity fields reach here from provider and extension data and end up in a
+	// persisted transcript, so an absolute home path is replaced before bounding.
+	// `pi-ai` cannot reach coding-agent's `shortenEmbeddedPaths`, and this is the
+	// single place every entitlement label and cause passes through.
+	const home = os.homedir();
+	const withoutHome = home.length > 1 ? text.replaceAll(home, "~") : text;
+	const clean = sanitizeText(withoutHome).replace(/\s+/g, " ").trim();
+	if (Bun.stringWidth(clean) <= maxColumns) return clean;
+	let kept = "";
+	let width = 0;
+	for (const { segment } of DIAGNOSTIC_GRAPHEMES.segment(clean)) {
+		const glyphWidth = Bun.stringWidth(segment);
+		if (width + glyphWidth > maxColumns - 1) break;
+		kept += segment;
+		width += glyphWidth;
+	}
+	return `${kept}…`;
 }
 
 /**
@@ -2084,6 +2135,7 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
+		this.#remapIndexedCredentialState(provider, current, credentials);
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -2100,6 +2152,56 @@ export class AuthStorage {
 			this.#data.set(provider, credentials);
 		}
 		this.#bumpGeneration("credentials");
+	}
+
+	/**
+	 * In-memory backoff and session stickiness use a credential's position in the provider
+	 * array. A reload that removes or reorders rows — a refreshed broker
+	 * snapshot, a sibling process's login — would otherwise leave every block
+	 * attached to whichever credential now occupies its old index, and an
+	 * exhaustion scan could charge one account's model denial to an untried
+	 * sibling. Carry each entry over by credential id and drop the ones whose
+	 * row is gone; persisted blocks are keyed by id already.
+	 */
+	#remapIndexedCredentialState(
+		provider: string,
+		previous: readonly StoredCredential[],
+		next: readonly StoredCredential[],
+	): void {
+		if (previous.every((entry, index) => next[index]?.id === entry.id)) return;
+		const nextIndexById = new Map(next.map((entry, index) => [entry.id, index] as const));
+		// Keys are `provider:type` or `provider:type\0scope`; match per type so a
+		// provider id that is a prefix of another (managed MCP ids embed URLs)
+		// cannot claim the other's maps.
+		const providerKeys = (["oauth", "api_key"] as const).map(type => this.#getProviderTypeKey(provider, type));
+		const belongs = (backoffKey: string): boolean =>
+			providerKeys.some(key => backoffKey === key || backoffKey.startsWith(`${key}\0`));
+		const remap = <T>(maps: Map<string, Map<number, T>>): void => {
+			for (const [backoffKey, byIndex] of maps) {
+				if (!belongs(backoffKey)) continue;
+				const remapped = new Map<number, T>();
+				for (const [index, value] of byIndex) {
+					const id = previous[index]?.id;
+					const nextIndex = id === undefined ? undefined : nextIndexById.get(id);
+					if (nextIndex !== undefined) remapped.set(nextIndex, value);
+				}
+				if (remapped.size === 0) maps.delete(backoffKey);
+				else maps.set(backoffKey, remapped);
+			}
+		};
+		remap(this.#credentialBackoff);
+		remap(this.#credentialBackoffProviderTimed);
+		remap(this.#credentialBackoffProbeAfter);
+		const sessions = this.#sessionLastCredential.get(provider);
+		if (sessions) {
+			for (const [sessionId, value] of sessions) {
+				const id = previous[value.index]?.id;
+				const index = id === undefined ? undefined : nextIndexById.get(id);
+				if (index === undefined || next[index]?.credential.type !== value.type) sessions.delete(sessionId);
+				else value.index = index;
+			}
+			if (sessions.size === 0) this.#sessionLastCredential.delete(provider);
+		}
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -2350,6 +2452,32 @@ export class AuthStorage {
 			) {
 				blockedUntil = persistedScopedBlockedUntil;
 			}
+		}
+		return blockedUntil;
+	}
+
+	/**
+	 * Block expiry written under exactly `blockScope` — in memory or persisted —
+	 * ignoring the unscoped provider key that
+	 * {@link AuthStorage.#getCredentialBlockedUntil} always folds in. Answers
+	 * "was this credential blocked for this scope", not "is it usable now".
+	 */
+	#getScopedCredentialBlockedUntil(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		blockScope: string,
+	): number | undefined {
+		let blockedUntil = this.#getCredentialBlockedUntilForKey(
+			this.#toScopedBackoffKey(providerKey, blockScope),
+			credentialIndex,
+			Date.now(),
+		);
+		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
+		if (credentialId === undefined) return blockedUntil;
+		const persistedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
+		if (persistedBlockedUntil !== undefined && (blockedUntil === undefined || persistedBlockedUntil > blockedUntil)) {
+			blockedUntil = persistedBlockedUntil;
 		}
 		return blockedUntil;
 	}
@@ -7451,12 +7579,16 @@ export class AuthStorage {
 		}
 	}
 
+	#oauthCredentialMatchesApiKey(credential: OAuthCredential, apiKey: string): boolean {
+		if (credential.access === apiKey) return true;
+		return this.#extractStructuredApiKeyToken(apiKey) === credential.access;
+	}
+
 	async #credentialMatchesApiKey(credential: AuthCredential, apiKey: string): Promise<boolean> {
 		if (credential.type === "api_key") {
 			return (await this.#configValueResolver(credential.key)) === apiKey;
 		}
-		if (credential.access === apiKey) return true;
-		return this.#extractStructuredApiKeyToken(apiKey) === credential.access;
+		return this.#oauthCredentialMatchesApiKey(credential, apiKey);
 	}
 
 	async invalidateCredentialMatching(
@@ -7505,6 +7637,195 @@ export class AuthStorage {
 		const latestRows = this.#store.listAuthCredentials(provider);
 		this.#loadStoredCredentials(provider, latestRows);
 		return true;
+	}
+
+	/**
+	 * The terminal verdict for an exact model-entitlement denial (Codex ChatGPT
+	 * account, Cursor plan) that {@link AuthStorage.rotateSessionCredential}
+	 * could not rotate away from: every credential of the provider is now
+	 * blocked for the model. Names the accounts that were denied or are parked
+	 * for another reason, the accounts torn down recently, and the way back in,
+	 * so the user is not left with the provider's bare sentence after a silent
+	 * fall-through to whichever sibling account remained.
+	 *
+	 * `undefined` for any other error, when no request model is known, and
+	 * whenever the stored pool is not proven exhausted: the failed bearer
+	 * (`options.apiKey`) must resolve to a stored credential that carries the
+	 * model-scope block — a runtime/config override, an env key, or a bearer a
+	 * peer has since refreshed resolves to nothing, and a credential parked by
+	 * an unrelated backoff was never denied this model — and no credential of
+	 * the same type may remain unblocked, since that is the pool
+	 * re-resolution rotates within (an OAuth pool is never abandoned for a
+	 * stored API key).
+	 *
+	 * The verdict becomes an assistant `errorMessage`, so every part a provider
+	 * controls — identities, disable causes, the raw Cursor sentence — is
+	 * sanitized and bounded here. The best-effort tombstone lookup, snapshot
+	 * revalidation, and asynchronous bearer matching share `options.signal`
+	 * plus a short budget: diagnostic work must not delay an error we already know.
+	 */
+	async modelEntitlementError(
+		provider: string,
+		modelId: string | undefined,
+		error: unknown,
+		options?: { apiKey?: string; signal?: AbortSignal },
+	): Promise<AIError.ModelEntitlementError | undefined> {
+		if (typeof modelId !== "string" || options?.apiKey === undefined) return undefined;
+		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
+		const exactCodexModelPolicy =
+			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, modelId);
+		if (!exactCodexModelPolicy && !AIError.isCursorPlanAccountPolicyError(error, provider)) return undefined;
+		const modelPolicyScope = modelAccountPolicyBlockScope(provider, modelId);
+		if (modelPolicyScope === undefined) return undefined;
+
+		// The verdict is terminal, so it is judged against the pool as it is now,
+		// not a broker client's cached snapshot: another client may have signed in
+		// or unblocked a sibling since. One bounded budget covers this, the
+		// tombstone lookup, and any API-key resolution needed to match the bearer.
+		// Failure to refresh or match cannot prove exhaustion.
+		const deadline = performance.now() + ENTITLEMENT_LOOKUP_BUDGET_MS;
+		const budget = AbortSignal.timeout(ENTITLEMENT_LOOKUP_BUDGET_MS);
+		const lookupSignal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
+		if (lookupSignal.aborted) return undefined;
+		// History is re-read against the refreshed pool, so a sibling signed out
+		// while this ran is named in the verdict rather than silently dropped.
+		const {
+			history: disabled,
+			activeAccounts,
+			revalidated,
+			historyRechecked,
+		} = await this.readRevalidatedDisabledHistory({
+			provider,
+			signal: lookupSignal,
+			deadlineMs: deadline,
+			// A store with no tombstone hook, or a broker predating the endpoint,
+			// answers an empty list that is indistinguishable from "nothing was
+			// signed out". This verdict is terminal and names who was signed out,
+			// so it must not rest on an absence the store cannot vouch for:
+			// reject the unsupported case instead of reading it as evidence.
+			requireSupported: true,
+		});
+		// An unreadable history, an unrefreshed pool, or a history the refresh
+		// outran cannot prove exhaustion: the verdict names accounts from the
+		// pool, so both sides have to come from the same revalidated snapshot.
+		if (disabled === undefined || !revalidated || !historyRechecked) return undefined;
+
+		// Evidence that this request ran on the stored pool and was refused
+		// there: the failed bearer resolves to a stored credential blocked for
+		// exactly this model. The folding lookup would also accept an unrelated
+		// global backoff, which is not a denial.
+		// OAuth has precedence over stored API keys during resolution. Match its
+		// bearer synchronously so an earlier !command row cannot run unrelated
+		// work or hold up an already-known OAuth denial.
+		const remainingMs = Math.ceil(deadline - performance.now());
+		if (remainingMs <= 0 || lookupSignal.aborted) return undefined;
+		const apiKey = options.apiKey;
+		const oauthIndex = this.#getStoredCredentials(provider).findIndex(
+			({ credential }) => credential.type === "oauth" && this.#oauthCredentialMatchesApiKey(credential, apiKey),
+		);
+		let failed: { type: AuthCredential["type"]; index: number } | undefined;
+		if (oauthIndex !== -1) {
+			failed = { type: "oauth", index: oauthIndex };
+		} else {
+			try {
+				failed = await withTimeout(
+					this.#resolveCredentialTarget(provider, undefined, {
+						apiKey: options.apiKey,
+						signal: lookupSignal,
+					}),
+					remainingMs,
+					"Credential lookup timed out",
+					lookupSignal,
+				);
+			} catch (lookupError) {
+				logger.debug("Credential lookup failed; withholding the entitlement verdict", {
+					provider: providerIdForDisplay(provider),
+					error: String(lookupError),
+				});
+				return undefined;
+			}
+		}
+		if (!failed || lookupSignal.aborted || performance.now() >= deadline) return undefined;
+		const failedProviderKey = this.#getProviderTypeKey(provider, failed.type);
+		if (
+			this.#getScopedCredentialBlockedUntil(provider, failedProviderKey, failed.index, modelPolicyScope) ===
+			undefined
+		) {
+			return undefined;
+		}
+
+		// Both sentences are reconstructed, never echoed: the classifier matches its
+		// markers anywhere in the response, so the rest of the body is arbitrary
+		// provider or proxy context that can carry credentials and home paths.
+		//
+		// The model id named here is the caller's `modelId`, not the provider's
+		// captured `deniedModel`. `isCodexChatGPTAccountPolicyError` already proved
+		// the denial refers to this request, and it matches on the final path
+		// component alone — so a denial quoting `/home/alice/gpt-5.3-codex`
+		// classifies identically while the path never reaches the rendered
+		// sentence, the persisted error, or the session transcript.
+		const head = exactCodexModelPolicy
+			? AIError.codexChatGPTAccountPolicyMessage(boundedDiagnostic(modelId, ENTITLEMENT_DIAGNOSTIC_SENTENCE_MAX))
+			: `This ${provider} plan does not include the requested model.`;
+
+		const nowMs = Date.now();
+		const tried: string[] = [];
+		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
+			// Rotation and re-resolution stay within the failed credential's type.
+			if (credential.type !== failed.type) continue;
+			const label =
+				credential.type === "oauth"
+					? boundedDiagnostic(credentialAccountLabel(credential), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX)
+					: "API key";
+			if (
+				this.#getScopedCredentialBlockedUntil(provider, failedProviderKey, index, modelPolicyScope) !== undefined
+			) {
+				tried.push(`${label} denied`);
+				continue;
+			}
+			// Rotation also skips siblings parked by a usage limit or backoff.
+			const routing = this.#credentialBlockRouting(provider, credential.type, modelId, modelPolicyScope);
+			const blockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				failedProviderKey,
+				index,
+				routing.siblingBlockScopes,
+			);
+			if (blockedUntil === undefined) {
+				// An untried sibling is still reachable: a mid-flight peer rotation
+				// may have left nothing blocked this time, but this is not exhaustion.
+				return undefined;
+			}
+			tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
+		}
+		const named = tried.slice(0, ENTITLEMENT_DIAGNOSTIC_ACCOUNTS_MAX);
+		const unnamed = tried.length - named.length;
+		const parts = [
+			head,
+			`No other signed-in ${provider} account can serve it: ${named.join(", ")}${unnamed > 0 ? `, and ${unnamed} more` : ""}.`,
+		];
+
+		// History and identities come from the same revalidated snapshot.
+		const recentlySignedOut = coalesceDisabledCredentialWarnings(
+			disabled.filter(summary => isActionableCredentialDisable(summary, activeAccounts)),
+		)
+			.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
+			.slice(0, 3)
+			.map(summary => {
+				const ago =
+					summary.disabledAtMs !== undefined ? `, ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+				const label = boundedDiagnostic(credentialAccountLabel(summary), ENTITLEMENT_DIAGNOSTIC_LABEL_MAX);
+				return `${label} (${boundedDiagnostic(summarizeDisableCause(summary.cause), ENTITLEMENT_DIAGNOSTIC_CAUSE_MAX)}${ago})`;
+			});
+		if (recentlySignedOut.length > 0) parts.push(`Recently signed out: ${recentlySignedOut.join(", ")}.`);
+		// Per-field bounds do not bound their sum: eight named accounts plus three
+		// recent sign-outs plus a 200-column model name assemble into a line that
+		// can pass every individual limit and still overflow the terminal. Bound
+		// the assembled body — but append the remedy afterwards, because it is the
+		// one sentence this error exists to deliver and truncation eats the tail.
+		const remedy = `Sign in with /login ${provider} using an account entitled to this model.`;
+		const body = boundedDiagnostic(parts.join(" "), ENTITLEMENT_DIAGNOSTIC_MESSAGE_MAX);
+		return new AIError.ModelEntitlementError(`${body} ${remedy}`, provider, modelId);
 	}
 
 	/**
@@ -7740,6 +8061,13 @@ export class AuthStorage {
 					apiKey: previousKey,
 				});
 				if (!switched) {
+					// A model no account is entitled to is terminal for this request:
+					// re-resolving would only hand back an already-denied bearer.
+					const exhausted = await this.modelEntitlementError(provider, modelId, error, {
+						apiKey: previousKey,
+						signal,
+					});
+					if (exhausted) throw exhausted;
 					const status = AIError.status(error);
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 					// Preserve no-sibling quota backoff instead of re-resolving an

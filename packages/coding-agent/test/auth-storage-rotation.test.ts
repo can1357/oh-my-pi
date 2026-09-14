@@ -236,6 +236,9 @@ describe("AuthStorage account rotation", () => {
 					rotationTargets.push(options?.apiKey);
 					return false;
 				},
+				async modelEntitlementError() {
+					return undefined;
+				},
 			},
 		};
 		const resolver = createApiKeyResolver(registry, "openai-codex", {
@@ -254,6 +257,40 @@ describe("AuthStorage account rotation", () => {
 		expect(rotationTargets).toEqual(["stale-access"]);
 	});
 
+	test("API key resolver stops instead of re-resolving when the entitlement lookup is aborted", async () => {
+		const controller = new AbortController();
+		let resolutions = 0;
+		const registry: Parameters<typeof createApiKeyResolver>[0] = {
+			async getApiKeyForProvider() {
+				resolutions++;
+				return "should-not-be-reached";
+			},
+			authStorage: {
+				async rotateSessionCredential() {
+					return false;
+				},
+				async modelEntitlementError() {
+					// The real lookup awaits broker history and reports an abort as
+					// `undefined` rather than throwing.
+					controller.abort();
+					return undefined;
+				},
+			},
+		};
+		const resolver = createApiKeyResolver(registry, "openai-codex", { sessionId: "aborted-entitlement" });
+
+		await expect(
+			resolver({
+				lastChance: true,
+				error: Object.assign(new Error("403 model not entitled"), { status: 403 }),
+				previousKey: "denied-key",
+				signal: controller.signal,
+			}),
+		).rejects.toThrow();
+		// A cancelled turn must not start another credential resolution.
+		expect(resolutions).toBe(0);
+	});
+
 	test("API key resolver stops when a usage-limit rotation has no unblocked sibling", async () => {
 		const resolvedKeys = ["quota-blocked-B", "quota-blocked-A"];
 		const registry: Parameters<typeof createApiKeyResolver>[0] = {
@@ -263,6 +300,9 @@ describe("AuthStorage account rotation", () => {
 			authStorage: {
 				async rotateSessionCredential() {
 					return false;
+				},
+				async modelEntitlementError() {
+					return undefined;
 				},
 			},
 		};

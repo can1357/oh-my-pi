@@ -39,6 +39,7 @@
 - Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — when it happens, and again at startup until that account signs in — instead of silently degrading to a sibling account; SDK consumers get the same replay from `session.getDisabledCredentialNotices()` ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - `omp usage` now lists accounts the auth layer disabled, and `--redact` keeps distinct providers distinct in both usage and history JSON instead of collapsing them onto one masked key ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 - Copilot terminal auth errors no longer log out the entire provider after the failed request has settled, preserving a concurrent re-login and unrelated accounts ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- A request for a model no signed-in Codex or Cursor account is entitled to now fails with which accounts were tried, who was signed out recently, and the `/login` step, instead of the provider's bare denial ([#11913](https://github.com/can1357/oh-my-pi/pull/11913) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.2.1] - 2026-09-15
 
