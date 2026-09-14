@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Requests now carry the git branch their session recorded — the header's `gitBranch` or a later `git_branch` entry — in a new `messages.git_branch` column, so spend can be sliced by branch. An existing stats database gains the column on the next start.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

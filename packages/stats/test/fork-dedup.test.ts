@@ -82,6 +82,7 @@ function makeStat(sessionFile: string, entryId: string, timestamp: number, premi
 		sessionFile,
 		entryId,
 		folder: "/tmp/fork-dedup",
+		gitBranch: null,
 		model: "gpt-5.4",
 		provider: "openai",
 		api: "openai-responses",

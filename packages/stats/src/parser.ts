@@ -221,6 +221,7 @@ function extractStats(
 	folder: string,
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
+	currentGitBranch: string | null,
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const msg = entry.message as AssistantMessage;
@@ -272,6 +273,7 @@ function extractStats(
 		sessionFile,
 		entryId: entry.id,
 		folder,
+		gitBranch: currentGitBranch,
 		model: msg.model,
 		provider: msg.provider,
 		api: msg.api,
@@ -291,6 +293,7 @@ function extractModelUsageStats(
 	sessionFile: string,
 	folder: string,
 	entry: SessionModelUsageEntry,
+	currentGitBranch: string | null,
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
@@ -315,6 +318,7 @@ function extractModelUsageStats(
 			},
 		},
 		undefined,
+		currentGitBranch,
 		agentType,
 	);
 }
@@ -454,6 +458,47 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
+
+/**
+ * Structural view of the two entry shapes that record a branch. Session JSONL
+ * is outside-controlled data (older versions, crash-truncated turns, foreign
+ * producers), so every field stays `unknown` and is re-validated at read time —
+ * same boundary-cast idiom as the trace builder's `EntryView`.
+ */
+interface BranchEntryView {
+	type?: string;
+	/** `session` header field. */
+	gitBranch?: unknown;
+	/** `custom` entry discriminator. */
+	customType?: string;
+	/** `custom` entry payload. */
+	data?: { gitBranch?: unknown };
+}
+
+/**
+ * Branch recorded by one transcript entry, or `undefined` when the entry
+ * records none: the session header's start-of-session `gitBranch`, or the
+ * payload of the `git_branch` custom entry omp appends when the branch changes
+ * mid-session.
+ */
+function gitBranchFromEntry(entry: SessionEntry): string | null | undefined {
+	// Boundary cast: persisted JSONL entries are re-validated field-by-field below.
+	const view = entry as BranchEntryView;
+	if (view.type === "session") return typeof view.gitBranch === "string" ? view.gitBranch : null;
+	if (view.type !== "custom" || view.customType !== "git_branch") return undefined;
+	const value = view.data?.gitBranch;
+	return typeof value === "string" || value === null ? value : undefined;
+}
+
+/** Latest branch recorded in a transcript prefix; see {@link gitBranchFromEntry}. */
+function scanLastGitBranch(bytes: Uint8Array): string | null {
+	let currentGitBranch: string | null = null;
+	visitSessionEntriesLenient(bytes, entry => {
+		const recorded = gitBranchFromEntry(entry);
+		if (recorded !== undefined) currentGitBranch = recorded;
+	});
+	return currentGitBranch;
+}
 /**
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
@@ -469,6 +514,11 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
  * for the latest service-tier value before parsing the unprocessed tail.
  * The scan only keeps the current tier and does not materialize prefix
  * entries, preserving offset-based memory behavior for large sessions.
+ *
+ * Branch carry-over: `currentGitBranch` is session-scoped the same way — the
+ * header's `gitBranch` overridden by later `git_branch` entries — and rides the
+ * same prefix scan, so an incremental sync that resumes past the header still
+ * stamps each new request with the branch it ran on.
  */
 export interface ParseSessionResult {
 	stats: MessageStatsInput[];
@@ -500,10 +550,14 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
 	let currentServiceTier: ServiceTierByFamily | undefined;
+	let currentGitBranch: string | null = null;
 	if (start > 0) {
 		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
+		currentGitBranch = scanLastGitBranch(bytes.subarray(0, start));
 	}
 	for (const entry of entries) {
+		const recordedBranch = gitBranchFromEntry(entry);
+		if (recordedBranch !== undefined) currentGitBranch = recordedBranch;
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			continue;
@@ -522,12 +576,12 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			continue;
 		}
 		if (isModelUsage(entry)) {
-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, currentGitBranch, agentType);
 			if (modelUsageStats) stats.push(modelUsageStats);
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, currentGitBranch, agentType);
 			if (msgStats) stats.push(msgStats);
 			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
 			// Link assistant's responding model back to the user message it answered.

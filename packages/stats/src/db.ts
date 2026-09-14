@@ -208,6 +208,7 @@ export async function initDb(): Promise<Database> {
 			cost_no_cache_input REAL,
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
+			git_branch TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -307,6 +308,14 @@ export async function initDb(): Promise<Database> {
 		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
 	);
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
+	// `git_branch` rides the agent_type idiom: a brand-new table gets it from
+	// CREATE TABLE, a pre-existing one gets the column here. Rows ingested
+	// before it stay NULL ("branch unknown", not a branch named ""), and the
+	// next sync of each session fills them: the parser re-reads the header and
+	// any `git_branch` entries from the transcript prefix on every pass.
+	if (!messageColumns.some(column => column.name === "git_branch")) {
+		db.run("ALTER TABLE messages ADD COLUMN git_branch TEXT");
+	}
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
 	// already produced the new schema, but we want a clean wipe + re-ingest.
@@ -637,14 +646,15 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
 			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
-			cost_unpriced, agent_type
+			cost_unpriced, agent_type, git_branch
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
 		)
 		ON CONFLICT(session_file, entry_id) DO UPDATE SET
+			git_branch = excluded.git_branch,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
@@ -686,6 +696,7 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 				noCacheInputCost,
 				unpriced ? 1 : 0,
 				s.agentType,
+				s.gitBranch,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp).
 				s.entryId,
@@ -1203,6 +1214,7 @@ function rowToMessageStats(row: any): MessageStats {
 		sessionFile: row.session_file,
 		entryId: row.entry_id,
 		folder: row.folder,
+		gitBranch: row.git_branch ?? null,
 		model: row.model,
 		provider: row.provider,
 		api: row.api,

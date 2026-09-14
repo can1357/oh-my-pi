@@ -41,6 +41,14 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	/**
+	 * Checked-out git branch when the session started, read through the native
+	 * VCS layer — never by spawning `git`. Absent outside a git checkout, on a
+	 * detached HEAD, and on sessions written before this field existed. A branch
+	 * switched mid-session is appended as a `git_branch` custom entry
+	 * (`GIT_BRANCH_CUSTOM_TYPE` in `./git-branch`) instead of rewriting this.
+	 */
+	gitBranch?: string;
+	/**
 	 * Additional workspace directories beyond `cwd` (multi-root workspace).
 	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
 	 * See {@link SessionWorkspace} in `./session-workspace`.

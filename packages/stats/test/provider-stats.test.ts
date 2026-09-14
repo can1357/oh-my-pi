@@ -38,6 +38,7 @@ function message(overrides: Partial<MessageStats> & { entryId: string }): Messag
 	return {
 		sessionFile: "/tmp/session.jsonl",
 		folder: "/tmp/project",
+		gitBranch: null,
 		model: "model-x",
 		provider: "prov-a",
 		api: "openai-completions",

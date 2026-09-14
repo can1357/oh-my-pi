@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Session headers now record the checked-out git branch as `gitBranch`, read through the native VCS layer (never a `git` subprocess); a branch switched mid-session is appended as a `git_branch` custom entry at the next turn boundary, so session logs say which branch each turn's work ran on.
+
 ## [18.1.21] - 2026-09-14
 
 ### Fixed

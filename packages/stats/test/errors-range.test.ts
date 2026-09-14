@@ -13,6 +13,7 @@ function makeError(timestamp: number, entryId: string): MessageStats {
 		sessionFile: "/tmp/errors-range-session.jsonl",
 		entryId,
 		folder: "/tmp/project",
+		gitBranch: null,
 		model: "gpt-5.4",
 		provider: "openai-codex",
 		api: "openai-codex-responses",

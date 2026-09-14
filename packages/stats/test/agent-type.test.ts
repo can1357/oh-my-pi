@@ -23,6 +23,7 @@ function makeMessage(entryId: string, agentType: AgentType, tokens: Tokens): Mes
 		sessionFile: `/tmp/${agentType}.jsonl`,
 		entryId,
 		folder: "/tmp/project",
+		gitBranch: null,
 		model: "claude-sonnet-4.5",
 		provider: "anthropic",
 		api: "anthropic-messages",

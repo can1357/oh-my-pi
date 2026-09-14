@@ -15,6 +15,14 @@ export interface MessageStats {
 	entryId: string;
 	/** Folder/project path (extracted from session filename) */
 	folder: string;
+	/**
+	 * Checked-out git branch recorded for this request: the session header's
+	 * `gitBranch` (the branch the session started on), or the newest
+	 * `git_branch` custom entry after a mid-session switch. `null` when the
+	 * harness recorded none (not a checkout, detached HEAD, or a session
+	 * written before the field existed).
+	 */
+	gitBranch: string | null;
 	/** Model ID */
 	model: string;
 	/** Provider name */
@@ -76,6 +84,8 @@ export interface SessionHeader {
 	id: string;
 	timestamp: string;
 	cwd: string;
+	/** Branch the session started on; absent on sessions written before omp recorded it. */
+	gitBranch?: string;
 	title?: string;
 }
 

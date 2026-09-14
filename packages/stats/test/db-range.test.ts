@@ -12,6 +12,7 @@ function makeMessage(timestamp: number, entryId: string, folder = "/tmp/project"
 		sessionFile: "/tmp/session.jsonl",
 		entryId,
 		folder,
+		gitBranch: null,
 		model: "gpt-5.4",
 		provider: "openai-codex",
 		api: "openai-codex-responses",

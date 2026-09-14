@@ -3120,6 +3120,10 @@ export class AgentSession {
 		}
 
 		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
+		// Record a branch switched since the last turn (one native HEAD read per
+		// turn, never a `git` subprocess) so the journal shows which branch each
+		// turn's work actually ran on.
+		if (event.type === "turn_end") this.sessionManager.recordGitBranchIfChanged();
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
 		// This must happen at turn_end (not message_end) because onInvoked handlers
 		// run during tool execution, which happens between message_end and turn_end.

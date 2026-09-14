@@ -22,6 +22,7 @@ import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
+import { type GitBranchEntryData, GIT_BRANCH_CUSTOM_TYPE, readGitBranch, recordedGitBranch } from "./git-branch";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -476,6 +477,13 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
  */
 export class SessionManager {
 	#cwd: string;
+	/**
+	 * Branch last recorded for this session: the header's value at session start,
+	 * or the newest `git_branch` entry after a mid-session switch. `null` means
+	 * "recorded as not on a branch" — a session that never recorded anything
+	 * starts here too, so its first turn records the branch it is actually on.
+	 */
+	#gitBranch: string | null = null;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
 	#fallbackRuntimeOnly = false;
@@ -1117,12 +1125,15 @@ export class SessionManager {
 		this.#hasTitleSlot = true;
 
 		const timestamp = nowIso();
+		const gitBranch = readGitBranch(this.#cwd);
+		this.#gitBranch = gitBranch ?? null;
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
 			id: this.#sessionId,
 			timestamp,
 			cwd: this.#cwd,
+			gitBranch,
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 		};
@@ -1166,6 +1177,7 @@ export class SessionManager {
 
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
 		this.#header = header;
+		this.#gitBranch = recordedGitBranch(header, entries);
 		this.#entries = entries;
 		this.#sessionId = header.id;
 		this.#sessionName = header.title;
@@ -1515,6 +1527,8 @@ export class SessionManager {
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		const gitBranch = readGitBranch(this.#cwd);
+		this.#gitBranch = gitBranch ?? null;
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1523,6 +1537,7 @@ export class SessionManager {
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: this.#cwd,
+			gitBranch,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
@@ -2470,6 +2485,25 @@ export class SessionManager {
 	}
 
 	/**
+	 * Record the checked-out branch when it changed since the last recorded one.
+	 *
+	 * The header carries the branch the session started on; a later `git
+	 * checkout`/`git switch` (or a `moveTo` into another worktree) would
+	 * otherwise be invisible to log readers. Callers invoke this at a turn
+	 * boundary, where one native HEAD read is negligible and the branch is
+	 * guaranteed to be re-read once per turn rather than once per request.
+	 *
+	 * @returns the appended entry id, or `null` when the branch was unchanged.
+	 */
+	recordGitBranchIfChanged(): string | null {
+		const branch = readGitBranch(this.#cwd) ?? null;
+		if (branch === this.#gitBranch) return null;
+		this.#gitBranch = branch;
+		const data: GitBranchEntryData = { gitBranch: branch };
+		return this.appendCustomEntry(GIT_BRANCH_CUSTOM_TYPE, data);
+	}
+
+	/**
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
 	 * outputs). Use sparingly.
 	 */
@@ -2755,6 +2789,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.#cwd,
+			gitBranch: readGitBranch(this.#cwd),
 			title: this.#sessionName,
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
@@ -2777,6 +2812,9 @@ export class SessionManager {
 		}
 
 		this.#header = header;
+		// The header carries the branch read just now, so it wins over any
+		// `git_branch` entry inherited from the copied path.
+		this.#gitBranch = header.gitBranch ?? null;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
 		this.#sessionName = header.title;
@@ -2838,6 +2876,7 @@ export class SessionManager {
 			id,
 			timestamp,
 			cwd: path.resolve(cwd),
+			gitBranch: readGitBranch(cwd),
 		};
 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
 		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
