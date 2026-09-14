@@ -25,7 +25,7 @@ import {
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
+import { getKeybindings, type Keybinding, replaceTabs, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -37,6 +37,7 @@ import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "../config/keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
+import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../edit/normalize";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -58,7 +59,7 @@ import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
-import { formatBytes } from "../tools/render-utils";
+import { formatBytes, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../tools/render-utils";
 import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
@@ -304,22 +305,75 @@ function legacyEditTool(cwd: string): ToolDefinition {
 			if (typeof path !== "string" || !Array.isArray(edits) || edits.length === 0) {
 				throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
 			}
-			let result: AgentToolResult | undefined;
 			for (const edit of edits) {
 				if (typeof edit?.oldText !== "string" || typeof edit?.newText !== "string") {
 					throw new Error("Edit tool input is invalid. Every edits[] entry needs oldText and newText strings.");
 				}
-				result = await replaceTool.execute(
+			}
+			if (edits.length === 1) {
+				// Keep omp's replace-mode seams (LSP diagnostics, checkpoints, fuzzy
+				// matching) for the common single-replacement call.
+				return replaceTool.execute(
 					toolCallId,
-					{ path, old_string: edit.oldText, new_string: edit.newText },
+					{ path, old_string: edits[0]!.oldText as string, new_string: edits[0]!.newText as string },
 					signal,
 					onUpdate,
 				);
 			}
-			return result!;
+			// Multi-edit batches must honor upstream pi's contract — every edit is
+			// matched against the ORIGINAL file content, never incrementally — and
+			// must not persist earlier replacements when a later entry is invalid.
+			// Validate the whole list against one snapshot, then apply by index.
+			const batchPath = path as string;
+			const raw = await Bun.file(batchPath).text();
+			const { bom, text: body } = stripBom(raw);
+			const normalized = normalizeToLF(body);
+			const replacement = edits as Array<{ oldText: string; newText: string }>;
+			const matches: Array<{ index: number; length: number; newText: string }> = [];
+			for (let i = 0; i < replacement.length; i++) {
+				const { oldText, newText } = replacement[i]!;
+				if (normalizeToLF(oldText).length === 0) {
+					throw new Error(`edits[${i}] in ${batchPath} has empty oldText. Provide the exact text to replace.`);
+				}
+				const index = normalized.indexOf(normalizeToLF(oldText));
+				if (index === -1) {
+					throw new Error(
+						`edits[${i}] oldText was not found in ${batchPath}. It must match the current file content exactly.`,
+					);
+				}
+				const occurrences = normalized.split(normalizeToLF(oldText)).length - 1;
+				if (occurrences > 1) {
+					throw new Error(
+						`edits[${i}] oldText matches ${occurrences} locations in ${batchPath}. It must be unique in the original file; include more surrounding context.`,
+					);
+				}
+				matches.push({ index, length: normalizeToLF(oldText).length, newText: normalizeToLF(newText) });
+			}
+			matches.sort((a, b) => a.index - b.index);
+			for (let i = 1; i < matches.length; i++) {
+				const previous = matches[i - 1]!;
+				const current = matches[i]!;
+				if (previous.index + previous.length > current.index) {
+					throw new Error(
+						`Two edits[] entries overlap in ${batchPath}. Merge them into one edit or target disjoint regions.`,
+					);
+				}
+			}
+			let updated = "";
+			let cursor = 0;
+			for (const match of matches) {
+				updated += normalized.slice(cursor, match.index) + match.newText;
+				cursor = match.index + match.length;
+			}
+			updated += normalized.slice(cursor);
+			const ending = detectLineEnding(body);
+			await Bun.write(batchPath, bom + restoreLineEndings(updated, ending));
+			return {
+				content: [{ type: "text", text: `Successfully replaced ${replacement.length} blocks in ${batchPath}.` }],
+			} satisfies AgentToolResult;
 		},
 	};
-	return definition;
+	return markToolDefinition(definition);
 }
 
 function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName): ToolDefinition {
@@ -395,10 +449,24 @@ function textResult(result: AgentToolResult<unknown> | undefined): string {
 	return result?.content.find(block => block.type === "text")?.text ?? "";
 }
 
+/** Legacy result preview caps — shared shape with the repo's PREVIEW_LIMITS. */
+const LEGACY_RESULT_PREVIEW_LINES = 12;
+
 function legacyRenderResult(result: AgentToolResult<unknown>, _options: unknown, themeArg: unknown): Text {
 	const theme = renderTheme(themeArg, undefined);
 	const output = textResult(result);
-	return new Text(output ? `\n${themedMuted(theme, output)}` : "", 0, 0);
+	if (!output) return new Text("", 0, 0);
+	// TUI sanitization contract: tabs break layout, absolute home paths leak, and
+	// file-derived output (diffs, errors) can be unbounded.
+	const sanitized = replaceTabs(shortenEmbeddedPaths(output));
+	const lines = sanitized.split("\n");
+	const visible = lines
+		.slice(0, LEGACY_RESULT_PREVIEW_LINES)
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE));
+	if (lines.length > LEGACY_RESULT_PREVIEW_LINES) {
+		visible.push(`… ${lines.length - LEGACY_RESULT_PREVIEW_LINES} more lines`);
+	}
+	return new Text(`\n${themedMuted(theme, visible.join("\n"))}`, 0, 0);
 }
 
 function lineRangePath(readPath: string, offset: number | undefined, limit: number | undefined): string {
@@ -822,7 +890,7 @@ export function createWriteTool(cwd: string, options?: WriteToolOptions): ToolDe
 
 /** Create legacy read, bash, edit, and write tools. */
 export function createCodingTools(cwd: string): ToolDefinition[] {
-	return LEGACY_CODING_TOOL_NAMES.map(name => legacyBuiltinTool(cwd, name));
+	return LEGACY_CODING_TOOL_NAMES.map(name => (name === "edit" ? legacyEditTool(cwd) : legacyBuiltinTool(cwd, name)));
 }
 
 /** Create legacy read, grep, find, and ls tools. */
