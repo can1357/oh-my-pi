@@ -19,19 +19,22 @@ The prelude exists only while Eval and `browser.enabled` are enabled. It is not 
 
 ```js
 const tab = await browser.open({
-  name: "main",
-  url: "https://example.com",
-  wait_until: "load",
+	name: "main",
+	url: "https://example.com",
+	wait_until: "load",
 });
 
 const observation = await tab.observe();
-await tab.id(observation.elements[0].id).click();
+const first = observation.elements[0];
+if (first.actionable !== false) {
+	await tab.id(first.id).click();
+}
 const title = await tab.title();
 
-const length = await tab.run(
-  async ({ tab }, suffix) => (await tab.title() + suffix).length,
-  { args: ["!"], timeout: 30 },
-);
+const length = await tab.run(async ({ tab }, suffix) => ((await tab.title()) + suffix).length, {
+	args: ["!"],
+	timeout: 30,
+});
 
 await tab.close();
 ```
@@ -57,6 +60,8 @@ Direct `waitFor` and `waitForSelector` return booleans. `tab.id(number)` and `ta
 
 Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, and `pierce/…` query handlers. Playwright-only pseudos such as `:has-text()` and `:visible` are rejected. `tab.select` is required for `<select>` elements; `tab.fill` does not support them.
 
+- `observe()` entries with `actionable: false` are informational and have no usable `id`; check `entry.actionable !== false` before passing `entry.id` to `tab.id`.
+
 `observe()` assigns numeric ids consumed by `tab.id`. `ariaSnapshot()` assigns `[ref=eN]` ids consumed by `tab.ref`. Navigation and re-rendering invalidate handles; re-observe and act in the same Eval cell.
 
 ### `tab.run(fnOrCode, options?)`
@@ -65,13 +70,10 @@ A run accepts either a serialized function or a JavaScript function-body string,
 
 ```js
 const hrefs = await tab.run(async ({ page }) => {
-  return await page.$$eval("a", links => links.map(link => link.href));
+	return await page.$$eval("a", links => links.map(link => link.href));
 });
 
-const title = await tab.run(
-  "return await tab.title();",
-  { timeout: 10 },
-);
+const title = await tab.run("return await tab.title();", { timeout: 10 });
 ```
 
 Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
@@ -84,12 +86,12 @@ The return value stays structured. Nonempty text emitted by inner `display(...)`
 
 ## Python API
 
-Python exposes the same handles and direct method names. `open` and `close` use keyword arguments, while `browser.tab` and `tab.id`/`tab.ref` are synchronous handle lookups. Keyword arguments on direct helpers become a trailing JavaScript options object.
-
 ```python
 tab = await browser.open(name="main", url="https://example.com")
 observation = await tab.observe(viewportOnly=True)
-await tab.id(observation["elements"][0]["id"]).click()
+first = observation["elements"][0]
+if first.get("actionable", True):
+    await tab.id(first["id"]).click()
 title = await tab.run("return await tab.title();", timeout=30)
 await tab.close()
 ```
@@ -103,10 +105,32 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 - **Headless:** creates an omp-owned page in project-shared Chromium and applies stealth patches.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here.
 - **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
-- **Relay (`app.relay: true`):** adopts the user's real Chrome tab. `app.target` selects by URL/title substring; without it the visible usable tab is adopted.
+- **Relay (`app.relay: true`):** uses `browser.relayBrowser`. Chromium adopts the user's real Chrome tab through the extension relay; Firefox connects to an already-running local WebDriver BiDi endpoint without an extension. `app.target` selects by URL/title substring.
 - **Cmux:** drives an available cmux WKWebView surface.
 
 Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned headless pages and owned cmux surfaces closes them. Connected and relay pages remain open. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates the process.
+
+An occupied Chromium profile is reused only when its running executable matches the requested application. A wrapper may launch a fresh profile, but if its already-running target cannot be verified, select the actual executable or explicitly use `app.cdp_url`; OMP does not silently borrow another application's profile owner.
+
+### Firefox relay setup
+
+Firefox relay is connect-only: start Firefox yourself with remote debugging enabled, preferably using a dedicated profile. For example:
+
+```sh
+firefox --no-remote --profile /path/to/dedicated-profile --remote-debugging-port 9222
+```
+
+Create that profile first using Firefox's profile manager. Keep the debugging endpoint local; it grants control of the browser. Close other tools connected to the same BiDi endpoint before using OMP.
+
+See Mozilla's [Remote Agent security documentation](https://firefox-source-docs.mozilla.org/remote/Security.html) for the local-only debugging interface and its access implications.
+In OMP's browser settings, enable `browser.relay`, select `browser.relayBrowser = firefox`, and set `browser.relayUrl` to the local WebSocket endpoint reported by Firefox (normally `ws://127.0.0.1:9222/session`). Then open the intended existing tab explicitly:
+
+```javascript
+const tab = await browser.open({ name: "firefox", app: { relay: true, target: "page title or URL" } });
+await tab.observe();
+```
+
+`omp browser-relay install` and its Chrome extension are for Chromium only; they do not configure Firefox. Closing the OMP handle disconnects control but does not close the attached Firefox browser.
 
 ## Screenshots and output
 
@@ -118,7 +142,7 @@ Host result details preserve structured `value` separately from displayed conten
 
 Relay and attached modes operate on real logged-in sessions; sites attribute actions to the user. Name a target or create a dedicated tab. Never navigate the user's visible tab or take a consequential action without direct authorization.
 
-Each named tab has one worker and permits one active run. A timed-out or aborted run can recycle the worker and invalidate handles. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
+Each named tab permits one active run. Firefox aliases on the same endpoint share a worker and serialize operations. A timed-out or aborted run can invalidate handles. Firefox navigation timeouts discard the affected worker and its aliases even if run code catches the error; reopen the intended target explicitly before the next operation. The attached Firefox browser remains open. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
 
 ## Common recovery
 
@@ -126,7 +150,7 @@ Each named tab has one worker and permits one active run. A timed-out or aborted
 - Stale id/ref: call `observe` or `ariaSnapshot` again, then reacquire the handle.
 - Busy tab: await the active helper/run before issuing another.
 - Selector timeout: re-observe and use a supported selector.
-- Relay unavailable: install/start the relay and verify its Chrome extension connection.
+- Chromium relay unavailable: install/start the relay and verify its Chrome extension connection. Firefox relay unavailable: verify Firefox is already running with remote debugging, the local BiDi URL is correct, and no other client owns that endpoint.
 - Attached target missing: inspect available pages and use a precise `app.target`.
 
 `tab.run` and direct helpers execute against live browser state. Verify the actual page after every UI-changing action.

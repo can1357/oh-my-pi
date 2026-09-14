@@ -1,5 +1,14 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isCompiledBinary, logger, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
+import {
+	acquireFileLock,
+	type FileLockHandle,
+	getBaseConfigRoot,
+	isCompiledBinary,
+	logger,
+	withTimeout,
+	workerHostEntry,
+} from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError, ToolError } from "../tool-errors";
@@ -16,7 +25,7 @@ import {
 } from "./launch";
 import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
-import type { RelayKind } from "./relay/kind";
+import type { FirefoxRelayKind, RelayKind } from "./relay/kind";
 import { ensureSharedBrowser } from "./shared-daemon";
 
 export type PuppeteerBrowserKind =
@@ -25,7 +34,7 @@ export type PuppeteerBrowserKind =
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
 
-export type BrowserKind = PuppeteerBrowserKind | CmuxKind;
+export type BrowserKind = PuppeteerBrowserKind | FirefoxRelayKind | CmuxKind;
 
 export type BrowserKindTag = BrowserKind["kind"];
 
@@ -42,14 +51,13 @@ const HEADLESS_CLOSE_TIMEOUT_MS = 5_000;
  */
 const RELAY_EXTENSION_WAIT_MS = 35_000;
 
-interface BrowserHandleCommon {
+interface BrowserHandleCommon<TKind extends BrowserKind = BrowserKind> {
 	key: string;
-	kind: BrowserKind;
+	kind: TKind;
 	refCount: number;
 }
 
-export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
-	kind: PuppeteerBrowserKind;
+export interface PuppeteerBrowserHandle extends BrowserHandleCommon<PuppeteerBrowserKind> {
 	browser: Browser;
 	cdpUrl?: string;
 	pid?: number;
@@ -61,13 +69,20 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	stealth: { browserSession: CDPSession | null; override: UserAgentOverride | null };
 }
 
-export interface CmuxBrowserHandle extends BrowserHandleCommon {
-	kind: CmuxKind;
+export interface FirefoxRelayBrowserHandle extends BrowserHandleCommon<FirefoxRelayKind> {
+	webSocketUrl: string;
+	/** OS-backed endpoint ownership; released after the last worker alias closes. */
+	endpointLease?: FileLockHandle;
+	/** Actual inline worker disconnection, which may outlive bounded caller cleanup. */
+	connectionCleanup?: Promise<void>;
+}
+
+export interface CmuxBrowserHandle extends BrowserHandleCommon<CmuxKind> {
 	client: CmuxSocketClient;
 	surface?: string;
 }
 
-export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle;
+export type BrowserHandle = PuppeteerBrowserHandle | FirefoxRelayBrowserHandle | CmuxBrowserHandle;
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {
@@ -90,6 +105,13 @@ export function browserKey(kind: BrowserKind): string {
 			return `connected:${kind.cdpUrl}`;
 		case "relay":
 			return `relay:${kind.cdpUrl}`;
+		case "firefox-relay": {
+			const endpoint = new URL(kind.webSocketUrl);
+			// Share the loopback listener without rewriting the connection URL
+			// (notably the hostname used for TLS certificate validation).
+			if (endpoint.hostname === "localhost") endpoint.hostname = "127.0.0.1";
+			return `firefox-relay:${endpoint.href.replace(/\/$/, "")}`;
+		}
 		case "cmux":
 			return `cmux:${kind.socketPath}`;
 	}
@@ -107,7 +129,7 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 	for (;;) {
 		const existing = browsers.get(key);
 		if (existing) {
-			if ("client" in existing) return existing;
+			if ("client" in existing || "webSocketUrl" in existing) return existing;
 			if (existing.browser.connected) return existing;
 			browsers.delete(key);
 			await disposeBrowserHandle(existing, { kill: false });
@@ -211,6 +233,28 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			cdpUrl,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
+		};
+	}
+	if (kind.kind === "firefox-relay") {
+		// Firefox permits one BiDi session across all OMP processes, not merely
+		// one worker in this registry. OS ownership also releases after a crash.
+		const leaseDir = path.join(getBaseConfigRoot(), "run", "firefox-leases");
+		await fs.mkdir(leaseDir, { recursive: true });
+		const endpointKey = Bun.hash(browserKey(kind)).toString(16);
+		let endpointLease: FileLockHandle;
+		try {
+			endpointLease = await acquireFileLock(path.join(leaseDir, endpointKey), { retries: 1 });
+		} catch {
+			throw new ToolError(
+				"This Firefox endpoint is already owned by another OMP process. Close its Firefox tabs before opening it here.",
+			);
+		}
+		return {
+			key: browserKey(kind),
+			kind,
+			webSocketUrl: kind.webSocketUrl,
+			endpointLease,
+			refCount: 0,
 		};
 	}
 	if (kind.kind === "relay") {
@@ -335,6 +379,16 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		handle.client.close();
 		return;
 	}
+	if ("webSocketUrl" in handle) {
+		const lease = handle.endpointLease;
+		handle.endpointLease = undefined;
+		if (handle.connectionCleanup) {
+			void handle.connectionCleanup.then(() => lease?.release());
+		} else {
+			lease?.release();
+		}
+		return;
+	}
 	if (handle.kind.kind === "headless") {
 		if (handle.sharedDaemon) {
 			// The broker owns the Chromium; this process only drops its CDP
@@ -371,7 +425,7 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		if (handle.userDataDir) await removeUserDataDir(handle.userDataDir);
 		return;
 	}
-	// Connected and relay browsers belong to the user: drop our CDP link, never kill.
+	// Connected and relay browsers belong to the user: drop our automation link, never kill.
 	if (handle.kind.kind === "connected" || handle.kind.kind === "relay") {
 		if (handle.browser.connected) {
 			try {

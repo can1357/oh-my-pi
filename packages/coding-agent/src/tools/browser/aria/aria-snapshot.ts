@@ -21,21 +21,30 @@ export interface AriaSnapshotOptions {
  *
  * Puppeteer serializes these functions to a CDP `Runtime.evaluate` in the page's
  * MAIN world (the only world where the bundle's `_ariaRef` ref expandos live —
- * isolated-world locators/query-handlers cannot see them). Nothing is installed
- * on `window`; the only footprint is the `_ariaRef` markers the snapshot writes,
- * which are the price of actionable `[ref=eN]` ids.
+ * isolated-world locators/query-handlers cannot see them). A page-global owner
+ * marker accompanies `_ariaRef` so another alias's snapshot cannot silently
+ * redirect a previously returned ref to a different element.
  */
-function buildEvaluator(params: string, call: string): (...args: unknown[]) => unknown {
+function buildEvaluator(params: string, call: string, setup = ""): (...args: unknown[]) => unknown {
 	return new Function(
 		...params.split(",").map(p => p.trim()),
-		`var module = { exports: {} };\n${ariaBundle}\nreturn module.exports.${call};`,
+		`var module = { exports: {} };\n${ariaBundle}\n${setup}\nreturn module.exports.${call};`,
 	) as unknown as (...args: unknown[]) => unknown;
 }
 
 // Handles (root) must stay top-level args: Puppeteer only unwraps JSHandles
 // passed positionally to page.evaluate, never ones nested inside an object.
-const evaluateAriaSnapshot = buildEvaluator("root, request", "ariaSnapshot(root, request)");
-const evaluateResolveRef = buildEvaluator("ref", "resolveAriaRef(ref)");
+const SNAPSHOT_OWNER = 'Symbol.for("omp.browser.ariaSnapshotOwner")';
+const evaluateAriaSnapshot = buildEvaluator(
+	"root, request, owner",
+	"ariaSnapshot(root, request)",
+	`globalThis[${SNAPSHOT_OWNER}] = owner;`,
+);
+const evaluateResolveRef = buildEvaluator(
+	"ref, owner",
+	"resolveAriaRef(ref)",
+	`if (globalThis[${SNAPSHOT_OWNER}] !== owner) throw new Error("ARIA refs were invalidated by another alias; run tab.ariaSnapshot() or tab.observe() again");`,
+);
 
 /**
  * Capture a Playwright-format ARIA snapshot of `root` (or the whole document when
@@ -47,9 +56,15 @@ export async function captureAriaSnapshot(
 	page: Page,
 	root: ElementHandle | null,
 	options: AriaSnapshotOptions = {},
+	owner?: string,
 ): Promise<string> {
 	const request = { depth: options.depth, boxes: options.boxes };
-	return (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	return (await page.evaluate(
+		evaluateAriaSnapshot as never,
+		root as never,
+		request as never,
+		owner as never,
+	)) as string;
 }
 
 /**
@@ -57,8 +72,8 @@ export async function captureAriaSnapshot(
  * null when the ref no longer matches any element. Runs in the main world so it
  * sees the `_ariaRef` expandos the snapshot wrote.
  */
-export async function resolveAriaRefHandle(page: Page, ref: string): Promise<ElementHandle | null> {
-	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never)) as JSHandle;
+export async function resolveAriaRefHandle(page: Page, ref: string, owner?: string): Promise<ElementHandle | null> {
+	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never, owner as never)) as JSHandle;
 	const element = handle.asElement();
 	if (!element) {
 		await handle.dispose().catch(() => undefined);
@@ -127,5 +142,5 @@ export function parseAriaRefSelector(selector: string): string | null {
 export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
 	const request = { depth: options.depth, boxes: options.boxes };
 	const sel = selector ? JSON.stringify(selector) : "null";
-	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
+	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");globalThis[${SNAPSHOT_OWNER}]=undefined;return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
 }

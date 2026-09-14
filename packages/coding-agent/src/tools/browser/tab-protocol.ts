@@ -2,8 +2,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 
 export type Transferable = Bun.Transferable;
 
-export interface ObservationEntry {
-	id: number;
+interface ObservationEntryBase {
 	role: string;
 	name?: string;
 	value?: string | number;
@@ -11,6 +10,9 @@ export interface ObservationEntry {
 	keyshortcuts?: string;
 	states: string[];
 }
+
+export type ObservationEntry = ObservationEntryBase &
+	({ id: number; actionable?: true } | { id?: never; actionable: false });
 
 export interface Observation {
 	url: string;
@@ -59,7 +61,12 @@ export type WorkerInitPayload =
 			mode: "attach";
 			browserWSEndpoint: string;
 			safeDir: string;
+			/** Connect through Puppeteer's native WebDriver BiDi transport instead of CDP. */
+			protocol?: "webDriverBiDi";
 			targetId: string;
+			targetMatcher?: string;
+			/** Optional viewport requested for the initial Firefox WebDriver BiDi tab. */
+			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
@@ -84,7 +91,31 @@ export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunEr
 
 export type WorkerInbound =
 	| { type: "init"; payload: WorkerInitPayload }
-	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
+	| {
+			type: "select";
+			id: string;
+			name: string;
+			targetId?: string;
+			targetMatcher?: string;
+			url?: string;
+			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
+			viewport?: { width: number; height: number; deviceScaleFactor?: number };
+			timeoutMs: number;
+			dialogs?: "accept" | "dismiss";
+	  }
+	| { type: "abort-select"; id: string }
+	| { type: "release-runtime"; name: string }
+	| {
+			type: "run";
+			id: string;
+			name: string;
+			code: string;
+			timeoutMs: number;
+			session: SessionSnapshot;
+			targetId?: string;
+			targetMatcher?: string;
+			dialogs?: "accept" | "dismiss";
+	  }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
@@ -100,6 +131,8 @@ export interface RunResultOk {
 	displays: Array<TextContent | ImageContent>;
 	returnValue: unknown;
 	screenshots: ScreenshotResult[];
+	/** The run caught a cleanup failure; the backend must discard or recover its worker before reuse. */
+	recoverTab?: boolean;
 }
 
 export interface RunErrorPayload {
@@ -132,6 +165,8 @@ export type WorkerOutbound =
 	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
+	| { type: "selected"; id: string; info: ReadyInfo }
+	| { type: "select-failed"; id: string; error: RunErrorPayload }
 	| { type: "result"; id: string; ok: true; payload: RunResultOk }
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }

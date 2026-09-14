@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added connect-only Browser Relay support for Firefox-family browsers through local WebDriver BiDi endpoints ([#10295](https://github.com/can1357/oh-my-pi/pull/10295) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ## [18.1.21] - 2026-09-14
 
 ### Fixed

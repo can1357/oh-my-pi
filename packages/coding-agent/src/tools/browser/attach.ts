@@ -1,4 +1,6 @@
+import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { getBrowserProfilesDir } from "@oh-my-pi/pi-utils";
@@ -128,7 +130,7 @@ export async function waitForCdp(cdpUrl: string, timeoutMs: number, signal?: Abo
  */
 function findCdpPortInArgs(args: string[]): number | null {
 	for (const arg of args) {
-		const m = /^--remote-debugging-port=(\d+)$/.exec(arg);
+		const m = /^--remote-debugging-port(?:=| +)(\d+)$/.exec(arg);
 		if (m) {
 			const port = Number.parseInt(m[1]!, 10);
 			if (Number.isFinite(port) && port > 0) return port;
@@ -151,6 +153,10 @@ function findUserDataDirInArgs(args: string[] | undefined): string | null {
 		const arg = args[index]!;
 		if (arg.startsWith(inlinePrefix)) {
 			result = arg.length > inlinePrefix.length ? arg.slice(inlinePrefix.length) : null;
+			continue;
+		}
+		if (arg.startsWith("--user-data-dir ")) {
+			result = arg.slice("--user-data-dir ".length).trimStart() || null;
 			continue;
 		}
 		if (arg !== "--user-data-dir") continue;
@@ -240,14 +246,77 @@ export async function findReusableCdp(
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
 			? normalizeUserDataDir(requestedUserDataDir)
 			: null;
-	const candidates = Process.fromPath(exe).filter(process => process.status() === ProcessStatus.Running);
+	// Process paths use the executable's real path, not its launcher symlink.
+	const executablePath = await fs.realpath(exe).catch(() => exe);
+	const candidates = Process.fromPath(executablePath).filter(process => process.status() === ProcessStatus.Running);
+	if (process.platform === "linux" && normalizedRequestedUserDataDir !== null) {
+		// Profile ownership does not imply application identity. A wrapper can
+		// launch a fresh profile, but an occupied profile needs a verified binary
+		// match (or an explicitly selected CDP endpoint).
+		const lock = await fs.readlink(path.join(normalizedRequestedUserDataDir, "SingletonLock")).catch(() => undefined);
+		const localPrefix = `${os.hostname()}-`;
+		if (lock?.startsWith(localPrefix)) {
+			const pidText = lock.slice(localPrefix.length);
+			const owner = /^\d+$/.test(pidText) ? Process.fromPid(Number(pidText)) : null;
+			if (owner?.status() === ProcessStatus.Running && !candidates.some(candidate => candidate.pid === owner.pid)) {
+				const ownerExecutable = await fs.realpath(`/proc/${owner.pid}/exe`).catch(() => undefined);
+				if (ownerExecutable !== executablePath) {
+					throw new ToolError(
+						"The requested profile is occupied by an unverified application. Use its executable path or explicitly select app.cdp_url.",
+					);
+				}
+				candidates.push(owner);
+			}
+		}
+	}
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
 	for (const process of candidates) {
 		let args: string[];
+		let ambiguousProfile = false;
 		try {
-			args = process.args();
+			const processArgs = process.args();
+			if (processArgs.length === 0) {
+				hasUnreadableCandidate = true;
+				continue;
+			}
+			if (globalThis.process.platform === "linux" && processArgs.length === 1) {
+				let title = processArgs[0]!;
+				let matchedProfile = false;
+				if (requestedUserDataDir !== null) {
+					for (const separator of ["=", " "]) {
+						const token = ` --user-data-dir${separator}${requestedUserDataDir}`;
+						const offset = title.indexOf(token);
+						if (offset < 0) continue;
+						const end = offset + token.length;
+						if (end !== title.length && !title.startsWith(" --", end)) continue;
+						if (end !== title.length) {
+							const lock = await fs
+								.readlink(path.join(normalizedRequestedUserDataDir ?? "", "SingletonLock"))
+								.catch(() => undefined);
+							const ownerPid = lock?.startsWith(`${os.hostname()}-`)
+								? Number(lock.slice(os.hostname().length + 1))
+								: NaN;
+							if (ownerPid !== process.pid) {
+								ambiguousProfile = true;
+								continue;
+							}
+						}
+						title = title.slice(0, offset) + title.slice(end);
+						matchedProfile = true;
+						break;
+					}
+				}
+				args = title.split(/ (?=--)/);
+				if (matchedProfile) args.push(`--user-data-dir=${requestedUserDataDir}`);
+			} else {
+				args = processArgs;
+			}
 		} catch {
+			hasUnreadableCandidate = true;
+			continue;
+		}
+		if (ambiguousProfile) {
 			hasUnreadableCandidate = true;
 			continue;
 		}

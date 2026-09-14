@@ -160,10 +160,8 @@ interface BrowserBoundingBox {
 	height: number;
 }
 
-/** One element in a structured browser observation. */
-interface BrowserObservationEntry {
-	/** Numeric id accepted by `tab.id`. */
-	id: number;
+/** Fields shared by every structured browser observation entry. */
+interface BrowserObservationEntryBase {
 	/** Accessibility role. */
 	role: string;
 	/** Accessible name. */
@@ -177,6 +175,25 @@ interface BrowserObservationEntry {
 	/** Serialized accessibility states. */
 	states: string[];
 }
+
+/** An observation entry that can be passed to `tab.id`. */
+interface BrowserActionableObservationEntry extends BrowserObservationEntryBase {
+	/** Numeric id accepted by `tab.id`. */
+	id: number;
+	/** Omitted by the runtime for actionable entries. */
+	actionable?: true;
+}
+
+/** A reference-less observation entry that cannot be passed to `tab.id`. */
+interface BrowserNonActionableObservationEntry extends BrowserObservationEntryBase {
+	/** Distinguishes reference-less entries from actionable entries. */
+	actionable: false;
+	/** Reference-less entries have no numeric id. */
+	id?: never;
+}
+
+/** One element in a structured browser observation. */
+type BrowserObservationEntry = BrowserActionableObservationEntry | BrowserNonActionableObservationEntry;
 
 /** Structured result returned by `tab.observe`. */
 interface BrowserObservation {
