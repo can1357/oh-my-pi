@@ -12,6 +12,8 @@
 - Kept the subagent `yield` tool as a direct function call instead of mounting it through `xd://`.
 - Git TUI staging now honors `.gitattributes` `text`/`eol` and clean filters, so "Stage All" no longer leaves `eol=crlf` files (e.g. `*.cmd`) dirty with no visible diff.
 - Browsers spawned via `app.path` into an omp-owned profile no longer trigger the macOS "wants to use your confidential information in Safe Storage" keychain dialog.
+- Fixed browser-relay tabs becoming detached, duplicated, or undrivable after relay outages and extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed recovered tabs losing their active sessions or remaining attached after the last client disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 
 ## [18.1.22] - 2026-09-14
 
@@ -48,8 +50,6 @@
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
-- Fixed browser-relay tabs becoming detached, duplicated, or undrivable after relay outages and extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed recovered tabs losing their active sessions or remaining attached after the last client disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 ## [18.1.20] - 2026-09-13
 
 ### Added
