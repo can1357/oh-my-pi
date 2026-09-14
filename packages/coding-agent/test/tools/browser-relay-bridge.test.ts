@@ -3971,6 +3971,100 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	it("creates and uses an OOPIF isolated world for changed-frame preload recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true, worldName: "isolated" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-before" } }],
+			},
+		});
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-after-recovery" });
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				sessionId: "oopif-session",
+				method: "Page.frameNavigated",
+				params: { frame: { id: "oopif", loaderId: "child-after" } },
+			}),
+		);
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Target.attachedToTarget",
+				params: { sessionId: "oopif-session", targetInfo: { targetId: "oopif", type: "iframe" } },
+			}),
+		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-after" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.createIsolatedWorld"));
+		const worldCreation = ext2.pending("send").find(rpc => rpc.method === "Page.createIsolatedWorld");
+		expect(worldCreation?.sessionId).toBe("oopif-session");
+		expect(worldCreation?.params).toEqual({ frameId: "oopif", worldName: "isolated" });
+		ack(bridge, ext2, "send", { executionContextId: 207 });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		const childReplay = ext2.pending("send").find(rpc => rpc.method === "Runtime.evaluate");
+		expect(childReplay?.sessionId).toBe("oopif-session");
+		expect(childReplay?.params).toMatchObject({ contextId: 207 });
+		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
+		await flush();
+	});
+
 	it("runs a preload once and clears its marker in every existing frame during handoff", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

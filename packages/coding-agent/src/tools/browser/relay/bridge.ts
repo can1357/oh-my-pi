@@ -400,6 +400,8 @@ class TabState {
 	groupOptOut = false;
 	/** Real Chrome session ids (OOPIF/worker children) living under this tab's root session. */
 	readonly realSessions = new Set<string>();
+	/** OOPIF frame id to the child debugger session that owns its Runtime contexts. */
+	readonly frameSessions = new Map<string, string>();
 	/** Live execution contexts from the shared root debugger session. */
 	readonly runtimeContexts = new Map<number, Record<string, unknown>>();
 	/** Temporary context inventory used to target recovery preloads at changed frames. */
@@ -2873,12 +2875,24 @@ export class RelayBridge {
 			if (typeof child === "string") {
 				tab.realSessions.add(child);
 				this.#realSessionTabs.set(child, tabId);
+				const targetInfo = params?.targetInfo;
+				const targetId =
+					targetInfo &&
+					typeof targetInfo === "object" &&
+					"targetId" in targetInfo &&
+					typeof targetInfo.targetId === "string"
+						? targetInfo.targetId
+						: undefined;
+				if (targetId !== undefined) tab.frameSessions.set(targetId, child);
 			}
 		} else if (method === "Target.detachedFromTarget") {
 			const child = params?.sessionId;
 			if (typeof child === "string") {
 				tab.realSessions.delete(child);
 				this.#realSessionTabs.delete(child);
+				for (const [frameId, sessionId] of tab.frameSessions) {
+					if (sessionId === child) tab.frameSessions.delete(frameId);
+				}
 			}
 		}
 		if (method === "Page.frameNavigated") {
@@ -2887,6 +2901,7 @@ export class RelayBridge {
 				if (!sourceSessionId && !("parentId" in frame)) tab.mainFrameNavigationGeneration++;
 				const frameId = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
 				const loaderId = "loaderId" in frame && typeof frame.loaderId === "string" ? frame.loaderId : undefined;
+				if (frameId !== undefined && sourceSessionId) tab.frameSessions.set(frameId, sourceSessionId);
 				if (frameId !== undefined && loaderId !== undefined) {
 					for (const scripts of tab.preloadScripts.values()) {
 						for (const script of scripts.values()) {
@@ -3725,6 +3740,39 @@ export class RelayBridge {
 				probeEnabled = true;
 			}
 			for (const frameId of frameIds) {
+				const sessionId = tab.frameSessions.get(frameId);
+				if (typeof worldName === "string") {
+					const isolatedWorld = (await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						...(sessionId ? { sessionId } : {}),
+						method: "Page.createIsolatedWorld",
+						params: { frameId, worldName },
+					})) as { executionContextId?: unknown } | undefined;
+					if (typeof isolatedWorld?.executionContextId !== "number") {
+						throw new Error(`No isolated execution context for changed frame ${frameId}`);
+					}
+					this.#assertExtensionCurrent(expectedExt);
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						...(sessionId ? { sessionId } : {}),
+						method: "Runtime.evaluate",
+						params: { expression: source, contextId: isolatedWorld.executionContextId },
+					});
+					continue;
+				}
+				if (sessionId) {
+					this.#assertExtensionCurrent(expectedExt);
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						sessionId,
+						method: "Runtime.evaluate",
+						params: { expression: source },
+					});
+					continue;
+				}
 				const match = [...contexts].find(([, context]) => {
 					const auxData = context.auxData;
 					if (!auxData || typeof auxData !== "object") return false;
@@ -3732,7 +3780,7 @@ export class RelayBridge {
 					if (contextAuxData.frameId !== frameId) {
 						return false;
 					}
-					return typeof worldName === "string" ? context.name === worldName : contextAuxData.isDefault === true;
+					return contextAuxData.isDefault === true;
 				});
 				if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
 				this.#assertExtensionCurrent(expectedExt);
@@ -4034,6 +4082,7 @@ export class RelayBridge {
 
 	#resetRuntime(tab: TabState): void {
 		tab.runtimeContexts.clear();
+		tab.frameSessions.clear();
 		tab.rootRuntimeEnabled = false;
 		tab.rootRuntimeEnabling = null;
 		tab.runtimeGeneration++;

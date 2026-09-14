@@ -102,6 +102,29 @@ describe("attachment-state", () => {
 		expect(generations.get(1)).toBe(2);
 	});
 
+	it("does not replace the main loader with an OOPIF root-frame event", () => {
+		const loaderIds = new Map([[1, "main-before"]]);
+		const frameLoaderIds = new Map<number, Record<string, string>>([
+			[1, { main: "main-before", oopif: "child-before" }],
+		]);
+		const generations = new Map([[1, 1]]);
+
+		expect(
+			captureRecoveryLoaderNavigation(
+				loaderIds,
+				generations,
+				1,
+				"Page.frameNavigated",
+				{ frame: { id: "oopif", loaderId: "child-after" } },
+				frameLoaderIds,
+				false,
+			),
+		).toBe(true);
+		expect(loaderIds.get(1)).toBe("main-before");
+		expect(frameLoaderIds.get(1)).toEqual({ main: "main-before", oopif: "child-after" });
+		expect(generations.get(1)).toBe(2);
+	});
+
 	it("observes navigation until an orphan detach finishes", async () => {
 		const loaderIds = new Map([[1, "loader-before"]]);
 		const generations = new Map([[1, 1]]);

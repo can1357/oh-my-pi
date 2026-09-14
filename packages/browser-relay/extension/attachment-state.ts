@@ -34,6 +34,7 @@ export function captureRecoveryLoaderNavigation(
 	method: string,
 	params: unknown,
 	frameLoaderIds?: Map<number, Record<string, string>>,
+	isRootSession = true,
 ): boolean {
 	if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
 		return false;
@@ -47,7 +48,7 @@ export function captureRecoveryLoaderNavigation(
 	if (typeof loaderId !== "string") return false;
 	if (parentId !== undefined && !frameLoaderIds) return false;
 	noteAttachmentStateChange(loaderGenerations, tabId);
-	if (parentId === undefined) loaderIds.set(tabId, loaderId);
+	if (isRootSession && parentId === undefined) loaderIds.set(tabId, loaderId);
 	if (typeof id === "string" && frameLoaderIds) {
 		frameLoaderIds.set(tabId, { ...frameLoaderIds.get(tabId), [id]: loaderId });
 	}

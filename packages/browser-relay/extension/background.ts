@@ -1490,6 +1490,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 			method,
 			params,
 			recoveryFrameLoaderIds,
+			source.sessionId === undefined,
 		);
 	post({
 		t: "cdpEvent",
