@@ -849,7 +849,7 @@ fn run_commit_hook(
 			},
 		);
 	let hook = hooks_dir.join(name);
-	if !hook_is_executable(&hook)? {
+	if !hook_is_executable(&hook) {
 		return Ok(());
 	}
 	let output = Command::new(&hook)
@@ -877,23 +877,24 @@ fn run_commit_hook(
 	})
 }
 
-fn hook_is_executable(path: &Path) -> Result<bool> {
-	let metadata = match fs::metadata(path) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-		Err(err) => return Err(err.into()),
+/// Mirrors git's `find_hook`: any failure to stat the hook (missing, or
+/// `core.hooksPath` pointing at a non-directory such as `/dev/null`) means
+/// "no hook", never a commit failure.
+fn hook_is_executable(path: &Path) -> bool {
+	let Ok(metadata) = fs::metadata(path) else {
+		return false;
 	};
 	if !metadata.is_file() {
-		return Ok(false);
+		return false;
 	}
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
-		Ok(metadata.permissions().mode() & 0o111 != 0)
+		metadata.permissions().mode() & 0o111 != 0
 	}
 	#[cfg(not(unix))]
 	{
-		Ok(true)
+		true
 	}
 }
 

@@ -6136,7 +6136,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6206,7 +6206,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6291,11 +6291,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.1.19"
+version = "18.1.21"
 
 [[package]]
 name = "pi-edit"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6314,7 +6314,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "async-trait",
  "libc",
@@ -6326,7 +6326,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6409,7 +6409,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6437,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6452,7 +6452,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6467,7 +6467,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.19"
+version = "18.1.21"
 dependencies = [
  "dashmap",
  "globset",
@@ -8356,9 +8356,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-cmake"
-version = "0.7.4"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "164e0c4f4236ec5ceff14824a5528615cf462e100467e49826442ff57d327061"
+checksum = "d22893fac54133fdb93497efc45713d53a96d93b035288c7a8ab0c2af77c0ddd"
 dependencies = [
  "cc",
  "tree-sitter-language",

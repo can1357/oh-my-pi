@@ -339,6 +339,7 @@ auth "anthropic" {
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
+    native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false
 }
