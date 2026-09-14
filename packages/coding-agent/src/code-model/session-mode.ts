@@ -7,7 +7,7 @@ import type {
 	SessionBeforeIdleEvent,
 	SessionStopEventResult,
 } from "../extensibility/extensions/types";
-import type { ModelChangeEntry } from "../session/session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, type ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
 import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
 import { availableCodeModels, resolveCodeModelSelection } from "./model-menu";
@@ -19,6 +19,7 @@ interface ModelState {
 	provider: string;
 	id: string;
 	selector?: string;
+	role?: string;
 	effort?: ConfiguredThinkingLevel;
 }
 
@@ -73,12 +74,14 @@ function isModelState(value: unknown): value is ModelState {
 	if (!value || typeof value !== "object") return false;
 	const effort = "effort" in value ? value.effort : undefined;
 	const selector = "selector" in value ? value.selector : undefined;
+	const role = "role" in value ? value.role : undefined;
 	return (
 		"provider" in value &&
 		typeof value.provider === "string" &&
 		"id" in value &&
 		typeof value.id === "string" &&
 		(selector === undefined || typeof selector === "string") &&
+		(role === undefined || typeof role === "string") &&
 		(effort === undefined || parseConfiguredThinkingLevel(typeof effort === "string" ? effort : undefined) === effort)
 	);
 }
@@ -118,6 +121,18 @@ export function installCodeModelSession(
 		return pi.getConfiguredThinkingLevel();
 	}
 
+	function getActiveRole(ctx: ExtensionContext, selector: string): string {
+		const entries = branch(ctx);
+		const entry = entries.findLast(
+			item => item.type === "model_change" && item.model === selector && !item.resolvedModelIsFallback,
+		) as ModelChangeEntry | undefined;
+		return entry
+			? (entry.role ?? "default")
+			: entries.some(item => item.type === "model_change")
+				? "temporary"
+				: "default";
+	}
+
 	function snapshot(ctx: ExtensionContext): ModelState {
 		const fallbackPrimary = hooks.getRetryFallbackPrimary?.();
 		const model = fallbackPrimary ? ctx.models.resolve(fallbackPrimary.selector) : ctx.models.current();
@@ -130,6 +145,7 @@ export function installCodeModelSession(
 			provider: model.provider,
 			id: model.id,
 			selector,
+			role: getActiveRole(ctx, selector),
 			effort: fallbackPrimary ? fallbackPrimary.effort : configuredThinkingLevel(),
 		};
 	}
@@ -160,13 +176,27 @@ export function installCodeModelSession(
 		}
 	}
 
-	async function apply(ctx: ExtensionContext, target: ModelState): Promise<void> {
+	async function apply(
+		ctx: ExtensionContext,
+		target: ModelState,
+		options: { ephemeral?: boolean; role?: string } = {},
+	): Promise<void> {
 		const model = target.selector
 			? ctx.models.resolve(target.selector)
 			: ctx.models.list().find(candidate => candidate.provider === target.provider && candidate.id === target.id);
 		const identifier = target.selector ?? `${target.provider}/${target.id}`;
-		if (!model) throw new Error(`The available model catalogue must contain ${identifier}.`);
-		if (!sameModel(ctx.models.current(), target) && !(await pi.setModel(model))) {
+		if (!model || !sameModel(model, target)) {
+			throw new Error(`The available model catalogue must contain ${identifier}.`);
+		}
+		const setModelOptions = options.ephemeral
+			? { ephemeral: true }
+			: { role: options.role ?? target.role ?? "default" };
+		const latest = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
+		const restoreRole =
+			!options.ephemeral &&
+			latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE &&
+			setModelOptions.role !== EPHEMERAL_MODEL_CHANGE_ROLE;
+		if ((!sameModel(ctx.models.current(), target) || restoreRole) && !(await pi.setModel(model, setModelOptions))) {
 			throw new Error(`Check the existing authentication for ${identifier}.`);
 		}
 		pi.setThinkingLevel(target.effort);
@@ -198,7 +228,7 @@ export function installCodeModelSession(
 			};
 		}
 		save({ ...previous, phase: "restoring" });
-		await apply(ctx, previous.original);
+		await apply(ctx, previous.original, { role: previous.original.role ?? "default" });
 		save(undefined);
 		return { changed: true, message: `Restored main conversation model: ${describeModelState(previous.original)}.` };
 	}
@@ -235,7 +265,7 @@ export function installCodeModelSession(
 		signal?.throwIfAborted();
 		save({ version: 1, sessionId: id, phase: "switching", original, coding });
 		try {
-			await apply(ctx, coding);
+			await apply(ctx, coding, { ephemeral: true });
 			signal?.throwIfAborted();
 			if (sessionId(ctx) !== id) throw new Error("The session changed during the model switch.");
 			if (!state) throw new Error("The coding phase state was cleared during the model switch.");

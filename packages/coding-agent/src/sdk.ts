@@ -72,6 +72,7 @@ import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	parseModelPattern,
+	parsePersistedModelSelector,
 	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
@@ -1562,7 +1563,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
 	const resolveRestorableSessionModel = (selector: string) =>
-		parseModelPattern(selector, modelRegistry.getAvailable(), modelMatchPreferences);
+		parsePersistedModelSelector(selector, modelRegistry.getAvailable());
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {

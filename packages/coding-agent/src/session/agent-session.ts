@@ -102,7 +102,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, parseModelPattern, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { parsePersistedModelSelector, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -9246,10 +9246,9 @@ export class AgentSession {
 			);
 			if (targetModelStrings.length > 0) {
 				const availableModels = this.#modelRegistry.getAvailable();
-				const matchPreferences = getModelMatchPreferences(this.settings);
 				let match: Model | undefined;
 				for (const targetModelStr of targetModelStrings) {
-					match = parseModelPattern(targetModelStr, availableModels, matchPreferences).model;
+					match = parsePersistedModelSelector(targetModelStr, availableModels).model;
 					if (match) break;
 				}
 				if (match) {

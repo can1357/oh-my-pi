@@ -1059,6 +1059,22 @@ export function parseModelPattern(
 	);
 }
 
+/** Restore a transcript's exact provider/id identity and optional upstream route. */
+export function parsePersistedModelSelector(selector: string, availableModels: Model<Api>[]): ParsedModelResult {
+	const exact = (value: string) => availableModels.find(model => `${model.provider}/${model.id}` === value);
+	let model = exact(selector);
+	let upstream: string | undefined;
+	if (!model) {
+		const routing = splitUpstreamRouting(selector);
+		const base = routing && exact(routing.base);
+		if (routing && base && supportsUpstreamRouting(base)) {
+			model = applyUpstreamRouting(base, routing.upstream);
+			upstream = routing.upstream;
+		}
+	}
+	return { model, upstream, warning: undefined, explicitThinkingLevel: false };
+}
+
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 

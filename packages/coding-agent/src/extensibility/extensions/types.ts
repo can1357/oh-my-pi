@@ -1479,8 +1479,7 @@ export interface ExtensionAPI {
 	getCommands(): SlashCommandInfo[];
 
 	/** Set the current model. Returns false if no API key available. */
-	setModel(model: Model): Promise<boolean>;
-
+	setModel(model: Model, options?: SetModelOptions): Promise<boolean>;
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel | undefined;
 	/** Get the configured thinking selector, preserving `auto` when active. */
@@ -1694,8 +1693,14 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
-export type SetModelHandler = (model: Model) => Promise<boolean>;
+export interface SetModelOptions {
+	/** Session-history role; defaults to `default`. */
+	role?: string;
+	/** Record the switch with the reserved ephemeral role, preserving named-role selections. */
+	ephemeral?: boolean;
+}
 
+export type SetModelHandler = (model: Model, options?: SetModelOptions) => Promise<boolean>;
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 export type GetConfiguredThinkingLevelHandler = () => ConfiguredThinkingLevel | undefined;
 

@@ -11,6 +11,8 @@ import { createCodeModelExtension } from "../src/code-model";
 import type { Settings } from "../src/config/settings";
 import { formatModelStringWithRouting } from "../src/config/model-resolver";
 import type { ExtensionAPI, ExtensionContext } from "../src/extensibility/extensions/types";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../src/session/session-entries";
+import { getRestorableSessionModels } from "../src/session/session-context";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../src/thinking";
 
 interface RegisteredTool {
@@ -86,11 +88,15 @@ function harness(
 		appendEntry(customType: string, data: unknown) {
 			branch.push({ type: "custom", customType, data });
 		},
-		async setModel(next: Model) {
+		async setModel(next: Model, options?: { ephemeral?: boolean; role?: string }) {
 			await setModelGate;
 			if (!setModelAllowed) return false;
 			current = next;
-			branch.push({ type: "model_change", model: formatModelStringWithRouting(next) });
+			branch.push({
+				type: "model_change",
+				model: formatModelStringWithRouting(next),
+				role: options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : (options?.role ?? "default"),
+			});
 			return true;
 		},
 		getThinkingLevel() {
@@ -142,11 +148,11 @@ function harness(
 		current: () => current,
 		effort: () => effort,
 		effectiveEffort: () => effectiveEffort,
-		setCurrent(next: Model, nextEffort: ConfiguredThinkingLevel | undefined) {
+		setCurrent(next: Model, nextEffort: ConfiguredThinkingLevel | undefined, role: string = "default") {
 			current = next;
 			effort = nextEffort;
 			effectiveEffort = nextEffort === AUTO_THINKING ? ThinkingLevel.Medium : nextEffort;
-			branch.push({ type: "model_change", model: formatModelStringWithRouting(next) });
+			branch.push({ type: "model_change", model: formatModelStringWithRouting(next), role });
 			branch.push({
 				type: "thinking_level_change",
 				thinkingLevel: effectiveEffort,
@@ -299,9 +305,52 @@ describe("code-model session phase", () => {
 		expect(state.branch).toContainEqual({
 			type: "model_change",
 			model: "openrouter/glm-4.7@cerebras",
+			role: EPHEMERAL_MODEL_CHANGE_ROLE,
 		});
 	});
 
+	it("preserves active role and default fallback across coding phase switches", async () => {
+		const state = harness();
+		state.branch.push({
+			type: "model_change",
+			model: formatModelStringWithRouting(state.main),
+			role: "default",
+		});
+		state.setCurrent(state.fallback, ThinkingLevel.High, "slow");
+
+		const session = installCodeModelSession(state.pi, state.settings);
+		const started = await session.run("start", state.ctx);
+		expect(started.changed).toBe(true);
+		expect(state.current()).toBe(state.coding);
+
+		expect(state.branch.findLast(entry => entry.type === "model_change")).toMatchObject({
+			type: "model_change",
+			model: formatModelStringWithRouting(state.coding),
+			role: EPHEMERAL_MODEL_CHANGE_ROLE,
+		});
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.fallback);
+		expect(state.effort()).toBe(ThinkingLevel.High);
+
+		const lastModelChange = state.branch.findLast(entry => entry.type === "model_change");
+		expect(lastModelChange).toMatchObject({
+			type: "model_change",
+			model: formatModelStringWithRouting(state.fallback),
+			role: "slow",
+		});
+		const roles = Object.fromEntries(
+			state.branch
+				.filter(entry => entry.type === "model_change")
+				.map(entry => [entry.role ?? "default", entry.model]),
+		);
+		expect(roles.default).toBe(formatModelStringWithRouting(state.main));
+		expect(getRestorableSessionModels(roles, "slow")).toEqual([
+			formatModelStringWithRouting(state.fallback),
+			formatModelStringWithRouting(state.main),
+		]);
+	});
 	it("keeps a manually selected model when finishing", async () => {
 		const state = harness();
 		const session = installCodeModelSession(state.pi, state.settings);

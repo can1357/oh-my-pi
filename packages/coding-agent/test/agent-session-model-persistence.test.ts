@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { installCodeModelSession, type CodeModelSessionController } from "../src/code-model/session-mode";
+import { runExtensionSetModel } from "../src/extensibility/extensions/compact-handler";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -284,6 +286,67 @@ describe("AgentSession model persistence", () => {
 		expect(created.settings.getModelRole("slow")).toBe(slowRoleValue);
 	});
 
+	it("preserves named-role fallback through the extension phase switch and resume", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel), code: modelValue(defaultModel) },
+			persist: true,
+		});
+		await created.session.setModel(defaultModel, "default");
+		await created.session.setModel(slowModel, "slow");
+		const runtime = new ExtensionRuntime();
+		Object.assign(runtime, {
+			setModel: (model: Model, options?: { role?: string; ephemeral?: boolean }) =>
+				runExtensionSetModel(created.session, model, options),
+			appendEntry: (type: string, data: unknown) => created.session.sessionManager.appendCustomEntry(type, data),
+			getThinkingLevel: () => created.session.thinkingLevel,
+			getConfiguredThinkingLevel: () => created.session.configuredThinkingLevel(),
+			setThinkingLevel: (level: Parameters<AgentSession["setThinkingLevel"]>[0]) =>
+				created.session.setThinkingLevel(level),
+		});
+		let controller: CodeModelSessionController | undefined;
+		await loadExtensionFromFactory(
+			pi => {
+				controller = installCodeModelSession(pi, created.settings);
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"role-preservation-phase",
+		);
+		const ctx = {
+			sessionManager: created.session.sessionManager,
+			models: {
+				current: () => created.session.model,
+				list: () => created.modelRegistry.getAvailable(),
+				resolve: (selector: string) => parseModelPattern(selector, created.modelRegistry.getAvailable()).model,
+			},
+			ui: { notify() {} },
+		} as unknown as ExtensionContext;
+		if (!controller) throw new Error("Expected the phase controller");
+		await controller.run("start", ctx);
+		expect(created.session.sessionManager.getLastModelChangeRole()).toBe(EPHEMERAL_MODEL_CHANGE_ROLE);
+		await controller.run("finish", ctx);
+		expect(created.session.model?.id).toBe(slowModel.id);
+		expect(created.session.sessionManager.getLastModelChangeRole()).toBe("slow");
+		const models = created.session.sessionManager.buildSessionContext().models;
+		expect(models.default).toBe(modelValue(defaultModel));
+		expect(models.slow).toBe(modelValue(slowModel));
+		await created.session.sessionManager.ensureOnDisk();
+		const target = created.session.sessionManager.getSessionFile();
+		if (!target) throw new Error("Expected a persisted session");
+		const originalAvailable = created.modelRegistry.getAvailable.bind(created.modelRegistry);
+		created.modelRegistry.getAvailable = () => originalAvailable().filter(model => model.id !== slowModel.id);
+		try {
+			await expect(created.session.switchSession(target)).resolves.toBe(true);
+			expect(created.session.model?.id).toBe(defaultModel.id);
+		} finally {
+			created.modelRegistry.getAvailable = originalAvailable;
+		}
+	});
+
 	it("cycles role models backward from the current role", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -420,6 +483,41 @@ describe("AgentSession model persistence", () => {
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(created.session.model?.id).toBe(defaultModel.id);
+	});
+
+	it("restores the saved default when a similar model remains during session switch", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const previousModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const defaultRoleValue = modelValue(defaultModel);
+		const removedSelector = "anthropic/sonnet-4-6";
+		expect(parseModelPattern(removedSelector, sharedModelRegistry.getAvailable()).model?.id).toBe(previousModel.id);
+		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, removedSelector);
+
+		const created = await createSession({
+			initialModel: previousModel,
+			modelRoles: { default: defaultRoleValue },
+			persist: true,
+		});
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(created.session.model?.id).toBe(defaultModel.id);
+	});
+
+	it("restores the saved default when a similar model remains during startup", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const settingsFallbackModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const defaultRoleValue = modelValue(defaultModel);
+		const removedSelector = "anthropic/sonnet-4-6";
+		expect(parseModelPattern(removedSelector, sharedModelRegistry.getAvailable()).model?.id).toBe(
+			settingsFallbackModel.id,
+		);
+		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, removedSelector);
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(settingsFallbackModel));
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.id).toBe(defaultModel.id);
 	});
 
 	it("restores the saved default model when switch-session last role is fallback", async () => {
