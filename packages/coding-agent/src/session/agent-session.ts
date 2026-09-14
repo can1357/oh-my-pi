@@ -4143,11 +4143,12 @@ export class AgentSession {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
-		if (this.#agentKind === "sub" || !this.#extensionRunner?.hasHandlers("session_stop")) {
+		const runner = this.#extensionRunner;
+		if (this.#agentKind === "sub" || !runner?.hasHandlers("session_stop")) {
 			return false;
 		}
 		const generation = this.#promptGeneration;
-		const result = await this.#extensionRunner.emitSessionStop({
+		let result = await runner.emitSessionStop({
 			messages,
 			turn_id: Math.max(0, this.#turnIndex - 1),
 			last_assistant_message: lastAssistantMessage,
@@ -4160,7 +4161,25 @@ export class AgentSession {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
-		const additionalContext = this.#sessionStopContinuationContext(result);
+		let additionalContext = this.#sessionStopContinuationContext(result);
+		if (this.#codeModelBeforeIdleHandler) {
+			const internalResult = await this.#codeModelBeforeIdleHandler(
+				{
+					type: "session_before_idle",
+					messages: [...messages],
+					willContinue: additionalContext !== undefined,
+				},
+				runner.createContext(),
+			);
+			if (this.#promptGeneration !== generation || this.#abortInProgress || this.#isDisposed) {
+				this.#resetSessionStopContinuationState();
+				return false;
+			}
+			if (additionalContext === undefined) {
+				result = internalResult;
+				additionalContext = this.#sessionStopContinuationContext(result);
+			}
+		}
 		if (!additionalContext) {
 			this.#resetSessionStopContinuationState();
 			return false;

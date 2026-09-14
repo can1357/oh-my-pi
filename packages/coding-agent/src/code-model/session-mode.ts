@@ -1,7 +1,12 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import type { ExtensionAPI, ExtensionContext, SessionBeforeIdleEvent } from "../extensibility/extensions/types";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SessionBeforeIdleEvent,
+	SessionStopEventResult,
+} from "../extensibility/extensions/types";
 import type { ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
 import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
@@ -35,7 +40,10 @@ export interface CodeModelSessionController {
 	run(action: "start" | "finish" | "status", ctx: ExtensionContext, signal?: AbortSignal): Promise<CodeModelResult>;
 }
 
-export type CodeModelBeforeIdleHandler = (event: SessionBeforeIdleEvent, ctx: ExtensionContext) => Promise<void>;
+export type CodeModelBeforeIdleHandler = (
+	event: SessionBeforeIdleEvent,
+	ctx: ExtensionContext,
+) => Promise<SessionStopEventResult | undefined>;
 
 export interface CodeModelSessionHooks {
 	getRetryFallbackPrimary?: () => { selector: string; effort: ConfiguredThinkingLevel | undefined } | undefined;
@@ -94,6 +102,8 @@ export function installCodeModelSession(
 	let state: PhaseState | undefined;
 	let busy = false;
 	let inFlight: Promise<unknown> | undefined;
+	let reviewPending = false;
+	const usesInternalFinalizer = hooks.registerBeforeIdle !== undefined;
 
 	const sessionId = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId();
 	const branch = (ctx: ExtensionContext) => ctx.sessionManager.getBranch();
@@ -315,15 +325,18 @@ export function installCodeModelSession(
 	pi.on("session_before_branch", (_event, ctx) => prepareNavigation(ctx));
 	pi.on("session_stop", async (event, ctx) => {
 		if (!state || busy || event.signal.aborted) return;
+		const last = event.last_assistant_message ?? event.messages.findLast(message => message.role === "assistant");
+		const shouldReview = last?.role === "assistant" && last.stopReason === "stop";
+		if (usesInternalFinalizer && shouldReview) reviewPending = true;
 		const result = await guarded(() => restore(ctx));
 		ctx.ui.notify(result.message, "info");
-		const last = event.last_assistant_message ?? event.messages.findLast(message => message.role === "assistant");
-		if (result.changed && last?.role === "assistant" && last.stopReason === "stop" && !event.signal.aborted) {
+		if (usesInternalFinalizer && (!result.changed || event.signal.aborted)) reviewPending = false;
+		if (result.changed && shouldReview && !event.signal.aborted && !usesInternalFinalizer) {
 			return { continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT };
 		}
 	});
 	const beforeIdle: CodeModelBeforeIdleHandler = async (event, ctx) => {
-		if (!state || event.willContinue) return;
+		if (event.willContinue) return;
 		if (inFlight) {
 			try {
 				await inFlight;
@@ -331,17 +344,32 @@ export function installCodeModelSession(
 				// The restoration below retries from the persisted phase state.
 			}
 		}
-		if (!state) return;
+		if (!state) {
+			if (reviewPending) {
+				reviewPending = false;
+				return { continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT };
+			}
+			return;
+		}
 		try {
 			const result = await guarded(() => restore(ctx));
 			ctx.ui.notify(result.message, "info");
+			if (reviewPending) {
+				reviewPending = false;
+				if (result.changed) {
+					return { continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT };
+				}
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Coding phase recovery failed: ${message} Run /code-model finish to retry.`, "error");
 		}
 	};
 	if (hooks.registerBeforeIdle) hooks.registerBeforeIdle(beforeIdle);
-	else pi.on("session_before_idle", beforeIdle);
+	else
+		pi.on("session_before_idle", async (event, ctx) => {
+			await beforeIdle(event, ctx);
+		});
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (!state || busy) return;
 		try {

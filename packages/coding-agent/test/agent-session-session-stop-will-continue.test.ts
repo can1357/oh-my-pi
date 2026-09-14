@@ -116,4 +116,78 @@ describe("AgentSession session_stop willContinue", () => {
 			expect(last.stopReason).toBe("stop");
 		}
 	});
+
+	it("schedules an internal code-model review continuation", async () => {
+		const model = getBundledModel("openai", "gpt-5");
+		if (!model) {
+			throw new Error("Expected bundled OpenAI test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ content: ["first settle"], stopReason: "stop" },
+				{ content: ["after code-model review continuation"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const extensionEmits: Array<{ type: string; willContinue?: boolean }> = [];
+		let sessionStopCalls = 0;
+		const extensionRunner = {
+			emit: async (event: { type: string; willContinue?: boolean }) => {
+				extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+			},
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "session_stop",
+			emitSessionStop: async () => {
+				sessionStopCalls++;
+				return undefined;
+			},
+			createContext: () => ({}),
+		} as unknown as ExtensionRunner;
+
+		const beforeIdleEvents: boolean[] = [];
+		let reviewScheduled = false;
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+			codeModelBeforeIdleHandler: async event => {
+				beforeIdleEvents.push(event.willContinue);
+				if (!reviewScheduled && !event.willContinue) {
+					reviewScheduled = true;
+					return { continue: true, additionalContext: "code-model review" };
+				}
+				return undefined;
+			},
+		});
+
+		await session.prompt("Trigger internal code-model review continuation");
+		await session.waitForIdle();
+
+		const agentEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(sessionStopCalls).toBe(2);
+		expect(agentEnds).toHaveLength(2);
+		expect(mock.calls).toHaveLength(2);
+		expect(agentEnds[0]?.willContinue).toBe(true);
+		expect(agentEnds[1]?.willContinue).toBeFalsy();
+		expect(beforeIdleEvents).toEqual([false, true, false, false]);
+	});
 });

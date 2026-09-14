@@ -362,15 +362,16 @@ describe("code-model session phase", () => {
 		await Promise.resolve();
 		let idleSettled = false;
 		const idlePromise = finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx).then(
-			() => {
+			result => {
 				idleSettled = true;
+				return result;
 			},
 		);
 		await Bun.sleep(1);
 		expect(idleSettled).toBe(false);
 		gate.resolve();
-		await stopPromise;
-		await idlePromise;
+		expect(await stopPromise).toBeUndefined();
+		expect(await idlePromise).toEqual({ continue: true, additionalContext: CODE_MODEL_REVIEW_PROMPT });
 		expect(state.current()).toBe(state.main);
 		expect(idleSettled).toBe(true);
 	});
