@@ -4,10 +4,10 @@
 
 ### Fixed
 
-- Invalid dynamic discovery snapshots now preserve the last complete model catalog instead of being treated as successful empty or partial results.
-- Complete model membership now survives failed refreshes, offline reads and bundled metadata migrations; separate retry timestamps and transactional refresh generations prevent stale requests from replacing newer catalogs.
-- Discovery rejects incomplete pagination and malformed membership across shared, Gemini and configured model-list paths; valid empty lists retain empty membership.
-- Closed failed SQLite initialization handles so corrupt caches can be quarantined and recovered on Windows.
+- Invalid dynamic discovery snapshots now preserve the last complete model catalog instead of being treated as successful empty or partial results ([#12059](https://github.com/can1357/oh-my-pi/pull/12059) by [@yyyllllming](https://github.com/yyyllllming)).
+- Complete model membership now survives failed refreshes, offline reads and bundled metadata migrations; separate retry timestamps and transactional refresh generations prevent stale requests from replacing newer catalogs ([#12059](https://github.com/can1357/oh-my-pi/pull/12059) by [@yyyllllming](https://github.com/yyyllllming)).
+- Discovery rejects incomplete pagination and malformed membership across shared, Gemini and configured model-list paths; valid empty lists retain empty membership ([#12059](https://github.com/can1357/oh-my-pi/pull/12059) by [@yyyllllming](https://github.com/yyyllllming)).
+- Closed failed SQLite initialization handles so corrupt caches can be quarantined and recovered on Windows ([#12059](https://github.com/can1357/oh-my-pi/pull/12059) by [@yyyllllming](https://github.com/yyyllllming)).
 - Fixed the GitHub Copilot picker showing disabled models or hiding models available only through another configured account; successful discovery now uses the union of all accounts' grants.
 - Fixed shared Copilot models retaining the first account's Enterprise endpoint when another account is selected for inference.
 - Copilot discovery now retains each model's granting accounts across cache reloads.
