@@ -1091,6 +1091,14 @@ export class RelayBridge {
 						return undefined;
 					})
 				: undefined;
+		// The post-registration document probe is another await on the same
+		// debugger root. A final-owner detach can complete while it is pending,
+		// so fence the returned identifier again before journaling it or queuing
+		// owner-loss cleanup against a replacement root.
+		if (tab.runtimeGeneration !== rootGeneration) {
+			this.#replyError(conn, msg, "Page.addScriptToEvaluateOnNewDocument completed after the debugger detached");
+			return;
+		}
 		if (conn.sessions.get(sessionId) !== ref) {
 			this.#enqueuePreloadScriptCleanup(tab, [
 				{
@@ -3382,6 +3390,7 @@ export class RelayBridge {
 		const currentLoaderId = currentDocumentState?.mainLoaderId;
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
+			const rootGeneration = tab.runtimeGeneration;
 			const previousLoaderId = recoveryLoaderId ?? script.loaderId;
 			const previousFrameLoaderIds = recoveryFrameLoaderIds
 				? { ...script.frameLoaderIds, ...recoveryFrameLoaderIds }
@@ -3448,6 +3457,13 @@ export class RelayBridge {
 				throw err;
 			}
 			this.#assertExtensionCurrent(expectedExt);
+			// A preserved owner can disappear while the additive replay RPC is in
+			// flight, allowing the last-holder detach to destroy this debugger root
+			// without replacing the extension socket. Never journal or enqueue the
+			// late root-local identifier against a later root where Chrome may reuse it.
+			if (tab.runtimeGeneration !== rootGeneration) {
+				throw new Error("Page.addScriptToEvaluateOnNewDocument replay completed after the debugger detached");
+			}
 			const identifier = result?.identifier;
 			if (typeof identifier !== "string") {
 				throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");

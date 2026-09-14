@@ -3618,6 +3618,41 @@ describe("RelayBridge tab grouping", () => {
 		expect(replay?.params).toMatchObject({ runImmediately: false });
 	});
 
+	it("drops an initial preload identifier when detach completes during its loader probe", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__oldOwner = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "reused-id" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1, "detach during initial preload loader probe");
+		ack(bridge, ext, "detach");
+		nack(bridge, ext, "send", "frame tree unavailable");
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		await attachPage(bridge, ext, adopter, adopterConn, 1);
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toEqual([]);
+	});
+
 	it("reruns an immediate preload after a same-URL navigation during subscription recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -4869,6 +4904,50 @@ describe("RelayBridge tab grouping", () => {
 		});
 		ack(bridge, replacement, "send");
 		await flush();
+	});
+
+	it("drops a replay identifier when its final holder detaches before the result arrives", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__ownerScript = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "old-root-id" });
+		await flush();
+
+		bridge.extClosed(ext);
+		const recovering = new FakeExtSocket();
+		connect(bridge, recovering, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => recovering.pending("attach").length === 1);
+		ack(bridge, recovering, "attach");
+		await waitFor(() =>
+			recovering.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => recovering.pending("detach").length === 1, "detach during preload replay");
+		ack(bridge, recovering, "detach");
+		ack(bridge, recovering, "send", { identifier: "reused-id" });
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		await attachPage(bridge, recovering, adopter, adopterConn, 1);
+		expect(recovering.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toEqual(
+			[],
+		);
 	});
 
 	it("does not apply old-root preload cleanup IDs after a fresh-root replay", async () => {
