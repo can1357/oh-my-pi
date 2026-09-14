@@ -155,6 +155,23 @@ describe("resolveSessionStorage", () => {
 		expect(fromEnv.message).toBe('OMP_SESSION_STORAGE is "redis"; expected "file" or "sql"');
 	});
 
+	it("refuses contents the driver cannot parse as a URL without echoing them, even through Bun.inspect", async () => {
+		// libpq keyword form: Bun.SQL rejects it in the constructor with a TypeError that embeds
+		// the whole string. cli.ts's fatal handler prints Bun.inspect(error), so that is the
+		// surface that must not carry the password.
+		const dsnFile = await writeDsnFile("host=db user=app password=hunter2\n");
+		const error = await rejection(
+			resolveSessionStorage({
+				settings: Settings.isolated(),
+				env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile },
+			}),
+		);
+		expect(error.message).toBe(
+			`OMP_SESSION_SQL_DSN_FILE names ${dsnFile}, but its contents are not a connection URL the database driver accepts`,
+		);
+		expect(Bun.inspect(error)).not.toContain("hunter2");
+	});
+
 	it("refuses an unreachable database with the driver's error, naming the path but never the connection string", async () => {
 		const dsnFile = await writeDsnFile("postgres://user:hunter2@127.0.0.1:1/sessions");
 		const error = await rejection(

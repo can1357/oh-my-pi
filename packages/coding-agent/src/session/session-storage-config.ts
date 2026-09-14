@@ -13,8 +13,11 @@
  * and awaits {@link SqlSessionStorage.create}, whose `CREATE TABLE` round trip
  * is where an unreachable database fails. Every refusal names the variable or
  * setting that supplied the value and the path it named, never the connection
- * string. There is no fallback to file storage: a misconfigured `sql` refuses
- * to start rather than quietly writing sessions somewhere else.
+ * string: an unreadable or empty file, contents the driver cannot parse as a
+ * connection URL (the driver's own error embeds the string, so it is not
+ * attached as a cause either), and a database that cannot be opened each
+ * refuse in those terms. There is no fallback to file storage: a misconfigured
+ * `sql` refuses to start rather than quietly writing sessions somewhere else.
  */
 
 import { toError } from "@oh-my-pi/pi-utils";
@@ -24,8 +27,8 @@ import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import { SqlSessionStorage } from "./sql-session-storage";
 import { cfgSessionSqlDsnFile, cfgSessionStorage } from "./storage-settings";
 
-export const SESSION_STORAGE_ENV = "OMP_SESSION_STORAGE";
-export const SESSION_SQL_DSN_FILE_ENV = "OMP_SESSION_SQL_DSN_FILE";
+const SESSION_STORAGE_ENV = "OMP_SESSION_STORAGE";
+const SESSION_SQL_DSN_FILE_ENV = "OMP_SESSION_SQL_DSN_FILE";
 const SESSION_STORAGE_SETTING = cfgSessionStorage.id;
 const SESSION_SQL_DSN_FILE_SETTING = cfgSessionSqlDsnFile.id;
 
@@ -77,7 +80,14 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 	}
 	if (!dsn) throw new SessionStorageConfigError(`${source} names ${dsnFile}, which is empty`);
 
-	const client = new SQL(dsn);
+	let client: SQL;
+	try {
+		client = new SQL(dsn);
+	} catch {
+		throw new SessionStorageConfigError(
+			`${source} names ${dsnFile}, but its contents are not a connection URL the database driver accepts`,
+		);
+	}
 	try {
 		return await SqlSessionStorage.create({ client });
 	} catch (err) {
