@@ -198,12 +198,12 @@ describe("AgentSession model persistence", () => {
 
 		await created.session.setModel(routed);
 
-		expect(
-			created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
-		).toMatchObject({
-			type: "model_change",
-			model: "openrouter/z-ai/glm-4.7@cerebras",
-		});
+		expect(created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject(
+			{
+				type: "model_change",
+				model: "openrouter/z-ai/glm-4.7@cerebras",
+			},
+		);
 	});
 
 	it("persists the default role when explicitly requested", async () => {
