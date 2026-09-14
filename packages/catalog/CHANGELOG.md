@@ -20,6 +20,9 @@
 ### Added
 
 - Enabled assistant prefill support for Ollama models
+### Added
+
+- Added Nous Portal as a built-in API-key provider against `https://inference-api.nousresearch.com/v1`, with `/login nous-portal` and live `/v1/models` discovery ([#10444](https://github.com/can1357/oh-my-pi/issues/10444)).
 
 ### Fixed
 

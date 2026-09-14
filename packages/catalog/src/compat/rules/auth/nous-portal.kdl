@@ -1,0 +1,10 @@
+auth "nous-portal" {
+	name "Nous Portal"
+	login "api-key" {
+		auth-url "https://portal.nousresearch.com"
+		instructions "Create an API key at portal.nousresearch.com (API Keys), then paste it here. Do not reuse Hermes' OAuth refresh token."
+		prompt "Paste your Nous Portal API key" placeholder="sk-nous-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="Nous Portal" url="https://inference-api.nousresearch.com/v1/models"
+	}
+}

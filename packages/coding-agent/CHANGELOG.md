@@ -20,6 +20,7 @@
 - Hub message/job waits now always use the adaptive window (5s, lengthening to 5m across back-to-back waits); removed the `timeoutMs` argument and `async.pollWaitDuration` setting.
 
 ### Added
+- Added `/login nous-portal` for Nous Portal dashboard API keys (`NOUS_API_KEY`), using the public inference API rather than the Hermes subscription proxy ([#10444](https://github.com/can1357/oh-my-pi/issues/10444)).
 
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD

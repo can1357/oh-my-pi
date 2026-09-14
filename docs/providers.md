@@ -120,6 +120,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
 | `novita`                         | `NOVITA_API_KEY`                                                              |
+| `nous-portal`                    | `NOUS_API_KEY`                                                                |
 | `venice`                         | `VENICE_API_KEY`                                                              |
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
@@ -158,6 +159,9 @@ Each provider has one or more environment variables that supply a key when no st
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
+
+`nous-portal` is Nous Research's OpenAI-compatible inference API (`https://inference-api.nousresearch.com/v1`). Create a dashboard key (`sk-nous-…`) at [portal.nousresearch.com](https://portal.nousresearch.com) and either `/login nous-portal` or set `NOUS_API_KEY`. The live `/v1/models` catalog is authoritative per account. This is not the Hermes subscription proxy (`http://127.0.0.1:8645/v1`); point a custom `models.yml` entry at that loopback URL only if you already run `hermes proxy start`.
+
 
 OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
