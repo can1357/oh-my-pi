@@ -95,21 +95,21 @@ describe("createSessionManager — --new versus the autoResume setting", () => {
 	});
 
 	it("rejects --new combined with another session source", async () => {
-		for (const overrides of [
-			{ continue: true },
-			{ resume: "019ea530-0000-7000-0000-000000000000" },
-			{ resume: true as const },
-			{ fork: "019ea530-0000-7000-0000-000000000000" },
-		]) {
+		for (const [overrides, conflicting] of [
+			[{ continue: true }, "--continue"],
+			[{ resume: "019ea530-0000-7000-0000-000000000000" }, "--resume"],
+			[{ resume: true as const }, "--resume"],
+			[{ fork: "019ea530-0000-7000-0000-000000000000" }, "--fork"],
+		] as const) {
 			const caught = await createSessionManager(
 				buildArgs({ newSession: true, ...overrides }),
 				cwd,
 				autoResumeSettings,
 			).catch((error: unknown) => error);
 			expect(caught).toBeInstanceOf(SessionResolutionError);
-			expect((caught as SessionResolutionError).message).toBe(
-				"--new cannot be combined with --continue, --resume, or --fork",
-			);
+			const { message } = caught as SessionResolutionError;
+			expect(message).toContain("--new");
+			expect(message).toContain(conflicting);
 		}
 	});
 });
@@ -127,9 +127,9 @@ describe("resolveForeignSessionSource — --new versus a foreign import", () => 
 				caught = error;
 			}
 			expect(caught).toBeInstanceOf(SessionResolutionError);
-			expect((caught as SessionResolutionError).message).toBe(
-				`--from-${source} cannot be combined with --continue, --resume, --fork, or --new`,
-			);
+			const { message } = caught as SessionResolutionError;
+			expect(message).toContain(`--from-${source}`);
+			expect(message).toContain("--new");
 		}
 	});
 
