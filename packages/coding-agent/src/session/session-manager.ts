@@ -399,7 +399,7 @@ export type ReadonlySessionManager = Pick<
 	| "putBlobSync"
 >;
 
-interface SessionManagerStateSnapshot {
+export interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;

@@ -239,6 +239,7 @@ import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
 	AsyncJobSnapshot,
+	CodeModelNavigationPreparation,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
 	DroppedPrompt,
@@ -365,7 +366,12 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
+import {
+	cleanupEmptyMoveSession,
+	copySessionArtifacts,
+	type SessionManager,
+	type SessionManagerStateSnapshot,
+} from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -8088,17 +8094,62 @@ export class AgentSession {
 			}
 		}
 		if (!previousSessionFile) return false;
-		if (await this.#codeModelBlocksNavigation()) return false;
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
+
 		let advisorRecordersDetached = false;
+		let forkCommitted = false;
+		let codeModelPreparation: CodeModelNavigationPreparation | undefined;
+		let rollbackCodeModelPreparation: (() => void) | undefined;
+
 		try {
 			advisorRecordersDetached = true;
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
+
+			const preCodeModelSessionState: SessionManagerStateSnapshot = this.sessionManager.captureState();
+			const preCodeModelModel = this.model;
+			const preCodeModelThinkingLevel = this.thinkingLevel;
+			const preCodeModelAutoThinking = this.isAutoThinking;
+			const preCodeModelAutoResolvedLevel = this.autoResolvedThinkingLevel();
+			const preCodeModelServiceTierByFamily = this.serviceTierByFamily;
+			const preCodeModelFreshProviderSessionId = this.#freshProviderSessionId;
+			const preCodeModelInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+
+			rollbackCodeModelPreparation = () => {
+				if (!codeModelPreparation?.rollback) return;
+				this.sessionManager.restoreState(preCodeModelSessionState);
+				this.#freshProviderSessionId = preCodeModelFreshProviderSessionId;
+				this.#inheritedProviderPromptCacheKey = preCodeModelInheritedProviderPromptCacheKey;
+				this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+				let modelRolledBack = false;
+				if (preCodeModelModel) {
+					const activeModel = this.model;
+					this.agent.setModel(preCodeModelModel);
+					modelRolledBack = !modelsAreEqual(activeModel, preCodeModelModel);
+				}
+				this.#models.restoreThinkingSnapshot(
+					preCodeModelThinkingLevel,
+					preCodeModelAutoThinking,
+					preCodeModelAutoResolvedLevel,
+				);
+				if (preCodeModelServiceTierByFamily) {
+					this.#models.restoreServiceTiers(preCodeModelServiceTierByFamily);
+				}
+				codeModelPreparation.rollback();
+				this.#todo.syncFromBranch();
+				if (modelRolledBack) this.#emit({ type: "model_changed" });
+			};
+
+			codeModelPreparation = await this.#prepareCodeModelNavigation();
+			if (codeModelPreparation?.cancel) {
+				rollbackCodeModelPreparation();
+				return false;
+			}
+
 			const bashTransition = this.#bash.beginSessionTransition();
 
 			// Fork the session (creates new session file with same entries)
@@ -8114,8 +8165,10 @@ export class AgentSession {
 			}
 			if (!forkResult) {
 				this.#bash.finishSessionTransition(bashTransition, false);
+				rollbackCodeModelPreparation();
 				return false;
 			}
+			forkCommitted = true;
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running
@@ -8144,6 +8197,9 @@ export class AgentSession {
 			}
 
 			return true;
+		} catch (error) {
+			if (!forkCommitted) rollbackCodeModelPreparation?.();
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
 		}

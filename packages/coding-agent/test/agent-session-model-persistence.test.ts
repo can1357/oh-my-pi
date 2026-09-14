@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
@@ -280,6 +280,59 @@ describe("AgentSession model persistence", () => {
 
 		expect(await created.session.fork()).toBe(false);
 		expect(outgoingRestorations).toBe(0);
+	});
+
+	it("preserves the coding model without preparing navigation when fork flush rejects", async () => {
+		let preparationCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				preparationCalled = true;
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {},
+				};
+			},
+		});
+
+		const failure = new Error("flush failed");
+		vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+
+		await expect(created.session.fork()).rejects.toThrow(failure);
+		expect(preparationCalled).toBe(false);
+		expect(created.session.model).toBe(codingModel);
+	});
+
+	it("rolls back code-model navigation preparation when fork creation rejects", async () => {
+		let rollbackCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {
+						rollbackCalled = true;
+					},
+				};
+			},
+		});
+
+		const failure = new Error("fork failed");
+		vi.spyOn(created.session.sessionManager, "fork").mockRejectedValueOnce(failure);
+
+		await expect(created.session.fork()).rejects.toThrow(failure);
+		expect(rollbackCalled).toBe(true);
+		expect(created.session.model).toBe(codingModel);
 	});
 
 	it("preserves the outgoing phase when destination cwd requires approval", async () => {

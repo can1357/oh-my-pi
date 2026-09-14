@@ -5,6 +5,7 @@ import {
 	CODE_MODEL_REVIEW_PROMPT,
 	CODE_MODEL_STATE_TYPE,
 	type CodeModelBeforeIdleHandler,
+	type CodeModelBeforeNavigationHandler,
 	installCodeModelSession,
 } from "../src/code-model/session-mode";
 import { createCodeModelExtension } from "../src/code-model";
@@ -252,6 +253,28 @@ describe("code-model session phase", () => {
 		await session.run("start", state.ctx);
 		state.setCurrent(state.fallback, ThinkingLevel.Low);
 		state.setFallback();
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
+
+	it("restores the main model when the retry primary selector includes its effort", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () =>
+				state.current() === state.fallback
+					? {
+							selector: `${state.coding.provider}/${state.coding.id}:high`,
+							effort: ThinkingLevel.High,
+							fallbackEffort: ThinkingLevel.Low,
+						}
+					: undefined,
+		});
+		await session.run("start", state.ctx);
+		state.setCurrent(state.fallback, ThinkingLevel.Low);
+		state.setFallback();
+
 		const finished = await session.run("finish", state.ctx);
 		expect(finished.changed).toBe(true);
 		expect(state.current()).toBe(state.main);
@@ -590,6 +613,26 @@ describe("code-model session phase", () => {
 		expect(
 			await finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx),
 		).toBeUndefined();
+	});
+
+	it("retains the coding phase when navigation preparation rolls back", async () => {
+		const state = harness();
+		let navigationPreparation: CodeModelBeforeNavigationHandler | undefined;
+		const session = installCodeModelSession(state.pi, state.settings, {
+			registerBeforeNavigation: handler => {
+				navigationPreparation = handler;
+			},
+		});
+		await session.run("start", state.ctx);
+		expect(navigationPreparation).toBeDefined();
+
+		const preparation = await navigationPreparation?.(state.ctx);
+		expect(preparation?.rollback).toBeDefined();
+		expect(state.current()).toBe(state.main);
+
+		preparation?.rollback?.();
+		const status = await session.run("status", state.ctx);
+		expect(status.message).toContain("Current phase: coding");
 	});
 
 	it("restores a persisted coding phase when the session resumes", async () => {

@@ -1,5 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { formatModelStringWithRouting, parsePersistedModelSelector } from "../config/model-resolver";
+import { formatModelStringWithRouting, parseModelString, parsePersistedModelSelector } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type {
 	ExtensionAPI,
@@ -7,6 +7,7 @@ import type {
 	SessionBeforeIdleEvent,
 	SessionStopEventResult,
 } from "../extensibility/extensions/types";
+import type { CodeModelNavigationPreparation } from "../session/agent-session-types";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
 import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
@@ -46,10 +47,7 @@ export type CodeModelBeforeIdleHandler = (
 	ctx: ExtensionContext,
 ) => Promise<SessionStopEventResult | undefined>;
 
-export interface CodeModelNavigationPreparation {
-	cancel?: boolean;
-	rollback?: () => void;
-}
+export type { CodeModelNavigationPreparation };
 export type CodeModelBeforeNavigationHandler = (
 	ctx: ExtensionContext,
 ) => Promise<CodeModelNavigationPreparation | undefined>;
@@ -74,6 +72,21 @@ function sameModel(model: Model | undefined, state: ModelState): boolean {
 		return formatModelStringWithRouting(model) === state.selector;
 	}
 	return model.provider === state.provider && model.id === state.id;
+}
+
+function matchesRetryPrimary(retrySelector: string, coding: ModelState, ctx: ExtensionContext): boolean {
+	const parsedModel = parsePersistedModelSelector(retrySelector, ctx.models.list()).model;
+	if (parsedModel) {
+		return sameModel(parsedModel, coding);
+	}
+	const parsedString = parseModelString(retrySelector, { allowMaxSuffix: true, allowAutoAlias: true });
+	if (parsedString) {
+		if (coding.selector !== undefined) {
+			return coding.selector === `${parsedString.provider}/${parsedString.id}`;
+		}
+		return coding.provider === parsedString.provider && coding.id === parsedString.id;
+	}
+	return sameModel(ctx.models.resolve(retrySelector), coding);
 }
 
 function describeModelState(state: ModelState): string {
@@ -238,10 +251,7 @@ export function installCodeModelSession(
 		// Legacy phase snapshots predate explicit role attribution.
 		const codingRoleMatches = previous.original.role === undefined || latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE;
 		const retryPrimaryMatchesCoding =
-			retryFallback === undefined ||
-			(previous.coding.selector !== undefined
-				? retryFallback.selector === previous.coding.selector
-				: sameModel(ctx.models.resolve(retryFallback.selector), previous.coding));
+			retryFallback === undefined || matchesRetryPrimary(retryFallback.selector, previous.coding, ctx);
 		const codingStateMatches =
 			(codingRoleMatches && sameModel(active, previous.coding) && effort === previous.coding.effort) ||
 			(retryPrimaryMatchesCoding && retryFallbackIsActive(ctx) && effort === fallbackEffort);
