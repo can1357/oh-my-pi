@@ -201,7 +201,11 @@ export function installCodeModelSession(
 			!options.ephemeral &&
 			latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE &&
 			setModelOptions.role !== EPHEMERAL_MODEL_CHANGE_ROLE;
-		if ((!sameModel(ctx.models.current(), target) || restoreRole) && !(await pi.setModel(model, setModelOptions))) {
+		const claimEphemeralRole = options.ephemeral && latest?.role !== EPHEMERAL_MODEL_CHANGE_ROLE;
+		if (
+			(!sameModel(ctx.models.current(), target) || restoreRole || claimEphemeralRole) &&
+			!(await pi.setModel(model, setModelOptions))
+		) {
 			throw new Error(`Check the existing authentication for ${identifier}.`);
 		}
 		pi.setThinkingLevel(target.effort);

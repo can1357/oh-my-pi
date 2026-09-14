@@ -206,6 +206,22 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
+	it("records phase ownership when only effort changes", async () => {
+		const state = harness({ role: "main/reviewer:high" });
+		const session = installCodeModelSession(state.pi, state.settings);
+		const started = await session.run("start", state.ctx);
+		expect(started.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.High);
+		expect(state.branch.findLast(entry => entry.type === "model_change")?.role).toBe(EPHEMERAL_MODEL_CHANGE_ROLE);
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+		expect(state.branch.findLast(entry => entry.type === "model_change")?.role).toBe("default");
+	});
+
 	it("requires the exact retry primary before starting a coding phase", async () => {
 		const state = harness();
 		const sibling = { ...state.main, id: "reviewer-new" };
