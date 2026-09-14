@@ -1046,14 +1046,16 @@ export class RelayBridge {
 		}
 		const rootGeneration = tab.runtimeGeneration;
 		// Keep the pre-registration read to distinguish a navigation that overlaps
-		// the command from one that happened earlier, but never persist it as the
-		// successful invocation's baseline.
-		if (msg.params?.runImmediately === true) {
-			await this.#mainFrameLoaderId(ref.tabId).catch(err => {
-				if (isExtensionTransportInterrupted(err)) throw err;
-				return undefined;
-			});
-		}
+		// the command from one that happened earlier. Prefer the post-registration
+		// snapshot below, but retain this state as the baseline if that later probe
+		// fails without indicating a lost extension transport.
+		const initialDocumentState =
+			msg.params?.runImmediately === true
+				? await this.#frameDocumentState(ref.tabId).catch(err => {
+						if (isExtensionTransportInterrupted(err)) throw err;
+						return undefined;
+					})
+				: undefined;
 		let result: Record<string, unknown> | undefined;
 		try {
 			result = (await this.#rpc({
@@ -1085,14 +1087,14 @@ export class RelayBridge {
 			this.#replyError(conn, msg, "Page.addScriptToEvaluateOnNewDocument completed after the debugger detached");
 			return;
 		}
-		const loaderId =
+		const documentState =
 			msg.params?.runImmediately === true
 				? await this.#frameDocumentState(ref.tabId).catch(err => {
 						if (isExtensionTransportInterrupted(err)) {
 							tab.forceFreshRootBeforeReplay = true;
 							throw err;
 						}
-						return undefined;
+						return initialDocumentState;
 					})
 				: undefined;
 		// The post-registration document probe is another await on the same
@@ -1124,9 +1126,9 @@ export class RelayBridge {
 			clientIdentifier,
 			rootIdentifier,
 			msg.params,
-			loaderId?.mainLoaderId,
+			documentState?.mainLoaderId,
 			undefined,
-			loaderId?.frameLoaderIds,
+			documentState?.frameLoaderIds,
 		);
 		this.#reply(conn, msg, { ...result, identifier: clientIdentifier });
 	}
@@ -3844,10 +3846,6 @@ export class RelayBridge {
 				}
 			}
 		}
-	}
-
-	async #mainFrameLoaderId(tabId: number): Promise<string | undefined> {
-		return (await this.#frameDocumentState(tabId)).mainLoaderId;
 	}
 
 	async #frameDocumentState(tabId: number): Promise<{
