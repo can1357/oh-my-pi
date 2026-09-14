@@ -15,6 +15,7 @@
 
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 - Multi-step logins (e.g. Perplexity email → code) now move the input field under the latest prompt instead of leaving it stuck beneath the first one.
+- Hashline edit errors now tell agents to replace incompatible patch bodies instead of only prepending a snapshot header ([#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
 
 ## [18.1.21] - 2026-09-14
 

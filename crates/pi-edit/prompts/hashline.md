@@ -91,20 +91,6 @@ PUT 1*:
 </example>
 
 <anti-patterns>
-# WRONG — apply_patch file directives and unified hunks are invalid.
-*** Begin Patch
-*** Update File: greet.py
-@@ -2,1 +2,1 @@
--old
-+new
-*** End Patch
-# RIGHT — the same optional envelope contains a Hashline section/op.
-*** Begin Patch
-[greet.py#A1B2]
-PUT 2.=2:
-+new
-*** End Patch
-
 # WRONG — empty `PUT` to delete. RIGHT: `CUT 4.=4`
 PUT 4.=4:
 

@@ -747,33 +747,29 @@ fn contamination_message(text: &str) -> Option<String> {
 			trimmed.into()
 		};
 		return Some(format!(
-			"apply_patch file directive {} is not valid Hashline syntax. {}",
-			messages::json_quote(&preview),
-			messages::input_format_guidance()
-		));
-	}
-	if trimmed.starts_with("<<<<<<< SEARCH") || trimmed.starts_with(">>>>>>> REPLACE") {
-		return Some(format!(
-			"SEARCH/REPLACE marker {} is not valid Hashline syntax. {}",
-			messages::json_quote(trimmed),
-			messages::input_format_guidance()
+			"apply_patch sentinel {} is not valid in hashline. File sections start with \
+			 `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, \
+			 or `PUT <N:`/`PUT >N:` ops.",
+			messages::json_quote(&preview)
 		));
 	}
 	if trimmed.starts_with("@@") {
-		let prefix = if UNIFIED_HUNK_RE.is_match(trimmed) {
-			"unified-diff hunk header"
-		} else {
-			"`@@`-bracketed hunk header"
-		};
+		if UNIFIED_HUNK_RE.is_match(trimmed) {
+			return Some(
+				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT \
+				 N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+					.to_string(),
+			);
+		}
 		let preview = if trimmed.chars().count() > 48 {
 			format!("{}…", trimmed.chars().take(48).collect::<String>())
 		} else {
 			trimmed.into()
 		};
 		return Some(format!(
-			"{prefix} {} is not valid Hashline syntax. {}",
-			messages::json_quote(&preview),
-			messages::input_format_guidance()
+			"`@@`-bracketed hunk header {} is not valid in hashline. Drop the `@@ ... @@` brackets \
+			 and write a header such as `PUT N.=M:`.",
+			messages::json_quote(&preview)
 		));
 	}
 	if !trimmed.is_empty()
