@@ -6,6 +6,7 @@
 
 - `omp config set <key> <value> --if-absent` now applies global defaults without replacing explicitly configured values.
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
+- `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
 ### Changed
 

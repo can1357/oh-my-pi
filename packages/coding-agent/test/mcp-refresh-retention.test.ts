@@ -16,6 +16,7 @@ const probePath = path.join(import.meta.dir, "fixtures", "mcp-refresh-retention-
 async function runProbe(): Promise<ProbeResult> {
 	const proc = Bun.spawn([process.execPath, probePath], {
 		cwd: path.join(import.meta.dir, "../../.."),
+		env: { ...process.env, BUN_JSC_useConcurrentJIT: "0" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
