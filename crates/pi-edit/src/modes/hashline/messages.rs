@@ -6,26 +6,16 @@ use std::{
 	fmt::Write,
 };
 
-use super::format::{
-	HL_CUT_KEYWORD, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_GAP_AFTER, HL_GAP_BEFORE,
-	HL_LINE_BODY_SEP, HL_PAYLOAD_REPLACE, HL_PUT_KEYWORD, HL_RANGE_SEP,
-};
 pub use super::types::BlockSpan;
-/// Canonical recovery shown when input does not follow the hashline wire
-/// format.
-pub fn input_format_guidance() -> String {
-	format!(
-		"Expected hashline shape: `[PATH#HASH]`, then `{HL_PUT_KEYWORD} N{HL_RANGE_SEP}M:`, then \
-		 `{HL_PAYLOAD_REPLACE}TEXT`. Copy `HASH` from the latest `read`/`search` output for that \
-		 file; never invent it. `N` and `M` are the inclusive original start and end line numbers \
-		 from that snapshot; `M` is not a line count, and one line is `N{HL_RANGE_SEP}N`. \
-		 `{HL_PUT_KEYWORD} N{HL_RANGE_SEP}M:` replaces that range with `{HL_PAYLOAD_REPLACE}TEXT` \
-		 body rows; `{HL_CUT_KEYWORD} N{HL_RANGE_SEP}M` with no body deletes it; `{HL_PUT_KEYWORD} \
-		 {HL_GAP_BEFORE}N:`/`{HL_PUT_KEYWORD} {HL_GAP_AFTER}N:` with body rows inserts before/after \
-		 line `N`. Unified-diff hunks, apply_patch file directives, and SEARCH/REPLACE markers are \
-		 invalid in Hashline mode."
-	)
-}
+
+const HL_FILE_PREFIX: &str = "[";
+const HL_FILE_SUFFIX: &str = "]";
+const HL_PAYLOAD_REPLACE: &str = "+";
+const HL_PUT_KEYWORD: &str = "PUT";
+const HL_CUT_KEYWORD: &str = "CUT";
+const HL_FILE_HASH_SEP: &str = "#";
+const HL_RANGE_SEP: &str = ".=";
+const HL_LINE_BODY_SEP: &str = ":";
 
 #[inline]
 fn format_numbered_line(line_number: u32, line: &str) -> String {

@@ -557,6 +557,7 @@
 - Multi-step logins (e.g. Perplexity email → code) now move the input field under the latest prompt instead of leaving it stuck beneath the first one.
 - Todo updates made through Eval's `tool.todo(...)` now persist to the session, so they survive resume/rewind/fork and no longer trigger false incomplete-todo reminders.
 - Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
+- Hashline edit errors now tell agents to replace incompatible patch bodies instead of only prepending a snapshot header ([#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
 
 ## [18.1.21] - 2026-09-14
 

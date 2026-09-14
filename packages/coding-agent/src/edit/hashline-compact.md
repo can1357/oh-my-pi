@@ -8,7 +8,6 @@ PUT 3.=3:
 *** End Patch
 ```
 `TAG`: required 4-hex snapshot; `N,M`: original line numbers. Repeat the header per file.
-In Hashline mode, `*** Begin Patch` / `*** End Patch` are optional wrappers; inside them, NEVER use `*** Update File:`, `---`/`+++`, `@@`, or SEARCH/REPLACE.
 
 Ops:
 - `PUT N.=M:` replaces inclusive N–M with `+` body; `PUT N*:` replaces the syntax block at N.
