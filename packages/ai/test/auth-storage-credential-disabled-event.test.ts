@@ -66,9 +66,13 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		if (row) row.credential = credential;
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
+	deleteAuthCredential(id: number, disabledCause: string): boolean {
 		const row = this.#rows.find(entry => entry.id === id);
-		if (row) row.disabledCause = disabledCause;
+		// Mirror persistence: retention keeps the first cause, so disabling an
+		// already-tombstoned row transitions nothing.
+		if (!row || row.disabledCause !== null) return false;
+		row.disabledCause = disabledCause;
+		return true;
 	}
 
 	tryDisableAuthCredentialIfMatches(id: number, expectedData: string, disabledCause: string): boolean {

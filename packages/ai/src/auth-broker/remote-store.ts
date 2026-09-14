@@ -17,6 +17,7 @@ import {
 	resolveOAuthCredentialIdentity,
 } from "../auth/sqlite-credential-store";
 import {
+	providerIdForDisplay,
 	type AuthCredential,
 	authCredentialEquals,
 	type AuthCredentialSnapshotEntry,
@@ -76,6 +77,12 @@ const BACKGROUND_BACKOFF_INITIAL_MS = 500;
 const BACKGROUND_BACKOFF_MAX_MS = 30_000;
 /** Idle window after the last foreground store use before background sync parks. */
 const BACKGROUND_IDLE_MS = 20_000;
+/**
+ * How many departed credential ids stay eligible for an idempotent logout. A
+ * retry that has fallen this far behind the snapshot is no longer the request
+ * the caller is holding open.
+ */
+const VANISHED_CREDENTIAL_MEMORY = 128;
 
 function compareCredentialBlockSnapshots(a: CredentialBlockSnapshot, b: CredentialBlockSnapshot): number {
 	const provider = a.providerKey.localeCompare(b.providerKey);
@@ -316,6 +323,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#pendingCredentialRemovals = new Map<number, PendingCredentialRemoval>();
 	#credentialRemovalRetryTimer: Timer | undefined;
 	#credentialRemovalRetryAtMs = Infinity;
+	/**
+	 * Credential ids this client held in its own snapshot and then lost. A
+	 * deliberate removal of one of these is already complete, so it reports
+	 * success instead of a skipped logout; an id this client never held stays
+	 * refused, so an account pool cannot be used to reach outside itself.
+	 */
+	#vanishedCredentialIds = new Set<number>();
 	/** AuthStorage already announces successful disables initiated by this client. */
 	#localDisables = new Map<
 		number,
@@ -388,10 +402,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
 		this.#refreshCredentialRevision();
-		if (previousCredentials.length > 0 && this.#credentialDisabledListeners.size > 0) {
+		if (previousCredentials.length > 0) {
 			const activeIds = new Set(snapshot.credentials.map(entry => entry.id));
+			const announcing = this.#credentialDisabledListeners.size > 0;
 			for (const entry of previousCredentials) {
-				if (!activeIds.has(entry.id))
+				if (activeIds.has(entry.id)) continue;
+				this.#noteCredentialVanished(entry.id);
+				if (announcing)
 					this.#notifyCredentialRemoved(entry, this.#siblingApiKeyIds(entry, previousCredentials, generation));
 			}
 		}
@@ -712,6 +729,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		};
 	}
 
+	/** Bounded: only the most recent departures can still be retried as logouts. */
+	#noteCredentialVanished(id: number): void {
+		this.#vanishedCredentialIds.delete(id);
+		this.#vanishedCredentialIds.add(id);
+		if (this.#vanishedCredentialIds.size > VANISHED_CREDENTIAL_MEMORY) {
+			const oldest = this.#vanishedCredentialIds.values().next().value;
+			if (oldest !== undefined) this.#vanishedCredentialIds.delete(oldest);
+		}
+	}
+
 	/** `siblingApiKeyIds` is resolved by the caller against the list it diffed. */
 	#notifyCredentialRemoved(entry: SnapshotEntry, siblingApiKeyIds: ReadonlySet<number> | undefined): void {
 		if (this.#closed || this.#credentialDisabledListeners.size === 0) return;
@@ -917,7 +944,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#streamAdditions.delete(id);
 		this.#snapshotReceivedAt = Date.now();
 		this.#refreshCredentialRevision();
-		if (removed && !options?.retainBrokerUsageAccount) this.#notifyCredentialRemoved(removed, siblingApiKeyIds);
+		if (removed && !options?.retainBrokerUsageAccount) {
+			// A streamed removal is a departure this client witnessed, exactly like
+			// one found by diffing a full snapshot. Record it whether or not anyone
+			// is listening for the announcement.
+			this.#noteCredentialVanished(id);
+			this.#notifyCredentialRemoved(removed, siblingApiKeyIds);
+		}
 		this.#retryCredentialRemovalNotifications();
 	}
 
@@ -1119,26 +1152,35 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
+	/**
+	 * Optimistic local disable. Reports whether this client's snapshot still
+	 * held the row: a peer that already disabled it owns the persisted cause,
+	 * and the broker resolves the authoritative outcome asynchronously.
+	 */
+	deleteAuthCredential(id: number, disabledCause: string): boolean {
 		this.#noteActivity();
+		const held = this.#snapshot.credentials.some(entry => entry.id === id);
 		this.#removeCredentialById(id);
 		// Fire-and-forget: tell the broker to persist the disable.
 		this.#client.disableCredential(id, disabledCause).catch(error => {
 			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
 		});
+		return held;
 	}
 
-	async deleteAuthCredentialRemote(id: number, disabledCause: string): Promise<boolean> {
+	async deleteAuthCredentialRemote(id: number, disabledCause: string, signal?: AbortSignal): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
 		if (!found) {
 			if (!isDeliberateRemovalCause(disabledCause.trim())) return false;
 			// A refresh can remove a peer-disabled row before a failed logout is retried.
 			// Only tombstones visible through this client account pool may be removed.
-			const disabled = await this.listDisabledCredentials();
-			if (!disabled.some(entry => entry.id === id)) return false;
+			const disabled = await this.listDisabledCredentials(undefined, signal);
+			// A row this client held and then lost is already removed: report the
+			// logout complete rather than telling the caller it was skipped.
+			if (!disabled.some(entry => entry.id === id)) return this.#vanishedCredentialIds.has(id);
 		}
-		const disabling = this.#client.disableCredential(id, disabledCause);
+		const disabling = this.#client.disableCredential(id, disabledCause, signal);
 		let localDisable = this.#localDisables.get(id);
 		if (!localDisable) {
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -1304,14 +1346,42 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * restricted by an account pool so hidden accounts and history are preserved.
 	 * Only drop the local snapshot after the broker persists the operation successfully.
 	 */
-	async deleteAuthCredentialsRemote(provider: string, _disabledCause: string): Promise<void> {
+	async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
 		if (this.#accountPool?.has(provider)) {
 			throw new AIError.ConfigurationError(
 				`Cannot log out all ${provider} accounts while its broker account pool is restricted; remove individual accounts instead`,
 			);
 		}
 		this.#noteActivity();
-		await this.#client.logoutProvider(provider);
+		try {
+			await this.#client.logoutProvider(provider);
+		} catch (error) {
+			// A broker predating this route answers 404 from its catch-all; the
+			// handler itself never does. Rather than failing whole-provider logout
+			// in a mixed-version deployment — which also breaks managed MCP
+			// credential removal during `/mcp reauth` — fall back to the
+			// per-credential disable route every broker has always supported. Old
+			// broker, old semantics: the rows go, their tombstones stay.
+			if (!(error instanceof AuthBrokerError && error.status === 404)) throw error;
+			// Attempt every row before reporting, so one unreachable credential does
+			// not strand the rest — but a failure must still surface: clearing the
+			// local snapshot on a broker that kept the credential would report a
+			// logout that did not happen, and a later refresh would resurrect it.
+			let firstFailure: unknown;
+			for (const entry of this.listAuthCredentials(provider)) {
+				try {
+					await this.#client.disableCredential(entry.id, disabledCause);
+				} catch (disableError) {
+					firstFailure ??= disableError;
+					logger.warn("auth-broker disable during provider logout fallback failed", {
+						provider: providerIdForDisplay(provider),
+						id: entry.id,
+						error: String(disableError),
+					});
+				}
+			}
+			if (firstFailure !== undefined) throw firstFailure;
+		}
 		this.#removeProviderEntries(provider);
 		this.#maybeRefreshSnapshot("delete");
 	}

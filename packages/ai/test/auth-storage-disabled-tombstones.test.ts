@@ -308,6 +308,75 @@ describe("disabled credential tombstone retention", () => {
 		expect(readRows(dbPath)).toEqual([]);
 	});
 
+	it("does not announce a sign-out when a peer's deliberate logout already owns the tombstone", async () => {
+		if (!store) throw new Error("test setup failed");
+		const backing = store;
+		const id = backing.upsertAuthCredentialForProvider("openai-codex", credential("live"))[0].id;
+		const authStorage = new AuthStorage(backing);
+		await authStorage.reload();
+		const announced: CredentialDisabledEvent[] = [];
+		authStorage.onCredentialDisabled(event => {
+			announced.push(event);
+		});
+
+		// A peer logs the account out; this client still holds it in its snapshot.
+		const peer = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			peer.deleteAuthCredential(id, "logged out by user");
+		} finally {
+			peer.close();
+		}
+
+		expect(authStorage.disableCredentialById(id, AUTOMATIC_CAUSE)).toBe(false);
+		expect(announced).toEqual([]);
+		// The deliberate cause stays authoritative rather than being restated as a failure.
+		expect(readRows(dbPath)).toEqual([{ id, disabled_cause: "logged out by user" }]);
+		expect(authStorage.listStoredCredentials("openai-codex")).toEqual([]);
+	});
+
+	it("reports a deliberate logout as complete when a peer already removed the row", async () => {
+		if (!store) throw new Error("test setup failed");
+		const backing = store;
+		const id = backing.upsertAuthCredentialForProvider("openai-codex", credential("live"))[0].id;
+		const authStorage = new AuthStorage(backing);
+		await authStorage.reload();
+		expect(authStorage.listStoredCredentials("openai-codex")).toHaveLength(1);
+
+		// A peer logs the account out and its tombstone later ages out of the
+		// store, so the row is gone entirely by the time this client asks.
+		const peer = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			peer.deleteAuthCredential(id, "logged out by user");
+		} finally {
+			peer.close();
+		}
+		ageRow(dbPath, id);
+		expect(await backing.listDisabledCredentials("openai-codex")).toEqual([]);
+		expect(readRows(dbPath)).toEqual([]);
+
+		// The requested logout is already complete, so the broker must not 404.
+		expect(authStorage.disableCredentialById(id, "logged out by user")).toBe(true);
+		expect(authStorage.listStoredCredentials("openai-codex")).toEqual([]);
+	});
+
+	it("treats a padded deliberate cause as the removal persistence records, not a failure", async () => {
+		if (!store) throw new Error("test setup failed");
+		const backing = store;
+		const id = backing.upsertAuthCredentialForProvider("openai-codex", credential("live"))[0].id;
+		const authStorage = new AuthStorage(backing);
+		await authStorage.reload();
+		const announced: CredentialDisabledEvent[] = [];
+		authStorage.onCredentialDisabled(event => {
+			announced.push(event);
+		});
+
+		// SQLite trims before classifying, so the broker endpoint must not
+		// announce a re-login for what persistence stored as a deliberate removal.
+		expect(authStorage.disableCredentialById(id, "  deleted by user  ")).toBe(true);
+		expect(announced).toEqual([]);
+		expect(readRows(dbPath)).toEqual([{ id, disabled_cause: "deleted by user" }]);
+	});
+
 	it("removes a peer-disabled unidentified target without claiming other unidentified history", async () => {
 		if (!store) throw new Error("test setup failed");
 		const bare = (suffix: string): OAuthCredential => ({

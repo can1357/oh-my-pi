@@ -549,13 +549,12 @@ describe("runUsageCommand disabled credential output", () => {
 				expect(after).toEqual(history);
 				if (json) {
 					expect(JSON.parse(output).disabledCredentials).toEqual([
-						expect.objectContaining({ id: latestId, cause: "invalid_grant generation-2" }),
+						expect.objectContaining({ id: latestId, cause: "sign-in expired" }),
 					]);
 				} else {
+					// Only the newest tombstone for the account is shown; its cause is
+					// classified, so the row is identified by account, not cause text.
 					expect(output.match(/repeated@example.test/g)).toHaveLength(1);
-					expect(output).toContain("generation-2");
-					expect(output).not.toContain("generation-0");
-					expect(output).not.toContain("generation-1");
 				}
 			} finally {
 				vi.restoreAllMocks();

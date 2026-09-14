@@ -6,10 +6,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	isAutomaticDisableCause,
 	AuthStorage,
 	type CredentialDisabledEvent,
 	type AuthCredentialStore,
-	type CredentialDisabledEvent,
 	type OAuthCredential,
 	registerOAuthProvider,
 	SqliteAuthCredentialStore,
@@ -138,11 +138,11 @@ describe("disabled credential tombstones", () => {
 		await removeWithRetries(tempDir);
 	});
 
-	test("one login consumes at most one unidentified tombstone", async () => {
+	test("a login retains every unidentified tombstone", async () => {
 		// Two accounts signed out without any recoverable identity (no email, no
-		// account id, no identity key). A later login can only account for one of
-		// them; purging both on a single login silently drops the other account's
-		// startup and usage warning.
+		// account id, no identity key). Retention keeps an unidentified automatic
+		// tombstone until explicit provider logout or expiry, so a single login
+		// clears neither — it cannot prove which account it replaces.
 		const anonymous = (access: string): OAuthCredential => ({
 			type: "oauth",
 			access,
@@ -160,9 +160,7 @@ describe("disabled credential tombstones", () => {
 		store!.saveOAuth("anthropic", mintOAuth("back@example.test"));
 
 		const remaining = await store!.listDisabledCredentials("anthropic");
-		expect(remaining).toHaveLength(1);
-		// The older sign-out is the one left to explain; the newest was consumed.
-		expect(remaining[0]!.id).toBe(Math.min(...rows.map(row => row.id)));
+		expect(remaining.map(entry => entry.id).sort()).toEqual(rows.map(row => row.id).sort());
 	});
 
 	test("sqlite store lists identity + cause + disabledAtMs and never token material", async () => {
@@ -469,22 +467,73 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 		}
 	});
 
-	test("provider logout requires bearer authorization and an explicit provider", async () => {
-		serverStorage!.upsertCredential("anthropic", mintOAuth("b@example.test"));
-		const before = serverStore!.listAuthCredentials();
-		const unauthorized = new AuthBrokerClient({ url: handle!.url, token: "wrong-token" });
-		await expect(unauthorized.logoutProvider("anthropic")).rejects.toMatchObject({ status: 401 });
-		const invalid = await fetch(`${handle!.url}/v1/provider/logout`, {
-			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-			body: JSON.stringify({ provider: "" }),
+	test("a logout the client already lost from its snapshot reports complete, not skipped", async () => {
+		serverStorage!.upsertCredential("anthropic", mintOAuth("departed@example.test"));
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const snapshot = await client.fetchSnapshot();
+		if (snapshot.status !== 200) throw new Error("expected snapshot");
+		const departed = snapshot.snapshot.credentials[0]!;
+		const store = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: snapshot.snapshot,
+			streamSnapshots: false,
 		});
-		await invalid.arrayBuffer();
-		expect(invalid.status).toBe(400);
-		expect(serverStore!.listAuthCredentials()).toEqual(before);
+		try {
+			// A peer logs the account out; the refresh drops it from this client's
+			// snapshot and the deliberate removal leaves no tombstone behind.
+			await client.disableCredential(departed.id, "deleted by user");
+			await store.refreshSnapshot();
+			expect(store.listAuthCredentials("anthropic")).toEqual([]);
+			const db = new Database(path.join(tempDir, "broker.db"));
+			try {
+				db.run("DELETE FROM auth_credentials WHERE id = ?", [departed.id]);
+			} finally {
+				db.close();
+			}
+			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
+
+			// The requested logout is already complete.
+			expect(await store.deleteAuthCredentialRemote(departed.id, "deleted by user")).toBe(true);
+			// An id this client never held stays refused.
+			expect(await store.deleteAuthCredentialRemote(departed.id + 9_000, "deleted by user")).toBe(false);
+		} finally {
+			store.close();
+		}
 	});
 
-	test("provider logout rejects an older broker without falling back to per-row removal", async () => {
+	test("a streamed peer removal also makes the completed logout idempotent", async () => {
+		serverStorage!.upsertCredential("anthropic", mintOAuth("streamed@example.test"));
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const snapshot = await client.fetchSnapshot();
+		if (snapshot.status !== 200) throw new Error("expected snapshot");
+		const departed = snapshot.snapshot.credentials[0]!;
+		const store = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: snapshot.snapshot,
+			streamSnapshots: true,
+		});
+		try {
+			// The removal arrives as a stream `removed` frame, never as a diffed snapshot.
+			await client.disableCredential(departed.id, "deleted by user");
+			const deadline = Date.now() + 5_000;
+			while (store.listAuthCredentials("anthropic").length > 0 && Date.now() < deadline) {
+				await Bun.sleep(10);
+			}
+			expect(store.listAuthCredentials("anthropic")).toEqual([]);
+			const db = new Database(path.join(tempDir, "broker.db"));
+			try {
+				db.run("DELETE FROM auth_credentials WHERE id = ?", [departed.id]);
+			} finally {
+				db.close();
+			}
+			expect(await store.listDisabledCredentials("anthropic")).toEqual([]);
+			expect(await store.deleteAuthCredentialRemote(departed.id, "deleted by user")).toBe(true);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("provider logout falls back to per-row removal on a broker without the route", async () => {
 		serverStorage!.upsertCredential("anthropic", mintOAuth("b@example.test"));
 		const upstreamUrl = handle!.url;
 		const oldBroker = Bun.serve({
@@ -504,15 +553,77 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 		);
 		try {
 			await oldClient.revalidateCredentials();
-			const before = oldClient.listStoredCredentials("anthropic");
-			await expect(oldClient.remove("anthropic")).rejects.toMatchObject({ status: 404 });
-			expect(oldClient.listStoredCredentials("anthropic")).toEqual(before);
-			expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).toEqual(before.map(row => row.id));
-			expect(await serverStorage!.listDisabledCredentials("anthropic")).toEqual([]);
+			expect(oldClient.listStoredCredentials("anthropic").length).toBeGreaterThan(0);
+
+			// Failing outright would leave a current client unable to log out at all
+			// against a broker predating this route. Fall back to the per-credential
+			// disable every broker has always supported.
+			await oldClient.remove("anthropic");
+
+			expect(oldClient.listStoredCredentials("anthropic")).toEqual([]);
+			expect(serverStore!.listAuthCredentials("anthropic")).toEqual([]);
+			// The degraded path soft-deletes instead of clearing history, but it
+			// never fabricates an automatic cause — so nothing it leaves behind can
+			// reach the "recently signed out" surface, which filters on exactly that.
+			const residue = await serverStorage!.listDisabledCredentials("anthropic");
+			expect(residue.map(entry => entry.cause)).toEqual(residue.map(() => "deleted by user"));
+			expect(residue.some(entry => isAutomaticDisableCause(entry.cause))).toBe(false);
 		} finally {
 			oldClient.close();
 			oldBroker.stop(true);
 		}
+	});
+
+	test("a failed per-row disable in the fallback leaves the local snapshot intact", async () => {
+		serverStorage!.upsertCredential("anthropic", mintOAuth("kept@example.test"));
+		const upstreamUrl = handle!.url;
+		const oldBroker = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				const url = new URL(req.url);
+				if (url.pathname === "/v1/provider/logout") return new Response("not found", { status: 404 });
+				// The fallback route is reachable but refuses: authorization,
+				// connectivity or a broker error mid-logout.
+				if (url.pathname.endsWith("/disable")) return new Response("boom", { status: 500 });
+				return fetch(new Request(`${upstreamUrl}${url.pathname}${url.search}`, req));
+			},
+		});
+		const oldClient = new AuthStorage(
+			new RemoteAuthCredentialStore({
+				client: new AuthBrokerClient({ url: oldBroker.url.href, token }),
+				streamSnapshots: false,
+			}),
+		);
+		try {
+			await oldClient.revalidateCredentials();
+			const before = oldClient.listStoredCredentials("anthropic");
+			expect(before.length).toBeGreaterThan(0);
+
+			// Reporting success here would clear the local snapshot while the broker
+			// still holds the credential, and the next refresh would resurrect it.
+			await expect(oldClient.remove("anthropic")).rejects.toMatchObject({ status: 500 });
+			expect(oldClient.listStoredCredentials("anthropic")).toEqual(before);
+			expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).toEqual(before.map(row => row.id));
+		} finally {
+			oldClient.close();
+			oldBroker.stop(true);
+		}
+	});
+
+	test("provider logout requires bearer authorization and an explicit provider", async () => {
+		serverStorage!.upsertCredential("anthropic", mintOAuth("b@example.test"));
+		const before = serverStore!.listAuthCredentials();
+		const unauthorized = new AuthBrokerClient({ url: handle!.url, token: "wrong-token" });
+		await expect(unauthorized.logoutProvider("anthropic")).rejects.toMatchObject({ status: 401 });
+		const invalid = await fetch(`${handle!.url}/v1/provider/logout`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ provider: "" }),
+		});
+		await invalid.arrayBuffer();
+		expect(invalid.status).toBe(400);
+		expect(serverStore!.listAuthCredentials()).toEqual(before);
 	});
 
 	test("provider logout propagates persistence failure without clearing history or snapshots", async () => {

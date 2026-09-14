@@ -1581,11 +1581,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Returns whether this call actually disabled or removed the row. A busy or
-	 * read-only database, an aborting trigger, or a row that is already gone all
-	 * report `false` — callers announce a teardown and drop the row from memory
-	 * on the strength of this answer, and a swallowed write failure would have
-	 * them do that while the credential stays live in persistence.
+	 * Disable the credential, reporting whether this call performed the
+	 * transition. The automatic update is guarded by `disabled_cause IS NULL`
+	 * so retention keeps the original cause, which makes a second disable a
+	 * silent no-op: report it so callers never announce a teardown that landed
+	 * under a peer's cause. A deliberate removal reports the row it cleared.
+	 *
+	 * A busy or read-only database, or an aborting trigger, also reports
+	 * `false`: callers drop the row from memory and announce a teardown on the
+	 * strength of this answer, so a swallowed write failure would have them do
+	 * that while the credential stays live in persistence.
 	 */
 	deleteAuthCredential(id: number, disabledCause: string): boolean {
 		const cause = normalizeDisabledCause(disabledCause);
@@ -1595,7 +1600,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				// tombstoned must not be re-stamped with a second cause and
 				// timestamp, which would overwrite the original forensics and let
 				// this process announce a teardown it did not perform.
-				return (this.#disableIfActiveStmt.run(cause, id) as { changes: number }).changes > 0;
+				// bun:sqlite types `run` as void; the driver returns the change count.
+				const result = this.#disableIfActiveStmt.run(cause, id) as { changes: number };
+				return result.changes > 0;
 			} catch (error) {
 				logger.debug("auth credential disable failed", { id, error: String(error) });
 				return false;
@@ -1616,19 +1623,24 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			} finally {
 				stmt.finalize();
 			}
-			if (row?.disabled_cause != null) {
+			if (row === null) return false;
+			if (row.disabled_cause != null) {
 				// The explicit id owns a peer's tombstone even without a known identity.
 				changed = (this.#hardDeleteStmt.run(id) as { changes: number }).changes > 0;
 			} else {
 				changed = (this.#deleteStmt.run(cause, id) as { changes: number }).changes > 0;
 			}
-			const removed = row ? deserializeCredential(row) : null;
-			if (row && removed) {
+			const removed = deserializeCredential(row);
+			if (removed) {
 				this.#purgeTombstonesSupersededBy(row.provider, [removed], {
-		} catch (error) {
-			logger.debug("auth credential removal failed", { id, error: String(error) });
-			return false;
-		}
+					keepAutomatic: false,
+					excludeIds: new Set([id]),
+				});
+			}
+		});
+		// Failures propagate: the caller must only drop its in-memory credential
+		// after this transaction commits.
+		remove.immediate();
 		return changed;
 	}
 

@@ -9,7 +9,9 @@ describe("issue 3555 Ollama usage registration", () => {
 				return [];
 			},
 			updateAuthCredential() {},
-			deleteAuthCredential() {},
+			deleteAuthCredential() {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				return false;
 			},
