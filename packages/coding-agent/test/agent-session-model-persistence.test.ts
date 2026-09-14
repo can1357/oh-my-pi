@@ -9,10 +9,14 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -103,6 +107,7 @@ describe("AgentSession model persistence", () => {
 		initialModel?: Model<Api>;
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
+		codeModelBeforeNavigationHandler?: AgentSessionConfig["codeModelBeforeNavigationHandler"];
 		persist?: boolean;
 		onSessionSwitch?: (ctx: ExtensionContext) => void;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
@@ -135,11 +140,13 @@ describe("AgentSession model persistence", () => {
 			? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
 			: SessionManager.inMemory();
 		let extensionRunner: ExtensionRunner | undefined;
-		if (options?.onSessionSwitch) {
+		if (options?.onSessionSwitch || options?.codeModelBeforeNavigationHandler) {
 			const runtime = new ExtensionRuntime();
 			const extension = await loadExtensionFromFactory(
 				pi => {
-					pi.on("session_switch", (_event, ctx) => options.onSessionSwitch?.(ctx));
+					if (options.onSessionSwitch) {
+						pi.on("session_switch", (_event, ctx) => options.onSessionSwitch?.(ctx));
+					}
 				},
 				tempDir.path(),
 				new EventBus(),
@@ -153,6 +160,7 @@ describe("AgentSession model persistence", () => {
 			sessionManager,
 			settings: sessionSettings,
 			modelRegistry,
+			codeModelBeforeNavigationHandler: options?.codeModelBeforeNavigationHandler,
 			extensionRunner,
 		});
 
@@ -181,8 +189,57 @@ describe("AgentSession model persistence", () => {
 			skipPythonPreflight: true,
 		});
 		session = result.session;
+
 		return result;
 	}
+	it("awaits the internal navigation gate beyond the extension timeout", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let cancelNavigation = false;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				entered.resolve();
+				await release.promise;
+				return cancelNavigation ? { cancel: true } : undefined;
+			},
+			persist: true,
+		});
+		const beforeSessionId = created.session.sessionManager.getSessionId();
+		testSetExtensionHandlerTimeoutMs(5);
+		let settled = false;
+		const navigation = created.session.newSession().then(result => {
+			settled = true;
+			return result;
+		});
+		try {
+			await entered.promise;
+			await Bun.sleep(20);
+			expect(settled).toBe(false);
+			release.resolve();
+			expect(await navigation).toBe(true);
+			expect(created.session.sessionManager.getSessionId()).not.toBe(beforeSessionId);
+
+			cancelNavigation = true;
+			const destinationSessionId = created.session.sessionManager.getSessionId();
+			const userEntryId = created.session.sessionManager.appendMessage({
+				role: "user",
+				content: "navigation target",
+				timestamp: Date.now(),
+			});
+			expect((await created.session.branch(userEntryId)).cancelled).toBe(true);
+			expect((await created.session.navigateTree(userEntryId)).cancelled).toBe(true);
+			expect(await created.session.fork()).toBe(false);
+			const sessionFile = created.session.sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session path");
+			expect(await created.session.switchSession(sessionFile)).toBe(false);
+			expect(created.session.sessionManager.getSessionId()).toBe(destinationSessionId);
+		} finally {
+			release.resolve();
+			await navigation;
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
+	});
+
 	it("switches the active model without persisting by default", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");

@@ -710,6 +710,7 @@ export class AgentSession {
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#codeModelBeforeIdleHandler: AgentSessionConfig["codeModelBeforeIdleHandler"];
+	#codeModelBeforeNavigationHandler: AgentSessionConfig["codeModelBeforeNavigationHandler"];
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	/**
@@ -1376,6 +1377,7 @@ export class AgentSession {
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
 		this.#codeModelBeforeIdleHandler = config.codeModelBeforeIdleHandler;
+		this.#codeModelBeforeNavigationHandler = config.codeModelBeforeNavigationHandler;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#customCommands = config.customCommands ?? [];
@@ -2117,6 +2119,12 @@ export class AgentSession {
 
 	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
+	}
+
+	async #codeModelBlocksNavigation(): Promise<boolean> {
+		if (!this.#codeModelBeforeNavigationHandler || !this.#extensionRunner) return false;
+		const result = await this.#codeModelBeforeNavigationHandler(this.#extensionRunner.createContext());
+		return result?.cancel === true;
 	}
 
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
@@ -7924,6 +7932,7 @@ export class AgentSession {
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		if (await this.#codeModelBlocksNavigation()) return false;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -8055,6 +8064,7 @@ export class AgentSession {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
+		if (await this.#codeModelBlocksNavigation()) return false;
 
 		// Emit session_before_switch event with reason "fork" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -9107,6 +9117,7 @@ export class AgentSession {
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
+		if (await this.#codeModelBlocksNavigation()) return false;
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -9470,6 +9481,7 @@ export class AgentSession {
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
 		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
 
+		if (await this.#codeModelBlocksNavigation()) return { selectedText, selectedImages, cancelled: true };
 		let skipConversationRestore = false;
 
 		// Emit session_before_branch event (can be cancelled)
@@ -9585,6 +9597,9 @@ export class AgentSession {
 			this.isRetrying
 		) {
 			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+		}
+		if (await this.#codeModelBlocksNavigation()) {
+			return { cancelled: true, sessionFile: previousSessionFile };
 		}
 
 		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
@@ -9810,6 +9825,7 @@ export class AgentSession {
 			// Original arguments couldn't be recovered (corrupted/legacy session
 			// data) — fall through to a plain leaf move so navigation still works.
 		}
+		if (await this.#codeModelBlocksNavigation()) return { cancelled: true };
 
 		// Collect entries to summarize (from old leaf to common ancestor). For an
 		// `ask` re-answer completion, the branch point is `targetEntry.parentId`

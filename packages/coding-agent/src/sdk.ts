@@ -52,7 +52,11 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
-import { createCodeModelExtension, type CodeModelBeforeIdleHandler } from "./code-model";
+import {
+	createCodeModelExtension,
+	type CodeModelBeforeIdleHandler,
+	type CodeModelBeforeNavigationHandler,
+} from "./code-model";
 import { loadCapability } from "./capability";
 import {
 	MAIN_AGENT_RULE_NAME,
@@ -1730,6 +1734,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let agent: Agent;
 	let session!: AgentSession;
 	let codeModelBeforeIdleHandler: CodeModelBeforeIdleHandler | undefined;
+	let codeModelBeforeNavigationHandler: CodeModelBeforeNavigationHandler | undefined;
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -2159,6 +2164,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						},
 						registerBeforeIdle: handler => {
 							codeModelBeforeIdleHandler = handler;
+						},
+						registerBeforeNavigation: handler => {
+							codeModelBeforeNavigationHandler = handler;
 						},
 					}),
 				);
@@ -3823,6 +3831,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			slashCommands,
 			extensionRunner,
 			codeModelBeforeIdleHandler,
+			codeModelBeforeNavigationHandler,
 			getEvalPreludes,
 			customCommands: customCommandsResult.commands,
 			skills,

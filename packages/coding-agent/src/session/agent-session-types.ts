@@ -186,6 +186,8 @@ export interface AgentSessionConfig {
 		event: SessionBeforeIdleEvent,
 		ctx: ExtensionContext,
 	) => Promise<SessionStopEventResult | undefined>;
+	/** Built-in code-model restoration that completes before public navigation hooks run. */
+	codeModelBeforeNavigationHandler?: (ctx: ExtensionContext) => Promise<{ cancel?: boolean } | undefined>;
 	/** Returns the current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Loaded skills already discovered by the SDK. */

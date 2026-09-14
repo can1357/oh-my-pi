@@ -46,6 +46,8 @@ export type CodeModelBeforeIdleHandler = (
 	ctx: ExtensionContext,
 ) => Promise<SessionStopEventResult | undefined>;
 
+export type CodeModelBeforeNavigationHandler = (ctx: ExtensionContext) => Promise<{ cancel?: boolean } | undefined>;
+
 export interface CodeModelSessionHooks {
 	getRetryFallbackPrimary?: () =>
 		| {
@@ -55,6 +57,7 @@ export interface CodeModelSessionHooks {
 		  }
 		| undefined;
 	registerBeforeIdle?: (handler: CodeModelBeforeIdleHandler) => void;
+	registerBeforeNavigation?: (handler: CodeModelBeforeNavigationHandler) => void;
 }
 
 function sameModel(model: Model | undefined, state: ModelState): boolean {
@@ -370,9 +373,13 @@ export function installCodeModelSession(
 	pi.on("session_switch", recover);
 	pi.on("session_tree", recover);
 	pi.on("session_branch", recover);
-	pi.on("session_before_switch", (_event, ctx) => prepareNavigation(ctx));
-	pi.on("session_before_tree", (_event, ctx) => prepareNavigation(ctx));
-	pi.on("session_before_branch", (_event, ctx) => prepareNavigation(ctx));
+	if (hooks.registerBeforeNavigation) {
+		hooks.registerBeforeNavigation(prepareNavigation);
+	} else {
+		pi.on("session_before_switch", (_event, ctx) => prepareNavigation(ctx));
+		pi.on("session_before_tree", (_event, ctx) => prepareNavigation(ctx));
+		pi.on("session_before_branch", (_event, ctx) => prepareNavigation(ctx));
+	}
 	pi.on("session_stop", async (event, ctx) => {
 		if (!state || busy || event.signal.aborted) return;
 		const last = event.last_assistant_message ?? event.messages.findLast(message => message.role === "assistant");
