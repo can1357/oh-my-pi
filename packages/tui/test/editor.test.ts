@@ -236,10 +236,10 @@ describe("Editor component", () => {
 			key = "second";
 			failNextRead = true;
 			editor.setText("");
-			// The failed read is contained: it neither escapes the keystroke handler nor clears the
-			// list, and its data set stays unpublished.
+			// The failed read is contained and the press is a no-op: it neither escapes the
+			// keystroke handler nor recalls a prompt from the context just left.
 			editor.handleInput("\x1b[A");
-			expect(editor.getText()).toBe("prompt from the first context");
+			expect(editor.getText()).toBe("");
 
 			editor.handleInput("\x1b[A");
 			expect(editor.getText()).toBe("prompt from the second context");

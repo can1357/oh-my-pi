@@ -876,15 +876,19 @@ export class Editor implements Component, Focusable {
 	 * — the old ones belong to a context the user has left — and restarts browsing, but the
 	 * editor's own drafts (`Ctrl+C`) are carried over: they were never part of the data set
 	 * that changed, and the editor promises to recall them until the process exits.
+	 *
+	 * Returns false when the data set could not be read: the list still holds the context the
+	 * user left, so callers that would expose it — browsing, and filing a new entry — must skip
+	 * this call instead of serving that context under the new key.
 	 */
-	#rehydrateHistory(): void {
+	#rehydrateHistory(): boolean {
 		const key = this.#historySourceKey?.() ?? "";
-		if (key === this.#historySourceKeyValue) return;
+		if (key === this.#historySourceKeyValue) return true;
 		const storage = this.#historyStorage;
 		// Without persistent storage the list is the editor's own: never drop it.
 		if (!storage) {
 			this.#historySourceKeyValue = key;
-			return;
+			return true;
 		}
 		// Publish the key before the read so a storage that re-enters the editor cannot start a
 		// second seed for the same change, and put the previous one back if the read fails: the
@@ -899,7 +903,7 @@ export class Editor implements Component, Focusable {
 		} catch (error) {
 			this.#historySourceKeyValue = previousKey;
 			logger.warn("History re-seed failed", { error: String(error) });
-			return;
+			return false;
 		}
 		// Nothing below can fail, so the list and the key it belongs to change together.
 		const drafts = this.#history.filter(entry => entry.draft !== undefined);
@@ -908,6 +912,7 @@ export class Editor implements Component, Focusable {
 		if (drafts.length === 0) this.#historyDraftActive = false;
 		this.#history = [...drafts, ...recent.map(entry => ({ text: entry.prompt }))].slice(0, HISTORY_LIMIT);
 		this.#historyIndex = -1;
+		return true;
 	}
 
 	/**
@@ -924,7 +929,8 @@ export class Editor implements Component, Focusable {
 		// A command can switch the conversation or the working directory without a browse in
 		// between: re-seed first, so the entry is filed under the context active now rather than
 		// the one the list was seeded for. Returning to a context then re-seeds again, because
-		// the stored key is the context this submission moved to.
+		// the stored key is the context this submission moved to. A failed seed leaves the stale
+		// list in place, which nothing serves: browsing aborts until a read succeeds.
 		this.#rehydrateHistory();
 
 		const stor = this.#historyStorage;
@@ -999,7 +1005,9 @@ export class Editor implements Component, Focusable {
 	}
 
 	#navigateHistory(direction: 1 | -1): void {
-		this.#rehydrateHistory();
+		// A failed re-seed leaves the list on the context the user left: browsing it would recall
+		// another project's prompt, which is the isolation this list exists to keep.
+		if (!this.#rehydrateHistory()) return;
 		this.#resetKillSequence();
 		if (this.#history.length === 0) return;
 		const newIndex = this.#historyIndex - direction; // Up(-1) increases index, Down(1) decreases
