@@ -8,7 +8,7 @@ use std::{
 use gix::bstr::ByteSlice;
 
 use super::{
-	GitRepo,
+	DivergenceCache, GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
 };
 use crate::{
@@ -402,7 +402,318 @@ impl GitRepo {
 				}
 			}
 		}
+		if let Some((ahead, behind)) = self.ahead_behind()? {
+			summary.ahead = Some(ahead);
+			summary.behind = Some(behind);
+		}
 		Ok(summary)
+	}
+
+	/// Count commits HEAD is ahead of and behind its upstream tracking branch.
+	/// `None` when HEAD is detached/unborn or no upstream is configured; the
+	/// counts are `(0, 0)` when HEAD and upstream point at the same commit.
+	/// Reuses counts while both tips and shallow boundaries are unchanged;
+	/// tracking configuration and refs are resolved afresh on every call.
+	pub fn ahead_behind(&self) -> Result<Option<(u32, u32)>> {
+		let HeadState::Ref { branch: Some(branch), commit: Some(head), .. } = self.head()? else {
+			return Ok(None);
+		};
+		let Some(upstream_ref) = self.upstream_ref(&branch)? else {
+			return Ok(None);
+		};
+		let Some(upstream) = self.peel_symbolic(self.read_ref(&upstream_ref)?)? else {
+			return Ok(None);
+		};
+		if upstream == head {
+			return Ok(Some((0, 0)));
+		}
+		// Deepening a shallow clone can change reachability without moving refs.
+		let shallow = match std::fs::read(self.info().common_dir.join("shallow")) {
+			Ok(bytes) => Some(bytes),
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+			Err(err) => return Err(err.into()),
+		};
+		// `git replace`/`--graft` rewrites reachability without moving refs
+		// either, so its refs join the cache key. gix ignores them entirely
+		// (gix 0.85 collects replacements only when `core.useReplaceRefs` is
+		// false — the check is inverted), so their presence forces the
+		// `rev-list` fallback, which honors them like git does.
+		let replacements = self.replace_refs()?;
+		// Toggling `core.useReplaceRefs` changes reachability without changing
+		// the fingerprint, so enablement joins the key while replacements exist.
+		let use_replace_refs = match &replacements {
+			Some(_) => self.config_get("core.usereplacerefs")?,
+			None => None,
+		};
+		let mut cache = self
+			.divergence
+			.lock()
+			.map_err(|err| Error::backend("git ahead/behind cache", err))?;
+		if let Some(cached) = cache.as_ref()
+			&& cached.head == head
+			&& cached.upstream == upstream
+			&& cached.shallow == shallow
+			&& cached.replacements == replacements
+			&& cached.use_replace_refs == use_replace_refs
+		{
+			return Ok(Some(cached.counts));
+		}
+		let counts = self.count_ahead_behind(&head, &upstream, replacements.as_deref())?;
+		if let Some(counts) = counts {
+			*cache = Some(DivergenceCache {
+				head,
+				upstream,
+				shallow,
+				replacements,
+				use_replace_refs,
+				counts,
+			});
+		}
+		Ok(counts)
+	}
+
+	/// `refs/replace/*` fingerprint as sorted `src=dst` lines — the same pairs
+	/// gix snapshots into the object store at open time. Read fresh on every
+	/// call: replacements change reachability without moving HEAD, the
+	/// upstream ref, or the shallow file.
+	fn replace_refs(&self) -> Result<Option<Vec<u8>>> {
+		// `GIT_REPLACE_REF_BASE` relocates the whole replacement namespace
+		// (it replaces `refs/replace/`, not adds to it); git accepts the base
+		// with or without a trailing slash.
+		let base = std::env::var("GIT_REPLACE_REF_BASE")
+			.ok()
+			.and_then(|v| nonempty(v.as_str()))
+			.map_or_else(
+				|| "refs/replace/".to_owned(),
+				|v| if v.ends_with('/') { v } else { format!("{v}/") },
+			);
+		if self.is_reftable() {
+			// Replace refs live inside the table; only the CLI can see them.
+			return Ok(cli_try(self.root(), &[
+				"for-each-ref",
+				"--format=%(refname)=%(objectname)",
+				&base,
+			])?
+			.map(String::into_bytes));
+		}
+		let mut names = Vec::new();
+		if let Ok(entries) = std::fs::read_dir(self.info().common_dir.join(&base)) {
+			for entry in entries.flatten() {
+				if entry.file_type().is_ok_and(|t| t.is_file())
+					&& let Ok(name) = entry.file_name().into_string()
+				{
+					names.push(name);
+				}
+			}
+		}
+		for dir in [&self.info().git_dir, &self.info().common_dir] {
+			let Ok(content) = std::fs::read_to_string(dir.join("packed-refs")) else {
+				continue;
+			};
+			for line in content
+				.lines()
+				.map(str::trim)
+				.filter(|line| !line.is_empty() && !line.starts_with(['#', '^']))
+			{
+				if let Some((_, name)) = line.split_once(' ')
+					&& let Some(short) = name.strip_prefix(&base)
+				{
+					names.push(short.to_owned());
+				}
+			}
+		}
+		if names.is_empty() {
+			return Ok(None);
+		}
+		names.sort();
+		names.dedup();
+		let mut lines = Vec::with_capacity(names.len());
+		for name in names {
+			if let Some(target) = self.read_ref(&format!("{base}{name}"))? {
+				lines.push(format!("{name}={target}"));
+			}
+		}
+		if lines.is_empty() {
+			return Ok(None);
+		}
+		Ok(Some(lines.join("\n").into_bytes()))
+	}
+
+	fn count_ahead_behind(
+		&self,
+		head: &str,
+		upstream: &str,
+		replacements: Option<&[u8]>,
+	) -> Result<Option<(u32, u32)>> {
+		if self.is_reftable() || replacements.is_some() {
+			let spec = format!("{head}...{upstream}");
+			let counts = match cli_try(self.root(), &["rev-list", "--left-right", "--count", &spec]) {
+				Ok(counts) => counts,
+				// The replacements fallback needs a git binary; without one the
+				// count is simply unavailable, not a reason to drop the file
+				// status that was already computed.
+				Err(err) if replacements.is_some() && is_git_spawn(&err) => {
+					return Ok(None);
+				},
+				Err(err) => return Err(err),
+			};
+			let Some(counts) = counts else {
+				return Ok(None);
+			};
+			let Some((ahead, behind)) = counts.split_once('\t') else {
+				return Err(Error::backend("git rev-list", "unexpected --count output"));
+			};
+			let ahead = ahead
+				.trim()
+				.parse()
+				.map_err(|err| Error::backend("git rev-list", err))?;
+			let behind = behind
+				.trim()
+				.parse()
+				.map_err(|err| Error::backend("git rev-list", err))?;
+			return Ok(Some((ahead, behind)));
+		}
+		let repo = self.gix()?;
+		// `^{commit}` peels annotated tags: an upstream configured through
+		// `refs/tags/*` resolves to the tag object, which the walker rejects.
+		// A tip that doesn't peel to a commit (a tag on a blob or tree, or a
+		// missing object) has no divergence to report: git shows such an
+		// upstream as `[gone]` and keeps the file status, so degrade to `None`
+		// like the reftable path does when `rev-list` fails.
+		let parse = |sha: &str| {
+			repo
+				.rev_parse_single(format!("{sha}^{{commit}}").as_str())
+				.map(|id| id.detach())
+				.ok()
+		};
+		let (Some(head_id), Some(upstream_id)) = (parse(head), parse(upstream)) else {
+			return Ok(None);
+		};
+		let count = |tips: gix::ObjectId, hidden: gix::ObjectId| -> Result<u32> {
+			let mut n = 0u32;
+			for item in repo
+				.rev_walk([tips])
+				.with_hidden([hidden])
+				.all()
+				.map_err(|err| Error::backend("git rev-list", err))?
+			{
+				item.map_err(|err| Error::backend("git rev-list", err))?;
+				n = n.saturating_add(1);
+			}
+			Ok(n)
+		};
+		Ok(Some((count(head_id, upstream_id)?, count(upstream_id, head_id)?)))
+	}
+
+	/// Resolve the full ref name of `branch`'s configured upstream, from
+	/// `branch.<name>.remote` + `branch.<name>.merge`. A `.` remote tracks a
+	/// local ref, with the merge name dwimmed like git does (`main` →
+	/// `refs/heads/main`, `v1` → `refs/tags/v1`); anything else maps the full
+	/// merge ref through the remote's fetch refspecs, so custom destinations
+	/// (e.g. `+refs/heads/*:refs/custom/origin/*`) resolve to the
+	/// remote-tracking ref that actually exists. When no fetch refspec maps the
+	/// merge ref, git reports no upstream — `None`, even if a stale
+	/// `refs/remotes/<remote>/*` still exists.
+	fn upstream_ref(&self, branch: &str) -> Result<Option<String>> {
+		if self.is_reftable() {
+			// One spawn: `%(upstream)` applies the fetch refspecs (and `.`
+			// remotes) natively, replacing two `config --get` round-trips.
+			// Only the terminating newline is stripped: git preserves quoted
+			// padding in the merge value verbatim, and a padded name resolves
+			// to no upstream — trimming would invent one.
+			let out = super::cli::run_sync(
+				self.root(),
+				&[
+					"for-each-ref".to_owned(),
+					"--format=%(upstream)".to_owned(),
+					format!("refs/heads/{branch}"),
+				],
+				super::cli::SYNC_TIMEOUT,
+			)?;
+			if out.exit_code != 0 {
+				return Ok(None);
+			}
+			return Ok(nonempty(out.stdout.strip_suffix('\n').unwrap_or(&out.stdout)));
+		}
+		// One fresh open per call (previously two `config_get` round-trips):
+		// branch/remote tracking config must observe out-of-band mutations,
+		// which the cached handle's open-time config snapshot cannot see.
+		let repo = self.gix_fresh()?;
+		let config = repo.config_snapshot();
+		// git keeps parsed config values verbatim (quoted whitespace
+		// included): a padded remote or merge name matches nothing, so don't
+		// trim. An empty value means no upstream.
+		let Some(remote) = config
+			.string(format!("branch.{branch}.remote").as_str())
+			.and_then(|v| nonempty(v.to_str_lossy().as_ref()))
+		else {
+			return Ok(None);
+		};
+		// `branch.<name>.merge` may hold several values (octopus pull); git's
+		// upstream is the first one — not the last-wins scalar, and not the
+		// first non-empty one: an empty first value means no upstream.
+		let Some(merge) = config
+			.plumbing()
+			.raw_values(format!("branch.{branch}.merge").as_str())
+			.ok()
+			.and_then(|values| {
+				values
+					.first()
+					.and_then(|v| nonempty(v.to_str_lossy().as_ref()))
+			})
+		else {
+			return Ok(None);
+		};
+		// A `.` remote tracks a local ref without fetch refspecs. git dwims the
+		// merge name through the usual lookup rules and keeps an unresolvable
+		// one verbatim, which `read_ref` then reports as absent.
+		if remote == "." {
+			return Ok(Some(match repo.try_find_reference(merge.as_str()) {
+				Ok(Some(reference)) => reference.name().as_bstr().to_string(),
+				Ok(None) => merge,
+				Err(gix::reference::find::Error::Find(
+					gix::refs::file::find::Error::RefnameValidation(_),
+				)) => merge,
+				Err(err) => return Err(Error::backend("git config", err)),
+			}));
+		}
+		// Remote-tracking upstreams match fetch refspec sources verbatim: git
+		// leaves a shorthand `branch.<name>.merge` unexpanded (`main` never
+		// matches `refs/heads/*`, so `%(upstream)` is empty), yet an
+		// unqualified value still matches an exact source like `+HEAD:…`.
+		// Mirrors gix's `branch_remote_tracking_ref_name`, which we can't use
+		// directly because it reads the merge ref as a last-wins scalar.
+		let remote = match repo.try_find_remote(remote.as_str()) {
+			Some(Ok(remote)) => remote,
+			Some(Err(err)) => return Err(Error::backend("git config", err)),
+			None => return Ok(None),
+		};
+		let specs: Vec<_> = remote
+			.refspecs(gix::remote::Direction::Fetch)
+			.iter()
+			.map(gix::refspec::RefSpec::to_ref)
+			.filter(|spec| spec.source().is_some() && spec.destination().is_some())
+			.collect();
+		// No fetch refspec maps the merge ref (none configured, or none that
+		// match). git then reports no upstream — `%(upstream)` is empty and
+		// `@{upstream}` fails — even when a stale `refs/remotes/<remote>/*`
+		// still exists. Don't invent one.
+		if specs.is_empty() {
+			return Ok(None);
+		}
+		let null = repo.object_hash().null();
+		let matched = gix::refspec::MatchGroup { specs }.match_lhs(std::iter::once(
+			gix::refspec::match_group::Item {
+				full_ref_name: gix::bstr::BStr::new(merge.as_str()),
+				target:        &null,
+				object:        None,
+			},
+		));
+		Ok(matched
+			.mappings
+			.into_iter()
+			.next()
+			.and_then(|mapping| mapping.rhs.map(|rhs| rhs.to_string())))
 	}
 
 	/// Read a scalar git config value.
@@ -1027,6 +1338,10 @@ fn set_worktree(
 		.or_insert((' ', code, None));
 }
 
+fn is_git_spawn(err: &Error) -> bool {
+	matches!(err, Error::Backend { context: "git spawn", .. })
+}
+
 fn cli_try(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
 	let owned: Vec<_> = args.iter().map(|v| (*v).to_owned()).collect();
 	let out = super::cli::run_sync(cwd, &owned, super::cli::SYNC_TIMEOUT)?;
@@ -1356,10 +1671,397 @@ mod tests {
 		let fallback = repo.status_porcelain_gix(&StatusOptions::default())?;
 		assert_eq!(fallback.as_bytes(), expected.as_bytes());
 		assert_eq!(repo.status_summary()?, StatusSummary {
-			staged:    2,
-			unstaged:  2,
+			staged: 2,
+			unstaged: 2,
 			untracked: 2,
+			..Default::default()
 		});
+		Ok(())
+	}
+
+	#[test]
+	fn status_summary_counts_upstream_divergence() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		// No upstream configured: counts stay absent, not zero.
+		assert_eq!(repo.status_summary()?.ahead, None);
+		assert_eq!(repo.ahead_behind()?, None);
+
+		let remote = tempfile::tempdir()?;
+		git(remote.path(), &["init", "--bare", "-b", "main"])?;
+		git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()])?;
+		git(root, &["push", "-u", "origin", "main"])?;
+		// In sync with upstream.
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		// Two local commits the remote does not have.
+		commit(root, "a1", "a1\n", "a1")?;
+		commit(root, "a2", "a2\n", "a2")?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 0)));
+		assert_eq!(repo.status_summary()?.ahead, Some(2));
+
+		// The remote advances independently; after fetch we are only behind.
+		git(root, &["push", "origin", "main"])?;
+		let other = tempfile::tempdir()?;
+		git(other.path(), &["clone", remote.path().to_str().unwrap(), "."])?;
+		git(other.path(), &["config", "user.name", "Other"])?;
+		git(other.path(), &["config", "user.email", "other@example.com"])?;
+		commit(other.path(), "b1", "b1\n", "b1")?;
+		git(other.path(), &["push", "origin", "main"])?;
+		git(root, &["fetch", "origin"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 1)));
+
+		// One more local commit: diverged both ways.
+		commit(root, "a3", "a3\n", "a3")?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 1)));
+
+		// A branch without upstream reports absence again, as does detached HEAD.
+		git(root, &["checkout", "-b", "local-only"])?;
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["checkout", "--detach", "HEAD"])?;
+		assert_eq!(repo.ahead_behind()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_resolves_custom_fetch_refspec() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+
+		let remote = tempfile::tempdir()?;
+		git(remote.path(), &["init", "--bare", "-b", "main"])?;
+		git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()])?;
+		// Custom destination: tracking refs live outside refs/remotes/origin/*,
+		// where the old hard-coded mapping looked and found nothing.
+		git(root, &["config", "remote.origin.fetch", "+refs/heads/*:refs/custom/origin/*"])?;
+		git(root, &["push", "-u", "origin", "main"])?;
+		git(root, &["fetch", "origin"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		commit(root, "a1", "a1\n", "a1")?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_resolves_non_head_merge_refs() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["update-ref", "refs/custom/origin/changes/1", "HEAD"])?;
+		git(root, &["remote", "add", "origin", "."])?;
+		git(root, &[
+			"config",
+			"remote.origin.fetch",
+			"+refs/changes/*:refs/custom/origin/changes/*",
+		])?;
+		git(root, &["config", "branch.main.remote", "origin"])?;
+		git(root, &["config", "branch.main.merge", "refs/changes/1"])?;
+		commit(root, "ahead", "ahead\n", "ahead")?;
+		assert_eq!(
+			git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/main"])?.trim(),
+			"refs/custom/origin/changes/1"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// A dot remote uses the merge ref directly, including non-head refs.
+		git(root, &["config", "branch.main.remote", "."])?;
+		git(root, &["config", "branch.main.merge", "refs/custom/origin/changes/1"])?;
+		assert_eq!(
+			git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.trim(),
+			"1\t0"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		// Changing tracking configuration must be observed even with unchanged HEAD.
+		git(root, &["config", "branch.main.merge", "refs/heads/main"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+		git(root, &["config", "branch.main.merge", "refs/custom/origin/changes/1"])?;
+		git(root, &["update-ref", "-d", "refs/custom/origin/changes/1"])?;
+		assert_eq!(repo.ahead_behind()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_observes_deepened_history() -> TestResult {
+		let (source, _) = repo()?;
+		commit(source.path(), "base", "base\n", "base")?;
+		git(source.path(), &["branch", "upstream"])?;
+		commit(source.path(), "one", "one\n", "one")?;
+		commit(source.path(), "two", "two\n", "two")?;
+		let clone = tempfile::tempdir()?;
+		git(clone.path(), &[
+			"clone",
+			"--no-local",
+			"--depth=1",
+			"--no-single-branch",
+			source.path().to_str().unwrap(),
+			".",
+		])?;
+		git(clone.path(), &["config", "branch.main.merge", "refs/heads/upstream"])?;
+		let repo = GitRepo::require(clone.path())?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 1)));
+		let head = repo.head_sha()?;
+		let upstream = repo.resolve_ref("refs/remotes/origin/upstream")?;
+		git(clone.path(), &["fetch", "--unshallow", "origin"])?;
+		assert_eq!(repo.head_sha()?, head);
+		assert_eq!(repo.resolve_ref("refs/remotes/origin/upstream")?, upstream);
+		assert_eq!(repo.ahead_behind()?, Some((2, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_absent_without_fetch_refspec() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+
+		let remote = tempfile::tempdir()?;
+		git(remote.path(), &["init", "--bare", "-b", "main"])?;
+		git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()])?;
+		git(root, &["push", "-u", "origin", "main"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		// Drop the fetch refspec but keep branch.<name>.remote/.merge and the
+		// tracking ref: git reports no upstream in this state, so the stale
+		// refs/remotes/origin/main must not be counted as one.
+		git(root, &["config", "--unset", "remote.origin.fetch"])?;
+		assert_eq!(
+			git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/main"])?.trim(),
+			""
+		);
+		assert_eq!(repo.ahead_behind()?, None);
+		assert_eq!(repo.status_summary()?.ahead, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_tracks_local_branch_via_dot_remote() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+
+		git(root, &["checkout", "-b", "tracking-local"])?;
+		git(root, &["config", "branch.tracking-local.remote", "."])?;
+		git(root, &["config", "branch.tracking-local.merge", "refs/heads/main"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		// One commit past the local main it tracks.
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_dwims_shorthand_merge_for_dot_remote() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["checkout", "-b", "feat"])?;
+		git(root, &["config", "branch.feat.remote", "."])?;
+		git(root, &["config", "branch.feat.merge", "main"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		let upstream =
+			|root: &Path| git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/feat"]);
+		// git dwims a shorthand merge name for a `.` remote.
+		assert_eq!(upstream(root)?.trim(), "refs/heads/main");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Tags dwim too; annotated, so the walk also has to peel it.
+		git(root, &["tag", "-a", "v1", "-m", "v1", "main"])?;
+		git(root, &["config", "branch.feat.merge", "v1"])?;
+		assert_eq!(upstream(root)?.trim(), "refs/tags/v1");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// An unresolvable name is kept verbatim by git and names no ref.
+		git(root, &["config", "branch.feat.merge", "nonexistent"])?;
+		assert_eq!(upstream(root)?.trim(), "nonexistent");
+		assert_eq!(repo.ahead_behind()?, None);
+
+		// Remote-tracking upstreams are never expanded from shorthand: git
+		// reports no upstream even though refs/remotes/origin/main exists, and
+		// the full name still resolves through the fetch refspec.
+		git(root, &["remote", "add", "origin", "."])?;
+		git(root, &["fetch", "origin"])?;
+		git(root, &["config", "branch.feat.remote", "origin"])?;
+		git(root, &["config", "branch.feat.merge", "main"])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		assert_eq!(repo.status_summary()?.ahead, None);
+		git(root, &["config", "branch.feat.merge", "refs/heads/main"])?;
+		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/main");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_uses_first_of_multiple_merge_refs() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["branch", "one"])?;
+		git(root, &["checkout", "-b", "two"])?;
+		commit(root, "t1", "t1\n", "t1")?;
+		git(root, &["checkout", "-b", "feat", "main"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		// Octopus-pull configuration: two merge refs. git's upstream is the
+		// first; a scalar `config --get` would hand back the last.
+		git(root, &["config", "branch.feat.remote", "."])?;
+		git(root, &["config", "branch.feat.merge", "refs/heads/one"])?;
+		git(root, &["config", "--add", "branch.feat.merge", "refs/heads/two"])?;
+		let upstream =
+			|root: &Path| git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/feat"]);
+		assert_eq!(git(root, &["config", "--get", "branch.feat.merge"])?.trim(), "refs/heads/two");
+		assert_eq!(upstream(root)?.trim(), "refs/heads/one");
+		// Against `one` feat is (1, 0); against `two` it would be (1, 1).
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Same ordering when the merge refs map through a remote's fetch refspecs.
+		git(root, &["remote", "add", "origin", "."])?;
+		git(root, &["fetch", "origin"])?;
+		git(root, &["config", "branch.feat.remote", "origin"])?;
+		assert_eq!(upstream(root)?.trim(), "refs/remotes/origin/one");
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Quoted whitespace is verbatim for git: a padded merge name matches
+		// no fetch refspec, and a padded remote name resolves to no upstream.
+		git(root, &["config", "--replace-all", "branch.feat.merge", " refs/heads/one "])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["config", "--replace-all", "branch.feat.merge", "refs/heads/one"])?;
+		git(root, &["config", "branch.feat.remote", " origin "])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		// Under a `.` remote git keeps the padded merge name verbatim; it
+		// resolves to nothing rather than the trimmed ref.
+		git(root, &["config", "branch.feat.remote", "."])?;
+		git(root, &["config", "--replace-all", "branch.feat.merge", " refs/heads/one "])?;
+		assert_eq!(upstream(root)?.as_str(), " refs/heads/one \n");
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["config", "branch.feat.remote", "origin"])?;
+		git(root, &["config", "--replace-all", "branch.feat.merge", "refs/heads/one"])?;
+
+		// An empty first value is authoritative for git: no upstream, even
+		// though a usable ref follows it.
+		git(root, &["config", "--unset-all", "branch.feat.merge"])?;
+		git(root, &["config", "branch.feat.merge", ""])?;
+		git(root, &["config", "--add", "branch.feat.merge", "refs/heads/one"])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["config", "branch.feat.remote", "."])?;
+		assert_eq!(upstream(root)?.trim(), "");
+		assert_eq!(repo.ahead_behind()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_peels_annotated_tag_upstream() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["tag", "-a", "v1", "-m", "v1"])?;
+		git(root, &["config", "branch.main.remote", "."])?;
+		git(root, &["config", "branch.main.merge", "refs/tags/v1"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		// The tracking ref resolves to the tag object, not the tagged commit;
+		// git peels it and so must the walk.
+		assert_ne!(
+			git(root, &["rev-parse", "refs/tags/v1"])?.trim(),
+			git(root, &["rev-parse", "refs/tags/v1^{commit}"])?.trim()
+		);
+		assert_eq!(
+			git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.trim(),
+			"1\t0"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		assert_eq!(repo.status_summary()?.ahead, Some(1));
+
+		// A tag on HEAD itself: the tag SHA differs from HEAD, so in-sync is
+		// established by the peeled walk rather than the equal-SHA short-circuit.
+		git(root, &["tag", "-a", "v2", "-m", "v2"])?;
+		git(root, &["config", "branch.main.merge", "refs/tags/v2"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		// A tag on a blob peels to no commit at all. git fails the symmetric
+		// difference but still reports file status (the upstream shows as
+		// `[gone]`); divergence must go absent instead of failing the summary.
+		let blob = git(root, &["rev-parse", "HEAD:base"])?;
+		git(root, &["tag", "-a", "blob-tag", "-m", "blob", blob.trim()])?;
+		git(root, &["config", "branch.main.merge", "refs/tags/blob-tag"])?;
+		assert!(git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).is_err());
+		fs::write(root.join("untracked"), "u\n")?;
+		assert_eq!(repo.ahead_behind()?, None);
+		let summary = repo.status_summary()?;
+		assert_eq!((summary.ahead, summary.behind), (None, None));
+		assert_eq!(summary.untracked, 1);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_matches_unqualified_merge_refspec() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		// An exact non-glob fetch source matches an unqualified merge value.
+		git(root, &["config", "remote.origin.url", "."])?;
+		git(root, &["config", "remote.origin.fetch", "+HEAD:refs/remotes/origin/tip"])?;
+		git(root, &["config", "branch.main.remote", "origin"])?;
+		git(root, &["config", "branch.main.merge", "HEAD"])?;
+		git(root, &["update-ref", "refs/remotes/origin/tip", "HEAD"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// A shorthand merge value still doesn't expand to `refs/heads/*`.
+		git(root, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"])?;
+		git(root, &["config", "branch.main.merge", "main"])?;
+		assert_eq!(repo.ahead_behind()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_observes_replace_refs() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["branch", "upstream"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		git(root, &["config", "branch.main.remote", "."])?;
+		git(root, &["config", "branch.main.merge", "refs/heads/upstream"])?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// A graft rewrites reachability without moving either tip.
+		let tree = git(root, &["write-tree"])?;
+		let side = git(root, &["commit-tree", tree.trim(), "-m", "side"])?;
+		git(root, &["replace", "--graft", "HEAD", side.trim()])?;
+		assert_eq!(
+			git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.trim(),
+			"2\t1"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
+
+		// Removing the replacement restores the original counts.
+		git(root, &["replace", "-d", "HEAD"])?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// Toggling `core.useReplaceRefs` changes reachability without touching
+		// the fingerprint, so it must invalidate the cache on its own.
+		git(root, &["replace", "--graft", "HEAD", side.trim()])?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
+		git(root, &["config", "core.useReplaceRefs", "false"])?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		git(root, &["config", "core.useReplaceRefs", "true"])?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
+
+		// A custom replacement namespace relocates the whole feature: the
+		// default refs/replace/ entry is ignored while the custom one counts.
+		let head = git(root, &["rev-parse", "HEAD"])?;
+		git(root, &["update-ref", &format!("refs/custom/{}", head.trim()), side.trim()])?;
+		// SAFETY: single-threaded test binary section; no other test reads
+		// this variable, and it is restored before returning.
+		unsafe { std::env::set_var("GIT_REPLACE_REF_BASE", "refs/custom") };
+		assert_eq!(repo.ahead_behind()?, Some((1, 1)));
+		// SAFETY: same as above; restores the process default.
+		unsafe { std::env::remove_var("GIT_REPLACE_REF_BASE") };
+		assert_eq!(repo.ahead_behind()?, Some((2, 1)));
 		Ok(())
 	}
 
