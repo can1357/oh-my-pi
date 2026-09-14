@@ -20,4 +20,25 @@ describe("resumeCommand", () => {
 		setProfile("personal");
 		expect(resumeCommand("abc123")).toBe(`${APP_NAME} --profile personal --resume abc123`);
 	});
+
+	it("restores the session cwd and permits home-directory execution", () => {
+		setProfile(undefined);
+		expect(resumeCommand("abc123", "/Users/example/project")).toBe(
+			`cd '/Users/example/project' && ${APP_NAME} --allow-home --resume abc123`,
+		);
+	});
+
+	it("combines cwd restoration with the active profile", () => {
+		setProfile("personal");
+		expect(resumeCommand("abc123", "/Users/example/project")).toBe(
+			`cd '/Users/example/project' && ${APP_NAME} --profile personal --allow-home --resume abc123`,
+		);
+	});
+
+	it("shell-quotes apostrophes in the session cwd", () => {
+		setProfile(undefined);
+		expect(resumeCommand("abc123", "/tmp/it's here")).toBe(
+			`cd '/tmp/it'\\''s here' && ${APP_NAME} --allow-home --resume abc123`,
+		);
+	});
 });

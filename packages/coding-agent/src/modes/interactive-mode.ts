@@ -5334,7 +5334,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// #resumableSessionId).
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
+			process.stderr.write(
+				`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId, this.sessionManager.getCwd())}`)}\n`,
+			);
 		}
 
 		await postmortem.quit(0);
