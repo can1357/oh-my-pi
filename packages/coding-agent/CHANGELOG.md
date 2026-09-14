@@ -864,7 +864,7 @@
 ## [18.1.21] - 2026-09-14
 ### Added
 
-- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply`, and placed last in the built-in auto chain so no existing provider's priority changes. Serply proxies Google directly, so quoted phrases, `OR` groups, `-exclusions`, `site:`, `inurl:`, `intitle:`, `intext:`, `filetype:`, and `after:`/`before:` bounds are forwarded verbatim in the query instead of being translated onto vendor-specific filters; `recency` maps to `tbs=qdr:d|w|m|y` and is dropped when the query already carries absolute date bounds.
+- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply`, and placed last in the built-in auto chain so no existing provider's priority changes. Serply proxies Google directly, so quoted phrases, `OR` groups, `-exclusions`, `site:`, `inurl:`, `intitle:`, `intext:`, `filetype:`, and `after:`/`before:` bounds are forwarded verbatim in the query instead of being translated onto vendor-specific filters; `recency` maps to `tbs=qdr:d|w|m|y` and is dropped when the query already carries absolute date bounds ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ### Fixed
 
