@@ -334,6 +334,25 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
+	it("restores the outgoing phase before branch and tree navigation", async () => {
+		for (const [beforeEvent, afterEvent] of [
+			["session_before_branch", "session_branch"],
+			["session_before_tree", "session_tree"],
+		] as const) {
+			const state = harness();
+			const session = installCodeModelSession(state.pi, state.settings);
+			await session.run("start", state.ctx);
+			const prepare = state.handlers.get(beforeEvent);
+			const result = await prepare?.({ type: beforeEvent }, state.ctx);
+			expect(result).toBeUndefined();
+			state.branch.splice(0);
+			const recover = state.handlers.get(afterEvent);
+			await recover?.({ type: afterEvent }, state.ctx);
+			expect(state.current()).toBe(state.main);
+			expect(state.effort()).toBe(ThinkingLevel.Low);
+		}
+	});
+
 	it("ignores persisted phase state with an invalid effort", async () => {
 		const state = harness();
 		state.setCurrent(state.coding, ThinkingLevel.High);

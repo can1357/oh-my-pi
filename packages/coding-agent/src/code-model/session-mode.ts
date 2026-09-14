@@ -274,6 +274,19 @@ export function installCodeModelSession(
 		});
 	}
 
+	async function prepareNavigation(ctx: ExtensionContext) {
+		if (busy) return { cancel: true as const };
+		if (!state) return undefined;
+		try {
+			await guarded(() => restore(ctx));
+			return undefined;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Coding phase recovery failed: ${message} Resolve it before navigating the session.`, "error");
+			return { cancel: true as const };
+		}
+	}
+
 	async function recover(_event: unknown, ctx: ExtensionContext): Promise<void> {
 		const entry = branch(ctx).findLast(item => item.type === "custom" && item.customType === CODE_MODEL_STATE_TYPE);
 		const saved = entry?.type === "custom" ? entry.data : undefined;
@@ -293,8 +306,8 @@ export function installCodeModelSession(
 	pi.on("session_tree", recover);
 	pi.on("session_branch", recover);
 	pi.on("session_before_switch", () => (busy ? { cancel: true } : undefined));
-	pi.on("session_before_tree", () => (busy ? { cancel: true } : undefined));
-	pi.on("session_before_branch", () => (busy ? { cancel: true } : undefined));
+	pi.on("session_before_tree", (_event, ctx) => prepareNavigation(ctx));
+	pi.on("session_before_branch", (_event, ctx) => prepareNavigation(ctx));
 	pi.on("session_stop", async (event, ctx) => {
 		if (!state || busy || event.signal.aborted) return;
 		const result = await guarded(() => restore(ctx));

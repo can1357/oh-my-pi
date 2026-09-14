@@ -4,8 +4,11 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -13,6 +16,7 @@ import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/se
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession model persistence", () => {
@@ -98,6 +102,7 @@ describe("AgentSession model persistence", () => {
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
+		onSessionSwitch?: (ctx: ExtensionContext) => void;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -124,13 +129,29 @@ describe("AgentSession model persistence", () => {
 				}
 			}
 		}
+		const sessionManager = options?.persist
+			? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
+			: SessionManager.inMemory();
+		let extensionRunner: ExtensionRunner | undefined;
+		if (options?.onSessionSwitch) {
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session_switch", (_event, ctx) => options.onSessionSwitch?.(ctx));
+				},
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+				"model-persistence-session-switch",
+			);
+			extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		}
 		session = new AgentSession({
 			agent,
-			sessionManager: options?.persist
-				? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
-				: SessionManager.inMemory(),
+			sessionManager,
 			settings: sessionSettings,
 			modelRegistry,
+			extensionRunner,
 		});
 
 		return { modelRegistry, settings: sessionSettings, session };
@@ -329,6 +350,31 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(smolModel.id);
 	});
 
+	it("restores a routed temporary model before publishing session switch", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) throw new Error("Expected the routed OpenRouter fixture to exist");
+		const routed = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routed) throw new Error("Expected the routed OpenRouter fixture to resolve");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
+		const selector = formatModelStringWithRouting(routed);
+		const targetSessionFile = await writeRoleModelSession(modelValue(defaultModel), selector, "temporary");
+		let observedSelector: string | undefined;
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+			onSessionSwitch: ctx => {
+				const current = ctx.models.current();
+				observedSelector = current ? formatModelStringWithRouting(current) : undefined;
+			},
+		});
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(created.session.model && formatModelStringWithRouting(created.session.model)).toBe(selector);
+		expect(observedSelector).toBe(selector);
+	});
+
 	it("restores the last active role model during startup resume", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -339,6 +385,23 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile);
 
 		expect(result.session.model?.id).toBe(smolModel.id);
+	});
+
+	it("restores a routed temporary model during startup resume", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) throw new Error("Expected the routed OpenRouter fixture to exist");
+		const routed = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routed) throw new Error("Expected the routed OpenRouter fixture to resolve");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
+		const selector = formatModelStringWithRouting(routed);
+		const targetSessionFile = await writeRoleModelSession(modelValue(defaultModel), selector, "temporary");
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(defaultModel));
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model && formatModelStringWithRouting(result.session.model)).toBe(selector);
 	});
 
 	it("falls back to the saved default model when switch-session role restore is unavailable", async () => {
