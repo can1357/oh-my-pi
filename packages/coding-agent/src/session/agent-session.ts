@@ -9147,34 +9147,6 @@ export class AgentSession {
 			: undefined;
 		const targetCwd = preparedSession?.cwd ?? previousCwd;
 		const recordedCwd = preparedSession?.recordedCwd ?? this.sessionManager.getRecordedCwd() ?? previousCwd;
-		let cwdChangeTarget: string | undefined;
-		if (!options?.preserveLocalCwd) {
-			if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
-				return false;
-			}
-			if (options?.onCwdChange) {
-				if (path.resolve(targetCwd) !== path.resolve(previousCwd)) {
-					cwdChangeTarget = targetCwd;
-					try {
-						if (!(await options.onCwdChange(targetCwd, previousCwd))) return false;
-					} catch (error) {
-						try {
-							await options.onCwdChange(previousCwd, targetCwd);
-						} catch (rollbackError) {
-							this.beginDispose();
-							throw new Error(
-								`${error instanceof Error ? error.message : String(error)} (cwd rollback failed: ${
-									rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-								}; the process may remain in ${targetCwd})`,
-							);
-						}
-						throw error;
-					}
-				} else if (path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
-					return false;
-				}
-			}
-		}
 		const preCodeModelSessionState = this.sessionManager.captureState();
 		const preCodeModelModel = this.model;
 		const preCodeModelThinkingLevel = this.thinkingLevel;
@@ -9183,22 +9155,62 @@ export class AgentSession {
 		const preCodeModelServiceTierByFamily = this.serviceTierByFamily;
 		const preCodeModelFreshProviderSessionId = this.#freshProviderSessionId;
 		const preCodeModelInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
-		const codeModelPreparation = await this.#prepareCodeModelNavigation();
-		if (codeModelPreparation?.cancel) {
-			if (cwdChangeTarget && options?.onCwdChange) {
-				try {
+		let cwdChangeTarget: string | undefined;
+		const rollBackPreparedCwd = async (cause: unknown): Promise<void> => {
+			this.sessionManager.restoreState(preCodeModelSessionState);
+			this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+			let rollbackFailure: unknown;
+			try {
+				if (cwdChangeTarget && options?.onCwdChange) {
 					if (!(await options.onCwdChange(previousCwd, cwdChangeTarget))) {
-						throw new Error("cwd rollback was rejected");
+						rollbackFailure = new Error("cwd rollback was rejected");
 					}
-				} catch (error) {
-					this.beginDispose();
-					throw new Error(
-						`Coding phase recovery cancelled session switching, and cwd rollback failed: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
+				}
+			} catch (error) {
+				rollbackFailure = error;
+			}
+			await this.#sessionSwitchReconciler?.();
+			if (rollbackFailure) {
+				this.beginDispose();
+				throw new Error(
+					`${cause instanceof Error ? cause.message : String(cause)} (cwd rollback failed: ${
+						rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure)
+					}; the process may remain in ${cwdChangeTarget})`,
+				);
+			}
+		};
+		if (!options?.preserveLocalCwd) {
+			if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
+				return false;
+			}
+			if (options?.onCwdChange) {
+				if (path.resolve(targetCwd) !== path.resolve(previousCwd)) {
+					cwdChangeTarget = targetCwd;
+					if (preparedSession) await preparedSession.commit();
+					else await this.sessionManager.setSessionFile(sessionPath);
+					let cwdChangeAccepted: boolean;
+					try {
+						cwdChangeAccepted = await options.onCwdChange(targetCwd, previousCwd);
+					} catch (error) {
+						await rollBackPreparedCwd(error);
+						throw error;
+					}
+					if (!cwdChangeAccepted) {
+						this.sessionManager.restoreState(preCodeModelSessionState);
+						this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+						await this.#sessionSwitchReconciler?.();
+						return false;
+					}
+					this.sessionManager.restoreState(preCodeModelSessionState);
+					this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+				} else if (path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
+					return false;
 				}
 			}
+		}
+		const codeModelPreparation = await this.#prepareCodeModelNavigation();
+		if (codeModelPreparation?.cancel) {
+			if (cwdChangeTarget) await rollBackPreparedCwd(new Error("Coding phase recovery cancelled session switching"));
 			return false;
 		}
 

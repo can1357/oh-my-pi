@@ -369,7 +369,7 @@ export function installCodeModelSession(
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Coding phase recovery failed: ${message} Resolve it before navigating the session.`, "error");
-			return { cancel: true };
+			return { cancel: true, rollback };
 		}
 	}
 
