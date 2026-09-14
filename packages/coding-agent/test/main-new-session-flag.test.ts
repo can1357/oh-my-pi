@@ -11,7 +11,7 @@ import {
 	SessionResolutionError,
 } from "@oh-my-pi/pi-coding-agent/main";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./session-manager/helpers";
 
@@ -32,6 +32,8 @@ describe("createSessionManager — --new versus the autoResume setting", () => {
 	let cwd: string;
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const originalTmuxPane = process.env.TMUX_PANE;
+	const originalOmpProfile = process.env.OMP_PROFILE;
+	const originalPiProfile = process.env.PI_PROFILE;
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
@@ -51,6 +53,11 @@ describe("createSessionManager — --new versus the autoResume setting", () => {
 			setAgentDir(fallbackAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
+		if (originalOmpProfile === undefined) delete process.env.OMP_PROFILE;
+		else process.env.OMP_PROFILE = originalOmpProfile;
+		if (originalPiProfile === undefined) delete process.env.PI_PROFILE;
+		else process.env.PI_PROFILE = originalPiProfile;
+		__resetDirsFromEnvForTests();
 		await fsp.rm(agentDir, { recursive: true, force: true });
 	});
 
