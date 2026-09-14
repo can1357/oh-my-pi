@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { ThinkingControlMode } from "../types";
+import type { KnownApi, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -540,6 +540,85 @@ export interface CompiledAuth {
 	providers: CompiledAuthProvider[];
 }
 
+/**
+ * When a provider's seed rows enter the generated bundle:
+ * - `always`: every regeneration; same-id upstream/discovery rows win dedup.
+ * - `fallback`: only when authoritative catalog discovery did not succeed.
+ * - `empty`: only when no other source produced a row for the provider.
+ */
+export type SeedBundlePolicy = "always" | "fallback" | "empty";
+
+/** Catalog-generation discovery settings (`discovery` node in `providers/<id>.kdl`). */
+export interface CompiledProviderDiscovery {
+	/** Human-readable name for generator log messages. */
+	label: string;
+	/** Env vars checked for a generation-time API key; defaults to the provider's `env`. */
+	envVars?: string[];
+	/** OAuth provider whose stored credential may stand in for an API key. */
+	oauthProvider?: string;
+	/** Discovery proceeds without credentials. */
+	allowUnauthenticated?: boolean;
+}
+
+/**
+ * One authored seed row: the intrinsic `ModelSpec` fields plus optional
+ * explicit `thinking` / `compat` overrides compiled from the axis vocabulary
+ * (keyed by resolved field, value-validated at compile time). `seeds.ts`
+ * projects rows to `ModelSpec` at the JSON boundary.
+ */
+export interface CompiledSeedModel {
+	id: string;
+	name: string;
+	api: KnownApi;
+	provider: string;
+	baseUrl: string;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	supportsTools?: boolean;
+	cost: TokenCost;
+	contextWindow: number | null;
+	maxTokens: number | null;
+	thinking?: Record<string, unknown>;
+	compat?: Record<string, unknown>;
+}
+
+/** A provider's authored seed rows (`seed` node in `providers/<id>.kdl`). */
+export interface CompiledSeed {
+	bundle: SeedBundlePolicy;
+	/**
+	 * `seed`: rows are prepended after upstream merging so they outrank same-id
+	 * rows and never receive cross-provider reference fills. `upstream`
+	 * (default): rows are appended and same-id upstream rows win.
+	 */
+	precedence: "upstream" | "seed";
+	/** Rows in declaration order (inherited `models-from` rows appended last). */
+	models: CompiledSeedModel[];
+}
+
+/**
+ * One chat-model provider's catalog entry: the non-code half of what the
+ * runtime and generator know about a provider. A `providers/<id>.kdl` file
+ * declares one by carrying `default-model`; files without it are wire-compat
+ * only (custom provider ids such as `llama.cpp`).
+ */
+export interface CompiledProvider {
+	id: string;
+	/** Preferred model id when no explicit selection is made. */
+	defaultModel: string;
+	/** Env vars consulted, in order, for the runtime API-key fallback. */
+	envVars?: string[];
+	/** The runtime creates a model manager even without a valid API key. */
+	allowUnauthenticated?: boolean;
+	/** Successful runtime discovery replaces bundled provider models instead of merging. */
+	dynamicModelsAuthoritative?: boolean;
+	/** Generator backfills never copy reasoning/input/limits from same-id rows on other hosts. */
+	skipCrossProviderReferenceFills?: boolean;
+	/** Present only for providers enrolled in `generate-models.ts` discovery. */
+	discovery?: CompiledProviderDiscovery;
+	/** Authored bundled rows, when the provider cannot be discovered at generation time. */
+	seed?: CompiledSeed;
+}
+
 /** The complete compiled rule tree persisted as `rules.json`. */
 export interface CompiledCompatRules {
 	/** Compiled-format version; bump on incompatible shape changes. */
@@ -550,6 +629,8 @@ export interface CompiledCompatRules {
 	cascade: CompiledCascade;
 	behavior: CompiledBehavior;
 	auth: CompiledAuth;
+	/** Catalog provider entries keyed by provider id, sorted. */
+	providers: Record<string, CompiledProvider>;
 }
 
 /** Structured identity of one classified model. */

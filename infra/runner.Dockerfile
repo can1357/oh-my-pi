@@ -11,18 +11,19 @@
 #   - bun (system-wide, on PATH)
 #   - sccache + Zig + cmake/ninja + cargo-nextest/cargo-zigbuild/cargo-xwin for native builds
 #   - bazelisk (+ pre-warmed bazel 9.2.0) for the Bazel native pipeline
-#   - rust nightly (pinned) + clippy/rustfmt/rust-analyzer + linux-arm64/windows-msvc targets
+#   - rust nightly (pinned) + clippy/rustfmt/rust-analyzer + the rust-toolchain.toml
+#     targets (linux-x64, windows-msvc x64/arm64) and linux-arm64 for zigbuild
 #
 # Rebuild + reimport (see /root/omp-kata-runner.md) after bumping the ARGs below
 # or the apt set. Keep the apt set in sync with .github/actions/setup-system-deps.
 FROM ghcr.io/actions/actions-runner:latest
 
-ARG RUST_NIGHTLY=nightly-2026-04-29
+ARG RUST_NIGHTLY=nightly-2026-09-14
 ARG BUN_VERSION=1.4.2
-ARG SCCACHE_VERSION=0.15.0
+ARG SCCACHE_VERSION=0.18.0
 ARG ZIG_VERSION=0.16.0
-ARG CMAKE_VERSION=4.1.2
-ARG NINJA_VERSION=1.13.1
+ARG CMAKE_VERSION=4.4.3
+ARG NINJA_VERSION=1.13.2
 ARG BAZELISK_VERSION=1.29.0
 ARG BAZEL_VERSION=9.2.0
 
@@ -61,8 +62,8 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
  && ln -sf "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
  && rm -f /tmp/zig.tar.xz
 # cmake + ninja for native C deps (audiopus_sys builds bundled libopus via
-# CMake; MSVC cross builds generate with Ninja). Pinned to the same versions as
-# .github/actions/ensure-cmake, which no-ops when these are present.
+# CMake; MSVC cross builds generate with Ninja). Pinned so every job builds
+# native C deps with the same generator versions.
 RUN curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" -o /tmp/cmake.tar.gz \
  && tar -xzf /tmp/cmake.tar.gz -C /opt \
  && ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake \
@@ -92,7 +93,9 @@ RUN chmod -R a+rX "$BAZELISK_HOME" \
 RUN install -d -o 1001 -g 1001 -m 0755 /home/runner/.cache
 
 # rust toolchain + cargo helpers for the runner user; rustup default == pinned
-# nightly so Rust setup becomes a no-op on the preloaded image.
+# nightly so Rust setup becomes a no-op on the preloaded image. RUST_NIGHTLY,
+# components, and targets must stay a superset of rust-toolchain.toml or rustup
+# re-downloads the difference on every job.
 USER runner
 ENV RUSTUP_HOME=/home/runner/.rustup \
     CARGO_HOME=/home/runner/.cargo \
@@ -100,7 +103,7 @@ ENV RUSTUP_HOME=/home/runner/.rustup \
 RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain "${RUST_NIGHTLY}" --profile minimal \
  && rustup component add clippy rustfmt rust-analyzer \
- && rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc \
+ && rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-pc-windows-msvc \
  && cargo install --locked cargo-nextest cargo-zigbuild cargo-xwin \
  && cargo --version \
  && rustc --version \

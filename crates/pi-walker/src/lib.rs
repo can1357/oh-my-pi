@@ -2516,7 +2516,8 @@ impl<H> WalkContext<'_, H> {
 			return Ok(WalkStatus::Complete);
 		};
 
-		// Seed the ancestor stack only when descendant symlink traversal can loop.
+		// Seed the ancestor stack only when descendant symlink traversal can
+		// loop.
 		if self.options.follow_links == FollowLinks::Always
 			&& let Ok(id) = directory_identity(root)
 		{
@@ -3423,7 +3424,8 @@ mod platform {
 
 	impl Drop for FdGuard {
 		fn drop(&mut self) {
-			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly once.
+			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly
+			// once.
 			unsafe { libc::close(self.0) };
 		}
 	}
@@ -3456,8 +3458,9 @@ mod platform {
 			buffer.resize(BUFFER_SIZE, 0);
 		}
 		loop {
-			// SAFETY: `fd` is an open directory descriptor, `attrs` points to a valid
-			// attrlist for the duration of the call, and `buffer` is writable.
+			// SAFETY: `fd` is an open directory descriptor, `attrs` points to a
+			// valid attrlist for the duration of the call, and `buffer` is
+			// writable.
 			let count = unsafe {
 				libc::getattrlistbulk(
 					fd.0,
@@ -3567,8 +3570,9 @@ mod platform {
 	fn open_dir(path: &Path) -> io::Result<FdGuard> {
 		let path = CString::new(path.as_os_str().as_bytes())
 			.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-		// SAFETY: `path` is a NUL-terminated C string; flags open the directory for
-		// metadata traversal only and do not transfer ownership of the string.
+		// SAFETY: `path` is a NUL-terminated C string; flags open the directory
+		// for metadata traversal only and do not transfer ownership of the
+		// string.
 		let fd =
 			unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
 		if fd < 0 {
@@ -3724,7 +3728,8 @@ mod platform {
 
 	impl Drop for FdGuard {
 		fn drop(&mut self) {
-			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly once.
+			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly
+			// once.
 			unsafe { libc::close(self.0) };
 		}
 	}
@@ -3749,7 +3754,8 @@ mod platform {
 			buffer.resize(BUFFER_SIZE, 0);
 		}
 		loop {
-			// SAFETY: `fd` is an open directory descriptor and `buffer` is writable.
+			// SAFETY: `fd` is an open directory descriptor and `buffer` is
+			// writable.
 			let read = unsafe {
 				libc::syscall(
 					libc::SYS_getdents64,
@@ -3861,8 +3867,8 @@ mod platform {
 		} else {
 			STATX_TYPE
 		};
-		// SAFETY: `name` is NUL-terminated, `statx` is writable, and `dirfd` is an
-		// open directory descriptor for an AT_* relative metadata query.
+		// SAFETY: `name` is NUL-terminated, `statx` is writable, and `dirfd` is
+		// an open directory descriptor for an AT_* relative metadata query.
 		let rc = unsafe {
 			libc::syscall(
 				libc::SYS_statx,
@@ -4037,8 +4043,8 @@ mod platform {
 
 		loop {
 			let mut iosb = IO_STATUS_BLOCK::default();
-			// SAFETY: `handle` is an open directory handle, `buffer` is writable, and
-			// the query class matches the record parser below.
+			// SAFETY: `handle` is an open directory handle, `buffer` is writable,
+			// and the query class matches the record parser below.
 			let status = unsafe {
 				NtQueryDirectoryFile(
 					handle.0,
@@ -4068,8 +4074,8 @@ mod platform {
 					return Err(invalid_data("truncated NtQueryDirectoryFile record").into());
 				}
 				let info = unsafe {
-					// SAFETY: Bounds were checked above; records are byte-packed in the
-					// buffer and may not be aligned for Rust references.
+					// SAFETY: Bounds were checked above; records are byte-packed in
+					// the buffer and may not be aligned for Rust references.
 					std::ptr::read_unaligned(
 						buffer[offset..]
 							.as_ptr()

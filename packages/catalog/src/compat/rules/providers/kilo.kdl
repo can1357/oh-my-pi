@@ -1,6 +1,10 @@
 // Provider-wire compat for "kilo"; regenerated from the frozen census using deployment contract selectors.
 
 provider "kilo" {
+	default-model "anthropic/claude-opus-4.8"
+	env "KILO_API_KEY"
+	discovery label="Kilo Gateway" allow-unauthenticated=#true
+
 	// Replaces the reasoning-gated K2.6 stream-idle baseline.
 	models "moonshotai/kimi-k2.6" {
 		stream-idle-timeout-ms 300000

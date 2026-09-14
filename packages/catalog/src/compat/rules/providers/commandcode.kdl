@@ -6,6 +6,16 @@
 // ReasoningEffort` is false for them in the CLI), so a missing ladder here
 // is a deliberate absence, not a gap.
 provider "commandcode" {
+	default-model "claude-sonnet-4-6"
+	env "COMMAND_CODE_API_KEY" "COMMANDCODE_API_KEY"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	// The Provider API rows carry no reasoning/modality metadata and KDL owns
+	// the deployment policy: same-id references on other hosts must not
+	// backfill reasoning, input, or limits during generation.
+	skip-cross-provider-reference-fills #true
+	discovery label="Command Code" allow-unauthenticated=#true
+
 	supports-developer-role #false
 	supports-store #false
 	// No effort dial by default: only the exact ids below expose one

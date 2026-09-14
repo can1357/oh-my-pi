@@ -82,23 +82,28 @@ impl PulseApi {
 		let simple = open_library(c"libpulse-simple.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 		let pulse = open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_new = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleNew>(symbol(simple, c"pa_simple_new")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_free = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleFree>(symbol(simple, c"pa_simple_free")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_write = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleWrite>(symbol(simple, c"pa_simple_write")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_read = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleRead>(symbol(simple, c"pa_simple_read")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let strerror =
 			unsafe { std::mem::transmute::<*mut c_void, PaStrerror>(symbol(pulse, c"pa_strerror")?) };
 
@@ -106,8 +111,8 @@ impl PulseApi {
 	}
 
 	fn error(&self, code: c_int) -> String {
-		// SAFETY: pa_strerror accepts every PulseAudio error code and returns a static
-		// string.
+		// SAFETY: pa_strerror accepts every PulseAudio error code and returns a
+		// static string.
 		let message = unsafe { (self.strerror)(code) };
 		cstring_lossy(message, "unknown PulseAudio error")
 	}
@@ -143,42 +148,51 @@ impl AlsaApi {
 
 	fn load() -> Result<&'static Self, String> {
 		let library = open_library(c"libasound.so.2", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_open = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmOpen>(symbol(library, c"snd_pcm_open")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_set_params = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmSetParams>(symbol(
 				library,
 				c"snd_pcm_set_params",
 			)?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_writei = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmIo>(symbol(library, c"snd_pcm_writei")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_readi = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmIo>(symbol(library, c"snd_pcm_readi")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_recover = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmRecover>(symbol(library, c"snd_pcm_recover")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_wait = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmWait>(symbol(library, c"snd_pcm_wait")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_start = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmControl>(symbol(library, c"snd_pcm_start")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_close = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmControl>(symbol(library, c"snd_pcm_close")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let strerror = unsafe {
 			std::mem::transmute::<*mut c_void, SndStrerror>(symbol(library, c"snd_strerror")?)
 		};
@@ -197,7 +211,8 @@ impl AlsaApi {
 	}
 
 	fn error(&self, code: c_int) -> String {
-		// SAFETY: snd_strerror accepts ALSA status codes and returns a static string.
+		// SAFETY: snd_strerror accepts ALSA status codes and returns a static
+		// string.
 		let message = unsafe { (self.strerror)(code) };
 		cstring_lossy(message, "unknown ALSA error")
 	}
@@ -215,7 +230,8 @@ fn open_library(name: &CStr, flags: c_int) -> Result<*mut c_void, String> {
 }
 
 fn symbol(library: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
-	// SAFETY: library is a live handle deliberately retained for process lifetime.
+	// SAFETY: library is a live handle deliberately retained for process
+	// lifetime.
 	unsafe { libc::dlerror() };
 	// SAFETY: library is live and name is a valid NUL-terminated symbol name.
 	let address = unsafe { libc::dlsym(library, name.as_ptr()) };
@@ -233,7 +249,8 @@ fn symbol(library: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
 }
 
 fn dlerror() -> String {
-	// SAFETY: dlerror returns either null or a thread-local NUL-terminated string.
+	// SAFETY: dlerror returns either null or a thread-local NUL-terminated
+	// string.
 	let error = unsafe { libc::dlerror() };
 	cstring_lossy(error, "unknown dynamic-loader error")
 }
@@ -242,8 +259,8 @@ fn cstring_lossy(value: *const c_char, fallback: &str) -> String {
 	if value.is_null() {
 		fallback.to_owned()
 	} else {
-		// SAFETY: callers only pass pointers returned by APIs specifying NUL-terminated
-		// strings.
+		// SAFETY: callers only pass pointers returned by APIs specifying
+		// NUL-terminated strings.
 		unsafe { CStr::from_ptr(value) }
 			.to_string_lossy()
 			.into_owned()
@@ -335,8 +352,8 @@ impl AlsaStream {
 			)));
 		}
 		let stream = Self(pcm);
-		// SAFETY: pcm is an open handle owned by this thread and all enum values match
-		// ALSA.
+		// SAFETY: pcm is an open handle owned by this thread and all enum values
+		// match ALSA.
 		let status = unsafe {
 			(api.pcm_set_params)(
 				stream.0,
@@ -528,7 +545,8 @@ fn pulse_playback_loop(
 			break;
 		}
 		let mut error = 0;
-		// SAFETY: stream is open and buffer contains exactly the supplied byte count.
+		// SAFETY: stream is open and buffer contains exactly the supplied byte
+		// count.
 		let status = unsafe {
 			(api.simple_write)(
 				stream.0,
@@ -559,8 +577,8 @@ fn pulse_capture_loop(
 	let mut buffer = vec![0.0_f32; samples];
 	while !stop.load(Ordering::Acquire) {
 		let mut error = 0;
-		// SAFETY: stream is open and buffer has writable storage for the supplied byte
-		// count.
+		// SAFETY: stream is open and buffer has writable storage for the supplied
+		// byte count.
 		let status = unsafe {
 			(api.simple_read)(
 				stream.0,
@@ -639,8 +657,8 @@ fn alsa_playback_loop(
 					"audio period exceeds ALSA frame range".to_owned(),
 				);
 			};
-			// SAFETY: stream is open and the remaining buffer contains frames of mono f32
-			// audio.
+			// SAFETY: stream is open and the remaining buffer contains frames of
+			// mono f32 audio.
 			let status = unsafe {
 				(api.pcm_writei)(stream.0, buffer.as_ptr().add(offset).cast_mut().cast(), frames)
 			};
@@ -668,7 +686,8 @@ fn alsa_playback_loop(
 					);
 				};
 				if written > samples - offset {
-					// SAFETY: stream is still open and exclusively owned by this thread.
+					// SAFETY: stream is still open and exclusively owned by this
+					// thread.
 					unsafe { (api.pcm_close)(stream.0) };
 					return Err(format!(
 						"ALSA wrote {written} frames after receiving {}",
@@ -702,8 +721,8 @@ fn alsa_capture_loop(
 		);
 	};
 	while !stop.load(Ordering::Acquire) {
-		// SAFETY: stream is open and buffer has writable storage for frames mono f32
-		// frames.
+		// SAFETY: stream is open and buffer has writable storage for frames mono
+		// f32 frames.
 		let status = unsafe { (api.pcm_readi)(stream.0, buffer.as_mut_ptr().cast(), frames) };
 		if status == -c_long::from(libc::EAGAIN) {
 			if let Err(error) = wait_for_alsa(api, stream, timeout_ms) {
@@ -733,7 +752,8 @@ fn alsa_capture_loop(
 				);
 			};
 			if captured > samples {
-				// SAFETY: stream is still open and exclusively owned by this thread.
+				// SAFETY: stream is still open and exclusively owned by this
+				// thread.
 				unsafe { (api.pcm_close)(stream.0) };
 				return Err(format!("ALSA captured {captured} frames into a {samples}-frame buffer"));
 			}
@@ -794,8 +814,9 @@ fn finish(
 				.map_err(|_| "audio worker thread panicked".to_owned())?;
 		} else {
 			// A pathological PulseAudio server can stall pa_simple I/O forever.
-			// Detaching keeps stop/Drop bounded; the worker owns and eventually frees
-			// the handle if the server ever unblocks. The delivery gate prevents callbacks.
+			// Detaching keeps stop/Drop bounded; the worker owns and eventually
+			// frees the handle if the server ever unblocks. The delivery gate
+			// prevents callbacks.
 			drop(handle);
 		}
 	}

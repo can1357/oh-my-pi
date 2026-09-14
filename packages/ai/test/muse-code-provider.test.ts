@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { MUSE_CODE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 
 const encodedMuseCredential = JSON.stringify({
 	oauthAccessToken: "meta-account-access",
@@ -16,7 +16,7 @@ describe("Muse Code provider", () => {
 		if (!provider?.prepareRequest || !provider.prepareModelDiscovery) {
 			throw new Error("Muse Code transport is not registered");
 		}
-		const model = buildModel(MUSE_CODE_STATIC_MODELS[0]!);
+		const model = buildModel(seedModels("muse-code")[0]!);
 		const request = provider.prepareRequest(model, { apiKey: encodedMuseCredential });
 		const discovery = provider.prepareModelDiscovery({ apiKey: encodedMuseCredential });
 
