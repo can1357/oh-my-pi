@@ -35,7 +35,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `peek` | `boolean` | No | `inbox`: leave messages in the process-global bus mailbox. Note that messages already buffered on the live recipient session are still drained into this result by the current implementation. |
 | `name` | `string` | process ops | Stable project-scoped launch name (1-48 chars). On `send`/`wait` it routes the op to the process broker. |
 | `application`, `args`, `env`, `cwd`, `pty`, `ready`, `restart`, `persist`, `detached` | — | `start` | Launch spec, unchanged from the former `launch` tool. |
-| `progress` | `"wake" \| "ambient" \| "off"` | No | `start`: attach live progress with `wake` or `ambient`; default off. `monitor`: attach or retune with `wake`/`ambient`, or detach with `off`. |
+| `progress` | `"wake" \| "ambient" \| "off"` | No | `start`: attach live progress with `wake`/`ambient`, or explicitly leave monitoring off with `off`; omitted also defaults off. `monitor`: attach or retune with `wake`/`ambient`, or detach with `off`. |
 | `lines`, `head`, `grep`, `follow`, `cursor` | — | `logs` | Log window controls, unchanged. |
 | `for`, `pattern` | — | `wait` (name) | Process lifecycle condition / output regex. |
 | `text`, `enter`, `keys`, `signal` | — | `send` (name) | Process stdin / terminal keys / signal. |
@@ -98,7 +98,7 @@ Names are stable and unique within one project directory. A live name must be st
 
 ## Push monitoring (processes)
 
-`progress: "wake"` on `start` subscribes the calling agent session to future process output. `progress: "ambient"` uses the same capture path without starting a turn. Monitoring is opt-in and defaults off.
+`progress: "wake"` on `start` subscribes the calling agent session to future process output. `progress: "ambient"` uses the same capture path without starting a turn. Monitoring is opt-in and defaults off; `progress: "off"` makes that choice explicit for helpers that must not expose output.
 
 ```json
 {"op":"monitor","name":"web","progress":"wake"}

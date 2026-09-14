@@ -1168,8 +1168,7 @@ export async function executeLaunch(
 	if (params.progress !== undefined && params.op !== "start" && params.op !== "monitor") {
 		throw new ToolError("progress is only valid with start or monitor");
 	}
-	if (params.op === "start" && params.progress === "off") throw new ToolError("start progress cannot be off");
-	if (params.op === "start" && params.detached && params.progress !== undefined) {
+	if (params.op === "start" && params.detached && params.progress !== undefined && params.progress !== "off") {
 		throw new ToolError(DETACHED_MONITOR_ERROR);
 	}
 	if (params.op === "monitor" && params.progress === undefined) {
