@@ -3536,7 +3536,6 @@ describe("RelayBridge tab grouping", () => {
 		const replayContext: Record<string, unknown> = {};
 		vm.runInNewContext(replaySource!, replayContext);
 		expect(replayContext.__preloadRan).toBe(true);
-		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
 	it("preserves an immediate preload whose leading string expression continues on the next line", async () => {
@@ -3580,7 +3579,6 @@ describe("RelayBridge tab grouping", () => {
 		const replayContext: Record<string, unknown> = {};
 		vm.runInNewContext(replaySource!, replayContext);
 		expect(replayContext.__preloadRan).toBe(true);
-		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
 	it("records the loader after an initial immediate preload registration", async () => {
@@ -3927,8 +3925,7 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		const source =
-			"this.__preloadSawRelayMarker = Object.keys(this).some(key => key.startsWith('__ompRelayPreload')); let relayValue = 1; class RelayValue {}; this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
+		const source = "let relayValue = 1; class RelayValue {}; this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
 
 		const addId = ++msgSeq;
 		bridge.cdpMessage(
@@ -4016,9 +4013,9 @@ describe("RelayBridge tab grouping", () => {
 		const overlapDocument: Record<string, unknown> = {};
 		vm.createContext(overlapDocument);
 		vm.runInContext(markedSource!, overlapDocument);
+		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
 		vm.runInContext(cleanupSource!, overlapDocument);
 		expect(overlapDocument.__preloadRuns).toBe(1);
-		expect(overlapDocument.__preloadSawRelayMarker).toBe(false);
 		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 		const laterDocument: Record<string, unknown> = {};
 		laterDocument.window = laterDocument;
@@ -4026,7 +4023,6 @@ describe("RelayBridge tab grouping", () => {
 		vm.runInContext(markedSource ?? "", laterDocument);
 		vm.runInContext(cleanupSource ?? "", laterDocument);
 		expect(laterDocument.__preloadRuns).toBe(1);
-		expect(laterDocument.__preloadSawRelayMarker).toBe(false);
 		expect(vm.runInContext("relayValue", laterDocument)).toBe(1);
 		expect(vm.runInContext("typeof RelayValue", laterDocument)).toBe("function");
 		expect(Object.keys(laterDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
@@ -4109,10 +4105,8 @@ describe("RelayBridge tab grouping", () => {
 		vm.createContext(document);
 		expect(() => vm.runInContext(markedSource, document)).toThrow("boom");
 		expect(document.__preloadRuns).toBe(1);
-		expect(Object.keys(document).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 		const marker = Object.getOwnPropertyNames(document).find(key => key.startsWith("__ompRelayPreload"));
 		expect(marker).toBeDefined();
-		expect(Object.getOwnPropertyDescriptor(document, marker!)?.enumerable).toBe(false);
 	});
 
 	it("marks a preload without resolving its lexical Object binding", async () => {
@@ -4150,10 +4144,9 @@ describe("RelayBridge tab grouping", () => {
 		const document: Record<string, unknown> = {};
 		vm.runInNewContext(markedSource, document);
 		expect(document.__preloadRan).toBe(true);
-		expect(Object.keys(document).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
-	it("marks a preload even when the page tampered Object.prototype.constructor", async () => {
+	it("replays an immediate preload after the page replaces its Object global", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -4185,11 +4178,10 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		const markedSource = (marked?.params as { source?: string } | undefined)?.source ?? "";
-		// Simulate an earlier preload that poisoned the Object prototype's constructor
-		// link. A `({}).constructor.defineProperty` lookup would throw here; reading
-		// `this.Object.defineProperty` off the global must still succeed.
+		// The recovered document can mutate its global before the relay reconnects.
+		// Marker setup must not consult that page-controlled binding.
 		const context = vm.createContext({});
-		vm.runInContext("Object.prototype.constructor = null;", context);
+		vm.runInContext("this.Object = null;", context);
 		expect(() => vm.runInContext(markedSource, context)).not.toThrow();
 		expect(context.__preloadRan).toBe(true);
 		const marker = Object.getOwnPropertyNames(context).find(key => key.startsWith("__ompRelayPreload"));

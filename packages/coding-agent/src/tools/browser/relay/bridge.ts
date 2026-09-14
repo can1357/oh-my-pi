@@ -97,21 +97,15 @@ function hasNewFrameDocument(previous: Record<string, string>, current: Record<s
 function markPreloadApplication(source: unknown, marker: string): string {
 	if (typeof source !== "string") throw new Error("preload source must be a string");
 	// Record entry before caller code so a preload that performs side effects and
-	// then throws is still recognized as applied. Keep the random recovery key
-	// non-enumerable so ordinary global enumeration in the caller cannot observe
-	// relay-private state. Insert after any hashbang/directive prologue so their
-	// syntax and semantics stay intact, while leaving caller declarations at the
-	// top level. `this` cannot be shadowed by top-level lexical bindings.
-	//
-	// Read `defineProperty` from the global `Object` property (`this.Object`)
-	// rather than traversing `({}).constructor`: an earlier preload in the same
-	// document can tamper `Object.prototype.constructor` (e.g. set it to null),
-	// which would make the prototype-chain lookup throw and permanently break
-	// every later marker-bearing preload. `this.Object` is a global-object
-	// property read, so it is unaffected by both that prototype tampering and by
-	// a caller's top-level lexical `const Object` binding.
+	// then throws is still recognized as applied. Insert after any
+	// hashbang/directive prologue so their syntax and semantics stay intact, while
+	// leaving caller declarations at the top level. `this` cannot be shadowed by
+	// top-level lexical bindings. Use direct assignment because every Object or
+	// Reflect intrinsic reachable from this page realm can already have been
+	// replaced by the document or an earlier preload. The companion registration
+	// deletes this random private key after the producer runs.
 	const markerAccess = `this[${JSON.stringify(marker)}]`;
-	const markerStatement = `if (${markerAccess} === true) throw ${JSON.stringify(marker)}; this.Object.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
+	const markerStatement = `if (${markerAccess} === true) throw ${JSON.stringify(marker)}; ${markerAccess} = true;`;
 	const program = parse(source, {
 		sourceType: "script",
 		allowAwaitOutsideFunction: true,
