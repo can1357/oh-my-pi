@@ -245,6 +245,48 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("prompt from the second context");
 		});
 
+		it("keeps a submitted entry out of the list while the re-seed failed", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				A: [{ prompt: "persisted in A" }],
+				B: [{ prompt: "persisted in B" }],
+			};
+			const written: string[] = [];
+			let key = "A";
+			let failNextRead = false;
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage(
+				{
+					add: async prompt => {
+						written.push(prompt);
+					},
+					getRecent: () => {
+						if (failNextRead) {
+							failNextRead = false;
+							throw new Error("storage read failed");
+						}
+						return byKey[key] ?? [];
+					},
+				},
+				() => key,
+			);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted in A");
+
+			// The switch fails to seed, so the list still belongs to A while the submission is
+			// filed under B. Coming back to A re-seeds nothing — its key was restored — so the
+			// entry would be recalled there if it had been filed into that list.
+			key = "B";
+			failNextRead = true;
+			editor.addToHistory("typed while in B");
+			expect(written).toEqual(["typed while in B"]);
+
+			key = "A";
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted in A");
+		});
+
 		it("carries a canceled draft across a context change, keeping its payload expandable", () => {
 			const byKey: Record<string, { prompt: string }[]> = {
 				first: [{ prompt: "persisted from the first context" }],

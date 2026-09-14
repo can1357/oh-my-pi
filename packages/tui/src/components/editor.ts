@@ -930,8 +930,9 @@ export class Editor implements Component, Focusable {
 		// between: re-seed first, so the entry is filed under the context active now rather than
 		// the one the list was seeded for. Returning to a context then re-seeds again, because
 		// the stored key is the context this submission moved to. A failed seed leaves the stale
-		// list in place, which nothing serves: browsing aborts until a read succeeds.
-		this.#rehydrateHistory();
+		// list in place, and coming back to that context re-seeds nothing (its key was restored),
+		// so the entry must stay out of the list: the write below already filed it in storage.
+		const seeded = this.#rehydrateHistory();
 
 		const stor = this.#historyStorage;
 		if (stor) {
@@ -939,6 +940,7 @@ export class Editor implements Component, Focusable {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}
+		if (!seeded) return;
 
 		// Don't add consecutive submitted duplicates; a draft owns separate state.
 		const previous = this.#history[0];
