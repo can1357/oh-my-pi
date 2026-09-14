@@ -2,6 +2,9 @@ import type { ClipboardImage } from "./index.js";
 
 export type { ClipboardImage } from "./index.js";
 
+/** Copy text and keep serving it until clipboard ownership changes. */
+export declare function copyToClipboardPersistent(text: string): void;
+
 /** Copy text to the clipboard, loading the native addon on first use. */
 export declare function copyToClipboard(text: string): void;
 

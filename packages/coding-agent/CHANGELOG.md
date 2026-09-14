@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Fenced code blocks now expose a clickable `copy` link that copies their original source text ([#9527](https://github.com/can1357/oh-my-pi/pull/9527) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ## [18.1.21] - 2026-09-14
 
 ### Fixed

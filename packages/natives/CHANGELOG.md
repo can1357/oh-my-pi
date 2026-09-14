@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a persistent clipboard-write API through the public `@oh-my-pi/pi-natives/clipboard` entry point ([#9527](https://github.com/can1357/oh-my-pi/pull/9527) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ## [18.1.17] - 2026-09-10
 
 ### Fixed
