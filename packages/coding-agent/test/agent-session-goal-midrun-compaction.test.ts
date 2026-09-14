@@ -448,6 +448,90 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(persistedToolTurnRoles).toEqual(["assistant", "toolResult"]);
 	});
 
+	it("preserves passive tool context when message_end persistence overlaps mid-run compaction", async () => {
+		const releaseContextMessageEnd = Promise.withResolvers<void>();
+		const contextMessageEndEntered = Promise.withResolvers<void>();
+		const turnEndEntered = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn(
+				(eventType: string) => eventType === "tool_call" || eventType === "message_end" || eventType === "turn_end",
+			),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			markToolCallEmitted: vi.fn(),
+			emitToolCall: vi.fn(async () => ({ additionalContext: "PASSIVE-TOOL-CONTEXT" })),
+			emit: vi.fn(async (event: { type: string; message?: AgentMessage }) => {
+				if (event.type === "turn_end") {
+					turnEndEntered.resolve();
+					return;
+				}
+				if (event.type === "message_end" && event.message?.role === "developer") {
+					contextMessageEndEntered.resolve();
+					await releaseContextMessageEnd.promise;
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		// Disable background speculation: the soft method would otherwise defer
+		// this threshold crossing to a background run and the assertions below
+		// would race it. The sync mid-run path is the contract under test.
+		const { session, sessionManager, observedContexts } = await createHarness(
+			{ "compaction.asyncEnabled": false },
+			{ extensionRunner },
+		);
+		// Seed older history so the cut point lands mid-branch: the live turn's
+		// uncuttable [toolResult, developer] tail alone is smaller than the
+		// keep-recent budget, which would leave prepareCompaction with nothing
+		// to summarize on this tiny branch. Filler turns give the summary
+		// something real to cover while the live tail stays in the kept region.
+		for (let filler = 0; filler < 8; filler++) {
+			const timestamp = Date.now() + filler;
+			sessionManager.appendMessage({
+				role: "user",
+				content: `Filler history turn ${filler} padding padding padding padding padding padding`,
+				timestamp,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [
+					{
+						type: "text" as const,
+						text: `Filler reply ${filler} padding padding padding padding padding padding`,
+					},
+				],
+				api: "anthropic-messages" as const,
+				provider: "anthropic" as const,
+				model: "claude-sonnet-4-5",
+				stopReason: "stop" as const,
+				usage: highUsage(100),
+				timestamp,
+			});
+		}
+		const compactSpy = mockCompaction("MID-RUN-COMPACTED-WITH-PASSIVE-CONTEXT");
+
+		const prompt = session.prompt("work on the release");
+		await contextMessageEndEntered.promise;
+		await turnEndEntered.promise;
+		expect(compactSpy).not.toHaveBeenCalled();
+		releaseContextMessageEnd.resolve();
+		await prompt;
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
+		const nextProviderContext = observedContexts[1].join("\n");
+		expect(nextProviderContext).toContain("MID-RUN-COMPACTED-WITH-PASSIVE-CONTEXT");
+		expect(nextProviderContext).toContain("PASSIVE-TOOL-CONTEXT");
+		const persistedContext = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message)
+			.find(
+				message =>
+					message.role === "developer" &&
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "text" && block.text === "PASSIVE-TOOL-CONTEXT"),
+			);
+		expect(persistedContext).toBeDefined();
+	});
+
 	it("keeps synchronous message_end mutations notification-local during mid-run compaction", async () => {
 		const extensionRuntime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(

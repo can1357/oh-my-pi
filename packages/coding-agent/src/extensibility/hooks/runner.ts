@@ -326,6 +326,8 @@ export class HookRunner {
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.#createContext();
 		let result: ToolCallEventResult | undefined;
+		const additionalContext: string[] = [];
+		let input: ToolCallEventResult["input"];
 
 		for (const hook of this.hooks) {
 			const handlers = hook.handlers.get("tool_call");
@@ -333,18 +335,30 @@ export class HookRunner {
 
 			for (const handler of handlers) {
 				// No timeout - let user take their time
-				const handlerResult = await handler(event, ctx);
+				const handlerResult = (await handler(event, ctx)) as ToolCallEventResult | undefined;
 
-				if (handlerResult) {
-					result = handlerResult as ToolCallEventResult;
-					// If blocked, stop processing further hooks
-					if (result.block) {
-						return result;
-					}
+				if (!handlerResult) continue;
+				if (handlerResult.block) {
+					return handlerResult;
 				}
+				const { additionalContext: context, ...controlResult } = handlerResult;
+				if (typeof context === "string" && context.trim().length > 0) {
+					additionalContext.push(context);
+				}
+				if (handlerResult.input !== undefined) {
+					input = handlerResult.input;
+				}
+				result = controlResult;
 			}
 		}
 
+		if (additionalContext.length > 0 || input !== undefined) {
+			return {
+				...result,
+				...(input !== undefined ? { input } : {}),
+				...(additionalContext.length > 0 ? { additionalContext: additionalContext.join("\n\n") } : {}),
+			};
+		}
 		return result;
 	}
 

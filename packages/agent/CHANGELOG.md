@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added trusted tool-call instruction APIs: `beforeToolCall` can return `additionalContext`, and tools can call `AgentToolContext.addAdditionalContext()`. Instructions are injected after settled results in assistant call order and before the next provider request; raw tool output and other untrusted content remain ordinary tool results ([#8363](https://github.com/can1357/oh-my-pi/pull/8363) by [@kyle-elliott](https://github.com/kyle-elliott)).
+
 ## [18.1.19] - 2026-09-12
 
 ### Added

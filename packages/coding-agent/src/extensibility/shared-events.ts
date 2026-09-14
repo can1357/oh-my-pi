@@ -313,6 +313,14 @@ export interface ToolCallEventResult {
 	/** Reason for blocking (returned to LLM as error) */
 	reason?: string;
 	/**
+	 * Trusted handler-authored instructions for the next provider request. The
+	 * host emits them after tool results with developer/system priority where
+	 * supported. Raw tool output and other untrusted data must stay in the tool
+	 * result. Non-empty values from every non-blocking handler are preserved in
+	 * registration order; ignored when this or a later handler blocks the call.
+	 */
+	additionalContext?: string;
+	/**
 	 * Replacement input the tool executes with, instead of the original arguments. Ignored when
 	 * `block` is true. This is the raw execution input passed to the tool's `execute` (the handler
 	 * owns its correctness) — not the normalized `event.input` view, which may carry derived

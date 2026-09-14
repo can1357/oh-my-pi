@@ -59,6 +59,9 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					const reason = callResult.reason || "Tool execution was blocked by a hook";
 					throw new Error(reason);
 				}
+				if (typeof callResult?.additionalContext === "string" && callResult.additionalContext.trim().length > 0) {
+					context?.addAdditionalContext?.(callResult.additionalContext);
+				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input the tool runs with (handler-owned); it is not re-normalized. Skipped for `computer`
 				// tool calls, whose real parameters are not represented by the event input.

@@ -64,7 +64,7 @@ import { EventLoopKeepalive } from "./utils/yield";
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter((m): m is Message => {
 		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "toolResult";
+		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
 	});
 }
 
@@ -1792,6 +1792,7 @@ export class Agent {
 				this.appendMessage(toolResult);
 				this.#emit({ type: "message_end", message: toolResult });
 			}
+
 		} finally {
 			this.#cursorToolResultDrain = undefined;
 		}

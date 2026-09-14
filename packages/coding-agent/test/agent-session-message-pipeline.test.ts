@@ -1196,17 +1196,108 @@ describe("AgentSession message pipeline", () => {
 			authStorage.close();
 		}
 	});
-	it("exposes ctx.invokeTool to a re-registered built-in so it can delegate to the native tool", async () => {
-		// End-to-end for the extension path: a tool that re-registers `bash` receives ctx.invokeTool
-		// (bound to its own name), delegates to the native bash, and the native output flows back.
-		using tempDir = TempDir.createSync("@pi-invoke-tool-");
-		const api = "test-invoke-tool";
-		let requests = 0;
-		registerCustomApi(api, () => {
-			requests++;
+
+	it("delivers tool_call additionalContext on the next provider request", async () => {
+		using tempDir = TempDir.createSync("@pi-tool-call-context-");
+		const api = "test-tool-call-context";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-				if (requests === 1) {
+				if (contexts.length === 1) {
+					const message = createAssistantMessage("");
+					const toolCall = {
+						type: "toolCall",
+						id: "call-context-1",
+						name: "bash",
+						arguments: { command: "echo output" },
+					} as const;
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall as never, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage("done");
+					stream.push({ type: "done", reason: "stop", message });
+				}
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "local-tool-context-model",
+			name: "Local Tool Context Model",
+			api,
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const addToolContext: ExtensionFactory = pi => {
+			pi.on("tool_call", async event => {
+				if (event.toolName !== "bash") return undefined;
+				return { additionalContext: "Use the indexed result instead of searching again." };
+			});
+		};
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"bash.autoBackground.enabled": false,
+				"bashInterceptor.enabled": false,
+				"tools.xdev": false,
+			}),
+			model,
+			disableExtensionDiscovery: true,
+			extensions: [addToolContext],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["bash"],
+		});
+		try {
+			await session.sendUserMessage("run it");
+
+			expect(contexts).toHaveLength(2);
+			const developer = contexts[1]?.messages.find(message => message.role === "developer");
+			expect(developer?.content).toEqual([
+				{ type: "text", text: "Use the indexed result instead of searching again." },
+			]);
+			const persisted = session.agent.state.messages.find(message => message.role === "developer");
+			expect(persisted?.content).toEqual([
+				{ type: "text", text: "Use the indexed result instead of searching again." },
+			]);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("exposes tool-scoped context and invokeTool to a re-registered built-in", async () => {
+		// End-to-end for the registered-tool path: the execute context forwards passive context to
+		// the agent loop and binds invokeTool to the native built-in of the same name.
+		using tempDir = TempDir.createSync("@pi-invoke-tool-");
+		const api = "test-invoke-tool";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (contexts.length === 1) {
 					const message = createAssistantMessage("");
 					const toolCall = {
 						type: "toolCall",
@@ -1239,9 +1330,10 @@ describe("AgentSession message pipeline", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		let invokeToolPresent = false;
+		let addAdditionalContextPresent = false;
 		let delegatedText = "";
-		// Re-register `bash`: the wrapper ignores the model's args, delegates to the native bash with
-		// its own command via ctx.invokeTool, and returns the native result.
+		// Re-register `bash`: the wrapper records passive context, ignores the model's args, and
+		// delegates to the native bash with its own command via ctx.invokeTool.
 		const wrapBash: ExtensionFactory = pi => {
 			pi.registerTool({
 				name: "bash",
@@ -1256,6 +1348,8 @@ describe("AgentSession message pipeline", () => {
 					ctx: ExtensionContext,
 				) {
 					invokeToolPresent = typeof ctx.invokeTool === "function";
+					addAdditionalContextPresent = typeof ctx.addAdditionalContext === "function";
+					ctx.addAdditionalContext?.("Use the delegated tool output before running another command.");
 					const native = await ctx.invokeTool?.({ command: "echo from-wrapper" });
 					const textBlock = native?.content.find(b => b.type === "text");
 					delegatedText = textBlock?.type === "text" ? textBlock.text : "";
@@ -1293,6 +1387,12 @@ describe("AgentSession message pipeline", () => {
 			await session.sendUserMessage("run it");
 
 			expect(invokeToolPresent).toBe(true);
+			expect(addAdditionalContextPresent).toBe(true);
+			expect(contexts).toHaveLength(2);
+			const developer = contexts[1]?.messages.find(message => message.role === "developer");
+			expect(developer?.content).toEqual([
+				{ type: "text", text: "Use the delegated tool output before running another command." },
+			]);
 			// The native bash actually ran the wrapper's command, not the model's.
 			expect(delegatedText).toContain("from-wrapper");
 			expect(delegatedText).not.toContain("from-model");

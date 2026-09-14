@@ -39,7 +39,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 
 | Event | Fires | Can return |
 |---|---|---|
-| `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown> }` |
+| `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }` |
 | `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean }` |
 
 ### Session lifecycle
@@ -97,8 +97,8 @@ Contract:
 - If **any** handler returns `{ block: true }`, execution stops immediately.
 - `reason` becomes the tool error text the LLM sees.
 - If a handler **throws**, the tool is also blocked (fail-closed).
-- Last non-blocking return wins; first `block: true` short-circuits.
-- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. Handlers do not see earlier input revisions.
+- A non-blocking handler can return `additionalContext` carrying trusted handler-authored instructions for the next provider request. Non-empty values from all handlers are preserved in registration order, emitted after the batch's tool results in assistant call order with developer/system priority where supported, and discarded if that call is later blocked. Raw tool output and other untrusted data must stay in the tool result.
+- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. The last replacement wins, and handlers do not see earlier input revisions.
 - Eval prelude calls such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are not tool calls and do not emit these hooks.
 
 ## Post-tool override contract

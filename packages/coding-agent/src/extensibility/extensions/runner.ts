@@ -1192,6 +1192,7 @@ export class ExtensionRunner {
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
+			addAdditionalContext: delegation?.context?.addAdditionalContext,
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
 					? (params, options) =>
@@ -1473,13 +1474,15 @@ export class ExtensionRunner {
 			this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
 		);
 		let result: ToolCallEventResult | undefined;
+		const additionalContext: string[] = [];
+		let input: ToolCallEventResult["input"];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
+				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
 					ctx,
@@ -1493,19 +1496,32 @@ export class ExtensionRunner {
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,
-				);
+				)) as ToolCallEventResult | undefined;
 
-				if (handlerResult) {
-					result = handlerResult;
-					if (result.block) {
-						return result;
-					}
+				if (!handlerResult) continue;
+				if (handlerResult.block) {
+					return handlerResult;
 				}
+				const { additionalContext: context, ...controlResult } = handlerResult;
+				if (typeof context === "string" && context.trim().length > 0) {
+					additionalContext.push(context);
+				}
+				if (handlerResult.input !== undefined) {
+					input = handlerResult.input;
+				}
+				result = controlResult;
 			}
 		}
 
 		if (signal?.aborted) {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
+		}
+		if (additionalContext.length > 0 || input !== undefined) {
+			return {
+				...result,
+				...(input !== undefined ? { input } : {}),
+				...(additionalContext.length > 0 ? { additionalContext: additionalContext.join("\n\n") } : {}),
+			};
 		}
 		return result;
 	}

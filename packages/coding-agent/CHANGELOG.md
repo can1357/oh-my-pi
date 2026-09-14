@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added trusted `additionalContext` instructions to `tool_call` extension and hook results, with ordered delivery after tool results across built-in, extension, and nested `xd://` execution paths ([#8363](https://github.com/can1357/oh-my-pi/pull/8363) by [@kyle-elliott](https://github.com/kyle-elliott)).
 
 ### Added
 

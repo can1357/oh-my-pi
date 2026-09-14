@@ -22,6 +22,8 @@ export * from "./telemetry";
 export * from "./thinking";
 // Tokenizer choice
 export * from "./tokenizer";
+// Tool-context augmentation
+export * from "./tool-context";
 // Types
 export * from "./types";
 // Yield utilities for Bun event-loop busy-wait prevention
