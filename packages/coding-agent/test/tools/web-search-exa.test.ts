@@ -108,6 +108,65 @@ describe("buildExaRequestBody", () => {
 	});
 });
 
+describe("buildExaRequestBody cost settings", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	async function withSettings(
+		overrides: Record<string, boolean | string>,
+		run: () => void,
+	): Promise<void> {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides });
+		try {
+			run();
+		} finally {
+			resetSettingsForTest();
+		}
+	}
+
+	it("sends per-result summaries by default", () => {
+		const body = buildExaRequestBody({ query: "q" });
+		expect(body.contents).toEqual({ summary: { query: "q" } });
+	});
+
+	it("omits the contents block when exa.includeSummary is false", async () => {
+		await withSettings({ "exa.includeSummary": false }, () => {
+			const body = buildExaRequestBody({ query: "q" });
+			expect(body.contents).toBeUndefined();
+		});
+	});
+
+	it("restores the contents block when exa.includeSummary is true", async () => {
+		await withSettings({ "exa.includeSummary": true }, () => {
+			const body = buildExaRequestBody({ query: "q" });
+			expect(body.contents).toEqual({ summary: { query: "q" } });
+		});
+	});
+
+	it("applies exa.searchType when no caller type is given", async () => {
+		await withSettings({ "exa.searchType": "fast" }, () => {
+			const body = buildExaRequestBody({ query: "q" });
+			expect(body.type).toBe("fast");
+		});
+	});
+
+	it("lets an explicit caller type win over exa.searchType", async () => {
+		await withSettings({ "exa.searchType": "fast" }, () => {
+			const body = buildExaRequestBody({ query: "q", type: "neural" });
+			expect(body.type).toBe("neural");
+		});
+	});
+
+	it("keeps the caller type when exa.searchType is 'default'", async () => {
+		await withSettings({ "exa.searchType": "default" }, () => {
+			const body = buildExaRequestBody({ query: "q", type: "deep" });
+			expect(body.type).toBe("deep");
+		});
+	});
+});
+
 describe("synthesizeAnswer", () => {
 	it("returns undefined when results array is empty", () => {
 		expect(synthesizeAnswer([])).toBeUndefined();

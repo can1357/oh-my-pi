@@ -6126,6 +6126,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"exa.includeSummary": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Include Summary",
+			description:
+				"Request per-result summaries from Exa. Summaries are billed per result on top of the search; disable to cut Exa cost.",
+		},
+	},
+
+	"exa.searchType": {
+		type: "enum",
+		values: ["default", "auto", "fast", "neural", "deep"] as const,
+		default: "default",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Search Type",
+			description:
+				"Exa retrieval strategy. 'fast' is the cheapest per request; 'default' defers to the caller's requested type.",
+		},
+	},
+
 	// SearXNG
 	"searxng.endpoint": {
 		type: "string",
@@ -6492,6 +6517,8 @@ export interface TtsrSettings {
 export interface ExaSettings {
 	enabled: boolean;
 	searchDelayMs: number;
+	includeSummary: boolean;
+	searchType: "default" | "auto" | "fast" | "neural" | "deep";
 }
 
 export interface StatusLineSettings {

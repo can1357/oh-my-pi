@@ -281,13 +281,25 @@ export function synthesizeAnswer(results: ExaSearchResult[]): string | undefined
 
 /** Build the request body for `callExaSearch`. Exported for testing. */
 export function buildExaRequestBody(params: ExaSearchParams): Record<string, unknown> {
+	// Settings can be unavailable to one-shot CLI callers and unit tests; fall
+	// back to the schema defaults instead of throwing mid-request.
+	let includeSummary = getDefault("exa.includeSummary");
+	// "default" means "no operator override" so an explicit `params.type`
+	// (programmatic callers, tests) keeps precedence over the setting.
+	let configuredType: ExaSearchParamType | undefined;
+	try {
+		includeSummary = settings.get("exa.includeSummary");
+		const settingType = settings.get("exa.searchType");
+		if (settingType !== "default") configuredType = settingType;
+	} catch {
+		includeSummary = getDefault("exa.includeSummary");
+	}
+
 	const body: Record<string, unknown> = {
 		query: params.query,
 		numResults: params.num_results ?? 10,
-		type: normalizeSearchType(params.type),
-		contents: {
-			summary: { query: params.query },
-		},
+		type: normalizeSearchType(params.type ?? configuredType),
+		contents: includeSummary ? { summary: { query: params.query } } : undefined,
 	};
 
 	if (params.include_domains?.length) {
