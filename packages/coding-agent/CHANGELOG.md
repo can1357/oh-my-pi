@@ -11,6 +11,18 @@
 - Prompt history reads are no longer always global: `Up` and `Ctrl+R` can be scoped to the current conversation, folder or repository, so a project's prompts stop appearing in another once a scope is configured ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Collab guests no longer run or recall host-only commands: a command the guest gates refuse is neither recorded in `Up` history nor executed on the Ctrl+Enter path (`/new`, `/model …`, `/skill:…`) ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.1.21] - 2026-09-14
+
+### Fixed
+
+- Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
+- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
+- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
+- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
+- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
+- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
+- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
 ## [18.1.20] - 2026-09-13
 
 ### Added

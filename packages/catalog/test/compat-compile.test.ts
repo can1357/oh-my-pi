@@ -185,6 +185,17 @@ describe("auth grammar", () => {
 		expect(renderAuthIds(compiled)).toContain('export type AuthProviderId = "a" | "b";');
 	});
 
+	test("provider-owned authentication APIs compile into auth policy", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "X"\n\tnative-auth-api "bedrock-converse-stream" "openai-responses"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
+	});
+
 	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {
 		const compiled = compileAuth([
 			{

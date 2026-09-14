@@ -175,7 +175,7 @@ describe("browser open — failed spawned-app acquisition reaps its owned proces
 				pages: async () => [],
 			},
 			pid: 4242,
-			subprocess: {},
+			subprocess: { pid: 4242, exitCode: null },
 			stealth: { browserSession: null, override: null },
 		} as unknown as registry.BrowserHandle;
 		spyOn(registry, "acquireBrowser").mockResolvedValue(browser);

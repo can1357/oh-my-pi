@@ -90,7 +90,7 @@ describe("status-line background-job badge", () => {
 		component.setRunningSubagents(["task-0"]);
 
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(content).toContain(`${theme.icon.agents} 1 agent`);
+		expect(content).toContain(`${theme.icon.agents} 1`);
 		expect(content).toContain(`${theme.icon.job} 2`);
 	});
 

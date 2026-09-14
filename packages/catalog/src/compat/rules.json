@@ -16523,7 +16523,8 @@
 								"muse-spark-"
 							],
 							"exact": [
-								"muse-spark-1.3-contributor-free"
+								"muse-spark-1.3-contributor-free",
+								"gpt-6-astra"
 							]
 						}
 					},
@@ -19134,7 +19135,10 @@
 				"name": "Amazon Bedrock",
 				"env": {
 					"hook": "aws-bedrock"
-				}
+				},
+				"nativeAuthApis": [
+					"bedrock-converse-stream"
+				]
 			},
 			{
 				"id": "azure",
@@ -19148,7 +19152,10 @@
 				"env": {
 					"hook": "aws-bedrock-mantle"
 				},
-				"allowsMissingApiKey": true
+				"allowsMissingApiKey": true,
+				"nativeAuthApis": [
+					"openai-responses"
+				]
 			},
 			{
 				"id": "google",
