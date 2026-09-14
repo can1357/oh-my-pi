@@ -278,6 +278,44 @@ describe("pickElectronTarget", () => {
 		}
 	});
 
+	test.skipIf(process.platform !== "linux")(
+		"discovers a Chrome process exec'd by a Google Chrome wrapper",
+		async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-google-chrome-wrapper-"));
+			const chrome = path.join(tempDir, "chrome");
+			const wrapper = path.join(tempDir, "google-chrome");
+			const profile = path.join(tempDir, "profile");
+			const port = await findFreeCdpPort();
+			await Bun.write(chrome, Bun.file(process.execPath));
+			await Bun.write(wrapper, '#!/bin/sh\nexec "$(dirname "$0")/chrome" "$@"\n');
+			await Promise.all([fs.chmod(chrome, 0o755), fs.chmod(wrapper, 0o755)]);
+			const child = Bun.spawn(
+				[
+					wrapper,
+					"--eval",
+					`Bun.serve({ hostname: "127.0.0.1", port: ${port}, fetch: () => new Response("{}") }); process.stdout.write("ready\\n"); await Bun.stdin.text()`,
+					`--user-data-dir=${profile}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+			);
+			const readiness = child.stdout.getReader();
+			await readiness.read();
+			readiness.releaseLock();
+			try {
+				expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+					cdpUrl: `http://127.0.0.1:${port}`,
+					pid: child.pid,
+				});
+			} finally {
+				child.kill();
+				await child.exited;
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		},
+		10_000,
+	);
+
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps profile tabs isolated and never kills a borrowed Chrome on close",
 		async () => {

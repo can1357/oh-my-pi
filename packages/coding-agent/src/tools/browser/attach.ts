@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
@@ -240,10 +241,26 @@ export async function findReusableCdp(
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
 			? normalizeUserDataDir(requestedUserDataDir)
 			: null;
-	const candidates = Process.fromPath(exe).filter(process => process.status() === ProcessStatus.Running);
+	const executableCandidates = new Set([exe]);
+	try {
+		const resolved = await fs.realpath(exe);
+		executableCandidates.add(resolved);
+		if (path.basename(resolved) === "google-chrome") {
+			const chrome = path.join(path.dirname(resolved), "chrome");
+			if (await Bun.file(chrome).exists()) executableCandidates.add(chrome);
+		}
+	} catch {
+		// Process.fromPath still checks the original executable path.
+	}
+	const candidates = new Map<number, Process>();
+	for (const executable of executableCandidates) {
+		for (const process of Process.fromPath(executable)) {
+			if (process.status() === ProcessStatus.Running) candidates.set(process.pid, process);
+		}
+	}
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
-	for (const process of candidates) {
+	for (const process of candidates.values()) {
 		let args: string[];
 		try {
 			args = process.args();
@@ -279,7 +296,7 @@ export async function findReusableCdp(
 					normalizeUserDataDir(existingUserDataDir) !== normalizedRequestedUserDataDir)
 			);
 		});
-	if (!canLaunchIsolatedProfile && candidates.length > 0) {
+	if (!canLaunchIsolatedProfile && candidates.size > 0) {
 		const name = path.basename(exe);
 		throw new ToolError(
 			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass app.cdp_url for an existing endpoint.`,
