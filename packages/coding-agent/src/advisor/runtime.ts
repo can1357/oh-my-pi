@@ -407,7 +407,7 @@ export class AdvisorRuntime {
 	onTurnEnd(messages?: AgentMessage[], opts?: { willContinue?: boolean }): void {
 		if (this.disposed || this.#quotaExhausted) return;
 		this.#syncModelIdentity();
-		this.#resumeQuarantineAfterBasisChange();
+		if (!this.#haltedMaintenanceAbort) this.#resumeQuarantineAfterBasisChange();
 		if (this.#halted) {
 			if (this.#quarantineHalted) {
 				this.#maintainQuarantineHaltedFallback(messages ?? this.host.snapshotMessages());

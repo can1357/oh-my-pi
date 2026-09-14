@@ -5216,6 +5216,9 @@ describe("advisor", () => {
 			let promptCalls = 0;
 			let shouldQuarantine = true;
 			let quarantineBasis = "model/a\u001fadvise,read";
+			const maintenanceStarted = Promise.withResolvers<void>();
+			const maintenanceFinished = Promise.withResolvers<void>();
+			let holdMaintenance = false;
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					promptCalls++;
@@ -5258,6 +5261,13 @@ describe("advisor", () => {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
 				getQuarantineBasis: () => quarantineBasis,
+				maintainContext: async () => {
+					if (!holdMaintenance) return false;
+					quarantineBasis = "model/b\u001fadvise,read,grep";
+					maintenanceStarted.resolve();
+					await maintenanceFinished.promise;
+					return false;
+				},
 				notifyFailure: err => notifyFailures.push(err instanceof Error ? err.message : String(err)),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5276,18 +5286,22 @@ describe("advisor", () => {
 			expect(runtime.failureNotified).toBe(true);
 			expect(runtime.halted).toBe(true);
 
-			// Later unchanged primary updates cannot purchase another bad turn.
-			for (let i = 4; i <= 5; i++) {
-				messages.push({ role: "user", content: `msg-${i}`, timestamp: i } as AgentMessage);
-				runtime.onTurnEnd(messages);
-			}
-			expect(promptCalls).toBe(2);
-
-			// A changed model/tool basis is new admissible review work. It does not
-			// grant either unavailable tool; it merely releases this optional latch.
+			// A basis change made while the detached fallback maintenance is still
+			// running must not begin a concurrent advisor review. Maintenance owns
+			// the recovery; a later primary update dispatches the resumed review.
 			shouldQuarantine = false;
-			quarantineBasis = "model/b\u001fadvise,read,grep";
-			messages.push({ role: "user", content: "recovered", timestamp: 6 } as AgentMessage);
+			holdMaintenance = true;
+			messages.push({ role: "user", content: "maintenance", timestamp: 6 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await maintenanceStarted.promise;
+			messages.push({ role: "user", content: "during-maintenance", timestamp: 7 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			expect(promptCalls).toBe(2);
+			expect(runtime.halted).toBe(true);
+			maintenanceFinished.resolve();
+			await settleUntil(() => !runtime.halted);
+
+			messages.push({ role: "user", content: "recovered", timestamp: 8 } as AgentMessage);
 			runtime.onTurnEnd(messages);
 			await settleUntil(() => promptCalls === 3 && runtime.backlog === 0);
 

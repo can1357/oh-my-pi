@@ -113,6 +113,20 @@ describe("BtwPanelComponent", () => {
 		panel.setAnswer("Answer");
 		expect(panel.isBranchable()).toBe(true);
 	});
+
+	it("confirms a copy visually and clears the confirmation on the next answer", () => {
+		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
+		const panel = new BtwPanelComponent({ question: "Question?", tui: ui });
+		panel.setAnswer("Answer");
+		panel.markComplete();
+		expect(Bun.stripANSI(panel.render(80).join("\n"))).not.toContain("Copied");
+		panel.markCopied();
+		const copied = Bun.stripANSI(panel.render(80).join("\n"));
+		expect(copied).toContain("Copied");
+		expect(panel.title).toContain("Copied");
+		panel.appendText(" more");
+		expect(Bun.stripANSI(panel.render(80).join("\n"))).not.toContain("Copied");
+	});
 });
 
 describe("BtwController", () => {
@@ -381,7 +395,6 @@ describe("BtwController", () => {
 			"session-1",
 		);
 	});
-
 	it("copies the sanitized visible reply text after a complete non-empty reply", async () => {
 		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		const runEphemeralTurn = vi.fn(async (args: RunEphemeralTurnArgs) => {
@@ -391,7 +404,7 @@ describe("BtwController", () => {
 				assistantMessage: createAssistantMessage("raw assistant payload"),
 			};
 		});
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), new Container());
 		const controller = new BtwController(ctx);
 
 		await controller.start("Question?");
@@ -400,6 +413,33 @@ describe("BtwController", () => {
 		expect(controller.canCopy()).toBe(true);
 		expect(await controller.handleCopy()).toBe(true);
 		expect(copySpy).toHaveBeenCalledWith(replaceTabs("Visible\tanswer\n\nfrom /btw"));
+		expect(Bun.stripANSI(ctx.btwContainer.render(100).join("\n"))).toContain("Copied");
+	});
+	it("does not confirm a superseded panel when the clipboard settles late", async () => {
+		const { promise: copyGate, resolve: releaseCopy } = Promise.withResolvers<void>();
+		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async () => {
+			await copyGate;
+		});
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "First answer",
+			assistantMessage: createAssistantMessage("First answer"),
+		}));
+		const btwContainer = new Container();
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const controller = new BtwController(ctx);
+		try {
+			await controller.start("First?");
+			await drainBtwRequest();
+			const copyPromise = controller.handleCopy();
+			await controller.start("Second?");
+			await drainBtwRequest();
+			releaseCopy();
+			expect(await copyPromise).toBe(true);
+			expect(copySpy).toHaveBeenCalledTimes(1);
+			expect(Bun.stripANSI(btwContainer.render(100).join("\n"))).not.toContain("Copied");
+		} finally {
+			await controller.dispose();
+		}
 	});
 
 	it("does not copy running, empty, or errored /btw answers", async () => {
@@ -571,6 +611,7 @@ describe("BtwController", () => {
 			panel.handleInput("c");
 			await drainBtwRequest();
 			expect(copy).toHaveBeenCalledWith("Saved side answer");
+			expect(Bun.stripANSI(panel.render(120).join("\n"))).toContain("Copied");
 			await restored.dispose();
 		} finally {
 			await controller.dispose();
