@@ -60,6 +60,7 @@ function harness(
 	let effectiveEffort: ThinkingLevel | undefined = effort === AUTO_THINKING ? ThinkingLevel.Medium : effort;
 	let sessionId = "session-1";
 	let setModelAllowed = options.setModelAllowed ?? true;
+	let setModelGate: Promise<void> | undefined;
 	const branch: Array<Record<string, unknown>> = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -86,6 +87,7 @@ function harness(
 			branch.push({ type: "custom", customType, data });
 		},
 		async setModel(next: Model) {
+			await setModelGate;
 			if (!setModelAllowed) return false;
 			current = next;
 			branch.push({ type: "model_change", model: formatModelStringWithRouting(next) });
@@ -162,6 +164,9 @@ function harness(
 		setModelAllowed(value: boolean) {
 			setModelAllowed = value;
 		},
+		setModelGate(value: Promise<void> | undefined) {
+			setModelGate = value;
+		},
 		setSessionId(value: string) {
 			sessionId = value;
 		},
@@ -211,6 +216,23 @@ describe("code-model session phase", () => {
 		expect(state.current()).toBe(state.main);
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
+
+	it("restores an undefined retry-primary effort", async () => {
+		const state = harness();
+		state.setCurrent(state.fallback, ThinkingLevel.High);
+		state.setFallback();
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () => ({
+				selector: `${state.main.provider}/${state.main.id}`,
+				effort: undefined,
+			}),
+		});
+		await session.run("start", state.ctx);
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBeUndefined();
+	});
 	it("preserves manual effort when an automatic retry fallback occurs", async () => {
 		const state = harness();
 		const session = installCodeModelSession(state.pi, state.settings);
@@ -241,6 +263,8 @@ describe("code-model session phase", () => {
 	it("applies the configured coding route and restores the original model", async () => {
 		const state = harness({ role: "openrouter/glm-4.7@cerebras:high" });
 		const session = installCodeModelSession(state.pi, state.settings);
+		const status = await session.run("status", state.ctx);
+		expect(status.message).toContain("openrouter/glm-4.7@cerebras · high");
 
 		const started = await session.run("start", state.ctx);
 		expect(started.changed).toBe(true);
@@ -313,6 +337,44 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
+	it("awaits an in-flight stop restoration before idle", async () => {
+		const state = harness();
+		let finalizer: CodeModelBeforeIdleHandler | undefined;
+		const session = installCodeModelSession(state.pi, state.settings, {
+			registerBeforeIdle: handler => {
+				finalizer = handler;
+			},
+		});
+		await session.run("start", state.ctx);
+		const gate = Promise.withResolvers<void>();
+		state.setModelGate(gate.promise);
+		const stop = state.handlers.get("session_stop");
+		if (!stop || !finalizer) throw new Error("Expected terminal restoration handlers");
+		const stopPromise = stop(
+			{
+				type: "session_stop",
+				messages: [],
+				last_assistant_message: { role: "assistant", stopReason: "stop", content: [], timestamp: Date.now() },
+				signal: new AbortController().signal,
+			},
+			state.ctx,
+		);
+		await Promise.resolve();
+		let idleSettled = false;
+		const idlePromise = finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx).then(
+			() => {
+				idleSettled = true;
+			},
+		);
+		await Bun.sleep(1);
+		expect(idleSettled).toBe(false);
+		gate.resolve();
+		await stopPromise;
+		await idlePromise;
+		expect(state.current()).toBe(state.main);
+		expect(idleSettled).toBe(true);
+	});
+
 	it("restores a persisted coding phase when the session resumes", async () => {
 		const state = harness();
 		state.setCurrent(state.coding, ThinkingLevel.High);
@@ -334,8 +396,9 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
-	it("restores the outgoing phase before branch and tree navigation", async () => {
+	it("restores the outgoing phase before session navigation", async () => {
 		for (const [beforeEvent, afterEvent] of [
+			["session_before_switch", "session_switch"],
 			["session_before_branch", "session_branch"],
 			["session_before_tree", "session_tree"],
 		] as const) {

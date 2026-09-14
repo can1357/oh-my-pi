@@ -93,6 +93,7 @@ export function installCodeModelSession(
 ): CodeModelSessionController {
 	let state: PhaseState | undefined;
 	let busy = false;
+	let inFlight: Promise<unknown> | undefined;
 
 	const sessionId = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId();
 	const branch = (ctx: ExtensionContext) => ctx.sessionManager.getBranch();
@@ -113,7 +114,7 @@ export function installCodeModelSession(
 			provider: model.provider,
 			id: model.id,
 			selector,
-			effort: fallbackPrimary?.effort ?? configuredThinkingLevel(),
+			effort: fallbackPrimary ? fallbackPrimary.effort : configuredThinkingLevel(),
 		};
 	}
 
@@ -133,9 +134,12 @@ export function installCodeModelSession(
 	async function guarded<T>(operation: () => Promise<T>): Promise<T> {
 		if (busy) throw new Error("A code-model phase switch is already in progress.");
 		busy = true;
+		const pending = operation();
+		inFlight = pending;
 		try {
-			return await operation();
+			return await pending;
 		} finally {
+			if (inFlight === pending) inFlight = undefined;
 			busy = false;
 		}
 	}
@@ -250,6 +254,7 @@ export function installCodeModelSession(
 				? describeModelState({
 						provider: selection.model.provider,
 						id: selection.model.id,
+						selector: formatModelStringWithRouting(selection.model),
 						effort: selection.effort,
 					})
 				: "unconfigured";
@@ -305,7 +310,7 @@ export function installCodeModelSession(
 	pi.on("session_switch", recover);
 	pi.on("session_tree", recover);
 	pi.on("session_branch", recover);
-	pi.on("session_before_switch", () => (busy ? { cancel: true } : undefined));
+	pi.on("session_before_switch", (_event, ctx) => prepareNavigation(ctx));
 	pi.on("session_before_tree", (_event, ctx) => prepareNavigation(ctx));
 	pi.on("session_before_branch", (_event, ctx) => prepareNavigation(ctx));
 	pi.on("session_stop", async (event, ctx) => {
@@ -318,7 +323,15 @@ export function installCodeModelSession(
 		}
 	});
 	const beforeIdle: CodeModelBeforeIdleHandler = async (event, ctx) => {
-		if (!state || busy || event.willContinue) return;
+		if (!state || event.willContinue) return;
+		if (inFlight) {
+			try {
+				await inFlight;
+			} catch {
+				// The restoration below retries from the persisted phase state.
+			}
+		}
+		if (!state) return;
 		try {
 			const result = await guarded(() => restore(ctx));
 			ctx.ui.notify(result.message, "info");
