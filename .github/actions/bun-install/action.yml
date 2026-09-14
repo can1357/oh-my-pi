@@ -69,7 +69,16 @@ runs:
            export BUN_INSTALL="${HOME}/.bun"
            # Unquoted on purpose: an empty tag (floor pin) must pass no argument, which the
            # script reads as "latest".
-           curl -fsSL https://bun.sh/install | bash -s -- ${{ steps.env.outputs.bun_install }}
+           set -o pipefail
+           for attempt in 1 2 3; do
+             if curl -fsSL https://bun.sh/install | bash -s -- ${{ steps.env.outputs.bun_install }}; then
+               break
+             fi
+             if [ "$attempt" = 3 ]; then
+               exit 1
+             fi
+             sleep "$attempt"
+           done
            # Git Bash reports HOME as a POSIX path, but runner command files are
            # consumed by later native shells such as PowerShell.
            if [ "${RUNNER_OS:-}" = "Windows" ]; then
