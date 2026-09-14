@@ -878,8 +878,14 @@ export function launchRenderResult(
 			case "start": {
 				meta.push(...launchCallMeta(params));
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
-				if (details?.monitoring === "off") meta.push(theme.fg("warning", "monitor stopped"));
-				else if (details?.monitoring) meta.push(theme.fg("accent", `monitor ${details.monitoring}`));
+				if (details?.monitoring === "off") {
+					const monitorStopped = details.monitorStopped !== undefined;
+					meta.push(
+						theme.fg(monitorStopped ? "warning" : "muted", monitorStopped ? "monitor stopped" : "monitor off"),
+					);
+				} else if (details?.monitoring) {
+					meta.push(theme.fg("accent", `monitor ${details.monitoring}`));
+				}
 				if (daemon?.readyMatch) body.push(theme.fg("dim", `log matched: ${replaceTabs(daemon.readyMatch)}`));
 				if (daemon?.state === "failed" && daemon.exitReason)
 					body.push(theme.fg("error", replaceTabs(daemon.exitReason)));
