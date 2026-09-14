@@ -141,7 +141,17 @@ hindsight:
 
 `HINDSIGHT_*` environment variables override `hindsight.*` settings, which override built-in defaults. See the [complete Hindsight environment-variable table](./environment-variables.md#hindsight-memory-backend) for all 18 supported overrides, accepted values, parsing rules, precedence, and defaults.
 
-By default, Hindsight uses `per-project-tagged` scoping: writes go to a shared bank with a project tag, while recall includes project-tagged and untagged global memories. `per-project` isolates each working-directory project in its own bank; `global` uses one shared bank. An explicit `hindsight.bankId` selects the bank base. Changes to the bank ID, prefix, or scoping rebuild the primary session state so later operations use the new scope.
+By default, Hindsight uses `per-project-tagged` scoping: writes go to a shared bank with a project tag, while recall includes project-tagged and untagged global memories. `per-project` isolates each working-directory project in its own bank; `global` uses one shared bank. An explicit `hindsight.bankId` selects the bank base. For integrations that require an exact per-project bank ID, set `hindsight.bankIdTemplate` to a literal template containing only the `{gitProject}` placeholder, such as `coding-agent::{gitProject}`. The template applies only to `per-project`; invalid templates fall back to the existing `<prefix>-<bankId>-<project>` derivation, while `global` and `per-project-tagged` ignore it.
+
+Current recommendation: keep the default `per-project-tagged` mode when OMP alone owns the bank and project-tagged plus untagged global recall is desired. Use the exact template only when an external coding-agent integration requires one isolated bank per repository:
+
+```yaml
+memory:
+  backend: hindsight
+hindsight:
+  scoping: per-project
+  bankIdTemplate: coding-agent::{gitProject}
+```
 
 Both project-scoped modes name the project the same way: take the repository's primary checkout root (so every linked worktree of one repository resolves to the same directory), then lowercase its basename. A checkout at `~/code/General` therefore tags `project:general`. Tags are matched literally, so this fold is what keeps one repository in one memory scope no matter how the path is capitalised.
 

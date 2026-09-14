@@ -3483,6 +3483,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"hindsight.bankIdPrefix": { type: "string", default: undefined },
+	"hindsight.bankIdTemplate": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Per-Project Bank Template",
+			description:
+				"Exact bank ID template for per-project scoping; supports only {gitProject} (example: coding-agent::{gitProject})",
+			condition: "hindsightActive",
+		},
+	},
 	"hindsight.scoping": {
 		type: "enum",
 		values: ["global", "per-project", "per-project-tagged"] as const,

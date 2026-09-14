@@ -644,6 +644,34 @@ describe("hindsightBackend live bank routing", () => {
 		expect(next).not.toBe(initial);
 	});
 
+	it("rebuilds the primary state when hindsight.bankIdTemplate changes mid-session", async () => {
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		settings.set("hindsight.scoping", "per-project");
+		const session = makeFakeSession({ sessionId: "s-template", cwd: "/work/hotcake-app", settings });
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const initial = session.getHindsightSessionState();
+		expect(initial?.bankId).toBe("omp-hotcake-app");
+
+		settings.set("hindsight.bankIdTemplate", "coding-agent::{gitProject}");
+		await Bun.sleep(0);
+
+		const next = session.getHindsightSessionState();
+		expect(next?.bankId).toBe("coding-agent::hotcake-app");
+		expect(next).not.toBe(initial);
+	});
+
 	// Same setting written with the same value MUST NOT rebuild — a rebuild
 	// would reset `lastRetainedTurn` / `hasRecalledForFirstTurn` and force a
 	// fresh mental-model bootstrap for no observable reason.

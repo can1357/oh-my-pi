@@ -9,7 +9,8 @@
  *                              untagged ("global") memories alongside.
  *
  * The base bank id is `bankIdPrefix-bankId` (default `omp`). Per-project mode
- * appends `-<project>`; tagged mode leaves the bank untouched and uses tags.
+ * renders `bankIdTemplate` when configured, otherwise appends `-<project>`;
+ * tagged mode leaves the bank untouched and uses tags.
  *
  * Bank existence is idempotent at module level — a banksSet keeps track of
  * banks we've already PUT so each session boundary doesn't fire a fresh
@@ -24,7 +25,7 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { HindsightApi } from "./client";
-import type { HindsightConfig } from "./config";
+import { HINDSIGHT_PROJECT_PLACEHOLDER, type HindsightConfig, normalizeBankIdTemplate } from "./config";
 
 const DEFAULT_BANK_NAME = "omp";
 const PROJECT_TAG_PREFIX = "project:";
@@ -52,6 +53,22 @@ function baseBankId(config: HindsightConfig): string {
 	const base = config.bankId?.trim() || DEFAULT_BANK_NAME;
 	const prefix = config.bankIdPrefix?.trim() || "";
 	return prefix ? `${prefix}-${base}` : base;
+}
+
+/** Render the optional per-project bank template, or fall back when it is invalid/unset. */
+function renderProjectBankId(template: string | null, gitProject: string): string | undefined {
+	return normalizeBankIdTemplate(template)?.replaceAll(HINDSIGHT_PROJECT_PLACEHOLDER, () => gitProject);
+}
+
+/**
+ * Worktree-aware repository name matching Hindsight's `{gitProject}` placeholder.
+ * Preserve the checkout basename's case so the generated bank ID is byte-for-byte
+ * compatible with the external coding-agent integration.
+ */
+function gitProjectLabel(directory: string): string {
+	if (!directory) return UNKNOWN_PROJECT;
+	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
+	return path.basename(primary ?? directory) || UNKNOWN_PROJECT;
 }
 
 /**
@@ -89,8 +106,11 @@ export function computeBankScope(config: HindsightConfig, directory: string): Ba
 	switch (config.scoping) {
 		case "global":
 			return { bankId: base };
-		case "per-project":
-			return { bankId: `${base}-${projectLabel(directory)}` };
+		case "per-project": {
+			const project = projectLabel(directory);
+			const templated = renderProjectBankId(config.bankIdTemplate, gitProjectLabel(directory));
+			return { bankId: templated ?? `${base}-${project}` };
+		}
 		case "per-project-tagged": {
 			const tag = `${PROJECT_TAG_PREFIX}${projectLabel(directory)}`;
 			return {

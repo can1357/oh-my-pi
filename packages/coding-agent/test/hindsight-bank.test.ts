@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { computeBankScope, deriveBankId, ensureBankExists } from "@oh-my-pi/pi-coding-agent/hindsight/bank";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
-import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
+import { type HindsightConfig, normalizeBankIdTemplate } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Isolate `git` invocations in this file from the host's global config —
@@ -44,6 +44,7 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	hindsightApiToken: null,
 	bankId: null,
 	bankIdPrefix: "",
+	bankIdTemplate: null,
 	scoping: "global",
 	bankMission: "",
 	retainMission: null,
@@ -71,8 +72,33 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	...overrides,
 });
 
+describe("normalizeBankIdTemplate", () => {
+	it("accepts only a non-empty template whose sole placeholder is {gitProject}", () => {
+		expect(normalizeBankIdTemplate(" coding-agent::{gitProject} ")).toBe("coding-agent::{gitProject}");
+		expect(normalizeBankIdTemplate("coding-agent::{gitProject}::{gitProject}")).toBe(
+			"coding-agent::{gitProject}::{gitProject}",
+		);
+	});
+
+	it("rejects missing, unknown, or mixed placeholders", () => {
+		expect(normalizeBankIdTemplate("")).toBeUndefined();
+		expect(normalizeBankIdTemplate("coding-agent")).toBeUndefined();
+		expect(normalizeBankIdTemplate("coding-agent::{workspace}")).toBeUndefined();
+		expect(normalizeBankIdTemplate("coding-agent::{gitProject}-{workspace}")).toBeUndefined();
+	});
+});
+
 describe("computeBankScope", () => {
 	describe("scoping=global", () => {
+		it("ignores the per-project bank template", () => {
+			expect(
+				computeBankScope(
+					baseConfig({ bankId: "shared", bankIdTemplate: "coding-agent::{gitProject}" }),
+					"/work/hotcake-app",
+				),
+			).toEqual({ bankId: "shared" });
+		});
+
 		it("returns the configured bank id verbatim", () => {
 			expect(computeBankScope(baseConfig({ bankId: "team-a" }), "/work/proj")).toEqual({
 				bankId: "team-a",
@@ -98,6 +124,24 @@ describe("computeBankScope", () => {
 	});
 
 	describe("scoping=per-project", () => {
+		it("renders an exact bank ID from the project-only template", () => {
+			expect(
+				computeBankScope(
+					baseConfig({ scoping: "per-project", bankIdTemplate: "coding-agent::{gitProject}" }),
+					"/work/hotcake-app",
+				),
+			).toEqual({ bankId: "coding-agent::hotcake-app" });
+		});
+
+		it("preserves replacement-pattern characters in the exact project bank ID", () => {
+			expect(
+				computeBankScope(
+					baseConfig({ scoping: "per-project", bankIdTemplate: "coding-agent::{gitProject}" }),
+					"/work/repo$&",
+				),
+			).toEqual({ bankId: "coding-agent::repo$&" });
+		});
+
 		it("appends the cwd basename to the base bank id", () => {
 			expect(computeBankScope(baseConfig({ scoping: "per-project" }), "/work/proj")).toEqual({
 				bankId: "omp-proj",
@@ -124,6 +168,16 @@ describe("computeBankScope", () => {
 			expect(scope.bankId).toBe("prod-team-cool-app");
 		});
 
+		it("falls back byte-for-byte to legacy derivation for an invalid template", () => {
+			const config = baseConfig({
+				scoping: "per-project",
+				bankId: "team",
+				bankIdPrefix: "prod",
+				bankIdTemplate: "coding-agent::{workspace}",
+			});
+			expect(computeBankScope(config, "/work/cool-app")).toEqual({ bankId: "prod-team-cool-app" });
+		});
+
 		it("does not surface tag fields (isolation is at the bank level)", () => {
 			const scope = computeBankScope(baseConfig({ scoping: "per-project" }), "/work/proj");
 			expect(scope.retainTags).toBeUndefined();
@@ -132,6 +186,24 @@ describe("computeBankScope", () => {
 	});
 
 	describe("scoping=per-project-tagged", () => {
+		it("ignores the per-project bank template and preserves tagged semantics", () => {
+			expect(
+				computeBankScope(
+					baseConfig({
+						scoping: "per-project-tagged",
+						bankId: "shared",
+						bankIdTemplate: "coding-agent::{gitProject}",
+					}),
+					"/work/hotcake-app",
+				),
+			).toEqual({
+				bankId: "shared",
+				retainTags: ["project:hotcake-app"],
+				recallTags: ["project:hotcake-app"],
+				recallTagsMatch: "any",
+			});
+		});
+
 		it("keeps the base bank id and emits project tags with `any` match", () => {
 			expect(computeBankScope(baseConfig({ scoping: "per-project-tagged" }), "/work/proj")).toEqual({
 				bankId: "omp",
@@ -210,6 +282,12 @@ describe("computeBankScope", () => {
 			expect(computeBankScope(baseConfig({ scoping: "per-project" }), worktreeRoot)).toEqual({
 				bankId: "omp-myrepo",
 			});
+		});
+
+		it("renders the same templated bank id from the primary checkout and a linked worktree", () => {
+			const config = baseConfig({ scoping: "per-project", bankIdTemplate: "coding-agent::{gitProject}" });
+			expect(computeBankScope(config, primaryRoot)).toEqual({ bankId: "coding-agent::myrepo" });
+			expect(computeBankScope(config, worktreeRoot)).toEqual(computeBankScope(config, primaryRoot));
 		});
 
 		it("emits one shared project label across worktrees attached to a bare repository", () => {

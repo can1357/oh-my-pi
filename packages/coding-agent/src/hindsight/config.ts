@@ -21,6 +21,7 @@ export interface HindsightConfig {
 
 	bankId: string | null;
 	bankIdPrefix: string;
+	bankIdTemplate: string | null;
 	scoping: HindsightScoping;
 	bankMission: string;
 	retainMission: string | null;
@@ -102,6 +103,15 @@ function pickScoping(value: unknown): HindsightScoping | undefined {
 		: undefined;
 }
 
+export const HINDSIGHT_PROJECT_PLACEHOLDER = "{gitProject}";
+
+export function normalizeBankIdTemplate(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const template = value.trim();
+	if (!template || !template.includes(HINDSIGHT_PROJECT_PLACEHOLDER)) return undefined;
+	return /[{}]/.test(template.replaceAll(HINDSIGHT_PROJECT_PLACEHOLDER, "")) ? undefined : template;
+}
+
 /**
  * Load the resolved Hindsight config.
  *
@@ -143,6 +153,13 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 			value: settings.get("hindsight.scoping"),
 		});
 	}
+	const rawBankIdTemplate = settings.get("hindsight.bankIdTemplate");
+	const bankIdTemplate = normalizeBankIdTemplate(rawBankIdTemplate);
+	if (typeof rawBankIdTemplate === "string" && rawBankIdTemplate.trim() && !bankIdTemplate) {
+		logger.warn("Hindsight: invalid bankIdTemplate setting, falling back to legacy bank ID derivation", {
+			value: rawBankIdTemplate,
+		});
+	}
 
 	const config: HindsightConfig = {
 		hindsightApiUrl: apiUrlEnv ?? settings.get("hindsight.apiUrl") ?? null,
@@ -150,6 +167,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 
 		bankId: bankIdEnv ?? settings.get("hindsight.bankId") ?? null,
 		bankIdPrefix: settings.get("hindsight.bankIdPrefix") ?? "",
+		bankIdTemplate: bankIdTemplate ?? null,
 		scoping: scopingEnv ?? settingsScoping ?? "per-project-tagged",
 		bankMission: bankMissionEnv ?? settings.get("hindsight.bankMission") ?? "",
 		retainMission: settings.get("hindsight.retainMission") ?? null,
