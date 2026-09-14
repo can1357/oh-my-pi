@@ -632,6 +632,9 @@ Compaction headroom is separate from this opt-in. With the default 15% reserve, 
 ```yaml
 extendedContext: false
 
+context:
+  stopAtRepoRoot: false
+
 contextPromotion:
   enabled: false
 
@@ -648,6 +651,7 @@ memory:
 | Key                           | Type    | Default                                  | Notes                                                                                                                                                                                                                                     |
 | ----------------------------- | ------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `extendedContext` | boolean | `false` | Opt in to larger model windows; `/extended-context on`, `off`, or `status`. |
+| `context.stopAtRepoRoot`      | boolean | `false`                                  | Stop standalone `AGENTS.md` / `CLAUDE.md` discovery at the git repository root instead of walking through enclosing workspace directories up to `$HOME`. Off keeps the #7703 walk-to-home default.                                      |
 | `contextPromotion.enabled`    | boolean | `false`                                  | Promote to the active model's explicit `contextPromotionTarget` on context overflow.                                                                                                                                                      |
 | `compaction.enabled`          | boolean | `true`                                   | Automatic conversation compaction.                                                                                                                                                                                                        |
 | `compaction.asyncEnabled`     | boolean | `true`                                   | Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed.                                                                                        |

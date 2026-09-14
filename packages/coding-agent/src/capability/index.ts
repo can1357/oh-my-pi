@@ -281,6 +281,7 @@ export async function loadCapability<T>(
 	const home = os.homedir();
 	const repoRoot = await findRepoRoot(cwd);
 	const ctx: LoadContext = { cwd, home, repoRoot };
+	if (settings?.get("context.stopAtRepoRoot")) ctx.stopAtRepoRoot = true;
 	if (options.providers) ctx.explicitProviders = new Set(options.providers);
 	if (options.includeDisabled) ctx.includeOptOutUserSources = true;
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
