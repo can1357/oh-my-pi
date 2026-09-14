@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Doubleword as a built-in provider (`DOUBLEWORD_API_KEY`, `/login`). Requests use the Responses API and default to async `flex`; `/fast` switches a turn to realtime ([#12020](https://github.com/can1357/oh-my-pi/pull/12020) by [@audreyt](https://github.com/audreyt)).
 ### Fixed
 
 - OpenCode Zen GPT-6 Astra requests now use the Responses endpoint instead of failing through chat completions with HTTP 500 ([#12030](https://github.com/can1357/oh-my-pi/issues/12030)).

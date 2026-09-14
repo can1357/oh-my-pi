@@ -74,6 +74,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import { serviceTierCompat } from "./types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
@@ -1981,6 +1982,14 @@ function mapOptionsForApi<TApi extends Api>(
 ): OptionsForApi<TApi> {
 	const options = normalizeMandatoryReasoningOptions(model, rawOptions);
 	const simpleProviderOptions = getProviderDefinition(model.provider)?.mapSimpleOptions?.(options ?? {});
+	// `"none"` is the explicit omit sentinel — it suppresses the wire field and
+	// the model's `defaultServiceTier` fallback. Absent falls back to that
+	// default so hosts whose reduced-rate path is opt-in (Doubleword's `flex`)
+	// get it unless the session pinned a different tier or an explicit omit.
+	const serviceTier =
+		options?.serviceTier === "none"
+			? undefined
+			: (options?.serviceTier ?? serviceTierCompat(model)?.defaultServiceTier);
 	const base = {
 		temperature: options?.temperature,
 		topP: options?.topP,
@@ -2033,7 +2042,7 @@ function mapOptionsForApi<TApi extends Api>(
 					thinkingEnabled: false,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 			}
 
@@ -2045,7 +2054,7 @@ function mapOptionsForApi<TApi extends Api>(
 					thinkingEnabled: false,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 			}
 
@@ -2065,7 +2074,7 @@ function mapOptionsForApi<TApi extends Api>(
 					effort,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 			}
 
@@ -2078,7 +2087,7 @@ function mapOptionsForApi<TApi extends Api>(
 					effort,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 			}
 
@@ -2098,7 +2107,7 @@ function mapOptionsForApi<TApi extends Api>(
 					thinkingEnabled: false,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 			} else {
 				return castApi<"anthropic-messages">({
@@ -2110,7 +2119,7 @@ function mapOptionsForApi<TApi extends Api>(
 					effort,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 			}
 		}
@@ -2158,7 +2167,7 @@ function mapOptionsForApi<TApi extends Api>(
 					...base,
 					reasoning: resolveOpenAiReasoningEffort(model, options),
 					toolChoice: mapOpenAiToolChoice(options?.toolChoice),
-					serviceTier: options?.serviceTier,
+					serviceTier,
 					reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 					openrouterVariant: options?.openrouterVariant,
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
@@ -2173,7 +2182,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				disableReasoning: options?.disableReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
@@ -2186,7 +2195,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				disableReasoning: options?.disableReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
@@ -2197,7 +2206,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
@@ -2213,7 +2222,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
@@ -2226,7 +2235,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				preferWebsockets: options?.preferWebsockets,
 				codexCompaction: options?.codexCompaction,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
@@ -2241,7 +2250,7 @@ function mapOptionsForApi<TApi extends Api>(
 			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
 				return castApi<"google-generative-ai">({
 					...base,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 					thinking: resolveGoogleThinkingOff(model),
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
@@ -2256,7 +2265,7 @@ function mapOptionsForApi<TApi extends Api>(
 			if (googleModel.thinking?.mode === "google-level") {
 				return castApi<"google-generative-ai">({
 					...base,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 					thinking: {
 						enabled: true,
 						level: mapEffortToGoogleThinkingLevel(effort, googleModel),
@@ -2347,7 +2356,7 @@ function mapOptionsForApi<TApi extends Api>(
 			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
 				return castApi<"google-vertex">({
 					...base,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 					thinking: resolveGoogleThinkingOff(model),
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
@@ -2361,7 +2370,7 @@ function mapOptionsForApi<TApi extends Api>(
 			if (geminiModel.thinking?.mode === "google-level") {
 				return castApi<"google-vertex">({
 					...base,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 					thinking: {
 						enabled: true,
 						level: mapEffortToGoogleThinkingLevel(effort, model),
@@ -2374,7 +2383,7 @@ function mapOptionsForApi<TApi extends Api>(
 
 			return castApi<"google-vertex">({
 				...base,
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				thinking: {
 					enabled: true,
 					budgetTokens: getGoogleBudget(geminiModel, effort, options?.thinkingBudgets),

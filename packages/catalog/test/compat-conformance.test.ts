@@ -23,6 +23,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// including its tariff and effort ladder, comes from the live /v1/models
 	// snapshot, so no bundled rows are frozen into models.json.
 	"charm-hyper",
+	// Public gateway discovery via doublewordModelManagerOptions: every row
+	// comes from the live /v1/models snapshot; no bundled rows are frozen
+	// into models.json (same shape as charm-hyper).
+	"doubleword",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {

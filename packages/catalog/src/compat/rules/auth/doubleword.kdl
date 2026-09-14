@@ -1,0 +1,11 @@
+auth "doubleword" {
+	name "Doubleword"
+	login "api-key" {
+		auth-url "https://app.doubleword.ai/api-keys"
+		instructions "Create or copy your API key from the Doubleword console"
+		prompt "Paste your Doubleword API key" placeholder="sk-..."
+		// `/v1/models` rejects an unauthenticated request (401), so it
+		// discriminates a real key without spending inference.
+		validate "models-endpoint" label="Doubleword" url="https://api.doubleword.ai/v1/models"
+	}
+}

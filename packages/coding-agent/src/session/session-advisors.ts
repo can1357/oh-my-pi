@@ -270,7 +270,7 @@ export interface SessionAdvisorsHost {
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
-	effectiveServiceTier(model: Model): ServiceTier | undefined;
+	effectiveServiceTier(model: Model): ServiceTier | "none" | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
 		contextWindow: number,
@@ -856,7 +856,7 @@ export class SessionAdvisors {
 			advisorTierSetting === "inherit"
 				? undefined
 				: serviceTierForAllFamilies(serviceTierSettingToTier(advisorTierSetting));
-		const advisorServiceTierResolver = (model: Model): ServiceTier | undefined =>
+		const advisorServiceTierResolver = (model: Model): ServiceTier | "none" | undefined =>
 			advisorTierSetting === "inherit"
 				? this.#host.effectiveServiceTier(model)
 				: resolveModelServiceTier(advisorTierMap, model);

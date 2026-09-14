@@ -159,6 +159,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-effort": wire("supportsReasoningEffort", OAI),
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
+	"supports-service-tier": wire("supportsServiceTier", OAI),
+	"default-service-tier": wire("defaultServiceTier", OAI, "scalar", ["auto", "default", "flex", "scale", "priority"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),

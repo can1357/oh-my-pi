@@ -23,6 +23,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"cerebras",
 	"baseten",
 	"deepinfra",
+	"doubleword",
 	"openrouter",
 	"aimlapi",
 	"together",

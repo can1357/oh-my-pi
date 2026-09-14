@@ -1,0 +1,19 @@
+// Provider-wire compat for "doubleword".
+
+provider "doubleword" {
+	// Doubleword prices the serving path, and the cheaper asynchronous path is
+	// opt-in on the wire: a request that omits `service_tier` is served at the
+	// realtime rate (verified — the response echoes `service_tier: "default"`).
+	// Declaring the field supported enrolls these models in the `openai`
+	// service-tier family, so the OpenAI tier setting and `/fast` drive them;
+	// the default then makes async the resting state, with `/fast`
+	// (`priority`) switching a turn back to realtime.
+	supports-service-tier #true
+	default-service-tier "flex"
+	// Realtime is Doubleword's standard rate, not a premium serving path — the
+	// endpoint answers a `priority` request with `service_tier: "default"`. The
+	// API-generic 2x priority multiplier would over-report those turns.
+	service-tier-cost {
+		priority 1
+	}
+}

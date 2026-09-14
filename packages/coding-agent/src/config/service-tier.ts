@@ -6,15 +6,18 @@ import { serviceTierFamily } from "@oh-my-pi/pi-ai/types";
 import type { SubmenuOption } from "./settings-schema";
 
 /**
- * Per-family service-tier setting values. `"none"` is the omit-the-parameter
- * sentinel; the rest mirror the wire {@link ServiceTier} values each provider
+ * Per-family service-tier setting values. `"provider"` is the no-override
+ * default — the request falls back to the model's `defaultServiceTier` when
+ * its rule declares one (Doubleword's `flex`), else omits the field. `"none"`
+ * is the explicit omit sentinel: it suppresses the wire field AND that
+ * fallback. The rest mirror the wire {@link ServiceTier} values each provider
  * family actually realizes. OpenAI accepts the full set; Anthropic realizes
  * only `priority` (fast mode); Google (Gemini API + Vertex) realizes
  * `flex`/`priority`.
  */
-export const SERVICE_TIER_OPENAI_VALUES = ["none", "auto", "default", "flex", "scale", "priority"] as const;
-export const SERVICE_TIER_ANTHROPIC_VALUES = ["none", "priority"] as const;
-export const SERVICE_TIER_GOOGLE_VALUES = ["none", "flex", "priority"] as const;
+export const SERVICE_TIER_OPENAI_VALUES = ["provider", "none", "auto", "default", "flex", "scale", "priority"] as const;
+export const SERVICE_TIER_ANTHROPIC_VALUES = ["provider", "none", "priority"] as const;
+export const SERVICE_TIER_GOOGLE_VALUES = ["provider", "none", "flex", "priority"] as const;
 
 export type ServiceTierOpenAISettingValue = (typeof SERVICE_TIER_OPENAI_VALUES)[number];
 export type ServiceTierAnthropicSettingValue = (typeof SERVICE_TIER_ANTHROPIC_VALUES)[number];
@@ -32,7 +35,7 @@ export function isServiceTierFamily(value: unknown): value is ServiceTierFamily 
 
 /** Whether a runtime value is a supported service tier for one provider family. */
 export function isServiceTierForFamily(family: string, tier: unknown): tier is ServiceTier {
-	if (typeof tier !== "string" || tier === "none") return false;
+	if (typeof tier !== "string" || tier === "none" || tier === "provider" || tier === "inherit") return false;
 	let values: readonly string[];
 	switch (family) {
 		case "openai":
@@ -58,6 +61,7 @@ export function isServiceTierForFamily(family: string, tier: unknown): tier is S
  */
 export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 	"inherit",
+	"provider",
 	"none",
 	"auto",
 	"default",
@@ -98,6 +102,7 @@ export function validateAgentServiceTierOverrides(value: unknown): Record<string
 }
 
 export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierOpenAISettingValue>> = [
+	{ value: "provider", label: "Provider", description: "Use the model's own default tier when it declares one" },
 	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
 	{ value: "auto", label: "Auto", description: "Provider default tier selection" },
 	{ value: "default", label: "Default", description: "Standard priority processing" },
@@ -107,6 +112,7 @@ export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 ];
 
 export const SERVICE_TIER_ANTHROPIC_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierAnthropicSettingValue>> = [
+	{ value: "provider", label: "Provider", description: "Use the model's own default tier when it declares one" },
 	{ value: "none", label: "None", description: "Standard processing" },
 	{
 		value: "priority",
@@ -116,6 +122,7 @@ export const SERVICE_TIER_ANTHROPIC_OPTIONS: ReadonlyArray<SubmenuOption<Service
 ];
 
 export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierGoogleSettingValue>> = [
+	{ value: "provider", label: "Provider", description: "Use the model's own default tier when it declares one" },
 	{ value: "none", label: "None", description: "Standard processing" },
 	{ value: "flex", label: "Flex", description: "Lower cost, higher latency (Gemini API + Vertex)" },
 	{ value: "priority", label: "Priority", description: "Faster, higher reliability (Gemini API + Vertex)" },
@@ -123,6 +130,11 @@ export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 
 export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierInheritSettingValue>> = [
 	{ value: "inherit", label: "Inherit", description: "Match the main agent's live per-family tiers" },
+	{
+		value: "provider",
+		label: "Provider",
+		description: "Use the spawned model's own default tier when it declares one",
+	},
 	{ value: "none", label: "None", description: "Standard processing" },
 	{ value: "auto", label: "Auto", description: "Provider default tier selection (OpenAI family)" },
 	{ value: "default", label: "Default", description: "Standard priority processing (OpenAI family)" },
@@ -131,9 +143,14 @@ export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTi
 	{ value: "priority", label: "Priority", description: "Priority on every supported family of the spawned model" },
 ];
 
-/** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */
-export function serviceTierSettingToTier(value: string): ServiceTier | undefined {
-	if (value === "none" || value === "" || value === "inherit") return undefined;
+/**
+ * Map a per-family setting value to a wire {@link ServiceTier}, the `"none"`
+ * omit sentinel, or `undefined` for no override. `"provider"`/`"inherit"`/`""`
+ * mean no override — the request falls back to the model's `defaultServiceTier`.
+ */
+export function serviceTierSettingToTier(value: string): ServiceTier | "none" | undefined {
+	if (value === "none") return "none";
+	if (value === "provider" || value === "" || value === "inherit") return undefined;
 	return value as ServiceTier;
 }
 
@@ -152,12 +169,14 @@ export function buildServiceTierByFamily(openai: string, anthropic: string, goog
 /**
  * Broadcast a single chosen tier across families, clamped to what each family
  * realizes: OpenAI takes any tier, Anthropic only `priority`, Google only
- * `flex`/`priority`. Used by the subagent/advisor single-value settings and the
+ * `flex`/`priority`. `"none"` is the explicit omit sentinel and applies to
+ * every family. Used by the subagent/advisor single-value settings and the
  * `omp bench --service-tier` flag, which apply one tier to whatever family the
  * target model belongs to.
  */
-export function serviceTierForAllFamilies(tier: ServiceTier | undefined): ServiceTierByFamily {
+export function serviceTierForAllFamilies(tier: ServiceTier | "none" | undefined): ServiceTierByFamily {
 	if (!tier) return {};
+	if (tier === "none") return { openai: "none", anthropic: "none", google: "none" };
 	const out: ServiceTierByFamily = { openai: tier };
 	if (tier === "priority") out.anthropic = "priority";
 	if (tier === "flex" || tier === "priority") out.google = tier;
@@ -169,7 +188,9 @@ export function serviceTierForAllFamilies(tier: ServiceTier | undefined): Servic
  *
  * - A concrete tier is broadcast across families (see
  *   {@link serviceTierForAllFamilies}).
- * - `"none"` yields an empty map.
+ * - `"none"` yields the explicit omit sentinel on every family.
+ * - `"provider"` yields an empty map — the spawned model's own
+ *   `defaultServiceTier` applies when its rule declares one.
  * - `"inherit"` defers to `inherited` — the parent's live per-family tiers when
  *   a live session supplied them, else the empty map.
  */
@@ -192,7 +213,13 @@ export function resolveAgentServiceTierOverride(
 ): ServiceTierByFamily {
 	if (setting === "inherit") return inherited;
 	const tier = serviceTierSettingToTier(setting);
-	if (!tier || !model) return {};
+	if (tier === "none") {
+		// The omit sentinel is family-agnostic: scope it to the resolved model's
+		// family when known, else broadcast it so the override still omits.
+		const family = model ? serviceTierFamily(model) : undefined;
+		return family ? { [family]: "none" } : serviceTierForAllFamilies("none");
+	}
+	if (tier === undefined || !model) return {};
 	const family = serviceTierFamily(model);
 	if (!family || !isServiceTierForFamily(family, tier)) return {};
 	return { [family]: tier };

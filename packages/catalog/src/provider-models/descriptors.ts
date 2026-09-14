@@ -25,6 +25,7 @@ import {
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
+	doublewordModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -212,6 +213,17 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["DEEPSEEK_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => deepseekModelManagerOptions(config),
 		catalogDiscovery: { label: "DeepSeek" },
+	},
+	{
+		id: "doubleword",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+		envVars: ["DOUBLEWORD_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => doublewordModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		// Deliberately NO `catalogDiscovery`: `/v1/models` needs a key and ships
+		// nothing but ids, so a generated snapshot would bake a roster with no
+		// metadata and freeze it. Discovery is runtime-only, where the bundled
+		// reference index supplies each id's real limits.
 	},
 	{
 		id: "devin",

@@ -479,7 +479,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * session `serviceTier` (e.g. opting a Fireworks model into the Priority
 	 * serving path while leaving the OpenAI/Anthropic tier untouched).
 	 */
-	getServiceTier?: (model: Model) => ServiceTier | undefined;
+	getServiceTier?: (model: Model) => ServiceTier | "none" | undefined;
 
 	/**
 	 * Per-call working-directory resolver, read once per LLM call. When set, its

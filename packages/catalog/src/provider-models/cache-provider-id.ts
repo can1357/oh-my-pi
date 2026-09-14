@@ -1,4 +1,5 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import { DOUBLEWORD_API_BASE_URL, normalizeDoublewordBaseUrl } from "../wire/doubleword";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
@@ -29,6 +30,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "doubleword":
+			return DOUBLEWORD_API_BASE_URL;
 		case "opencode-go":
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
@@ -65,6 +68,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
 			// so the collapsed default is re-pointed to `-medium` (issue #9478).
 			return "cursor:default-effort-v4";
+		case "doubleword": {
+			// Discovery is authoritative for this gateway, so a warm cache is served
+			// for its full TTL without re-probing: the namespace must follow the
+			// configured endpoint, or a self-hosted proxy keeps serving the canonical
+			// host's roster until expiry. Normalized through the shared helper so a
+			// configured value with or without `/v1` lands on one namespace.
+			return `doubleword:models-v1:${Bun.hash(normalizeDoublewordBaseUrl(options.baseUrl)).toString(36)}`;
+		}
 		case "charm-hyper": {
 			// Discovery is authoritative for this gateway, so a warm cache is served
 			// for its full TTL without re-probing: the namespace must follow the

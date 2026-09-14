@@ -1787,7 +1787,7 @@ export const SETTINGS_SCHEMA = {
 	"tier.openai": {
 		type: "enum",
 		values: SERVICE_TIER_OPENAI_VALUES,
-		default: "none",
+		default: "provider",
 		ui: {
 			tab: "model",
 			group: "Sampling",
@@ -1801,7 +1801,7 @@ export const SETTINGS_SCHEMA = {
 	"tier.anthropic": {
 		type: "enum",
 		values: SERVICE_TIER_ANTHROPIC_VALUES,
-		default: "none",
+		default: "provider",
 		ui: {
 			tab: "model",
 			group: "Sampling",
@@ -1815,7 +1815,7 @@ export const SETTINGS_SCHEMA = {
 	"tier.google": {
 		type: "enum",
 		values: SERVICE_TIER_GOOGLE_VALUES,
-		default: "none",
+		default: "provider",
 		ui: {
 			tab: "model",
 			group: "Sampling",

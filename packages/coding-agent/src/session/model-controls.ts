@@ -701,7 +701,7 @@ export class ModelControls {
 	 * mutually exclusive with Priority). Every other model resolves the live
 	 * per-family tier map down to the entry for its family.
 	 */
-	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
+	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | "none" | undefined {
 		if (model?.provider === "fireworks") {
 			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"

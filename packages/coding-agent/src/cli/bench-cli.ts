@@ -558,8 +558,8 @@ interface BenchRequestOptions {
 	reasoning?: Effort;
 	/** Only set for an explicit `:off` suffix — some endpoints reject disablement. */
 	disableReasoning?: boolean;
-	/** Requested service tier passed to `streamSimple`; absent omits the option. The provider layer applies scope/support gating before it reaches the wire. */
-	serviceTier?: ServiceTier;
+	/** Requested service tier passed to `streamSimple`; absent omits the option. `"none"` is the explicit omit sentinel. The provider layer applies scope/support gating before it reaches the wire. */
+	serviceTier?: ServiceTier | "none";
 	promptCacheKey?: string;
 	statefulResponses?: false;
 	cacheCapture?: CacheRequestCapture;
@@ -952,9 +952,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		const serviceTierByFamily = command.flags.serviceTier
 			? serviceTierForAllFamilies(flagTier)
 			: buildServiceTierByFamily(
-					runtime.settings?.get("tier.openai") ?? "none",
-					runtime.settings?.get("tier.anthropic") ?? "none",
-					runtime.settings?.get("tier.google") ?? "none",
+					runtime.settings?.get("tier.openai") ?? "provider",
+					runtime.settings?.get("tier.anthropic") ?? "provider",
+					runtime.settings?.get("tier.google") ?? "provider",
 				);
 		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
 		const reports: BenchModelReport[] = [];

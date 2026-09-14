@@ -51,7 +51,7 @@ export interface SessionHandoffHost {
 	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
-	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
+	effectiveServiceTier(model: Model | undefined): ServiceTier | "none" | undefined;
 }
 
 /** Generates handoff documents with a cache-friendly oneshot LLM call. */

@@ -22,6 +22,7 @@
 		"auth/deepinfra.kdl",
 		"auth/deepseek.kdl",
 		"auth/devin.kdl",
+		"auth/doubleword.kdl",
 		"auth/exa.kdl",
 		"auth/firepass.kdl",
 		"auth/fireworks.kdl",
@@ -122,6 +123,7 @@
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
 		"providers/deepseek.kdl",
+		"providers/doubleword.kdl",
 		"providers/firepass.kdl",
 		"providers/fireworks.kdl",
 		"providers/github-copilot.kdl",
@@ -9903,6 +9905,21 @@
 				}
 			},
 			{
+				"source": "providers/doubleword.kdl:3",
+				"providers": [
+					"doubleword"
+				],
+				"wire": {
+					"supportsServiceTier": true,
+					"defaultServiceTier": "flex"
+				},
+				"catalog": {
+					"serviceTierCost": {
+						"priority": 1
+					}
+				}
+			},
+			{
 				"source": "providers/firepass.kdl:10",
 				"class": "glm",
 				"providers": [
@@ -16816,6 +16833,15 @@
 				}
 			},
 			{
+				"provider": "doubleword",
+				"match": {
+					"substring": [
+						"-embedding-",
+						"ocr"
+					]
+				}
+			},
+			{
 				"provider": "nanogpt",
 				"match": {
 					"substring": [
@@ -18697,6 +18723,23 @@
 						"label": "DeepInfra",
 						"baseUrl": "https://api.deepinfra.com/v1/openai",
 						"model": "deepseek-ai/DeepSeek-V4-Flash-0731"
+					}
+				}
+			},
+			{
+				"id": "doubleword",
+				"apiKeyFormat": "bearer",
+				"name": "Doubleword",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.doubleword.ai/api-keys",
+					"instructions": "Create or copy your API key from the Doubleword console",
+					"prompt": "Paste your Doubleword API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Doubleword",
+						"url": "https://api.doubleword.ai/v1/models"
 					}
 				}
 			},
