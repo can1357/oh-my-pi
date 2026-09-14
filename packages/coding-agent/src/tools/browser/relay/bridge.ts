@@ -402,6 +402,8 @@ class TabState {
 	readonly realSessions = new Set<string>();
 	/** Live execution contexts from the shared root debugger session. */
 	readonly runtimeContexts = new Map<number, Record<string, unknown>>();
+	/** Temporary context inventory used to target recovery preloads at changed frames. */
+	preloadContextProbe: Map<number, Record<string, unknown>> | null = null;
 	/** Whether the shared root Runtime domain has been enabled by the bridge. */
 	rootRuntimeEnabled = false;
 	/** Root Runtime was enabled before a detach and must be restored for default sessions. */
@@ -2923,6 +2925,14 @@ export class RelayBridge {
 					? params.executionContextId
 					: undefined;
 			if (createdContextId !== undefined) tab.contextGeneration++;
+			if (createdContextId !== undefined && createdContext && tab.preloadContextProbe) {
+				tab.preloadContextProbe.set(createdContextId, createdContext as Record<string, unknown>);
+			}
+			if (destroyedContextId !== undefined) tab.preloadContextProbe?.delete(destroyedContextId);
+			if (method === "Runtime.executionContextsCleared") tab.preloadContextProbe?.clear();
+			// A temporary probe must not expose an internal Runtime.enable cycle to
+			// downstream sessions that never enabled the domain themselves.
+			if (tab.preloadContextProbe && !tab.rootRuntimeEnabled) return;
 			if (createdContextId !== undefined && params) tab.runtimeContexts.set(createdContextId, params);
 			if (destroyedContextId !== undefined) tab.runtimeContexts.delete(destroyedContextId);
 			if (method === "Runtime.executionContextsCleared") tab.runtimeContexts.clear();
@@ -3491,13 +3501,19 @@ export class RelayBridge {
 					currentDocumentState !== undefined &&
 					documentStateAfterRegistration !== undefined &&
 					hasNewFrameDocument(currentDocumentState.frameLoaderIds, documentStateAfterRegistration.frameLoaderIds);
-				const childNavigationDuringRegistration =
-					frameNavigationDuringRegistration &&
-					Object.entries(documentStateAfterRegistration?.frameLoaderIds ?? {}).some(
-						([frameId, loaderId]) =>
-							frameId !== documentStateAfterRegistration?.mainFrameId &&
-							currentDocumentState?.frameLoaderIds[frameId] !== loaderId,
-					);
+				const changedChildFrames = frameNavigationDuringRegistration
+					? Object.entries(documentStateAfterRegistration?.frameLoaderIds ?? {})
+							.filter(
+								([frameId, loaderId]) =>
+									frameId !== documentStateAfterRegistration?.mainFrameId &&
+									currentDocumentState?.frameLoaderIds[frameId] !== loaderId,
+							)
+							.map(([frameId]) => frameId)
+					: [];
+				const mainFrameChanged =
+					currentLoaderId !== undefined &&
+					loaderAfterRegistration !== undefined &&
+					loaderAfterRegistration !== currentLoaderId;
 				navigationDuringRegistration =
 					frameNavigationDuringRegistration ||
 					(currentLoaderId !== undefined &&
@@ -3509,11 +3525,11 @@ export class RelayBridge {
 					// registered after the real script: seeing it in this document proves
 					// the real registration covered the navigation. Otherwise replace the
 					// ambiguous registration with an immediate one for the missed document.
-					// The marker probe below runs in the main frame. It can prove that a
-					// main-frame navigation received the registration, but it says nothing
-					// about a child that navigated in the same RPC window. Conservatively
-					// replay immediately whenever any child document changed.
-					if (applicationMarker !== undefined && !childNavigationDuringRegistration) {
+					// Probe the main frame when it changed. Child-only navigation is handled
+					// below by evaluating the marker-wrapped source only in the changed
+					// frames; using runImmediately here would duplicate non-idempotent side
+					// effects in the unchanged main frame and sibling frames.
+					if (applicationMarker !== undefined && mainFrameChanged) {
 						try {
 							appliedToCurrentDocument = await this.#preloadApplicationMarker(
 								tab.tabId,
@@ -3524,6 +3540,16 @@ export class RelayBridge {
 							if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
 							throw err;
 						}
+					}
+					if (!mainFrameChanged && changedChildFrames.length > 0 && applicationMarker !== undefined) {
+						await this.#applyPreloadToFrames(
+							tab,
+							changedChildFrames,
+							markPreloadApplication(script.params.source, applicationMarker),
+							script.params.worldName,
+							expectedExt,
+						);
+						appliedToCurrentDocument = true;
 					}
 					if (!appliedToCurrentDocument) {
 						try {
@@ -3678,6 +3704,50 @@ export class RelayBridge {
 			},
 		})) as { result?: { value?: unknown } } | undefined;
 		return evaluated?.result?.value === true;
+	}
+
+	async #applyPreloadToFrames(
+		tab: TabState,
+		frameIds: string[],
+		source: string,
+		worldName: unknown,
+		expectedExt: RelaySocket | null,
+	): Promise<void> {
+		const enabledForProbe = !tab.rootRuntimeEnabled;
+		const contexts = enabledForProbe ? new Map<number, Record<string, unknown>>() : tab.runtimeContexts;
+		if (enabledForProbe) {
+			tab.preloadContextProbe = contexts;
+			this.#assertExtensionCurrent(expectedExt);
+			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+			this.#assertExtensionCurrent(expectedExt);
+		}
+		try {
+			for (const frameId of frameIds) {
+				const match = [...contexts].find(([, context]) => {
+					const auxData = context.auxData;
+					if (!auxData || typeof auxData !== "object") return false;
+					const contextAuxData = auxData as Record<string, unknown>;
+					if (contextAuxData.frameId !== frameId) {
+						return false;
+					}
+					return typeof worldName === "string" ? context.name === worldName : contextAuxData.isDefault === true;
+				});
+				if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
+				this.#assertExtensionCurrent(expectedExt);
+				await this.#rpc({
+					op: "send",
+					tabId: tab.tabId,
+					method: "Runtime.evaluate",
+					params: { expression: source, contextId: match[0] },
+				});
+			}
+		} finally {
+			if (enabledForProbe) {
+				tab.preloadContextProbe = null;
+				this.#assertExtensionCurrent(expectedExt);
+				await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+			}
+		}
 	}
 
 	async #mainFrameLoaderId(tabId: number): Promise<string | undefined> {
