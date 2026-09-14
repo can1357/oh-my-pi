@@ -3574,6 +3574,13 @@ export class RelayBridge {
 							runImmediately: true,
 						},
 					})) as Record<string, unknown> | undefined;
+					// The preserved owner can disappear while the companion is being
+					// registered. A confirmed final-owner detach destroys both producer
+					// and cleanup registrations; their late identifiers must not be
+					// journaled or queued against a replacement root.
+					if (tab.runtimeGeneration !== rootGeneration) {
+						throw new Error("Page.addScriptToEvaluateOnNewDocument replay completed after the debugger detached");
+					}
 					if (typeof cleanup?.identifier !== "string") {
 						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 					}

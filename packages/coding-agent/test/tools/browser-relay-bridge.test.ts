@@ -5964,6 +5964,80 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("drops replay identifiers when the owner detaches during cleanup registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__oldOwner = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "initial-root-script", "loader-before");
+
+		bridge.extClosed(ext);
+		const recovering = new FakeExtSocket();
+		connect(bridge, recovering, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => recovering.pending("attach").length === 1);
+		ack(bridge, recovering, "attach");
+		await waitFor(() => recovering.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, recovering, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() =>
+			recovering.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
+		ack(bridge, recovering, "send", { identifier: "old-root-producer" });
+		await waitFor(() => recovering.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, recovering, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() =>
+			recovering.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
+		const oldRootCleanup = recovering
+			.pending("send")
+			.find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")!;
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => recovering.pending("detach").length === 1, "last-holder detach during cleanup add");
+		ack(bridge, recovering, "detach");
+		await flush();
+
+		// The companion result arrives only after its debugger root has gone. The
+		// replay task must discard both old-root identifiers before recovery can
+		// finish and a replacement holder can adopt the tab.
+		recovering.markAcked(oldRootCleanup.id);
+		bridge.extMessage(
+			recovering,
+			JSON.stringify({ t: "rpcResult", id: oldRootCleanup.id, ok: true, result: { identifier: "reused-id" } }),
+		);
+		await flush();
+		expect(
+			recovering.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
+		).toHaveLength(0);
+
+		bridge.extClosed(recovering);
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })]);
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		await attachPage(bridge, replacement, adopter, adopterConn, 1);
+		await flush();
+
+		// A later holder must not carry the old-root cleanup into its new root.
+		expect(
+			replacement.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
+		).toHaveLength(0);
+	});
+
 	it("retires a replaced application marker after a second recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
