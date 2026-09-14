@@ -11,6 +11,7 @@ import type {
 	CompiledApiRoutes,
 	CompiledBehavior,
 	CompiledExcludeModels,
+	CompiledImageByteBudgets,
 	CompiledMatchList,
 	CompiledModelLimits,
 	CompiledModelOperations,
@@ -266,6 +267,30 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 	return rule;
 }
 
+function parseImageByteBudgets(node: KdlNodeView): CompiledImageByteBudgets {
+	const children = ensureContainer(node, ["default"]);
+	const fallback = propInt(node, "default");
+	if (fallback === undefined) malformed(node);
+	const budgets: CompiledImageByteBudgets = { default: fallback, providers: [], apis: [] };
+	for (const child of children) {
+		ensureLeaf(child, ["bytes"]);
+		const [key] = positionalStrings(child);
+		const bytes = propInt(child, "bytes");
+		if (!key || bytes === undefined || child.args.length !== 1) malformed(child);
+		switch (child.name) {
+			case "provider":
+				budgets.providers.push({ provider: key, bytes });
+				break;
+			case "api":
+				budgets.apis.push({ api: key, bytes });
+				break;
+			default:
+				unexpected(child, "image-byte-budgets");
+		}
+	}
+	return budgets;
+}
+
 /** Compiles the runtime behavior source (may be absent → empty vocabulary). */
 export function compileBehavior(source: { file: string; text: string } | undefined): CompiledBehavior {
 	const behavior: CompiledBehavior = {
@@ -279,6 +304,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		retiredProviders: [],
 		planRequirements: [],
 		pricingPeers: [],
+		imageByteBudgets: { default: 0, providers: [], apis: [] },
 	};
 	if (!source) return behavior;
 	const nodes = parseKdl(source.file, source.text);
@@ -351,6 +377,10 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				behavior.retiredProviders.push(...values);
 				break;
 			}
+			case "image-byte-budgets":
+				if (behavior.imageByteBudgets.default !== 0) malformed(node);
+				behavior.imageByteBudgets = parseImageByteBudgets(node);
+				break;
 			default:
 				unexpected(node, "behavior");
 		}

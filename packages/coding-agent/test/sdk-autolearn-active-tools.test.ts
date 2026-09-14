@@ -135,4 +135,49 @@ describe("createAgentSession auto-learn tool activation", () => {
 		expect(names).toContain("checkpoint");
 		expect(names).toContain("rewind");
 	});
+
+	// Same activation invariant, second instance: `createTools` force-includes
+	// `context_notes`/`new_context` when `compaction.experimentalContextManagement`
+	// is on and BOTH `read` and `grep` are requested, so an explicit `toolNames`
+	// list that dropped them left the rollover reminder pointing at tools the
+	// model cannot call.
+	it("activates force-included context tools in a restricted top-level session", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.experimentalContextManagement": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			...noDiscoveryOptions(),
+			// Both are required for the force-include to fire at all.
+			toolNames: ["read", "grep"],
+		});
+		sessions.push(session);
+		const names = session.getActiveToolNames();
+		expect(names).toContain("read");
+		expect(names).toContain("grep");
+		expect(names).toContain("context_notes");
+		expect(names).toContain("new_context");
+	});
+
+	// The negative control: with the setting off nothing is force-included, so
+	// the activation must not widen the list on its own.
+	it("omits context tools from a restricted session when context management is off", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			...noDiscoveryOptions(),
+			toolNames: ["read", "grep"],
+		});
+		sessions.push(session);
+		const names = session.getActiveToolNames();
+		expect(names).toContain("read");
+		expect(names).not.toContain("context_notes");
+		expect(names).not.toContain("new_context");
+	});
 });

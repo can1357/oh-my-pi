@@ -306,6 +306,17 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/**
+ * Per-request image-BYTE budgets (summed base64 wire bytes) keyed by provider
+ * id and, as a fallback for an unbundled proxy slug, by declared API route.
+ * `default` is the floor for a provider/route neither table names.
+ */
+export interface CompiledImageByteBudgets {
+	default: number;
+	providers: { provider: string; bytes: number }[];
+	apis: { api: string; bytes: number }[];
+}
+
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
@@ -320,6 +331,7 @@ export interface CompiledBehavior {
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
 	retiredProviders: string[];
+	imageByteBudgets: CompiledImageByteBudgets;
 }
 
 /**

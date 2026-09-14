@@ -17002,6 +17002,65 @@
 				]
 			}
 		],
+		"imageByteBudgets": {
+			"default": 4000000,
+			"providers": [
+				{
+					"provider": "anthropic",
+					"bytes": 6000000
+				},
+				{
+					"provider": "amazon-bedrock",
+					"bytes": 6000000
+				},
+				{
+					"provider": "openai",
+					"bytes": 16000000
+				},
+				{
+					"provider": "openai-codex",
+					"bytes": 16000000
+				},
+				{
+					"provider": "google",
+					"bytes": 16000000
+				},
+				{
+					"provider": "google-vertex",
+					"bytes": 16000000
+				},
+				{
+					"provider": "google-gemini-cli",
+					"bytes": 16000000
+				},
+				{
+					"provider": "openrouter",
+					"bytes": 6000000
+				},
+				{
+					"provider": "umans",
+					"bytes": 6000000
+				}
+			],
+			"apis": [
+				{
+					"api": "anthropic-messages",
+					"bytes": 6000000
+				},
+				{
+					"api": "openai-responses",
+					"bytes": 16000000
+				},
+				{
+					"api": "openai-codex-responses",
+					"bytes": 16000000
+				},
+				{
+					"api": "google-generative-ai",
+					"bytes": 16000000
+				}
+			]
+		},
 		"openaiResponsesHeuristic": {
 			"includePrefixes": [
 				"gpt-",

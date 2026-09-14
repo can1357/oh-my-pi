@@ -279,7 +279,7 @@ function isMalformedToolCall(block: { id: string; name: string }): boolean {
 	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
 }
 
-function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
+export function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {

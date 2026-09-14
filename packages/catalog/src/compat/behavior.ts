@@ -205,3 +205,17 @@ export function pricingPeerFor(
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
 }
+
+/**
+ * Per-request image-byte budget (summed base64 wire bytes) for `provider`, else
+ * its declared API route, else the floor. The provider table wins; the route
+ * table is the fallback for an unbundled proxy slug that only declares its
+ * route. Consumed by snapcompact's image byte clamp.
+ */
+export function providerImageByteBudget(provider: string | undefined, api?: string): number {
+	const budgets = behavior.imageByteBudgets;
+	const byProvider = provider !== undefined ? budgets.providers.find(entry => entry.provider === provider) : undefined;
+	if (byProvider !== undefined) return byProvider.bytes;
+	const byApi = api !== undefined ? budgets.apis.find(entry => entry.api === api) : undefined;
+	return byApi?.bytes ?? budgets.default;
+}

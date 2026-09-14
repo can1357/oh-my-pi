@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { providerImageByteBudget } from "../src/compat/behavior";
 import rules from "../src/compat/rules.json";
 import models from "../src/models.json";
 
@@ -109,5 +110,31 @@ describe("compat rules conformance", () => {
 			}
 		}
 		expect([...rules.files].sort()).toEqual(onDisk.sort());
+	});
+});
+
+describe("image byte budgets resolve from KDL policy", () => {
+	const floor = rules.behavior.imageByteBudgets.default;
+
+	test("a KDL-declared provider budget differing from the floor wins over it", () => {
+		// anthropic is declared at 6 MB, distinct from the 4 MB unknown-provider
+		// floor: a value that came from the floor rather than the resolved policy
+		// would read 4 MB here.
+		expect(providerImageByteBudget("anthropic")).toBe(6_000_000);
+		expect(providerImageByteBudget("anthropic")).not.toBe(floor);
+		expect(providerImageByteBudget("openai")).toBe(16_000_000);
+	});
+
+	test("an unbundled proxy slug falls back to its declared API route", () => {
+		// A user-configured proxy picks its own provider slug but declares the
+		// route it speaks; the route's limit — not the floor — applies.
+		expect(providerImageByteBudget("anthropic-proxy", "anthropic-messages")).toBe(6_000_000);
+		expect(providerImageByteBudget("my-openai-proxy", "openai-responses")).toBe(16_000_000);
+	});
+
+	test("a provider and route neither table names falls to the floor", () => {
+		expect(providerImageByteBudget("some-new-router")).toBe(floor);
+		expect(providerImageByteBudget("some-new-router", "unknown-route")).toBe(floor);
+		expect(providerImageByteBudget(undefined)).toBe(floor);
 	});
 });

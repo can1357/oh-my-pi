@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `image-byte-budgets` runtime-behavior rule and `providerImageByteBudget()`, moving the per-request image-byte budgets (by provider id, with an API-route fallback for unbundled proxy slugs) out of `@oh-my-pi/snapcompact` and into the KDL policy tree ([#10286](https://github.com/can1357/oh-my-pi/pull/10286) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ### Fixed
 
 - OpenCode Zen GPT-6 Astra requests now use the Responses endpoint instead of failing through chat completions with HTTP 500 ([#12030](https://github.com/can1357/oh-my-pi/issues/12030)).

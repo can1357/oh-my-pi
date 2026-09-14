@@ -293,6 +293,10 @@ behavior {
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
+    image-byte-budgets default=4000000 {
+        provider "anthropic" bytes=6000000
+        api "anthropic-messages" bytes=6000000
+    }
 }
 ```
 

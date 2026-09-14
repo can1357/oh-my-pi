@@ -257,4 +257,33 @@ behavior {
 	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"
+
+	// Per-request image-BYTE budgets (summed base64 wire bytes): cap the combined
+	// base64 payload of every image in a rebuilt request, independent of the
+	// image-COUNT cap. A snapcompact archive accretes many small frames that each
+	// sit under the per-image dimension limit and the count cap, yet their summed
+	// bytes can still exceed the provider's request-size limit (a long session
+	// reached 79 frames / ~14 MB on messages[0] and every request 413'd). Values
+	// leave headroom for the rest of the context and a freshly added image; the
+	// oldest frames are dropped first to fit. `provider` wins; an `api` route is
+	// the fallback for an unbundled proxy slug that declares only its route
+	// (`anthropic-proxy` in docs/models.md speaks anthropic-messages), and
+	// `default` is the floor for a provider/route neither names. Consumed by
+	// `snapcompact`'s image byte clamp; replaces the PROVIDER_IMAGE_BYTE_BUDGETS /
+	// API_IMAGE_BYTE_BUDGETS tables that lived in TS.
+	image-byte-budgets default=4000000 {
+		provider "anthropic" bytes=6000000
+		provider "amazon-bedrock" bytes=6000000
+		provider "openai" bytes=16000000
+		provider "openai-codex" bytes=16000000
+		provider "google" bytes=16000000
+		provider "google-vertex" bytes=16000000
+		provider "google-gemini-cli" bytes=16000000
+		provider "openrouter" bytes=6000000
+		provider "umans" bytes=6000000
+		api "anthropic-messages" bytes=6000000
+		api "openai-responses" bytes=16000000
+		api "openai-codex-responses" bytes=16000000
+		api "google-generative-ai" bytes=16000000
+	}
 }
