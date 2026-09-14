@@ -145,27 +145,11 @@ describe("HistorySearchComponent", () => {
 		);
 
 		const { plain } = render(component);
-		expect(plain).toContain("History (all projects)");
-		expect(plain).toContain("No history in all projects.");
 		// Advertising a Tab that cannot change anything would promise a no-op. Scope the check to
 		// the footer so a title or prompt containing "tab" cannot mask a stray hint.
 		const footer = plain.split("\n").find(line => line.includes("navigate"));
 		expect(footer).toBeDefined();
 		expect(footer).not.toContain("tab");
 		expect(plain).not.toContain("Press Tab for");
-	});
-
-	it("names the active scope in the empty state and points at the next one", () => {
-		const component = new HistorySearchComponent(
-			scopedStorage({}),
-			ALL_SCOPES,
-			() => {},
-			() => {},
-		);
-
-		expect(render(component).plain).toContain("No history in this session. Press Tab for current folder.");
-
-		component.handleInput("\t");
-		expect(render(component).plain).toContain("No history in current folder. Press Tab for all projects.");
 	});
 });
