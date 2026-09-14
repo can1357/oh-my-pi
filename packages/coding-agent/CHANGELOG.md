@@ -21,6 +21,10 @@
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
 
+### Added
+
+- RPC clients can subscribe to completed child messages and progress with the `messages` subagent subscription level ([#11751](https://github.com/can1357/oh-my-pi/pull/11751) by [@numman-ali](https://github.com/numman-ali)).
+
 ### Fixed
 
 - The hidden notice announcing a mid-session tool-availability change now states that it lists only what changed, so an additions-only notice no longer reads as the complete tool set and the model keeps using tools that are still callable ([#11824](https://github.com/can1357/oh-my-pi/issues/11824) by [@camjac251](https://github.com/camjac251)).
