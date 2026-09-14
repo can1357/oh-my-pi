@@ -10428,6 +10428,93 @@ describe("RelayBridge attachment release", () => {
 		expect(cdp.sessionFor(retryId)).toBeDefined();
 	});
 
+	it("does not let a superseded attach failure ban a replacement attachment", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		const firstAttachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: firstAttachId,
+				method: "Target.attachToTarget",
+				params: { targetId: "PAGE1" },
+			}),
+		);
+		await waitFor(() => ext.pending("attach").length === 1, "initial attach RPC");
+		const staleAttach = ext.pending("attach")[0]!;
+
+		// Cancel the first attempt, then navigate the tab so it becomes eligible
+		// again and a new client can start a replacement attach on the same socket.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, url: "https://example.com/next" }) }),
+		);
+		const replacementAttachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: replacementAttachId,
+				method: "Target.attachToTarget",
+				params: { targetId: "PAGE1" },
+			}),
+		);
+		await waitFor(() => ext.pending("attach").length === 2, "replacement attach RPC");
+
+		// The canceled attempt reports failure after the replacement has taken
+		// ownership. Its rejection must not ban the tab or invalidate the new attach.
+		ext.markAcked(staleAttach.id);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "rpcResult", id: staleAttach.id, ok: false, error: "attach canceled" }),
+		);
+		await flush();
+		ack(bridge, ext, "attach");
+		await flush();
+
+		// A third client arriving after both callbacks exposes the stale attempt's
+		// terminal side effect: a poisoned `banned` flag refuses this new attach.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.detachFromTarget",
+				params: { sessionId: cdp.sessionFor(replacementAttachId) },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "detach");
+		await flush();
+		const thirdAttachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: thirdAttachId,
+				method: "Target.attachToTarget",
+				params: { targetId: "PAGE1" },
+			}),
+		);
+		await flush();
+		expect(ext.pending("attach")).toHaveLength(1);
+		ack(bridge, ext, "attach");
+		await flush();
+
+		const replacementSession = cdp.sessionFor(thirdAttachId);
+		expect(replacementSession).toBeDefined();
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, sessionId: replacementSession, method: "Runtime.evaluate" }),
+		);
+		ack(bridge, ext, "send", { result: { type: "undefined" } });
+		await flush();
+		expect(cdp.messages.find(message => message.id === commandId)?.error).toBeUndefined();
+	});
+
 	it("clears an in-flight detach immediately when the extension socket is replaced", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();

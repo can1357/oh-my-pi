@@ -3973,7 +3973,11 @@ export class RelayBridge {
 					url: tab.url,
 					error: err instanceof Error ? err.message : String(err),
 				});
-				if (!isExtensionTransportInterrupted(err)) tab.banned = true;
+				// A user detach clears `tab.attaching`, and a later navigation may
+				// start a replacement attach before this RPC settles. Only the attempt
+				// that still owns the slot may turn a terminal failure into a ban; an
+				// older rejection must not poison the newer attachment.
+				if (tab.attaching === attempt && !isExtensionTransportInterrupted(err)) tab.banned = true;
 				return false;
 			})
 			.finally(() => {
