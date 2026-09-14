@@ -499,10 +499,7 @@ describe("runSubprocess yield reminders", () => {
 		// Parking swaps the worker mid-install while an IRC delivery revives the
 		// replacement straight into an ordinary wake: the follow-up must wait out
 		// that wake before installing the keyed contract, not reject its yield.
-		const ensureLive = vi
-			.spyOn(AgentLifecycleManager.global(), "ensureLive")
-			.mockResolvedValueOnce(stale)
-			.mockResolvedValue(revived);
+		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockResolvedValueOnce(stale).mockResolvedValue(revived);
 		try {
 			const result = await runSubagentFollowUpTurn({
 				...baseOptions,

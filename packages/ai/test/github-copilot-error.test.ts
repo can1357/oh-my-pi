@@ -50,6 +50,14 @@ describe("rewriteCopilotError", () => {
 		expect(result).not.toContain("GitHub Copilot authentication failed");
 		expect(result).not.toContain("/login github-copilot");
 	});
+
+	it("names the CLI client identity, the chat retry, and the COPILOT_INTEGRATION_ID escape hatch on 403", () => {
+		const err = errorWithStatus(403);
+		const result = rewriteCopilotError("403 Forbidden", err, "github-copilot");
+		expect(result).toContain("copilot-developer-cli");
+		expect(result).toContain("copilot-chat");
+		expect(result).toContain("COPILOT_INTEGRATION_ID");
+	});
 });
 
 describe("isGitHubCopilotPolicyDenial", () => {

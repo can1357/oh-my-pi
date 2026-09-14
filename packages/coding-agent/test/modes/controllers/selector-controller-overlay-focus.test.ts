@@ -118,6 +118,9 @@ describe("SelectorController session replacement overlay", () => {
 			sessionManager: {
 				getCwd: () => "/tmp",
 				getSessionDir: () => "/tmp",
+				// Live-session path: keeps the picker's current-marker/focus code live
+				// during the overlay assertions (single-row list stays deterministic).
+				getSessionFile: () => session.path,
 			},
 			ui: {
 				showOverlay: vi.fn(component => {

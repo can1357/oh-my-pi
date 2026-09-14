@@ -38,7 +38,14 @@ import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
-import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
+import {
+	disambiguateDisplayLabels,
+	formatErrorMessage,
+	formatMeta,
+	formatTitle,
+	sanitizeCarriageReturns,
+	TRUNCATE_LENGTHS,
+} from "./render-utils";
 import { ToolAbortError } from "./tool-errors";
 
 // =============================================================================
@@ -636,7 +643,14 @@ async function askSingleQuestion(
 		selectedOptions = Array.from(selected);
 	} else {
 		while (true) {
-			const displayOptions = addRecommendedSuffix(questionOptions, recommended);
+			const baseDisplay = addRecommendedSuffix(questionOptions, recommended);
+			// Badging can collide rows (recommended `Retry now` vs a literal
+			// `Retry now (Recommended)`); disambiguate display copies like
+			// the rich dialog and map the choice back by identity below.
+			const displayLabels = disambiguateDisplayLabels(baseDisplay.map(getSelectOptionLabel), [OTHER_OPTION]);
+			const displayOptions: ExtensionUISelectItem[] = baseDisplay.map((option, index) =>
+				typeof option === "string" ? displayLabels[index]! : { ...option, label: displayLabels[index]! },
+			);
 			const optionsWithNavigation: ExtensionUISelectItem[] = [...displayOptions, OTHER_OPTION];
 
 			let initialIndex = recommended;
@@ -686,7 +700,12 @@ async function askSingleQuestion(
 				selectedOptions = [];
 				break;
 			}
-			selectedOptions = [stripRecommendedSuffix(choice)];
+			// Map the displayed choice back to the offered option by identity:
+			// the label itself may end with the recommendation suffix
+			// (intrinsic or via `\r` normalization), so stripping would
+			// corrupt it. First display match wins on identical rows.
+			const pickedIndex = displayOptions.findIndex(option => getSelectOptionLabel(option) === choice);
+			selectedOptions = [pickedIndex >= 0 ? questionOptions[pickedIndex]!.label : stripRecommendedSuffix(choice)];
 			customInput = undefined;
 			break;
 		}
@@ -858,6 +877,84 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (!context?.hasUI || !context.ui) {
 			context?.abort();
 			throw new ToolAbortError("Ask tool requires interactive mode");
+		}
+		// Models occasionally inject `\r` runs into string values (observed with
+		// GLM via OpenRouter); sanitize before the dialog renders or the answer
+		// echoes back into session history.
+		params = sanitizeAskParams(params);
+		// Sanitizing `\r` runs can collapse a crafted label into a reserved
+		// runtime label (`Other\r(type your own)` → `Other (type your own)`),
+		// which would hijack the custom-input branch and duplicate the rich
+		// dialog row — fail closed like schema validation does.
+		const reservedCollision = params.questions
+			.flatMap(question => question.options)
+			.find(option => RESERVED_OPTION_LABELS[option.label] === true);
+		if (reservedCollision !== undefined) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Error: option labels must not collide with reserved runtime labels: ${formatErrorValue(reservedCollision.label)}`,
+					},
+				],
+				details: {},
+			};
+		}
+		// The degraded multi-select completion row is theme-labeled and only
+		// appended after an answer exists, but the choice handler matches it
+		// unconditionally — a sanitized model label would exit instead of
+		// selecting. Fail closed like the other sentinels (multi-select only;
+		// single-select has no Done row).
+		const doneActionLabel = getDoneOptionLabel();
+		const doneCollision = params.questions
+			.filter(question => question.multi === true)
+			.flatMap(question => question.options)
+			.find(option => option.label === doneActionLabel);
+		if (doneCollision !== undefined) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Error: option labels must not collide with reserved runtime labels: ${formatErrorValue(doneCollision.label)}`,
+					},
+				],
+				details: {},
+			};
+		}
+		// Sanitizing `\r` runs can also merge distinct labels (`Retry\rnow` and
+		// `Retry now` become one); dialog selection is label-keyed, so one row
+		// would check both — fail closed like schema validation does. The same
+		// holds for question ids (`deploy\rmode`/`deploy mode`), which the
+		// model uses to correlate multi-question answers.
+		const seenIds = new Set<string>();
+		for (const question of params.questions) {
+			if (seenIds.has(question.id)) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: question ids must be unique: ${formatErrorValue(question.id)}`,
+						},
+					],
+					details: {},
+				};
+			}
+			seenIds.add(question.id);
+			const seenLabels = new Set<string>();
+			for (const option of question.options) {
+				if (seenLabels.has(option.label)) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Error: option labels must be unique within a question: ${formatErrorValue(option.label)}`,
+							},
+						],
+						details: {},
+					};
+				}
+				seenLabels.add(option.label);
+			}
 		}
 
 		const extensionUi = context.ui;
@@ -1144,17 +1241,83 @@ function normalizeRenderOptions(raw: unknown): AskRenderOption[] | undefined {
 	const out: AskRenderOption[] = [];
 	for (const entry of raw) {
 		if (typeof entry === "string") {
-			out.push({ label: entry });
+			out.push({ label: sanitizeCarriageReturns(entry) });
 			continue;
 		}
 		if (!entry || typeof entry !== "object") continue;
 		const { label, description } = entry as Partial<AskRenderOption>;
 		if (typeof label !== "string") continue;
-		out.push(typeof description === "string" ? { label, description } : { label });
+		out.push(
+			typeof description === "string"
+				? { label: sanitizeCarriageReturns(label), description: sanitizeCarriageReturns(description) }
+				: { label: sanitizeCarriageReturns(label) },
+		);
 	}
 	return out;
 }
 
+/**
+ * Format a model-provided id/label for a validation error. Degenerate input
+ * can carry tabs or kilobytes of text, and the error echoes through the
+ * plain `Text` fallback renderer — expand tabs FIRST so the width bound
+ * applies to displayed cells, then clamp like every other error display
+ * path (`formatErrorMessage`).
+ */
+function formatErrorValue(value: string): string {
+	return truncateToWidth(replaceTabs(value), TRUNCATE_LENGTHS.LINE);
+}
+/** Strip the `\r` runs degenerate models inject, so persisted call args render as prose. */
+function sanitizeAskParams(params: AskParams): AskParams {
+	return {
+		...params,
+		questions: params.questions.map(question => ({
+			...question,
+			id: sanitizeCarriageReturns(question.id),
+			question: sanitizeCarriageReturns(question.question),
+			...(question.header !== undefined ? { header: sanitizeCarriageReturns(question.header) } : {}),
+			options: question.options.map(option => ({
+				...option,
+				label: sanitizeCarriageReturns(option.label),
+				...(option.description !== undefined ? { description: sanitizeCarriageReturns(option.description) } : {}),
+				...(option.preview !== undefined ? { preview: sanitizeCarriageReturns(option.preview) } : {}),
+			})),
+		})),
+	};
+}
+
+/**
+ * Strip the `\r` runs degenerate models inject from persisted result details,
+ * so transcripts completed before params sanitization still render as prose.
+ * Display-only — the persisted payload is untouched.
+ */
+function sanitizeAskResultDetails(details: AskToolDetails): AskToolDetails {
+	return {
+		...details,
+		...(details.question !== undefined ? { question: sanitizeCarriageReturns(details.question) } : {}),
+		...(details.options !== undefined ? { options: details.options.map(sanitizeCarriageReturns) } : {}),
+		...(details.selectedOptions !== undefined
+			? { selectedOptions: details.selectedOptions.map(sanitizeCarriageReturns) }
+			: {}),
+		...(details.customInput !== undefined ? { customInput: sanitizeCarriageReturns(details.customInput) } : {}),
+		...(details.note !== undefined ? { note: sanitizeCarriageReturns(details.note) } : {}),
+		...(details.questions !== undefined ? { questions: details.questions.map(sanitizeCarriageReturns) } : {}),
+		...(details.results !== undefined
+			? {
+					results: details.results.map(entry => ({
+						...entry,
+						id: sanitizeCarriageReturns(entry.id),
+						question: sanitizeCarriageReturns(entry.question),
+						options: entry.options.map(sanitizeCarriageReturns),
+						selectedOptions: entry.selectedOptions.map(sanitizeCarriageReturns),
+						...(entry.customInput !== undefined
+							? { customInput: sanitizeCarriageReturns(entry.customInput) }
+							: {}),
+						...(entry.note !== undefined ? { note: sanitizeCarriageReturns(entry.note) } : {}),
+					})),
+				}
+			: {}),
+	};
+}
 /**
  * Coerce untrusted `questions` call args into a renderable array. Models
  * occasionally double-encode the array as a JSON string — a bare string passes
@@ -1175,8 +1338,8 @@ function normalizeRenderQuestions(raw: unknown): NonNullable<AskRenderArgs["ques
 		if (!entry || typeof entry !== "object") continue;
 		const q = entry as Partial<NonNullable<AskRenderArgs["questions"]>[number]>;
 		out.push({
-			id: typeof q.id === "string" ? q.id : "?",
-			question: typeof q.question === "string" ? q.question : "",
+			id: typeof q.id === "string" ? sanitizeCarriageReturns(q.id) : "?",
+			question: typeof q.question === "string" ? sanitizeCarriageReturns(q.question) : "",
 			options: normalizeRenderOptions(q.options) ?? [],
 			multi: q.multi === true,
 		});
@@ -1238,6 +1401,30 @@ function renderQuestionOptionLines(
 }
 
 /**
+ * Resolve selected labels to option indices against the RAW persisted labels.
+ * Sanitizing can merge distinct options (`Retry\rnow`/`Retry now`) into one
+ * display label, after which a label set would mark every colliding row —
+ * indices survive normalization because it preserves order and length.
+ * Every option exactly matching a selected label is marked: the legacy
+ * selector recorded a single occurrence for duplicate rows it marked
+ * together, while the rich dialog recorded one entry per row, and both
+ * shapes must replay as originally shown.
+ * Returns undefined when raw options are missing so the caller falls back to
+ * label matching.
+ */
+function selectedIndicesFor(
+	rawOptions: string[] | undefined,
+	rawSelected: string[] | undefined,
+): Set<number> | undefined {
+	if (!rawOptions || rawOptions.length === 0) return undefined;
+	const wanted = new Set(rawSelected ?? []);
+	const indices = new Set<number>();
+	rawOptions.forEach((option, index) => {
+		if (wanted.has(option)) indices.add(index);
+	});
+	return indices;
+}
+/**
  * Render the answered option list for a question: every offered option with its
  * selection marker filled in, plus any custom free-text answer. Flat marker
  * bullets — the frame is the container, so no tree guides are drawn.
@@ -1251,6 +1438,7 @@ function renderAnswerOptionLines(
 	customInput: string | undefined,
 	note: string | undefined,
 	width: number,
+	selectedIndices?: ReadonlySet<number>,
 ): string[] {
 	const selected = new Set(selectedOptions ?? []);
 	// Prefer the full recorded option set; fall back to the selected labels when
@@ -1263,8 +1451,8 @@ function renderAnswerOptionLines(
 	}
 
 	const out: string[] = [];
-	for (const label of list) {
-		const isSelected = selected.has(label);
+	for (const [index, label] of list.entries()) {
+		const isSelected = selectedIndices !== undefined ? selectedIndices.has(index) : selected.has(label);
 		const marker = optionMarker(uiTheme, multi, isSelected);
 		const markerStyled = isSelected ? uiTheme.fg("success", marker) : uiTheme.fg("dim", marker);
 		const labelStyled = renderInlineMarkdown(label, mdTheme, t =>
@@ -1321,7 +1509,7 @@ export const askToolRenderer = {
 			}));
 		}
 
-		const question = args.question;
+		const question = sanitizeCarriageReturns(args.question);
 		const meta: string[] = [];
 		if (args.multi) meta.push("multi");
 		const questionOptions = normalizeRenderOptions(args.options);
@@ -1349,19 +1537,20 @@ export const askToolRenderer = {
 		_options: RenderResultOptions,
 		uiTheme: Theme,
 	): Component {
-		const { details } = result;
+		const rawDetails = result.details;
 		const mdTheme = getMarkdownTheme();
 		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
 		const md = (text: string, width: number) =>
 			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
 
-		if (!details) {
+		if (!rawDetails) {
 			const txt = result.content[0];
-			const fallback = txt?.type === "text" && txt.text ? txt.text : "";
+			const fallback = txt?.type === "text" && txt.text ? sanitizeCarriageReturns(txt.text) : "";
 			const header = renderStatusLine({ icon: "warning", title: "Ask" }, uiTheme);
 			const body = fallback ? `\n${uiTheme.fg("dim", fallback)}` : "";
 			return new Text(`${header}${body}`, 0, 0);
 		}
+		const details = sanitizeAskResultDetails(rawDetails);
 
 		// Chat redirect: user chose "Chat about this" instead of answering.
 		if (details.chatRedirect) {
@@ -1394,7 +1583,10 @@ export const askToolRenderer = {
 				uiTheme,
 			);
 			return framedBlock(uiTheme, width => {
-				const sections = results.map(r => {
+				const rawResults = rawDetails.results ?? [];
+				const sections = results.map((r, index) => {
+					// Sanitizing preserves order and length, so raw indices align with `r`.
+					const raw = rawResults[index];
 					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
 					const lines = [
 						...md(r.question, width),
@@ -1407,6 +1599,7 @@ export const askToolRenderer = {
 							r.customInput,
 							r.note,
 							width,
+							selectedIndicesFor(raw?.options, raw?.selectedOptions),
 						),
 					];
 					return { label: uiTheme.fg("dim", `[${r.id}]`), lines };
@@ -1424,7 +1617,7 @@ export const askToolRenderer = {
 		// Single question result
 		if (!details.question) {
 			const txt = result.content[0];
-			const fallback = txt?.type === "text" && txt.text ? txt.text : "";
+			const fallback = txt?.type === "text" && txt.text ? sanitizeCarriageReturns(txt.text) : "";
 			return new Text(fallback, 0, 0);
 		}
 
@@ -1449,7 +1642,17 @@ export const askToolRenderer = {
 			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
 			const bodyLines = [
 				...md(question, width),
-				...renderAnswerOptionLines(uiTheme, mdTheme, dOptions, dSelected, dMulti, dCustom, dNote, width),
+				...renderAnswerOptionLines(
+					uiTheme,
+					mdTheme,
+					dOptions,
+					dSelected,
+					dMulti,
+					dCustom,
+					dNote,
+					width,
+					selectedIndicesFor(rawDetails.options, rawDetails.selectedOptions),
+				),
 			];
 			if (dTimedOut) {
 				// Distinguish auto-selection from a real user choice in the transcript.

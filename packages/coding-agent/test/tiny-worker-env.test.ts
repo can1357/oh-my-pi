@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { nativeLibraryPathOverlay } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
 import { tinyWorkerEnvOverlay } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { tinyWorkerEndpoint, tinyWorkerLogPath } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
@@ -61,8 +62,14 @@ describe("tinyWorkerLogPath", () => {
 	// the named-pipe endpoint (`\\.\pipe\omp-tiny-…`) into an unopenable file
 	// path and crashed `--smoke-test` with ENOENT.
 	it("stays under the runtime directory instead of deriving from the endpoint", () => {
-		const logPath = tinyWorkerLogPath("/runtime", "lfm2.5-230m", "onnx");
-		expect(logPath.startsWith("/runtime/")).toBe(true);
+		const runtimeDir = "/runtime";
+		const logPath = tinyWorkerLogPath(runtimeDir, "lfm2.5-230m", "onnx");
+		// `path.join` is platform-native, so assert containment through
+		// `path.relative` rather than assuming the host's separator: on Windows
+		// the same call yields `\runtime\<name>.log`.
+		const relativeToRuntime = path.relative(runtimeDir, logPath);
+		expect(path.isAbsolute(relativeToRuntime)).toBe(false);
+		expect(relativeToRuntime.startsWith("..")).toBe(false);
 		expect(logPath.endsWith(".log")).toBe(true);
 		expect(logPath.includes(".sock")).toBe(false);
 		if (process.platform === "win32") {

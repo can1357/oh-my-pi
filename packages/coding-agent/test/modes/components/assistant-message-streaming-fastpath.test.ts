@@ -216,6 +216,38 @@ Average Latency: 1,240 ms
 		reused.updateContent(filled);
 		expect(reused.render(W).join("\n")).toBe(teardownRender(filled));
 	});
+
+	it("matches fresh live output across hidden thinking emptiness transitions and reveal", () => {
+		const reused = new AssistantMessageComponent(undefined, true);
+		const latestReasoning = "Latest canonical reasoning";
+		try {
+			// A comment is raw-nonempty but display-empty; whitespace is canonically empty.
+			// Neither transition may leave the live pulse missing or stale.
+			for (const thinking of ["", "<!-- -->", " \n", latestReasoning]) {
+				const message = msg([
+					{ type: "text", text: "Visible answer" },
+					{ type: "thinking", thinking },
+				]);
+				const fresh = new AssistantMessageComponent(undefined, true);
+				try {
+					reused.updateContent(message, { transient: true });
+					fresh.updateContent(message, { transient: true });
+					expect(reused.render(W).join("\n")).toBe(fresh.render(W).join("\n"));
+				} finally {
+					fresh.dispose();
+				}
+			}
+
+			reused.setHideThinkingBlock(false);
+			reused.invalidate();
+			const revealed = Bun.stripANSI(reused.render(W).join("\n"));
+			expect(revealed).toContain(latestReasoning);
+			expect(revealed).toContain("Visible answer");
+		} finally {
+			reused.dispose();
+		}
+	});
+
 	it("does not re-format an already-display thinking block (rawThinking set)", () => {
 		// buildDisplayMessage emits a thinking block whose `thinking` is already the
 		// formatted display text and stamps the original under `rawThinking`.

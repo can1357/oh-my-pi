@@ -484,6 +484,8 @@ export interface SessionSummary {
 	subagents: number;
 	totalTokens: number;
 	costTotal: number;
+	/** Requests whose zero cost is unknown spend (scheduled card, no timestamp). */
+	unpricedRequests: number;
 	models: string[];
 }
 
@@ -569,6 +571,8 @@ export interface TraceSummary {
 	subagents: number;
 	totalTokens: number;
 	costTotal: number;
+	/** Model requests whose zero cost is unknown spend, not free usage. */
+	unpricedRequests: number;
 	/** Sorted totalMs desc. */
 	toolStats: TraceToolStat[];
 }

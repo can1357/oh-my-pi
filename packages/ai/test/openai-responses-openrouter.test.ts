@@ -103,6 +103,7 @@ async function capturePseudoChatRequest(
 		disableReasoning?: boolean;
 		openrouterVariant?: string;
 	} = {},
+	requestContext: Context = context,
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -110,7 +111,7 @@ async function capturePseudoChatRequest(
 		return createChatDoneResponse();
 	});
 
-	const stream = streamOpenAICompletions(model as unknown as Model<"openai-completions">, context, {
+	const stream = streamOpenAICompletions(model as unknown as Model<"openai-completions">, requestContext, {
 		apiKey: "test-key",
 		...options,
 		fetch: fetchMock,
@@ -131,6 +132,7 @@ async function capturePseudoResponsesRequest(
 		disableReasoning?: boolean;
 		openrouterVariant?: string;
 	} = {},
+	requestContext: Context = context,
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -138,7 +140,7 @@ async function capturePseudoResponsesRequest(
 		return createSseResponse();
 	});
 
-	const stream = streamOpenAIResponses(model as unknown as Model<"openai-responses">, context, {
+	const stream = streamOpenAIResponses(model as unknown as Model<"openai-responses">, requestContext, {
 		apiKey: "test-key",
 		...options,
 		fetch: fetchMock,
@@ -183,6 +185,37 @@ afterEach(() => {
 });
 
 describe("OpenRouter pseudo API dual-surface request parity", () => {
+	it("preserves V4.1 Flash images and max reasoning on both APIs without changing the older V4 Flash chat image guard", async () => {
+		const imageContext: Context = {
+			messages: [
+				{ role: "user", content: [{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }], timestamp: 1 },
+			],
+		};
+		const model = buildOpenRouterModel({
+			id: "deepseek/deepseek-v4.1-flash",
+			reasoning: true,
+			input: ["text", "image"],
+		});
+		const chat = await capturePseudoChatRequest(model, { reasoning: Effort.Max }, imageContext);
+		const responses = await capturePseudoResponsesRequest(model, { reasoning: Effort.Max }, imageContext);
+		expect(chat.model).toBe("deepseek/deepseek-v4.1-flash");
+		expect(responses.model).toBe("deepseek/deepseek-v4.1-flash");
+		expect(chat.reasoning).toMatchObject({ effort: "max" });
+		expect(responses.reasoning).toMatchObject({ effort: "max" });
+		expect(chat.messages).toContainEqual({
+			role: "user",
+			content: [{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } }],
+		});
+		expect(JSON.stringify(responses.input)).toContain('"image_url":"data:image/png;base64,ZmFrZQ=="');
+		const oldModel = buildOpenRouterModel({
+			id: "deepseek/deepseek-v4-flash",
+			reasoning: true,
+			input: ["text", "image"],
+		});
+		const oldChat = await capturePseudoChatRequest(oldModel, {}, imageContext);
+		expect(JSON.stringify(oldChat.messages)).not.toContain("image_url");
+	});
+
 	it("builds equivalent Anthropic reasoning payloads for chat and Responses", async () => {
 		const routing = { only: ["anthropic"], order: ["anthropic", "openai"] };
 		const model = buildOpenRouterModel(

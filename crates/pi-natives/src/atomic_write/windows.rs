@@ -516,11 +516,9 @@ fn legacy_dacl_is_safe(
 		if header.AceType == ACCESS_ALLOWED_ACE_TYPE as u8
 			&& !trusted_legacy_principal(sid, private)
 			&& foreign_allow_grants_mutation(mask)
-			&& header.AceFlags & INHERITED_ACE as u8 == 0
 		{
 			return Err(unsafe_path(
-				"local root or parent legacy DACL explicitly grants a foreign principal directory \
-				 mutation access",
+				"local root or parent legacy DACL grants a foreign principal directory mutation access",
 			));
 		}
 	}
@@ -661,8 +659,7 @@ fn validate_component(component: &[u16]) -> Result<(), AtomicWriteError> {
 				|| character == u16::from(b'|')
 				|| character == u16::from(b'?')
 				|| character == u16::from(b'*')
-		}) || component.first() == Some(&u16::from(b' '))
-		|| component.last() == Some(&u16::from(b' '))
+		}) || component.last() == Some(&u16::from(b' '))
 		|| component.last() == Some(&u16::from(b'.'))
 		|| reserved_device_name(component)
 	{
@@ -1374,6 +1371,18 @@ fn unsafe_path(message: impl Into<String>) -> AtomicWriteError {
 		AtomicWriteCommitState::NotCommitted,
 		message,
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::validate_component;
+
+	#[test]
+	fn accepts_publicly_addressable_leading_space_components() {
+		let component: Vec<u16> = " report.txt".encode_utf16().collect();
+
+		assert!(validate_component(&component).is_ok());
+	}
 }
 
 pub(super) fn write(

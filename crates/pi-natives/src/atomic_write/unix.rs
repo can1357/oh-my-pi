@@ -101,8 +101,12 @@ pub(super) fn write(
 
 	heartbeat(cancel_token)?;
 	let mut current = open_root().map_err(|error| precommit_io("opening /", error))?;
-	for component in &absolute_components {
+	let fallback_anchor = fallback_anchor_index(&absolute_components);
+	for (index, component) in absolute_components.iter().enumerate() {
 		current = open_or_create_directory(&current, component, None, cancel_token)?;
+		if fallback_anchor == Some(index) {
+			private_directory_device(current.as_raw_fd(), "fallback local-root anchor")?;
+		}
 	}
 
 	heartbeat(cancel_token)?;
@@ -153,6 +157,13 @@ pub(super) fn write(
 	// remove only if it still resolves to the open stage descriptor.
 	stage.cleanup_if_uncommitted();
 	Err(replacement_error(error))
+}
+
+fn fallback_anchor_index(components: &[CString]) -> Option<usize> {
+	components
+		.len()
+		.checked_sub(2)
+		.filter(|&index| components[index].to_bytes() == b"omp-local")
 }
 
 fn absolute_root_components(root: &Path) -> std::result::Result<Vec<CString>, AtomicWriteError> {
@@ -827,7 +838,7 @@ fn is_errno(error: &io::Error, errno: libc::c_int) -> bool {
 mod tests {
 	use std::path::Path;
 
-	use super::absolute_root_components;
+	use super::{absolute_root_components, fallback_anchor_index};
 	use crate::atomic_write::{AtomicWriteCommitState, AtomicWriteErrorCode};
 
 	#[test]
@@ -838,6 +849,15 @@ mod tests {
 			assert_eq!(error.commit_state, AtomicWriteCommitState::NotCommitted);
 		}
 	}
+	#[test]
+	fn identifies_the_private_fallback_anchor() {
+		let fallback = absolute_root_components(Path::new("/tmp/omp-local/session")).expect("fallback path parses");
+		let ordinary = absolute_root_components(Path::new("/tmp/artifacts/local")).expect("ordinary path parses");
+
+		assert_eq!(fallback_anchor_index(&fallback), Some(1));
+		assert_eq!(fallback_anchor_index(&ordinary), None);
+	}
+
 	#[cfg(target_os = "linux")]
 	#[test]
 	fn treats_enoent_tmpfile_link_failure_as_unavailable() {

@@ -3,7 +3,13 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllVmContexts, invokeJsTool } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import {
+	disposeAllVmContexts,
+	invokeJsTool,
+	runIfSnapshotMatches,
+	shadowPlanIfPresent,
+	snapshotVmContext,
+} from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -92,6 +98,85 @@ describe("executeJs", () => {
 		});
 		expect(resetResult.exitCode).toBe(0);
 		expect(resetResult.output.trim()).toBe("undefined");
+	});
+
+	it("captures retained JSON-safe bindings without executing another cell", async () => {
+		await executeJs("globalThis.shadowSnapshotValue = { nested: ['safe'] };", {
+			sessionId,
+			session,
+			sessionFile,
+		});
+
+		const snapshot = await snapshotVmContext({ sessionKey: sessionId, cwd: session.cwd, sessionId });
+		expect(snapshot?.values.shadowSnapshotValue).toEqual({ nested: ["safe"] });
+		expect(snapshot?.revision).toBeGreaterThan(0);
+	});
+
+	it("plans only against an already-retained JavaScript runtime", async () => {
+		await expect(
+			shadowPlanIfPresent({ sessionKey: "missing", cwd: session.cwd, sessionId: "missing", code: "tool.read({})" }),
+		).resolves.toBeNull();
+		await executeJs("globalThis.shadowPlanValue = true;", { sessionId, session, sessionFile });
+		const planned = await shadowPlanIfPresent({
+			sessionKey: sessionId,
+			cwd: session.cwd,
+			sessionId,
+			code: 'tool.read({ path: "src/a.ts" });',
+		});
+		expect(planned?.snapshot.values.shadowPlanValue).toBe(true);
+		expect(planned?.plan.operations[0]?.call.name).toBe("read");
+	});
+
+	it("runs through the retained atomic admission path when the snapshot matches", async () => {
+		const planned = await shadowPlanIfPresent({
+			sessionKey: sessionId,
+			cwd: session.cwd,
+			sessionId,
+			code: 'tool.read({ path: "src/a.ts" });',
+		});
+		if (!planned) throw new Error("expected retained session");
+		await expect(
+			runIfSnapshotMatches({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code: "globalThis.atomicContextManagerValue = 42;",
+				filename: "atomic-context.ts",
+				runState: {},
+				expectedRevision: planned.snapshot.revision,
+				expectedDigest: planned.digest,
+			}),
+		).resolves.not.toBeNull();
+		const result = await executeJs("return atomicContextManagerValue;", { sessionId, session, sessionFile });
+		expect(result.output.trim()).toBe("42");
+	});
+
+	it("rejects stale retained snapshots before executing JavaScript", async () => {
+		await executeJs("globalThis.atomicStaleGuard = 1;", { sessionId, session, sessionFile });
+		const planned = await shadowPlanIfPresent({
+			sessionKey: sessionId,
+			cwd: session.cwd,
+			sessionId,
+			code: "globalThis.atomicStaleGuard = 3;",
+		});
+		if (!planned) throw new Error("expected retained session");
+		await executeJs("globalThis.atomicStaleGuard = 2;", { sessionId, session, sessionFile });
+		await expect(
+			runIfSnapshotMatches({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code: "globalThis.atomicStaleGuard = 3;",
+				filename: "atomic-stale-context.ts",
+				runState: {},
+				expectedRevision: planned.snapshot.revision,
+				expectedDigest: planned.digest,
+			}),
+		).resolves.toBeNull();
+		const result = await executeJs("return atomicStaleGuard;", { sessionId, session, sessionFile });
+		expect(result.output.trim()).toBe("2");
 	});
 
 	it("describes and invokes tools defined in the retained JavaScript kernel", async () => {
@@ -481,6 +566,43 @@ describe("executeJs", () => {
 		expect(execute).toHaveBeenCalledTimes(2);
 		expect(execute.mock.calls[0]?.[1]).toEqual({ path: "package.json", [INTENT_FIELD]: "js prelude" });
 		expect(execute.mock.calls[1]?.[1]).toEqual({ path: "agent://agent-42", [INTENT_FIELD]: "js prelude" });
+	});
+
+	it("preserves nested await expressions in instrumented tool-call arguments", async () => {
+		const execute = vi.fn(async (_toolCallId: string, args: unknown): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: (args as { path: string }).path }],
+		}));
+		const toolSession: ToolSession = {
+			...session,
+			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),
+		};
+
+		const result = await executeJs(
+			'async function resolvePath() { return "package.json"; }\nreturn await tool.read({ path: await resolvePath() });',
+			{ sessionId, session: toolSession, sessionFile },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("package.json");
+	});
+
+	it("preserves direct eval bindings around an instrumented tool read", async () => {
+		const execute = vi.fn(async (_toolCallId: string, args: unknown): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: (args as { path: string }).path }],
+		}));
+		const toolSession: ToolSession = {
+			...session,
+			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),
+		};
+
+		const result = await executeJs(`await tool.read({ path: eval('var p = "note.txt"; p') }); p;`, {
+			sessionId,
+			session: toolSession,
+			sessionFile,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("note.txt");
 	});
 
 	it("auto-displays the final awaited expression result", async () => {

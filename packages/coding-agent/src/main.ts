@@ -106,11 +106,12 @@ import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { sanitizeDisplayWarnings } from "./tools/render-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
-type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
+type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<number>;
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
@@ -151,6 +152,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
+	"task.agentServiceTierOverrides",
 	"task.agentPrewalk",
 	"task.agentAdvisor",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
@@ -562,60 +564,82 @@ async function runInteractiveMode(
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
+				autoStartCollab: joinLink === undefined,
 				recentSessions: startupLease?.recentSessions,
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
+
+		if (setupWizard && playStartupSplash) {
+			await setupWizard.runStartupSplash(mode);
+		}
+
+		if (setupWizard && setupScenes.length > 0) {
+			await setupWizard.runSetupWizard(mode, setupScenes);
+		}
+
+		// Consume failures immediately, but defer any banner until the transcript is stable.
+		const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
+
+		// `init` already cleared native history before painting the startup frame.
+		// Replaying resumed transcript rows and repainting the viewport is enough;
+		// another clear would only archive the startup frame. In-process session
+		// replacements still request `clearTerminalHistory` at their own callsites.
+		await logger.time("InteractiveMode.renderInitialMessages", () =>
+			mode.renderInitialMessages({ preserveExistingChat: true }),
+		);
+		// A resolved version check must not insert its banner into a partial transcript.
+		checkedVersionPromise.then(newVersion => {
+			if (!settings.get("startup.checkUpdate")) {
+				return;
+			}
+			if (newVersion) {
+				mode.showNewVersionNotification(newVersion);
+			}
+		});
+
+		const advisorConfigWarnings = session.getAdvisorConfigWarnings();
+		if (advisorConfigWarnings.length > 0) {
+			// Pulled here, not pushed from SessionAdvisors: the constructor-time
+			// `emitNotice` fired before the UI subscribed and was silently lost.
+			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
+		}
+
+		for (const notify of notifs) {
+			if (!notify) {
+				continue;
+			}
+			if (notify.kind === "warn") {
+				mode.showWarning(notify.message);
+			} else if (notify.kind === "error") {
+				mode.showError(notify.message);
+			} else if (notify.kind === "info") {
+				mode.showStatus(notify.message);
+			}
+		}
+
+		// `omp join <link>`: dispatch through the same builtin path as a typed
+		// `/join` so collab guards and error rendering stay in one place.
+		if (joinLink !== undefined) {
+			await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
+			// Join failure returns to the local session; success still needs the
+			// controller observing its eventual restoration without hosting replicas.
+			mode.collabController.autoStart();
+		}
+		// Keep guest mutations gated through setup dialogs and transcript replay,
+		// not just init. Only a successful outer startup opens the room for input.
+		mode.collabController.startupComplete();
 	} catch (error) {
-		mode.stop();
+		// Init publishes before startup dialogs, so any later startup failure
+		// must withdraw the room before restoring the terminal.
+		try {
+			await mode.collabController.shutdown("startup failed");
+		} catch (cleanupError) {
+			logger.warn("Failed to stop collaboration after startup failure", { error: String(cleanupError) });
+		} finally {
+			mode.stop();
+		}
 		throw error;
-	}
-
-	if (setupWizard && playStartupSplash) {
-		await setupWizard.runStartupSplash(mode);
-	}
-
-	if (setupWizard && setupScenes.length > 0) {
-		await setupWizard.runSetupWizard(mode, setupScenes);
-	}
-
-	// Consume failures immediately, but defer any banner until the transcript is stable.
-	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
-
-	// `init` already cleared native history before painting the startup frame.
-	// Replaying resumed transcript rows and repainting the viewport is enough;
-	// another clear would only archive the startup frame. In-process session
-	// replacements still request `clearTerminalHistory` at their own callsites.
-	await logger.time("InteractiveMode.renderInitialMessages", () =>
-		mode.renderInitialMessages({ preserveExistingChat: true }),
-	);
-	// A resolved version check must not insert its banner into a partial transcript.
-	checkedVersionPromise.then(newVersion => {
-		if (!settings.get("startup.checkUpdate")) {
-			return;
-		}
-		if (newVersion) {
-			mode.showNewVersionNotification(newVersion);
-		}
-	});
-
-	for (const notify of notifs) {
-		if (!notify) {
-			continue;
-		}
-		if (notify.kind === "warn") {
-			mode.showWarning(notify.message);
-		} else if (notify.kind === "error") {
-			mode.showError(notify.message);
-		} else if (notify.kind === "info") {
-			mode.showStatus(notify.message);
-		}
-	}
-
-	// `omp join <link>`: dispatch through the same builtin path as a typed
-	// `/join` so collab guards and error rendering stay in one place.
-	if (joinLink !== undefined) {
-		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
 	if (initialMessage !== undefined) {
@@ -2113,7 +2137,7 @@ export async function runRootCommand(
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
-				await runPrintMode(session, {
+				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,
 					initialMessage,
@@ -2126,7 +2150,7 @@ export async function runRootCommand(
 				}
 				await session.dispose();
 				stopThemeWatcher();
-				await postmortem.quit(0);
+				await postmortem.quit(exitCode);
 			}
 		}
 	} catch (error) {

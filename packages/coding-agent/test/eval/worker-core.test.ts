@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { shadowSnapshotDigest } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/eval/js/worker-core";
 import type {
 	SessionSnapshot,
@@ -544,5 +545,90 @@ process.exit(0);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("returns a safe snapshot only while the JavaScript runtime is idle", async () => {
+		const harness = createWorkerHarness();
+		const snapshot = { cwd: process.cwd(), sessionId: "shadow-snapshot-worker" };
+		await initializeWorker(harness, snapshot);
+		const reply = waitForMessage(
+			harness,
+			message => message.type === "shadow-snapshot" && message.id === "snapshot-1",
+		);
+		harness.send({ type: "shadow-snapshot", id: "snapshot-1", snapshot });
+		const message = await reply;
+		if (message.type !== "shadow-snapshot") throw new Error("expected shadow snapshot reply");
+		expect(message.eligible).toBe(true);
+		expect(message.snapshot?.revision).toBe(0);
+	});
+
+	it("starts a real cell only when the retained snapshot still matches", async () => {
+		const harness = createWorkerHarness();
+		const snapshot = { cwd: process.cwd(), sessionId: "atomic-shadow-worker" };
+		await initializeWorker(harness, snapshot);
+		const snapshotReply = waitForMessage(
+			harness,
+			message => message.type === "shadow-snapshot" && message.id === "atomic-snapshot",
+		);
+		harness.send({ type: "shadow-snapshot", id: "atomic-snapshot", snapshot });
+		const captured = await snapshotReply;
+		if (captured.type !== "shadow-snapshot" || !captured.snapshot) throw new Error("expected snapshot");
+		const admission = waitForMessage(
+			harness,
+			message => message.type === "shadow-run" && message.id === "atomic-run",
+		);
+		const result = waitForMessage(harness, message => message.type === "result" && message.runId === "atomic-run-id");
+		harness.send({
+			type: "run-if-snapshot-matches",
+			id: "atomic-run",
+			runId: "atomic-run-id",
+			code: "globalThis.atomicShadowValue = true;",
+			filename: "atomic-shadow.ts",
+			snapshot,
+			expectedRevision: captured.snapshot.revision,
+			expectedDigest: shadowSnapshotDigest(captured.snapshot),
+		});
+		await expect(admission).resolves.toMatchObject({ eligible: true });
+		await expect(result).resolves.toMatchObject({ ok: true });
+	});
+
+	it("rejects an atomic run after retained state changes", async () => {
+		const harness = createWorkerHarness();
+		const snapshot = { cwd: process.cwd(), sessionId: "atomic-shadow-mismatch" };
+		await initializeWorker(harness, snapshot);
+		const capturedReply = waitForMessage(
+			harness,
+			message => message.type === "shadow-snapshot" && message.id === "mismatch-snapshot",
+		);
+		harness.send({ type: "shadow-snapshot", id: "mismatch-snapshot", snapshot });
+		const captured = await capturedReply;
+		if (captured.type !== "shadow-snapshot" || !captured.snapshot) throw new Error("expected snapshot");
+		const mutationResult = waitForMessage(
+			harness,
+			message => message.type === "result" && message.runId === "mutation",
+		);
+		harness.send({
+			type: "run",
+			runId: "mutation",
+			code: "globalThis.atomicMismatch = true;",
+			filename: "mutation.ts",
+			snapshot,
+		});
+		await mutationResult;
+		const rejected = waitForMessage(
+			harness,
+			message => message.type === "shadow-run" && message.id === "mismatch-run",
+		);
+		harness.send({
+			type: "run-if-snapshot-matches",
+			id: "mismatch-run",
+			runId: "should-not-run",
+			code: "throw new Error('must not execute');",
+			filename: "mismatch.ts",
+			snapshot,
+			expectedRevision: captured.snapshot.revision,
+			expectedDigest: shadowSnapshotDigest(captured.snapshot),
+		});
+		await expect(rejected).resolves.toMatchObject({ eligible: false, reason: "snapshot changed" });
 	});
 });

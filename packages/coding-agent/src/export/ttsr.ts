@@ -554,7 +554,11 @@ export class TtsrManager {
 		}
 	}
 
-	/** Reset stream buffers (called on new turn). */
+	/**
+	 * Reset stream buffers. Called at every stream boundary: a new turn, a new
+	 * assistant message within a turn, and a restarted response. Buffers never
+	 * span two assistant messages; repeat-after-gap counters are untouched.
+	 */
 	resetBuffer(): void {
 		this.#buffers.clear();
 		this.#lastAstSnapshots.clear();

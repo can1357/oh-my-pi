@@ -1384,6 +1384,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				enforcePlanModeWrite(this.session, path, { op: "create" });
 				const absolutePath = resolvePlanPath(this.session, path);
 				if (isLocalUrl) {
+					if (await fs.exists(absolutePath)) {
+						await assertEditableFile(absolutePath, path, this.session.settings);
+					}
 					const localWrite: AtomicLocalWritePreparation = {
 						route: "atomic-local",
 						path,

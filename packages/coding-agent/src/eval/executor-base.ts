@@ -7,6 +7,7 @@ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEven
 import type { JsStatusEvent } from "./js/shared/types";
 import type { KernelDisplayOutput } from "./py/display";
 import { registerPyToolBridge } from "./py/tool-bridge";
+import { getActiveEvalShadowCell } from "./speculation/runtime-context";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -498,6 +499,7 @@ export async function executeWithKernelBase<
 					signal: options.signal,
 					shieldedSignal: abortShield.signal,
 					emitStatus,
+					shadowCell: getActiveEvalShadowCell(),
 					abortRequested: () => {
 						return abortShield.abortRequested;
 					},

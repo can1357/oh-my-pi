@@ -105,6 +105,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	vimModeEnabled: () => {
+		try {
+			return Settings.instance.get("tui.vimMode") === true;
+		} catch {
+			return false;
+		}
+	},
 	hindsightActive: () => {
 		try {
 			return Settings.instance.get("memory.backend") === "hindsight";
@@ -143,6 +150,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 	planModeEnabled: () => {
 		try {
 			return Settings.instance.get("plan.enabled");
+		} catch {
+			return false;
+		}
+	},
+	planAutosaveEnabled: () => {
+		try {
+			return Settings.instance.get("plan.enabled") && Settings.instance.get("plan.autosave");
 		} catch {
 			return false;
 		}

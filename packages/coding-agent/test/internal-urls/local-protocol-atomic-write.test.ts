@@ -472,7 +472,6 @@ describe("writeLocalUrlAtomically", () => {
 					"local://%3F",
 					"local://%2A",
 					"local://trailing%20",
-					"local://%20leading",
 					"local://trailing%2E",
 				);
 			}
@@ -487,7 +486,22 @@ describe("writeLocalUrlAtomically", () => {
 			await expect(fs.lstat(path.join(artifactsDir, "local"))).rejects.toThrow();
 		});
 	});
+	it("writes and reads leading-space Windows file names", async () => {
+		if (process.platform !== "win32") return;
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const options = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "leading-space",
+			};
+			const url = "local://%20leading.txt";
 
+			LocalProtocolHandler.setOverride(options);
+			await writeLocalUrlAtomically(url, "content", options);
+
+			expect((await InternalUrlRouter.instance().resolve(url)).content).toBe("content");
+		});
+	});
 	it("rejects unpaired UTF-16 surrogates instead of replacing them during UTF-8 encoding", async () => {
 		await withTempDir(async tempDir => {
 			const artifactsDir = path.join(tempDir, "artifacts");

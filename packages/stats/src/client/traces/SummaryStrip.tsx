@@ -3,7 +3,7 @@
  * tool calls, agents, tokens, cost.
  */
 
-import { formatCompact, formatCost, formatDurationMs, formatInteger } from "../data/formatters";
+import { formatCompact, formatDurationMs, formatEstimatedCost, formatInteger } from "../data/formatters";
 import type { TraceSummary } from "../types";
 
 export interface SummaryStripProps {
@@ -21,7 +21,7 @@ export function SummaryStrip({ summary }: SummaryStripProps) {
 		{ label: "Tool Calls", value: formatInteger(summary.toolCalls) },
 		{ label: "Agents", value: formatInteger(summary.subagents) },
 		{ label: "Tokens", value: formatCompact(summary.totalTokens) },
-		{ label: "Cost", value: formatCost(summary.costTotal) },
+		{ label: "Cost", value: formatEstimatedCost(summary.costTotal, summary.unpricedRequests) },
 	];
 
 	return (
