@@ -118,6 +118,9 @@
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
 
+### Added
+
+- `omp agents list` now prints the bundled task agents (name + description, or `--json` catalog). Help and the CLI reference no longer claim the command "manages" agents when only `unpack` existed.
 ## [18.1.17] - 2026-09-10
 
 ### Added
