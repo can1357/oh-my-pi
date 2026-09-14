@@ -295,6 +295,15 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ProviderAuthSchema = type('"apiKey" | "none" | "oauth"');
 
+	const ModelDiscoverySchema = type({
+		"mode?": '"auto" | "merge" | "replace"',
+		"cacheTtlMs?": "number",
+	}).narrow((value, ctx) =>
+		value.cacheTtlMs === undefined || (Number.isFinite(value.cacheTtlMs) && value.cacheTtlMs >= 0)
+			? true
+			: ctx.mustBe("cacheTtlMs a finite nonnegative number"),
+	);
+
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
 		"apiKey?": "string",
@@ -305,6 +314,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"authHeader?": "boolean",
 		"auth?": ProviderAuthSchema,
 		"discovery?": ProviderDiscoverySchema,
+		"modelDiscovery?": ModelDiscoverySchema,
 		"models?": ModelDefinitionSchema.array(),
 		"modelOverrides?": { "[string]": ModelOverrideSchema },
 		"disableStrictTools?": "boolean",
@@ -342,6 +352,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	const ModelsConfigSchema = type({
+		"modelDiscovery?": ModelDiscoverySchema,
 		"providers?": { "[string]": ProviderConfigSchema },
 	});
 

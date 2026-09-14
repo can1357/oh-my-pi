@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -6,7 +7,7 @@ import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -37,7 +38,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		fs.mkdirSync(tempDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await fixtureModelRegistry.awaitBackgroundRefresh();
 		vi.restoreAllMocks();
 		for (const authStorage of authStoragesToClose) {
 			authStorage.close();
@@ -52,6 +54,29 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		fixtureAuthStorage.close();
 		removeSyncWithRetries(fixtureDir);
 	});
+
+	async function seedScopedCache(authStorage: AuthStorage, modelsPath: string, model: Model) {
+		const primer = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input =>
+				String(input).includes("/models")
+					? Response.json({ data: [{ id: model.id, capabilities: { type: "chat" } }] })
+					: new Response(null, { status: 404 }),
+		});
+		await primer.refreshProvider(model.provider, "online");
+		const cachePath = path.join(path.dirname(modelsPath), "models.db");
+		const db = new Database(cachePath);
+		try {
+			const row = db
+				.query(
+					"SELECT provider_id FROM model_cache WHERE json_extract(models, '$[0].provider') = ? AND EXISTS (SELECT 1 FROM json_each(models) WHERE json_extract(value, '$.id') = ?) ORDER BY updated_at DESC LIMIT 1",
+				)
+				.get(model.provider, model.id) as { provider_id: string } | null;
+			if (!row) throw new Error(`Missing scoped cache fixture for ${model.provider}`);
+			writeModelCache(row.provider_id, Date.now(), [model], true, "", cachePath);
+		} finally {
+			db.close();
+		}
+	}
 
 	const providerExtension: ExtensionFactory = pi => {
 		pi.registerProvider("runtime-provider", {
@@ -113,6 +138,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
+			settings: Settings.isolated(),
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			extensions: [providerExtension],
@@ -159,6 +185,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
+			settings: Settings.isolated(),
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			extensions: [dynamicOnlyProviderExtension],
@@ -219,6 +246,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
+			settings: Settings.isolated(),
 			model,
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
@@ -275,6 +303,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
+			settings: Settings.isolated(),
 			model: explicitModel,
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
@@ -327,14 +356,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				contextWindow: 128_000,
 				maxTokens: 16_384,
 			});
-			writeModelCache(
-				resolveModelCacheProviderId(provider.id, { apiKey: provider.apiKey }),
-				Date.now(),
-				[cachedModel],
-				true,
-				"",
-				path.join(tempDir, "models.db"),
-			);
+			await seedScopedCache(authStorage, modelsPath, cachedModel);
 			fallbackSelectors.push(`${provider.id}/${cachedModel.id}`);
 		}
 		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
@@ -376,7 +398,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		authStoragesToClose.push(authStorage);
 		const provider = "opencode-go";
 		const baseUrl = "https://opencode.ai/zen/go/v1";
-		const cacheDbPath = path.join(tempDir, "models.db");
 		const firstModel = buildModel({
 			id: "first-credential-model",
 			name: "First Credential Model",
@@ -390,14 +411,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			maxTokens: 16_384,
 		});
 		authStorage.setRuntimeApiKey(provider, "first-key");
-		writeModelCache(
-			resolveModelCacheProviderId(provider, { apiKey: "first-key" }),
-			Date.now(),
-			[firstModel],
-			true,
-			"",
-			cacheDbPath,
-		);
+		await seedScopedCache(authStorage, path.join(tempDir, "models.yml"), firstModel);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		await modelRegistry.hydrateCredentialScopedModelCaches();
@@ -409,17 +423,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			name: "Second Credential Model",
 		});
 		authStorage.setRuntimeApiKey(provider, "second-key");
-		writeModelCache(
-			resolveModelCacheProviderId(provider, { apiKey: "second-key" }),
-			Date.now(),
-			[secondModel],
-			true,
-			"",
-			cacheDbPath,
-		);
+		await seedScopedCache(authStorage, path.join(tempDir, "models.yml"), secondModel);
 
 		await modelRegistry.hydrateCredentialScopedModelCaches();
 		expect(modelRegistry.find(provider, secondModel.id)).toBeDefined();
+		expect(modelRegistry.find(provider, firstModel.id)).toBeUndefined();
 	});
 
 	test("does not silently fallback when explicit modelPattern is unresolved", async () => {
@@ -454,6 +462,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
+			settings: Settings.isolated(),
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			extensions: [providerExtension],
@@ -1032,7 +1041,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, "llama-vision-models.yml");
-		const cacheDbPath = path.join(tempDir, "models.db");
 		const cachedModel = buildModel({
 			id: "vision-model",
 			name: "vision-model",
@@ -1045,7 +1053,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			contextWindow: 128000,
 			maxTokens: 32768,
 		});
-		writeModelCache("llama.cpp", Date.now(), [cachedModel], true, "", cacheDbPath);
+		await seedScopedCache(authStorage, modelsPath, cachedModel);
 
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);

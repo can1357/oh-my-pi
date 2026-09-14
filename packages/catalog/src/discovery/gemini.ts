@@ -21,7 +21,7 @@ const resilientNumber = type("unknown").pipe(val => {
 });
 
 const geminiModelListItemSchema = type({
-	"name?": resilientString,
+	name: "string >= 1",
 	"displayName?": resilientString,
 	"supportedGenerationMethods?": "string[]",
 	"inputTokenLimit?": resilientNumber,
@@ -30,22 +30,11 @@ const geminiModelListItemSchema = type({
 
 type GeminiModelListItem = typeof geminiModelListItemSchema.infer;
 
-const modelsSchema = type("unknown[]")
-	.pipe(items => {
-		const parsedItems: GeminiModelListItem[] = [];
-		for (const item of items) {
-			const parsed = geminiModelListItemSchema(item);
-			if (!(parsed instanceof type.errors)) {
-				parsedItems.push(parsed);
-			}
-		}
-		return parsedItems;
-	})
-	.default(() => []);
+const modelsSchema = geminiModelListItemSchema.array();
 
 const geminiModelListResponseSchema = type({
 	models: modelsSchema,
-	"nextPageToken?": resilientString,
+	"nextPageToken?": "string",
 });
 /**
  * Configuration for Google Generative AI model discovery.
@@ -97,6 +86,7 @@ export async function fetchGeminiModels(
 			response = await fetchImpl(requestUrl, {
 				method: "GET",
 				signal: options.signal,
+				redirect: "error",
 			});
 		} catch {
 			return null;
@@ -119,6 +109,7 @@ export async function fetchGeminiModels(
 		}
 
 		for (const item of parsed.models) {
+			if (!normalizeModelId(item.name)) return null;
 			const model = normalizeModel(item, baseUrl, bundledById);
 			if (model) {
 				modelsById.set(model.id, model);
@@ -127,16 +118,16 @@ export async function fetchGeminiModels(
 
 		const token = normalizePageToken(parsed.nextPageToken);
 		if (!token) {
-			break;
+			return Array.from(modelsById.values()).sort((left, right) => left.id.localeCompare(right.id));
 		}
 		if (seenTokens.has(token)) {
-			break;
+			return null;
 		}
 		seenTokens.add(token);
 		nextPageToken = token;
 	}
 
-	return Array.from(modelsById.values()).sort((left, right) => left.id.localeCompare(right.id));
+	return null;
 }
 
 function buildModelsUrl(baseUrl: string, apiKey: string, pageSize: number, pageToken?: string): URL {

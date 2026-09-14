@@ -26,13 +26,11 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
 
-	// Stub transport: reject every request so refresh("online") drives the full
-	// online discovery path with deterministic, instant failures instead of real
-	// network. Provider fetches (dynamic + stencil.so) are caught and swallowed,
-	// leaving the registry with its bundled catalog plus runtime overlays.
+	// Nonretryable responses exercise discovery failure without real network or
+	// transport retry delays; retained catalogs and runtime overlays remain visible.
 	const offlineFetch: FetchImpl = input => {
 		fetchRequests.push(String(input));
-		return Promise.reject(new Error("network disabled in model-registry runtime test"));
+		return Promise.resolve(new Response(null, { status: 401 }));
 	};
 
 	beforeEach(async () => {
@@ -134,7 +132,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(fetchRequests).not.toContain("https://api.cline.bot/api/v1/ai/cline/recommended-models");
 		expect(registry.find("cline-pass", "kimi-k3")).toBeDefined();
-	});
+	}, 30_000);
 
 	test("validates provider config before mutating custom API state", () => {
 		const beforeAnthropicCount = registry.getAll().filter(model => model.provider === "anthropic").length;
@@ -341,6 +339,35 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(dynamicFetches).toBe(1);
 		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
 		expect(registry.find(providerName, "fallback-model")).toBeDefined();
+	});
+
+	test("invalid runtime model rows cannot replace the previous complete snapshot", async () => {
+		let invalid = false;
+		registry.registerProvider(
+			"runtime-invalid",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				api: "openai-completions",
+				apiKey: "fixture",
+				fetchDynamicModels: async () =>
+					invalid
+						? [
+								{ ...baseModel, id: "new" },
+								{ ...baseModel, id: "" },
+							]
+						: [{ ...baseModel, id: "live" }],
+			},
+			"ext://runtime",
+		);
+		await registry.refreshRuntimeProviders("online");
+		invalid = true;
+		await registry.refreshRuntimeProviders("online");
+		expect(
+			registry
+				.getAll()
+				.filter(model => model.provider === "runtime-invalid")
+				.map(model => model.id),
+		).toEqual(["live"]);
 	});
 
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {

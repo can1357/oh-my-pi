@@ -155,43 +155,46 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	}
 
 	const fetchImpl = discoveryFetch(options.fetch);
-	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
-		let response: Response;
-		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
-				method: "GET",
-				headers: requestHeaders,
-				signal,
-			});
-		} catch {
-			return null;
+	const fetchEntries = async (signal?: AbortSignal): Promise<ParsedOpenAICompatibleModelRecord[] | null> => {
+		const entries: ParsedOpenAICompatibleModelRecord[] = [];
+		const seenCursors = new Set<string>();
+		let cursor: string | undefined;
+		for (let page = 0; page < 100; page++) {
+			let payload: unknown;
+			try {
+				const url = new URL(`${baseUrl}${MODELS_PATH}`);
+				if (cursor !== undefined) {
+					url.searchParams.set(options.api === "anthropic-messages" ? "after_id" : "after", cursor);
+				}
+				const response = await fetchImpl(url.toString(), {
+					method: "GET",
+					headers: requestHeaders,
+					signal,
+					redirect: "error",
+				});
+				if (!response.ok || /\brel\s*=\s*["']?next\b/i.test(response.headers.get("link") ?? "")) return null;
+				payload = await response.json();
+			} catch {
+				return null;
+			}
+			const parsed = extractModelEntries(payload);
+			if (parsed === null) return null;
+			for (const entry of parsed.entries) entries.push(entry);
+			if (parsed.cursor === undefined) return entries;
+			if (seenCursors.has(parsed.cursor) || parsed.entries.length === 0) return null;
+			seenCursors.add(parsed.cursor);
+			cursor = parsed.cursor;
 		}
-
-		if (!response.ok) {
-			return null;
-		}
-
-		try {
-			return await response.json();
-		} catch {
-			return null;
-		}
+		return null;
 	};
-	const payload =
+	const entries =
 		options.signal !== undefined
-			? await fetchPayload(options.signal)
+			? await fetchEntries(options.signal)
 			: await withOpenAICompatibleDiscoveryTimeout(
 					options.timeoutMs ?? DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
-					fetchPayload,
+					fetchEntries,
 				);
-	if (payload === null) {
-		return null;
-	}
-
-	const entries = extractModelEntries(payload);
-	if (entries === null) {
-		return null;
-	}
+	if (entries === null) return null;
 
 	const context: OpenAICompatibleModelMapperContext<TApi> = {
 		api: options.api,
@@ -217,9 +220,8 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 		// `mapModel` returning null skips the entry (documented contract); only a
 		// missing mapper falls back to the defaults.
 		const mapped = options.mapModel ? options.mapModel(entry, defaults, context) : defaults;
-		if (!mapped || typeof mapped.id !== "string" || mapped.id.length === 0) {
-			continue;
-		}
+		if (mapped === null) continue;
+		if (!mapped || typeof mapped.id !== "string" || mapped.id.trim().length === 0) return null;
 		if (options.filterModel && !options.filterModel(entry, mapped)) {
 			continue;
 		}
@@ -237,30 +239,52 @@ function normalizeBaseUrl(baseUrl: string): string {
 	return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 }
 
-function extractModelEntries(payload: unknown): ParsedOpenAICompatibleModelRecord[] | null {
-	return extractModelEntriesFromNode(payload);
+interface ModelPage {
+	entries: ParsedOpenAICompatibleModelRecord[];
+	cursor?: string;
 }
 
-function extractModelEntriesFromNode(node: unknown): ParsedOpenAICompatibleModelRecord[] | null {
+export function extractModelEntries(node: unknown, depth = 0): ModelPage | null {
+	if (depth > 10) return null;
 	const parsedPayload = openAICompatibleModelsPayloadSchema(node);
-	if (parsedPayload instanceof type.errors) {
-		return null;
-	}
+	if (parsedPayload instanceof type.errors) return null;
 	if (Array.isArray(parsedPayload)) {
-		const parsedEntries = parsedPayload
-			.map(entry => openAICompatibleModelRecordSchema(entry))
-			.flatMap(entry => (entry instanceof type.errors ? [] : [entry]));
-		return parsedEntries;
-	}
-	for (const candidate of [parsedPayload.data, parsedPayload.models, parsedPayload.result, parsedPayload.items]) {
-		if (candidate === undefined) {
-			continue;
+		const entries: ParsedOpenAICompatibleModelRecord[] = [];
+		for (const entry of parsedPayload) {
+			const parsed = openAICompatibleModelRecordSchema(entry);
+			if (parsed instanceof type.errors || parsed.id.trim().length === 0) return null;
+			entries.push(parsed);
 		}
-		const nested = extractModelEntriesFromNode(candidate);
-		if (nested !== null) {
-			return nested;
-		}
+		return { entries };
 	}
-
-	return null;
+	const envelope = parsedPayload as OpenAICompatibleModelsEnvelope;
+	// Unknown continuation contracts must never turn one page into a complete catalog.
+	for (const key of [
+		"next",
+		"next_page",
+		"nextPage",
+		"next_page_token",
+		"nextPageToken",
+		"next_cursor",
+		"nextCursor",
+		"pagination",
+		"links",
+		"hasMore",
+	]) {
+		if (envelope[key] !== undefined && envelope[key] !== null && envelope[key] !== false && envelope[key] !== "")
+			return null;
+	}
+	if (envelope.has_more !== undefined && typeof envelope.has_more !== "boolean") return null;
+	const candidates = [envelope.data, envelope.models, envelope.result, envelope.items].filter(
+		value => value !== undefined,
+	);
+	if (candidates.length !== 1) return null;
+	const nested = extractModelEntries(candidates[0], depth + 1);
+	if (nested === null) return null;
+	if (envelope.has_more === true) {
+		if (nested.cursor !== undefined || typeof envelope.last_id !== "string" || !envelope.last_id.trim()) return null;
+		return { entries: nested.entries, cursor: envelope.last_id };
+	}
+	if (envelope.has_more === false && nested.cursor !== undefined) return null;
+	return nested;
 }

@@ -9,6 +9,10 @@ import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import type { Api, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	extractModelEntries,
+	type OpenAICompatibleModelRecord,
+} from "@oh-my-pi/pi-catalog/discovery/openai-compatible";
+import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
 	resolveModelReference,
@@ -323,13 +327,41 @@ function extractLlamaCppModelInputCapabilities(item: Record<string, unknown>): (
 	return modalities.has("image") ? ["text", "image"] : ["text"];
 }
 
-function parseLlamaCppModelList(payload: unknown): LlamaCppModelListEntry[] {
-	if (!isRecord(payload) || !Array.isArray(payload.data)) {
-		return [];
+async function fetchCompleteModelEntries(
+	ctx: DiscoveryContext,
+	modelsUrl: string,
+	headers: Record<string, string>,
+	signal: AbortSignal,
+	api: Api | undefined,
+): Promise<(OpenAICompatibleModelRecord & { id: string })[]> {
+	const entries: (OpenAICompatibleModelRecord & { id: string })[] = [];
+	const seen = new Set<string>();
+	let cursor: string | undefined;
+	for (let page = 0; page < 100; page++) {
+		const url = new URL(modelsUrl);
+		if (cursor !== undefined) url.searchParams.set(api === "anthropic-messages" ? "after_id" : "after", cursor);
+		const response = await ctx.fetch(url.toString(), { headers, signal, redirect: "error" });
+		if (!response.ok) throw new Error(`HTTP ${response.status} from model discovery`);
+		if (/\brel\s*=\s*["']?next\b/i.test(response.headers.get("link") ?? ""))
+			throw new Error("Unsupported model discovery pagination");
+		const parsed = extractModelEntries(await response.json());
+		if (parsed === null) throw new Error("Malformed or unsupported model discovery response");
+		for (const entry of parsed.entries) entries.push(entry);
+		if (parsed.cursor === undefined) return entries;
+		if (seen.has(parsed.cursor) || parsed.entries.length === 0)
+			throw new Error("Model discovery pagination did not advance");
+		seen.add(parsed.cursor);
+		cursor = parsed.cursor;
 	}
-	return payload.data.flatMap(item => {
-		if (!isRecord(item) || typeof item.id !== "string" || !item.id) {
-			return [];
+	throw new Error("Model discovery pagination exceeded its page limit");
+}
+
+function parseLlamaCppModelList(payload: unknown): LlamaCppModelListEntry[] {
+	const parsed = extractModelEntries(payload);
+	if (parsed === null || parsed.cursor !== undefined) throw new Error("Malformed or incomplete llama.cpp model list");
+	return parsed.entries.flatMap(item => {
+		if (!isRecord(item) || typeof item.id !== "string" || !item.id.trim()) {
+			throw new Error("Malformed llama.cpp model entry");
 		}
 		return [
 			{
@@ -480,16 +512,25 @@ export async function discoverOllamaModels(
 		const response = await ctx.fetch(tagsUrl, {
 			headers,
 			signal,
+			redirect: "error",
 		});
 		if (!response.ok) {
 			throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
 		}
-		return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
+		if (/\brel\s*=\s*["']?next\b/i.test(response.headers.get("link") ?? ""))
+			throw new Error("Unsupported Ollama pagination");
+		return (await response.json()) as unknown;
 	});
-	const entries = (payload.models ?? []).flatMap(item => {
-		const id = item.model || item.name;
-		return id ? [{ id, name: item.name || id }] : [];
+	if (!isRecord(payload) || !Array.isArray(payload.models)) throw new Error("Malformed Ollama model list");
+	const rawEntries = payload.models.map(item => {
+		if (!isRecord(item)) throw new Error("Malformed Ollama model entry");
+		const id = item.model ?? item.name;
+		if (typeof id !== "string" || !id.trim()) throw new Error("Malformed Ollama model identifier");
+		return { ...item, id };
 	});
+	const parsed = extractModelEntries({ ...payload, models: rawEntries });
+	if (parsed === null || parsed.cursor !== undefined) throw new Error("Malformed or incomplete Ollama model list");
+	const entries = parsed.entries.map(item => ({ id: item.id, name: item.name || item.id }));
 	const metadataById = new Map(
 		await Promise.all(
 			entries.map(
@@ -606,15 +647,9 @@ export async function discoverLlamaCppModels(
 	const attempt = async (h: Record<string, string>) => {
 		const [payload, metadata] = await Promise.all([
 			withTimeoutSignal(discoveryProbeTimeoutMs(baseUrl, 250, customTimeoutMs), async signal => {
-				const response = await ctx.fetch(modelsUrl, {
-					headers: h,
-					signal,
-				});
-				if (!response.ok) {
-					throw new Error(`HTTP ${response.status} from ${modelsUrl}`);
-				}
+				const entries = await fetchCompleteModelEntries(ctx, modelsUrl, h, signal, providerConfig.api);
 				headers = h;
-				return (await response.json()) as unknown;
+				return { data: entries };
 			}),
 			discoverLlamaCppServerMetadata(ctx, baseUrl, h, customTimeoutMs),
 		]);
@@ -832,24 +867,9 @@ export async function discoverOpenAIModelsList(
 				: Promise.resolve(null);
 		const [payload, nativeMetadata] = await Promise.all([
 			withTimeoutSignal(timeoutMs, async signal => {
-				const res = await ctx.fetch(modelsUrl, {
-					headers: h,
-					signal,
-				});
-				if (!res.ok) {
-					throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
-				}
+				const entries = await fetchCompleteModelEntries(ctx, modelsUrl, h, signal, providerConfig.api);
 				headers = h;
-				return (await res.json()) as {
-					data?: Array<{
-						id?: string;
-						max_model_len?: unknown;
-						context_length?: unknown;
-						input?: unknown;
-						input_modalities?: unknown;
-						architecture?: unknown;
-					}>;
-				};
+				return { data: entries };
 			}),
 			nativeMetadataPromise,
 		]);
@@ -859,12 +879,11 @@ export async function discoverOpenAIModelsList(
 	const [payload, nativeMetadata] = apiKey
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
-	const models = payload.data ?? [];
+	const models = payload.data;
 	const references = getBundledModelReferenceIndex();
 	const discovered: Model<Api>[] = [];
 	for (const item of models) {
 		const id = item.id;
-		if (!id) continue;
 		const nativeMetadataForModel = nativeMetadata?.get(id);
 		// Thin OpenAI-compatible proxies frequently omit `context_length`/
 		// `max_model_len` on `/v1/models`, leaving discovered models pinned at
@@ -897,7 +916,11 @@ export async function discoverOpenAIModelsList(
 				reasoning: reference?.reasoning ?? false,
 				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 				input: nativeMetadataForModel?.input ??
-					extractOpenAIModelsListInputCapabilities(item) ??
+					extractOpenAIModelsListInputCapabilities({
+						input: item.input,
+						input_modalities: item.input_modalities,
+						architecture: item.architecture,
+					}) ??
 					reference?.input ?? ["text"],
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 				// Proxy/gateway pricing is provider-specific and rarely matches
@@ -978,7 +1001,7 @@ export async function discoverLiteLLMModels(
 		}
 		richModels = null;
 	}
-	if (!richModels || richModels.length === 0) {
+	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
 	return richModels.map(spec => buildModel({ ...spec, headers }));
@@ -1011,28 +1034,26 @@ export async function discoverProxyModels(
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) =>
 		withTimeoutSignal(timeoutMs, async signal => {
-			const res = await ctx.fetch(modelsUrl, {
-				headers: h,
-				signal,
-			});
-			if (!res.ok) {
-				throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
-			}
+			const entries = await fetchCompleteModelEntries(ctx, modelsUrl, h, signal, providerConfig.api);
 			headers = h;
-			return (await res.json()) as {
-				data?: Array<{ id?: string; name?: string; supported_endpoint_types?: string[]; context_length?: number }>;
-			};
+			return { data: entries };
 		});
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const payload = apiKey
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
-	const items = payload.data ?? [];
+	const items = payload.data;
 	const discovered: Model<Api>[] = [];
 	for (const item of items) {
 		const id = item.id;
-		if (!id) continue;
-		const endpoints = item.supported_endpoint_types ?? [];
+		if (
+			item.supported_endpoint_types !== undefined &&
+			(!Array.isArray(item.supported_endpoint_types) ||
+				!item.supported_endpoint_types.every(value => typeof value === "string"))
+		) {
+			throw new Error("Malformed proxy endpoint types");
+		}
+		const endpoints = (item.supported_endpoint_types ?? []) as string[];
 		const api: Api | undefined = endpoints.includes("anthropic")
 			? "anthropic-messages"
 			: endpoints.includes("openai")

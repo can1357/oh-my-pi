@@ -225,6 +225,79 @@ describe("ModelRegistry", () => {
 		);
 	}
 
+	async function scopedCacheRegistry(
+		config: Record<string, unknown>,
+		opts: { seedCache: (dbPath: string) => void },
+	): Promise<ModelRegistry> {
+		const configPath = sharedConfigPath(config, opts.seedCache);
+		const dbPath = path.join(path.dirname(configPath), "models.db");
+		const db = new Database(dbPath);
+		const seeds = db
+			.query<{ provider_id: string; models: string }, []>("SELECT provider_id, models FROM model_cache")
+			.all();
+		const auth = await AuthStorage.create(":memory:");
+		const providers = new Set(
+			seeds.map(seed => (JSON.parse(seed.models) as Model[])[0]?.provider ?? seed.provider_id),
+		);
+		for (const provider of providers) auth.setRuntimeApiKey(provider, "cache-fixture-key");
+		const fetch: FetchImpl = async () => new Response("Fixture discovery denied", { status: 401 });
+		try {
+			const registry = new ModelRegistry(auth, configPath, { fetch });
+			for (const provider of providers) await registry.refreshProvider(provider, "online");
+			for (const seed of seeds) {
+				const provider = (JSON.parse(seed.models) as Model[])[0]?.provider ?? seed.provider_id;
+				const target = db
+					.query<{ provider_id: string }, [string]>("SELECT provider_id FROM model_cache WHERE provider_id LIKE ?")
+					.all(`${provider}%`)
+					.find(row => row.provider_id !== seed.provider_id);
+				if (!target) throw new Error(`Discovery did not create a scoped cache for ${provider}`);
+				const columns = db
+					.query<{ name: string }, []>("PRAGMA table_info(model_cache)")
+					.all()
+					.map(row => row.name)
+					.filter(name => name !== "provider_id");
+				db.run(
+					`UPDATE model_cache SET (${columns.join(",")}) = (SELECT ${columns.join(",")} FROM model_cache WHERE provider_id = ?) WHERE provider_id = ?`,
+					[seed.provider_id, target.provider_id],
+				);
+			}
+			return new ModelRegistry(auth, configPath, { fetch });
+		} finally {
+			db.close();
+			// The returned registry's synchronous reads still need its credential identity.
+			cacheFixtureAuth.push(auth);
+		}
+	}
+	const cacheFixtureAuth: AuthStorage[] = [];
+	afterAll(() => {
+		for (const auth of cacheFixtureAuth) auth.close();
+	});
+
+	async function writeScopedCodexCache(
+		provider: string,
+		updatedAt: number,
+		models: Model[],
+		authoritative: boolean,
+		fingerprint: string,
+		dbPath: string,
+	) {
+		authStorage.setRuntimeApiKey(provider, "cache-fixture-key");
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => new Response("Fixture discovery denied", { status: 401 }),
+		});
+		await registry.refreshProvider(provider, "online");
+		const db = new Database(dbPath);
+		try {
+			const row = db
+				.query<{ provider_id: string }, [string]>("SELECT provider_id FROM model_cache WHERE provider_id LIKE ?")
+				.get(`${provider}:%`);
+			if (!row) throw new Error(`Discovery did not create a scoped cache for ${provider}`);
+			writeModelCache(row.provider_id, updatedAt, models, authoritative, fingerprint, dbPath, [], undefined, true);
+		} finally {
+			db.close();
+		}
+	}
+
 	describe("OpenRouter routed suffix fallback", () => {
 		let registry: ModelRegistry;
 		beforeAll(() => {
@@ -1835,7 +1908,7 @@ describe("ModelRegistry", () => {
 			// Wire-value row, as discovery persists it; the cache loader
 			// applies the models.yml override before composition sees it, so
 			// the clamp must hold on every override pass, not just the last.
-			writeModelCache(
+			await writeScopedCodexCache(
 				"openai-codex",
 				Date.now(),
 				[{ ...astra, contextWindow: 272_000, maxContextWindow: 872_000 }],
@@ -1852,7 +1925,7 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			const astra = registry.find("openai-codex", "gpt-6-astra");
 			if (!astra) throw new Error("Expected bundled Astra model");
-			writeModelCache(
+			await writeScopedCodexCache(
 				"openai-codex",
 				Date.now(),
 				[
@@ -1888,11 +1961,25 @@ describe("ModelRegistry", () => {
 			const astra = registry.find("openai-codex", "gpt-6-astra");
 			if (!astra) throw new Error("Expected bundled Astra model");
 			const dbPath = path.join(tempDir, "models.db");
-			writeModelCache("openai-codex", Date.now(), [{ ...astra, maxContextWindow: 1_200_000 }], true, "", dbPath);
+			await writeScopedCodexCache(
+				"openai-codex",
+				Date.now(),
+				[{ ...astra, maxContextWindow: 1_200_000 }],
+				true,
+				"",
+				dbPath,
+			);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(1_200_000);
 
-			writeModelCache("openai-codex", Date.now(), [{ ...astra, maxContextWindow: 872_000 }], true, "", dbPath);
+			await writeScopedCodexCache(
+				"openai-codex",
+				Date.now(),
+				[{ ...astra, maxContextWindow: 872_000 }],
+				true,
+				"",
+				dbPath,
+			);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 		});
@@ -1903,7 +1990,7 @@ describe("ModelRegistry", () => {
 			const legacy = registry.find("openai-codex", "gpt-5.5");
 			const spark = registry.find("openai-codex", "gpt-5.3-codex-spark");
 			if (!legacy || !spark) throw new Error("Expected bundled Codex models");
-			writeModelCache(
+			await writeScopedCodexCache(
 				"openai-codex",
 				Date.now(),
 				[
@@ -2298,8 +2385,8 @@ describe("ModelRegistry", () => {
 				contextWindow: 222_222,
 				maxTokens: 8_888,
 			});
-		beforeAll(() => {
-			sharedCatalogCache = readonlyRegistry(
+		beforeAll(async () => {
+			sharedCatalogCache = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
@@ -2337,7 +2424,7 @@ describe("ModelRegistry", () => {
 					},
 				},
 			);
-			staticOnlySharedCatalogCache = readonlyRegistry(
+			staticOnlySharedCatalogCache = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
@@ -2404,7 +2491,7 @@ describe("ModelRegistry", () => {
 					},
 				},
 			);
-			standardCache = readonlyRegistry(
+			standardCache = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
@@ -2444,7 +2531,7 @@ describe("ModelRegistry", () => {
 					},
 				},
 			);
-			specialCache = readonlyRegistry(
+			specialCache = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
@@ -2492,14 +2579,24 @@ describe("ModelRegistry", () => {
 					},
 				},
 			);
-			vertexAuthoritative = readonlyRegistry(
+			vertexAuthoritative = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath =>
-						writeModelCache("google-vertex", Date.now(), [vertexProjectModel()], true, "", dbPath),
+						writeModelCache(
+							"google-vertex",
+							Date.now(),
+							[vertexProjectModel()],
+							true,
+							"",
+							dbPath,
+							[],
+							undefined,
+							true,
+						),
 				},
 			);
-			syntheticCacheLoad = readonlyRegistry(
+			syntheticCacheLoad = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath =>
@@ -2523,17 +2620,20 @@ describe("ModelRegistry", () => {
 							true,
 							"authoritative:test",
 							dbPath,
+							[],
+							undefined,
+							true,
 						),
 				},
 			);
-			vertexNonAuthoritative = readonlyRegistry(
+			vertexNonAuthoritative = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					seedCache: dbPath =>
 						writeModelCache("google-vertex", Date.now(), [vertexProjectModel()], false, "", dbPath),
 				},
 			);
-			vertexStale = readonlyRegistry(
+			vertexStale = await scopedCacheRegistry(
 				{ providers: {} },
 				{
 					// 25h old > 24h TTL → cache.fresh === false even though authoritative === true.
@@ -2545,10 +2645,13 @@ describe("ModelRegistry", () => {
 							true,
 							"",
 							dbPath,
+							[],
+							undefined,
+							true,
 						),
 				},
 			);
-			cachedDiscoverableRemoteCompaction = readonlyRegistry(
+			cachedDiscoverableRemoteCompaction = await scopedCacheRegistry(
 				{
 					providers: {
 						"cached-compact-proxy": {
@@ -2629,7 +2732,7 @@ describe("ModelRegistry", () => {
 						dbPath,
 					),
 			});
-			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
+			litellmCurrentNamespaceCache = await scopedCacheRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
 						"litellm-proxy:litellm-rich-v4",
@@ -2679,7 +2782,7 @@ describe("ModelRegistry", () => {
 						),
 				},
 			);
-		});
+		}, 30_000);
 
 		test("legacy cached discovery sentinels are ignored after nullable limit cutover", () => {
 			const model = legacySentinels.find("openai", "gpt-4o");
@@ -2783,10 +2886,10 @@ describe("ModelRegistry", () => {
 			expect(vertexModels.some(model => model.id.startsWith("gemini-"))).toBe(true);
 		});
 
-		test("keeps bundled google-vertex fallback when cached project catalog is stale", () => {
+		test("retains complete google-vertex membership when the project catalog is stale", () => {
 			const vertexModels = getModelsForProvider(vertexStale, "google-vertex");
 			expect(vertexModels.some(model => model.id === "zai-org/glm-4.7-maas")).toBe(true);
-			expect(vertexModels.some(model => model.id.startsWith("gemini-"))).toBe(true);
+			expect(vertexModels.some(model => model.id.startsWith("gemini-"))).toBe(false);
 		});
 
 		test("hydrates only shared-catalog additions from cache", () => {

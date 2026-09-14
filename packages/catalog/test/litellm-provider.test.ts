@@ -8,6 +8,31 @@ import {
 import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+test("complete empty rich membership does not fall through to another endpoint", async () => {
+	const urls: string[] = [];
+	const models = await fetchLiteLLMRichModels({
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "http://primary:4000/v1",
+		fetch: async input => {
+			urls.push(String(input));
+			return Response.json({ data: [] });
+		},
+	});
+	expect(models).toEqual([]);
+	expect(urls).toEqual(["http://primary:4000/model_group/info"]);
+});
+
+test("malformed rich membership cannot publish its valid sibling", async () => {
+	const models = await fetchLiteLLMRichModels({
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "http://primary:4000/v1",
+		fetch: async () => Response.json({ data: [{ model_name: "valid" }, {}] }),
+	});
+	expect(models).toBeNull();
+});
+
 const ORIGINAL_LITELLM_BASE_URL = Bun.env.LITELLM_BASE_URL;
 const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
 function makeLiteLLMSentinelPlaceholder(modelGroup: string) {

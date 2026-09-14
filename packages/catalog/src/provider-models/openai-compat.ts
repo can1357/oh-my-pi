@@ -870,7 +870,7 @@ async function fetchUmansModelsInfo(options: {
 	}
 	const models: ModelSpec<"anthropic-messages">[] = [];
 	for (const [modelId, value] of Object.entries(payload)) {
-		if (!isRecord(value)) continue;
+		if (!modelId.trim() || !isRecord(value)) return null;
 		const mapped = mapUmansModelInfo(modelId, value, options.baseUrl, options.references.get(modelId));
 		if (mapped) {
 			models.push(mapped);
@@ -1424,12 +1424,23 @@ async function fetchDeepinfraModels(options: {
 	if (!isRecord(payload) || !Array.isArray(payload.data)) {
 		return null;
 	}
+	for (const key of [
+		"has_more",
+		"hasMore",
+		"next",
+		"next_page",
+		"nextPageToken",
+		"next_cursor",
+		"pagination",
+		"links",
+	]) {
+		if (payload[key] !== undefined && payload[key] !== null && payload[key] !== false && payload[key] !== "")
+			return null;
+	}
 	const models: ModelSpec<"openai-completions">[] = [];
 	const seen = new Set<string>();
 	for (const entry of payload.data) {
-		if (!isRecord(entry)) {
-			continue;
-		}
+		if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim()) return null;
 		const reference = typeof entry.id === "string" ? options.references.get(entry.id) : undefined;
 		const mapped = mapDeepinfraModel(entry as DeepinfraModelEntry, options.baseUrl, reference);
 		if (mapped && !seen.has(mapped.id)) {
@@ -5491,23 +5502,30 @@ function toNonEmptyString(value: unknown): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function extractLiteLLMRichEntries(payload: unknown): LiteLLMRichModelEntry[] | null {
-	if (Array.isArray(payload)) {
-		return payload.flatMap(entry => (isRecord(entry) ? [entry] : []));
+function extractLiteLLMRichEntries(payload: unknown, depth = 0): LiteLLMRichModelEntry[] | null {
+	if (depth > 10) return null;
+	if (Array.isArray(payload)) return payload.every(isRecord) ? payload : null;
+	if (!isRecord(payload)) return null;
+	for (const key of [
+		"has_more",
+		"hasMore",
+		"next",
+		"next_page",
+		"nextPage",
+		"nextPageToken",
+		"next_page_token",
+		"next_cursor",
+		"nextCursor",
+		"pagination",
+		"links",
+	]) {
+		if (payload[key] !== undefined && payload[key] !== null && payload[key] !== false && payload[key] !== "")
+			return null;
 	}
-	if (!isRecord(payload)) {
-		return null;
-	}
-	for (const candidate of [payload.data, payload.models, payload.result, payload.items]) {
-		if (candidate === undefined) {
-			continue;
-		}
-		const entries = extractLiteLLMRichEntries(candidate);
-		if (entries !== null) {
-			return entries;
-		}
-	}
-	return null;
+	const candidates = [payload.data, payload.models, payload.result, payload.items].filter(
+		value => value !== undefined,
+	);
+	return candidates.length === 1 ? extractLiteLLMRichEntries(candidates[0], depth + 1) : null;
 }
 
 function getLiteLLMModelInfo(entry: LiteLLMRichModelEntry): LiteLLMRichModelEntry | undefined {
@@ -5807,6 +5825,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			method: "GET",
 			headers: requestHeaders,
 			signal,
+			redirect: "error",
 		});
 	} catch (error) {
 		return { failure: { endpoint, reason: "network-error", error } };
@@ -5820,12 +5839,14 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 	} catch (error) {
 		return { failure: { endpoint, reason: "invalid-json", status: response.status, error } };
 	}
+	if (/\brel\s*=\s*["']?next\b/i.test(response.headers.get("link") ?? "")) return null;
 	const entries = extractLiteLLMRichEntries(payload);
-	if (!entries || entries.length === 0) {
+	if (entries === null) {
 		return null;
 	}
 	const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
 	for (const entry of entries) {
+		if (!isLiteLLMUnusableSentinelPlaceholder(entry) && !getLiteLLMRichModelId(entry)) return null;
 		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl);
 		if (model) {
 			const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
@@ -5851,9 +5872,8 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
 		}
 	}
-	if (deduped.size === 0) {
-		return null;
-	}
+	// Sentinel-only management responses do not enumerate account membership.
+	if (entries.length > 0 && deduped.size === 0) return null;
 	const models = Array.from(deduped.values()).sort((left, right) => left.model.id.localeCompare(right.model.id));
 	return {
 		models,
@@ -5871,6 +5891,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 	}
 	const fetchModels = async (signal?: AbortSignal): Promise<ModelSpec<TApi>[] | null> => {
 		const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
+		let completeMembership = false;
 		let metadataFailure: LiteLLMRichEndpointFailure | undefined;
 		for (const endpoint of LITELLM_RICH_ENDPOINTS) {
 			const result = await fetchLiteLLMRichEndpoint(endpoint, options, managementBaseUrl, runtimeBaseUrl, signal);
@@ -5892,7 +5913,8 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				}
 				continue;
 			}
-			const hadPriorModels = deduped.size > 0;
+			const hadPriorModels = completeMembership;
+			completeMembership = true;
 			for (const next of result.models) {
 				const existing = deduped.get(next.model.id);
 				if (!existing) {
@@ -5922,7 +5944,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				break;
 			}
 		}
-		if (deduped.size === 0) {
+		if (!completeMembership) {
 			if (metadataFailure) {
 				warnLiteLLMMetadataFallback(managementBaseUrl, metadataFailure);
 			}
@@ -5975,7 +5997,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				resolveApi: resolveLiteLLMApi,
 				timeoutMs: 10_000,
 			});
-			if (richModels && richModels.length > 0) {
+			if (richModels !== null) {
 				return richModels;
 			}
 			return fetchOpenAICompatibleModels<Api>({

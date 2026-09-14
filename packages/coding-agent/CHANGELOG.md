@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added global and per-provider `modelDiscovery.mode` (`auto`, `merge`, `replace`) and `cacheTtlMs` policies in `models.yml`.
 - Added `tui.vimMode`, an opt-in modal editing layer for the prompt, off by default ([#3299](https://github.com/can1357/oh-my-pi/issues/3299)). Escape leaves Insert; Normal mode has `hjkl`, `0`, `^`, `$`, `w`, `b`, `e`, `gg`, `G`, count prefixes, `x`/`D`/`C`, `dd`/`yy`, `p`/`P` and `u`; `v`/`V` start a Visual selection that `y` copies and `d` deletes.
 - Added a `vim` status-line segment showing the current Vim mode (`NORMAL`/`INSERT`/`VISUAL`/`V-LINE`), the half-typed command beside it (Vim's `showcmd`, e.g. `2d`), and the Visual selection height (`V-LINE 4L`). Included in every built-in preset and hidden entirely unless `tui.vimMode` is on; `custom` preset users can add `"vim"` to `statusLine.leftSegments`.
 - The cursor now changes shape with the Vim mode: block in Normal/Visual, thin/underline in Insert. Applies to the software cursor, and to the real terminal cursor (DECSCUSR) when `PI_HARDWARE_CURSOR` is set.
@@ -16,6 +17,7 @@
 - The prompt border now colors Insert mode too (green), instead of falling through to the session accent. Normal and Visual were already colored, so Insert was the one mode the border could not distinguish — on themes whose accent matches the session accent it was indistinguishable from Normal. Borders outside Vim mode are unchanged.
 ### Fixed
 
+- Isolated discovered model caches and publication by endpoint and effective credential identity; removed IDs stay removed during failed/offline refreshes, while explicit models remain available.
 - Repeated soft compaction now includes messages retained by the previous pass instead of silently dropping them from model context.
 
 ## [18.1.16] - 2026-09-09

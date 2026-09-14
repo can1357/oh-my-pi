@@ -5,7 +5,6 @@ import { describe, expect, it } from "bun:test";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { createModelManager } from "../src/model-manager";
 
 const BASE_URL = "https://copilot.example.com";
@@ -557,7 +556,7 @@ describe("github-copilot multi-account discovery failures", () => {
 		}
 	});
 
-	it("rejects incomplete authoritative cache when cached models have unrestorable headers and refresh fails", async () => {
+	it("does not resurrect absent bundled models when discovered headers cannot be restored", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-copilot-cache-unrestorable-"));
 		try {
 			const cacheDbPath = path.join(tempDir, "models.db");
@@ -596,14 +595,11 @@ describe("github-copilot multi-account discovery failures", () => {
 
 			failFetch = true;
 			const result = await manager.refresh("online");
-			// Incomplete cache must not be retained as authoritative
-			expect(result.authoritative).toBe(false);
-			// Bundled models must be merged rather than pruned to an incomplete list
-			expect(result.models.map(m => m.id)).toEqual(["bundled-model"]);
-
-			// Persisted cache snapshot must not be authoritative
-			const cached = readModelCache("github-copilot", 24 * 60 * 60 * 1000, Date.now, cacheDbPath);
-			expect(cached?.authoritative).toBe(false);
+			expect(result.authoritative).toBe(true);
+			expect(result.stale).toBe(true);
+			expect(result.models).toEqual([]);
+			expect(result.updatedAt).toBe(initial.updatedAt);
+			expect((await manager.refresh("offline")).models).toEqual([]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

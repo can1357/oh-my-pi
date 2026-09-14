@@ -34,7 +34,35 @@ providers:
 
 `provider-id` is the canonical provider key used across selection and auth lookup.
 
-The root object currently contains only `providers`; unknown root keys fail schema validation.
+The root object accepts `providers` and an optional `modelDiscovery` policy; unknown root keys fail schema validation.
+
+## Model discovery policy
+
+```yaml
+modelDiscovery:
+  mode: auto
+  cacheTtlMs: 7200000
+providers:
+  openrouter:
+    modelDiscovery:
+      mode: replace
+      cacheTtlMs: 300000
+  curated-gateway:
+    modelDiscovery:
+      mode: merge
+```
+
+Provider fields override the corresponding global fields. `mode: auto` uses the adapter's existing completeness declaration. `merge` keeps bundled models and adds discovered models. `replace` treats a successful endpoint discovery as the complete discovered membership, removing absent bundled/discovered IDs; it has no removal effect without an endpoint fetcher. Only choose `replace` when that endpoint lists the complete model set for its credential. Shared metadata catalogs are not account availability lists.
+
+`cacheTtlMs` must be a finite nonnegative number. It controls freshness for cache-aware refreshes; `omp models refresh` forces a network attempt. A TTL is not a background polling interval. Failed discovery retains the last complete membership and last successful update time, with separate retry bookkeeping. Complete empty responses retain empty membership; adapters can use a short retry interval for an empty response without restoring removed models.
+
+Supported cursor pages must all succeed before publishing a catalog. Malformed responses, failed later pages, cursor cycles, and unsupported continuation contracts fail discovery instead of publishing a partial list. An endpoint silently omitting models without indicating pagination cannot be detected automatically.
+
+Caches are isolated by endpoint, effective credential/account identity, discovery policy and relevant configuration. A changed identity does not reuse another identity's discovered models. Older overlapping refreshes cannot replace newer results. Legacy caches without this identity or complete-membership metadata need a successful refresh; they are not upgraded into authoritative account lists. Command-backed credentials/headers are resolved for online discovery before selecting their cache identity, not executed merely to hydrate startup caches.
+
+Explicit `models` entries remain overlays and survive discovery pruning. `modelOverrides` only changes models that exist; it does not recreate a removed ID. Offline/error fallback preserves membership across bundled metadata changes. Models requiring unavailable, unpersisted headers can be hidden without admitting absent bundled IDs.
+
+Directory membership is not an inference health check. If the provider still lists an unavailable model, discovery alone cannot detect its 404, permission failure, or temporary rate limit.
 
 ## Provider-level fields
 

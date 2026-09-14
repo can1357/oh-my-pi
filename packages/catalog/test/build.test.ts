@@ -1300,23 +1300,17 @@ describe("model cache spec round trip", () => {
 			expect(initial.models.map(m => m.id)).toEqual(["model-a"]);
 			expect(initial.authoritative).toBe(true);
 
-			const db = new Database(dbPath, { readonly: true });
-			const rowInitial = db
-				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
-				.get(options.providerId);
-			expect(rowInitial?.authoritative).toBe(1);
-
 			// Online refresh fails: must retain model-a and NOT re-inject static model-b
 			failFetch = true;
 			const failedRefresh = await resolveProviderModels(options, "online");
 			expect(failedRefresh.models.map(m => m.id)).toEqual(["model-a"]);
 			expect(failedRefresh.authoritative).toBe(true);
 
-			const rowAfterFailure = db
-				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
-				.get(options.providerId);
-			db.close();
-			expect(rowAfterFailure?.authoritative).toBe(1);
+			const offline = await resolveProviderModels(options, "offline");
+			expect(offline.models.map(m => m.id)).toEqual(["model-a"]);
+			expect(offline.authoritative).toBe(true);
+			expect(offline.stale).toBe(true);
+			expect(offline.updatedAt).toBe(initial.updatedAt);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

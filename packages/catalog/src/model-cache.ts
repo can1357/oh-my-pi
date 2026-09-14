@@ -31,6 +31,8 @@ interface CacheRow {
 	version: number;
 	updated_at: number;
 	authoritative: number;
+	catalog_authoritative: number;
+	last_attempt_at: number | null;
 	static_fingerprint: string;
 	models: string;
 	header_omitted_model_ids: string;
@@ -46,6 +48,9 @@ export interface CacheEntry<TApi extends Api = Api> {
 	models: ModelSpec<TApi>[];
 	fresh: boolean;
 	authoritative: boolean;
+	/** Complete endpoint membership, independent of freshness and static metadata. */
+	catalogAuthoritative: boolean;
+	lastAttemptAt: number;
 	updatedAt: number;
 	/** Model ids whose live headers were intentionally omitted from disk. */
 	headerOmittedModelIds: readonly string[];
@@ -67,15 +72,16 @@ let sharedDbPath: string | null = null;
 
 function openDb(resolvedPath: string): Database {
 	const db = new Database(resolvedPath, { create: true });
-	// Install the busy handler BEFORE any lock-taking statement. See
-	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 3000");
-	// Schema invalidation can delete rows containing credentials written by old
-	// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
-	// free pages where a raw scan of models.db can still recover them (#5780).
-	db.run("PRAGMA secure_delete = ON");
-	db.run("PRAGMA journal_mode = WAL");
-	db.run(`
+	try {
+		// Install the busy handler BEFORE any lock-taking statement. See
+		// https://github.com/can1357/oh-my-pi/issues/2421.
+		db.run("PRAGMA busy_timeout = 3000");
+		// Schema invalidation can delete rows containing credentials written by old
+		// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
+		// free pages where a raw scan of models.db can still recover them (#5780).
+		db.run("PRAGMA secure_delete = ON");
+		db.run("PRAGMA journal_mode = WAL");
+		db.run(`
 		CREATE TABLE IF NOT EXISTS model_cache (
 			provider_id TEXT PRIMARY KEY,
 			version INTEGER NOT NULL,
@@ -88,8 +94,12 @@ function openDb(resolvedPath: string): Database {
 			models TEXT NOT NULL
 		)
 	`);
-	migrateCacheSchema(db);
-	return db;
+		migrateCacheSchema(db);
+		return db;
+	} catch (error) {
+		db.close();
+		throw error;
+	}
 }
 
 function getSharedDb(resolvedPath: string): Database {
@@ -195,6 +205,12 @@ function migrateCacheSchema(db: Database): void {
 			// header matching was introduced.
 			db.run("ALTER TABLE model_cache ADD COLUMN header_restore_version INTEGER NOT NULL DEFAULT 0");
 		}
+		if (!columns.some(column => column.name === "catalog_authoritative")) {
+			db.run("ALTER TABLE model_cache ADD COLUMN catalog_authoritative INTEGER NOT NULL DEFAULT 0");
+		}
+		if (!columns.some(column => column.name === "last_attempt_at")) {
+			db.run("ALTER TABLE model_cache ADD COLUMN last_attempt_at INTEGER");
+		}
 	} finally {
 		stmt.finalize();
 	}
@@ -204,6 +220,13 @@ function migrateCacheSchema(db: Database): void {
 	// subsequent invalidation (see #4146: pre-V2 Codex rows kept the legacy
 	// compaction path even after CACHE_SCHEMA_VERSION was bumped).
 	db.run("DELETE FROM model_cache WHERE version <> ?", [CACHE_SCHEMA_VERSION]);
+	db.run(
+		"CREATE TABLE IF NOT EXISTS model_cache_generation (provider_id TEXT PRIMARY KEY, generation INTEGER NOT NULL)",
+	);
+	db.run(
+		"CREATE TABLE IF NOT EXISTS model_cache_sequence (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL)",
+	);
+	db.run("INSERT OR IGNORE INTO model_cache_sequence VALUES (1, 0)");
 }
 
 export function readModelCache<TApi extends Api>(
@@ -236,6 +259,8 @@ export function readModelCache<TApi extends Api>(
 					fresh,
 					authoritative: row.authoritative === 1,
 					updatedAt: row.updated_at,
+					catalogAuthoritative: row.catalog_authoritative === 1,
+					lastAttemptAt: row.last_attempt_at ?? row.updated_at,
 					headerOmittedModelIds,
 					unrestorableHeaderModelIds,
 					legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
@@ -292,55 +317,140 @@ export function writeModelCache<TApi extends Api>(
 	dbPath?: string,
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
+	catalogAuthoritative = false,
+	lastAttemptAt = updatedAt,
+	generation?: number,
 ): void {
 	try {
 		withModelCacheDb(dbPath, db => {
-			const headerOmittedModelIds: string[] = [];
-			const unrestorableHeaderModelIds: string[] = [];
-			const cachedModels: ModelSpec<TApi>[] = [];
-			const staticById = new Map(staticHeaderSources.map(model => [model.id, model]));
-			for (const model of models) {
-				if (hasModelHeaders(model)) {
-					headerOmittedModelIds.push(model.id);
-					// Synthesized variants (e.g. Copilot `-1m`) have no same-id static
-					// entry; their headers come from the `requestModelId` base. Match
-					// against that source too, else they are wrongly flagged
-					// unrestorable and dropped on the next offline read (#6037, #6284).
-					const staticHeaderSource =
-						staticById.get(model.id) ?? (model.requestModelId ? staticById.get(model.requestModelId) : undefined);
-					// A model with no static source is still restorable when its live
-					// headers equal a trusted provider-wide fallback that the reader can
-					// re-derive without persisting it. This keeps reference-less models
-					// with constant or configured headers alive offline.
-					const matchesStatic = staticHeaderSource
-						? headersEqual(model.headers, staticHeaderSource.headers)
-						: headersEqual(model.headers, restorableHeaderFallback);
-					if (!matchesStatic) {
-						unrestorableHeaderModelIds.push(model.id);
+			const persist = db.transaction(() => {
+				if (generation !== undefined && !claimGeneration(db, providerId, generation)) return;
+				const headerOmittedModelIds: string[] = [];
+				const unrestorableHeaderModelIds: string[] = [];
+				const cachedModels: ModelSpec<TApi>[] = [];
+				const staticById = new Map(staticHeaderSources.map(model => [model.id, model]));
+				for (const model of models) {
+					if (hasModelHeaders(model)) {
+						headerOmittedModelIds.push(model.id);
+						// Synthesized variants (e.g. Copilot `-1m`) have no same-id static
+						// entry; their headers come from the `requestModelId` base. Match
+						// against that source too, else they are wrongly flagged
+						// unrestorable and dropped on the next offline read (#6037, #6284).
+						const staticHeaderSource =
+							staticById.get(model.id) ??
+							(model.requestModelId ? staticById.get(model.requestModelId) : undefined);
+						// A model with no static source is still restorable when its live
+						// headers equal a trusted provider-wide fallback that the reader can
+						// re-derive without persisting it. This keeps reference-less models
+						// with constant or configured headers alive offline.
+						const matchesStatic = staticHeaderSource
+							? headersEqual(model.headers, staticHeaderSource.headers)
+							: headersEqual(model.headers, restorableHeaderFallback);
+						if (!matchesStatic) {
+							unrestorableHeaderModelIds.push(model.id);
+						}
 					}
+					cachedModels.push(toCachedModelSpec(model));
 				}
-				cachedModels.push(toCachedModelSpec(model));
-			}
-			db.run(
-				`INSERT OR REPLACE INTO model_cache (
+				db.run(
+					`INSERT OR REPLACE INTO model_cache (
 					provider_id, version, updated_at, authoritative, static_fingerprint,
 					header_omitted_model_ids, unrestorable_header_model_ids,
-					header_restore_version, models
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				[
-					providerId,
-					CACHE_SCHEMA_VERSION,
-					updatedAt,
-					authoritative ? 1 : 0,
-					staticFingerprint,
-					JSON.stringify(headerOmittedModelIds),
-					JSON.stringify(unrestorableHeaderModelIds),
-					HEADER_RESTORE_VERSION,
-					JSON.stringify(cachedModels),
-				],
-			);
+					header_restore_version, models, catalog_authoritative, last_attempt_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					[
+						providerId,
+						CACHE_SCHEMA_VERSION,
+						updatedAt,
+						authoritative ? 1 : 0,
+						staticFingerprint,
+						JSON.stringify(headerOmittedModelIds),
+						JSON.stringify(unrestorableHeaderModelIds),
+						HEADER_RESTORE_VERSION,
+						JSON.stringify(cachedModels),
+						catalogAuthoritative ? 1 : 0,
+						lastAttemptAt,
+					],
+				);
+			});
+			persist.immediate();
 		});
 	} catch {
 		// Cache writes are best-effort; failures should not break model resolution.
+	}
+}
+
+function claimGeneration(db: Database, providerId: string, generation: number): boolean {
+	db.run(
+		`INSERT INTO model_cache_generation VALUES (?, ?)
+		ON CONFLICT(provider_id) DO UPDATE SET generation = excluded.generation
+		WHERE model_cache_generation.generation < excluded.generation`,
+		[providerId, generation],
+	);
+	return (
+		db
+			.query<{ generation: number }, [string]>("SELECT generation FROM model_cache_generation WHERE provider_id = ?")
+			.get(providerId)?.generation === generation
+	);
+}
+
+/** Reserve before awaiting discovery; SQLite orders independent managers and processes. */
+export function beginModelCacheRefresh(providerId: string, dbPath?: string): number | undefined {
+	try {
+		return withModelCacheDb(dbPath, db =>
+			db
+				.transaction(() => {
+					const row = db
+						.query<{ generation: number }, []>(
+							"UPDATE model_cache_sequence SET generation = generation + 1 WHERE id = 1 RETURNING generation",
+						)
+						.get()!;
+					claimGeneration(db, providerId, row.generation);
+					return row.generation;
+				})
+				.immediate(),
+		);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Adapters can discover their final account namespace while fetching. */
+export function isCurrentModelCacheRefresh(
+	providerId: string,
+	generation: number | undefined,
+	dbPath?: string,
+): boolean {
+	if (generation === undefined) return true;
+	try {
+		return withModelCacheDb(dbPath, db =>
+			db.transaction(() => claimGeneration(db, providerId, generation)).immediate(),
+		);
+	} catch {
+		return true;
+	}
+}
+
+/** Failed refreshes must not rewrite membership, omitted-header markers, or success time. */
+export function recordModelCacheAttempt(
+	providerId: string,
+	lastAttemptAt: number,
+	generation: number | undefined,
+	dbPath?: string,
+): void {
+	try {
+		withModelCacheDb(dbPath, db =>
+			db
+				.transaction(() => {
+					if (generation !== undefined && !claimGeneration(db, providerId, generation)) return;
+					db.run("UPDATE model_cache SET authoritative = 0, last_attempt_at = ? WHERE provider_id = ?", [
+						lastAttemptAt,
+						providerId,
+					]);
+				})
+				.immediate(),
+		);
+	} catch {
+		// Retry bookkeeping is best-effort, like snapshot persistence.
 	}
 }

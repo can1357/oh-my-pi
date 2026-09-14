@@ -8,10 +8,11 @@ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyLlamaCppQwenThinking,
+	discoverModelsByProviderType,
 	discoverOllamaModels,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
@@ -24,6 +25,82 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+describe("configured discovery completeness", () => {
+	test.each(["openai-models-list", "proxy", "llama.cpp", "ollama"] as const)(
+		"rejects malformed %s membership instead of publishing a partial catalog",
+		async type => {
+			const payload = type === "ollama" ? { models: [{ name: "valid" }, {}] } : { data: [{ id: "valid" }, {}] };
+			await expect(
+				discoverModelsByProviderType(
+					{
+						provider: "custom",
+						api: "openai-completions",
+						baseUrl: "https://catalog.example/v1",
+						discovery: { type },
+					},
+					{
+						fetch: async () => Response.json(payload),
+						getBearerApiKeyResolver: async () => undefined,
+					},
+				),
+			).rejects.toThrow();
+		},
+	);
+
+	test("preserves rich model metadata across Anthropic cursor pages", async () => {
+		const urls: string[] = [];
+		const models = await discoverModelsByProviderType(
+			{
+				provider: "custom",
+				api: "anthropic-messages",
+				baseUrl: "https://catalog.example/v1",
+				discovery: { type: "openai-models-list" },
+			},
+			{
+				fetch: async input => {
+					urls.push(String(input));
+					return Response.json(
+						urls.length === 1
+							? { data: [{ id: "first", context_length: 65536 }], has_more: true, last_id: "first" }
+							: {
+									data: [{ id: "second", context_length: 32768, input_modalities: ["text", "image"] }],
+									has_more: false,
+								},
+					);
+				},
+				getBearerApiKeyResolver: async () => undefined,
+			},
+		);
+		expect(models.map(model => [model.id, model.contextWindow, model.input])).toEqual([
+			["first", 65536, ["text"]],
+			["second", 32768, ["text", "image"]],
+		]);
+		expect(urls).toEqual(["https://catalog.example/v1/models", "https://catalog.example/v1/models?after_id=first"]);
+	});
+
+	test("rejects a later-page transport failure and never returns first-page membership", async () => {
+		let calls = 0;
+		await expect(
+			discoverModelsByProviderType(
+				{
+					provider: "custom",
+					api: "openai-completions",
+					baseUrl: "https://catalog.example/v1",
+					discovery: { type: "proxy" },
+				},
+				{
+					fetch: async () =>
+						++calls === 1
+							? Response.json({ data: [{ id: "first" }], has_more: true, last_id: "first" })
+							: new Response(null, { status: 503 }),
+					getBearerApiKeyResolver: async () => undefined,
+				},
+			),
+		).rejects.toThrow();
+		expect(calls).toBe(2);
+	});
+});
 
 describe("ModelRegistry runtime discovery", () => {
 	let tempDir: string;
@@ -83,8 +160,53 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 	});
 
-	function writeCachedOllamaModels(models: Model<"openai-completions">[], updatedAt = Date.now()) {
-		writeModelCache(resolveOllamaModelCacheProviderId("ollama"), updatedAt, models, true, "", cacheDbPath);
+	function cachedProviderId(provider: string): string {
+		const db = new Database(cacheDbPath);
+		try {
+			const row = db
+				.query(
+					"SELECT provider_id FROM model_cache WHERE json_extract(models, '$[0].provider') = ? ORDER BY updated_at DESC LIMIT 1",
+				)
+				.get(provider) as { provider_id: string } | null;
+			if (!row) throw new Error(`Missing discovery cache for ${provider}`);
+			return row.provider_id;
+		} finally {
+			db.close();
+		}
+	}
+
+	async function writeScopedModelCache(
+		provider: string,
+		updatedAt: number,
+		models: ModelSpec[],
+		authoritative = true,
+		fingerprint = "",
+		_dbPath = cacheDbPath,
+	) {
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async input => {
+				const url = String(input);
+				if (url.includes("/api/tags")) return Response.json({ models: models.map(model => ({ name: model.id })) });
+				if (url.includes("/models"))
+					return Response.json({ data: models.map(model => ({ id: model.id, capabilities: { type: "chat" } })) });
+				return new Response(null, { status: 404 });
+			},
+		});
+		await registry.refreshProvider(provider, "online");
+		const id = cachedProviderId(provider);
+		writeModelCache(
+			id,
+			updatedAt,
+			models.map(model => buildModel(model)),
+			authoritative,
+			fingerprint,
+			cacheDbPath,
+		);
+		return id;
+	}
+
+	async function writeCachedOllamaModels(models: Model<"openai-completions">[], updatedAt = Date.now()) {
+		await writeScopedModelCache("ollama", updatedAt, models);
 	}
 
 	function getModelsForProvider(registry: ModelRegistry, provider: string) {
@@ -212,7 +334,7 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 	}
 
-	test("scoped discovery coalesces with an in-flight background refresh", async () => {
+	test("scoped discovery publishes its latest snapshot during an in-flight background refresh", async () => {
 		writeRawModelsJson({
 			gateway: {
 				baseUrl: "http://127.0.0.1:9992",
@@ -229,7 +351,9 @@ describe("ModelRegistry runtime discovery", () => {
 			if (url === "http://127.0.0.1:9992/v1/models") {
 				modelListCalls++;
 				started.resolve();
-				return promise;
+				return modelListCalls === 1
+					? promise
+					: Response.json({ data: [{ id: "latest-model", context_length: 65_536 }] });
 			}
 			return new Response("", { status: 404 });
 		};
@@ -237,16 +361,13 @@ describe("ModelRegistry runtime discovery", () => {
 
 		registry.refreshInBackground();
 		await started.promise;
-		expect(modelListCalls).toBe(1);
 
 		const scopedRefresh = registry.refreshDiscoverableProviders(["gateway"], "online-if-uncached");
-		expect(modelListCalls).toBe(1);
 
 		resolve(Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] }));
 		await Promise.all([scopedRefresh, registry.awaitBackgroundRefresh()]);
 
-		expect(modelListCalls).toBe(1);
-		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
+		expect(getModelsForProvider(registry, "gateway").map(model => model.id)).toEqual(["latest-model"]);
 	});
 
 	test("does not coalesce or apply discovery across provider config changes", async () => {
@@ -394,11 +515,17 @@ describe("ModelRegistry runtime discovery", () => {
 			type: "oauth",
 			access: "sk-ant-oat-expired-anthropic",
 			refresh: "refresh-anthropic",
-			expires: Date.now() - 60_000,
+			expires: Date.now() + 3_600_000,
+			accountId: "anthropic-test-account",
 		});
-		// Fresh authoritative cache: the manager will not fetch, so opening a
-		// cached model selector must not rotate (or risk disabling) credentials.
-		writeModelCache("anthropic", Date.now() - 60_000, [], true, "", cacheDbPath);
+		const primeCapture: AnthropicDiscoveryCapture = { modelListCalls: 0 };
+		const prime = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: mockAnthropicModelsDiscovery(primeCapture),
+		});
+		await prime.refreshProvider("anthropic", "online");
+		const credential = authStorage.getOAuthCredential("anthropic");
+		if (!credential) throw new Error("Missing Anthropic fixture credential");
+		await authStorage.set("anthropic", { ...credential, expires: Date.now() - 60_000 });
 		const capture: AnthropicDiscoveryCapture = { modelListCalls: 0 };
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
 			fetch: mockAnthropicModelsDiscovery(capture),
@@ -785,9 +912,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
 
 		const initialCache = readModelCache(
-			resolveModelCacheProviderId("github-copilot", {
-				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
-			}),
+			cachedProviderId("github-copilot"),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -807,9 +932,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 		// Cache must preserve prior updatedAt and NOT renew with current time
 		const cacheAfterFailure = readModelCache(
-			resolveModelCacheProviderId("github-copilot", {
-				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
-			}),
+			cachedProviderId("github-copilot"),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -870,9 +993,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
 
 		const initialCache = readModelCache(
-			resolveModelCacheProviderId("github-copilot", {
-				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
-			}),
+			cachedProviderId("github-copilot"),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -892,9 +1013,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 		// Cache must preserve prior updatedAt
 		const cacheAfterFailure = readModelCache(
-			resolveModelCacheProviderId("github-copilot", {
-				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
-			}),
+			cachedProviderId("github-copilot"),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -1891,7 +2010,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(await registry.getApiKey(available[0])).toBe(kNoAuth);
 	});
 
-	test("normalizes cached ollama completions rows to responses on load", () => {
+	test("normalizes cached ollama completions rows to responses on load", async () => {
 		writeRawModelsJson({
 			ollama: {
 				baseUrl: "http://127.0.0.1:11434/v1",
@@ -1900,7 +2019,7 @@ describe("ModelRegistry runtime discovery", () => {
 				discovery: { type: "ollama" },
 			},
 		});
-		writeCachedOllamaModels([
+		await writeCachedOllamaModels([
 			buildModel({
 				id: "phi4-mini",
 				name: "phi4-mini",
@@ -1936,7 +2055,7 @@ describe("ModelRegistry runtime discovery", () => {
 			},
 		});
 		const configMtime = fs.statSync(modelsJsonPath).mtimeMs;
-		writeCachedOllamaModels(
+		await writeCachedOllamaModels(
 			[
 				buildModel({
 					id: "phi3:3.8b",
@@ -2115,7 +2234,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(state?.error).toContain("connection refused");
 	});
 
-	test("reports unauthenticated discoverable providers without discarding cached models", async () => {
+	test("reports unauthenticated providers without leaking the previous credential's cached models", async () => {
 		writeRawModelsJson({
 			"custom-local": {
 				baseUrl: "http://127.0.0.1:11434/v1",
@@ -2157,10 +2276,10 @@ describe("ModelRegistry runtime discovery", () => {
 		const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: noNetwork });
 		await cachedRegistry.refreshProvider("custom-local");
 
-		expect(getModelsForProvider(cachedRegistry, "custom-local").some(model => model.id === "local-coder")).toBe(true);
+		expect(getModelsForProvider(cachedRegistry, "custom-local")).toEqual([]);
 		const state = cachedRegistry.getProviderDiscoveryState("custom-local");
 		expect(state?.status).toBe("unauthenticated");
-		expect(state?.models).toContain("local-coder");
+		expect(state?.models).not.toContain("local-coder");
 	});
 	test("llama.cpp discovery honors configured API key", async () => {
 		authStorage.setRuntimeApiKey("llama.cpp", "test-llama-key");
@@ -2743,7 +2862,7 @@ providers:
 		// Reporter's workflow: `/model` picks a preset. On its very first switch
 		// the child hasn't been spawned yet (meta.n_ctx absent), but the
 		// configured window is still what the user wants surfaced.
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -2839,7 +2958,7 @@ providers:
 	});
 
 	test("llama.cpp selected model refresh patches newly loaded meta n_ctx and unlimited output limit", async () => {
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -2895,7 +3014,7 @@ providers:
 	});
 
 	test("llama.cpp selected model refresh marks cached text-only models image-capable from /props vision modality", async () => {
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -2951,7 +3070,7 @@ providers:
 	});
 
 	test("llama.cpp selected model refresh reads image capability from per-model architecture", async () => {
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -3015,7 +3134,7 @@ providers:
 	});
 
 	test("llama.cpp selected model refresh leaves the cached model untouched when /models no longer lists it", async () => {
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -3080,7 +3199,7 @@ providers:
 				},
 			},
 		});
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -3139,10 +3258,15 @@ providers:
 		// Pre-create so the before/after comparison works whether or not
 		// registry construction happens to invoke the key command itself.
 		fs.writeFileSync(commandLogPath, "");
+		const commandPath = path.join(tempDir, "key-command.cjs");
+		fs.writeFileSync(
+			commandPath,
+			`require("node:fs").appendFileSync(${JSON.stringify(commandLogPath)}, "x"); process.exit(1);`,
+		);
 		writeRawModelsJson({
 			"llama.cpp": {
 				baseUrl: "http://127.0.0.1:8080",
-				apiKey: `!"${process.execPath}" -e 'require("node:fs").appendFileSync(${JSON.stringify(commandLogPath)}, "x"); process.exit(1);'`,
+				apiKey: `!"${process.execPath}" "${commandPath}"`,
 				api: "openai-responses",
 				discovery: { type: "llama.cpp" },
 				models: [{ id: "protected-model", reasoning: false, input: ["text"] }],
@@ -3211,7 +3335,7 @@ providers:
 	});
 
 	test("llama.cpp refresh bypasses fresh cache so server restarts update n_ctx", async () => {
-		writeModelCache(
+		await writeScopedModelCache(
 			"llama.cpp",
 			Date.now(),
 			[
@@ -3796,8 +3920,7 @@ providers:
 		// Emulate a legacy write: the variant has no same-id static header source,
 		// so it is flagged unrestorable even though its base carries the headers.
 		authStorage.setRuntimeApiKey("github-copilot", "ghp_test_token");
-		const cacheProviderId = resolveModelCacheProviderId("github-copilot", { apiKey: "ghp_test_token" });
-		writeModelCache(cacheProviderId, Date.now(), [cachedVariant], true, "", cacheDbPath);
+		const cacheProviderId = await writeScopedModelCache("github-copilot", Date.now(), [cachedVariant]);
 		const db = new Database(cacheDbPath);
 		db.run("UPDATE model_cache SET header_restore_version = 0 WHERE provider_id = ?", [cacheProviderId]);
 		db.close();
