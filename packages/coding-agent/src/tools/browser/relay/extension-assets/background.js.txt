@@ -93,7 +93,7 @@ function noteDebuggerDetach(attachmentEpochs, loaderGenerations, tabId) {
   noteAttachmentStateChange(attachmentEpochs, tabId);
   noteAttachmentStateChange(loaderGenerations, tabId);
 }
-function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params, frameLoaderIds) {
+function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params, frameLoaderIds, isRootSession = true) {
   if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
     return false;
   const frame = params.frame;
@@ -105,7 +105,7 @@ function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, me
   if (parentId !== undefined && !frameLoaderIds)
     return false;
   noteAttachmentStateChange(loaderGenerations, tabId);
-  if (parentId === undefined)
+  if (isRootSession && parentId === undefined)
     loaderIds.set(tabId, loaderId);
   if (typeof id === "string" && frameLoaderIds) {
     frameLoaderIds.set(tabId, { ...frameLoaderIds.get(tabId), [id]: loaderId });
@@ -1171,7 +1171,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
   if (guardDetachments.has(source.tabId))
-    captureRecoveryLoaderNavigation(recoveryLoaderIds, recoveryLoaderGenerations, source.tabId, method, params, recoveryFrameLoaderIds);
+    captureRecoveryLoaderNavigation(recoveryLoaderIds, recoveryLoaderGenerations, source.tabId, method, params, recoveryFrameLoaderIds, source.sessionId === undefined);
   post({
     t: "cdpEvent",
     tabId: source.tabId,
