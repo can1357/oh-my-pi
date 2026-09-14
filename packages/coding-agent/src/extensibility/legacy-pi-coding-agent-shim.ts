@@ -39,6 +39,8 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
 import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../edit/normalize";
 import { EditTool } from "../edit";
+import { assertEditableFile } from "../tools/auto-generated-guard";
+import { resolveToCwd } from "../tools/path-utils";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
 	discoverContextFiles,
@@ -59,7 +61,7 @@ import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
-import { formatBytes, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../tools/render-utils";
+import { formatBytes, PREVIEW_LIMITS, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../tools/render-utils";
 import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
@@ -324,7 +326,10 @@ function legacyEditTool(cwd: string): ToolDefinition {
 			// matched against the ORIGINAL file content, never incrementally — and
 			// must not persist earlier replacements when a later entry is invalid.
 			// Validate the whole list against one snapshot, then apply by index.
-			const batchPath = path as string;
+			const batchPath = resolveToCwd(path as string, cwd);
+			// The direct write bypasses EditSession's native policy, so enforce the
+			// generated-file guard the single-edit branch gets for free.
+			await assertEditableFile(batchPath, path as string, Settings.isolated());
 			const raw = await Bun.file(batchPath).text();
 			const { bom, text: body } = stripBom(raw);
 			const normalized = normalizeToLF(body);
@@ -397,7 +402,10 @@ function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName): ToolDefinit
 		// definitions they wrap, so supply simple call/result renderers.
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
-			const detail = stringField(params, "path") ?? stringField(params, "input") ?? "";
+			const raw = stringField(params, "path") ?? stringField(params, "input") ?? "";
+			// Hostile or file-derived preview text: shorten home leaks, expand tabs,
+			// and cap the width so the call line cannot break terminal layout.
+			const detail = truncateToWidth(replaceTabs(shortenEmbeddedPaths(raw)), TRUNCATE_LENGTHS.LINE);
 			return new Text(`${themedTitle(theme, name)} ${themedMuted(theme, detail)}`.trimEnd(), 0, 0);
 		},
 		renderResult: legacyRenderResult,
@@ -445,26 +453,26 @@ function themedMuted(theme: LegacyThemeLike | undefined, text: string): string {
 	return theme ? theme.fg("toolOutput", text) : text;
 }
 
-function textResult(result: AgentToolResult<unknown> | undefined): string {
-	return result?.content.find(block => block.type === "text")?.text ?? "";
+/** Every text block joined — EditTool appends parse-regression warnings as a second block. */
+function allTextResult(result: AgentToolResult<unknown> | undefined): string {
+	const blocks = result?.content.filter(block => block.type === "text") ?? [];
+	return blocks.map(block => (block as { text: string }).text).join("\n\n");
 }
-
-/** Legacy result preview caps — shared shape with the repo's PREVIEW_LIMITS. */
-const LEGACY_RESULT_PREVIEW_LINES = 12;
 
 function legacyRenderResult(result: AgentToolResult<unknown>, _options: unknown, themeArg: unknown): Text {
 	const theme = renderTheme(themeArg, undefined);
-	const output = textResult(result);
+	const output = allTextResult(result);
 	if (!output) return new Text("", 0, 0);
 	// TUI sanitization contract: tabs break layout, absolute home paths leak, and
-	// file-derived output (diffs, errors) can be unbounded.
+	// file-derived output (diffs, errors) can be unbounded. The cap follows the
+	// shared preview policy instead of a local constant.
 	const sanitized = replaceTabs(shortenEmbeddedPaths(output));
 	const lines = sanitized.split("\n");
 	const visible = lines
-		.slice(0, LEGACY_RESULT_PREVIEW_LINES)
+		.slice(0, PREVIEW_LIMITS.OUTPUT_EXPANDED)
 		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE));
-	if (lines.length > LEGACY_RESULT_PREVIEW_LINES) {
-		visible.push(`… ${lines.length - LEGACY_RESULT_PREVIEW_LINES} more lines`);
+	if (lines.length > PREVIEW_LIMITS.OUTPUT_EXPANDED) {
+		visible.push(`… ${lines.length - PREVIEW_LIMITS.OUTPUT_EXPANDED} more lines`);
 	}
 	return new Text(`\n${themedMuted(theme, visible.join("\n"))}`, 0, 0);
 }

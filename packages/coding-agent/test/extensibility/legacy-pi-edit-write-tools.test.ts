@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as shim from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 
 // Issue #7094: pi extensions import the edit/write tool factories
@@ -139,15 +142,12 @@ describe("legacy shim edit batch semantics", () => {
 	});
 
 	it("applies a multi-edit batch against one original snapshot atomically", async () => {
-		const { mkdtemp, rm, writeFile, readFile } = await import("node:fs/promises");
-		const { tmpdir } = await import("node:os");
-		const { join } = await import("node:path");
-		const dir = await mkdtemp(join(tmpdir(), "legacy-edit-batch-"));
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-batch-"));
 		try {
 			// Original contains one A and one B; A→B would make B ambiguous for a
 			// naive sequential writer, B→C then applies against the same snapshot.
-			const file = join(dir, "batch.txt");
-			await writeFile(file, "A\nB\n");
+			const file = path.join(dir, "batch.txt");
+			await fs.writeFile(file, "A\nB\n");
 			const edit = shim.createEditTool(dir).execute!;
 			const result = await edit(
 				"batch-1",
@@ -167,21 +167,18 @@ describe("legacy shim edit batch semantics", () => {
 				.map(block => block.text)
 				.join("\n");
 			expect(text).toContain("2");
-			expect(await readFile(file, "utf8")).toBe("B\nC\n");
+			expect(await fs.readFile(file, "utf8")).toBe("B\nC\n");
 		} finally {
-			await rm(dir, { recursive: true, force: true });
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("rejects a batch whose second edit would be ambiguous after the first, without writing", async () => {
-		const { mkdtemp, rm, writeFile, readFile, stat } = await import("node:fs/promises");
-		const { tmpdir } = await import("node:os");
-		const { join } = await import("node:path");
-		const dir = await mkdtemp(join(tmpdir(), "legacy-edit-ambig-"));
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-ambig-"));
 		try {
-			const file = join(dir, "ambig.txt");
+			const file = path.join(dir, "ambig.txt");
 			const before = "same\nsame\n";
-			await writeFile(file, before);
+			await fs.writeFile(file, before);
 			const edit = shim.createEditTool(dir).execute!;
 			// Each oldText matches twice in the original snapshot → invalid, no write.
 			await expect(
@@ -199,21 +196,18 @@ describe("legacy shim edit batch semantics", () => {
 					{ cwd: dir } as never,
 				),
 			).rejects.toThrow(/unique/i);
-			expect(await readFile(file, "utf8")).toBe(before);
-			expect((await stat(file)).mtimeMs).toBeLessThan(Date.now() + 50_000);
+			expect(await fs.readFile(file, "utf8")).toBe(before);
+			expect((await fs.stat(file)).mtimeMs).toBeLessThan(Date.now() + 50_000);
 		} finally {
-			await rm(dir, { recursive: true, force: true });
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("single-edit calls still route through omp's replace-mode tool", async () => {
-		const { mkdtemp, rm, writeFile, readFile } = await import("node:fs/promises");
-		const { tmpdir } = await import("node:os");
-		const { join } = await import("node:path");
-		const dir = await mkdtemp(join(tmpdir(), "legacy-edit-single-"));
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-single-"));
 		try {
-			const file = join(dir, "single.txt");
-			await writeFile(file, "before\n");
+			const file = path.join(dir, "single.txt");
+			await fs.writeFile(file, "before\n");
 			const edit = shim.createEditTool(dir).execute!;
 			await edit(
 				"single-1",
@@ -222,9 +216,102 @@ describe("legacy shim edit batch semantics", () => {
 				undefined,
 				{ cwd: dir } as never,
 			);
-			expect(await readFile(file, "utf8")).toBe("after\n");
+			expect(await fs.readFile(file, "utf8")).toBe("after\n");
 		} finally {
-			await rm(dir, { recursive: true, force: true });
+			await fs.rm(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+// Second review round on the batch path: relative paths must resolve against the
+// tool's cwd, generated files must stay blocked even for multi-edit calls, the
+// call preview must be sanitized, and results must render every text block.
+describe("legacy shim batch edit path policies", () => {
+	it("resolves a relative batch path against the tool's cwd, not the process cwd", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-cwd-"));
+		try {
+			const file = path.join(dir, "rel.txt");
+			await fs.writeFile(file, "one\ntwo\n");
+			const savedCwd = process.cwd();
+			try {
+				process.chdir(os.tmpdir());
+				const edit = shim.createEditTool(dir).execute!;
+				await edit(
+					"cwd-1",
+					{
+						path: "rel.txt",
+						edits: [
+							{ oldText: "one", newText: "ONE" },
+							{ oldText: "two", newText: "TWO" },
+						],
+					},
+					undefined,
+					undefined,
+					{ cwd: dir } as never,
+				);
+			} finally {
+				process.chdir(savedCwd);
+			}
+			expect(await fs.readFile(file, "utf8")).toBe("ONE\nTWO\n");
+			// The temp sibling would only exist if the batch wrote relative to the
+			// process cwd instead of the tool's cwd.
+			await expect(fs.access(path.join(os.tmpdir(), "rel.txt"))).rejects.toThrow();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a multi-edit batch targeting an auto-generated file without writing", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "legacy-edit-gen-"));
+		try {
+			const file = path.join(dir, "generated.ts");
+			const before = "// @generated by protoc\nexport const A = 1;\n";
+			await fs.writeFile(file, before);
+			const edit = shim.createEditTool(dir).execute!;
+			await expect(
+				edit(
+					"gen-1",
+					{
+						path: file,
+						edits: [
+							{ oldText: "export const A = 1;", newText: "export const A = 2;" },
+							{ oldText: "export const A = 2;", newText: "export const A = 3;" },
+						],
+					},
+					undefined,
+					undefined,
+					{ cwd: dir } as never,
+				),
+			).rejects.toThrow(/auto-generated/i);
+			expect(await fs.readFile(file, "utf8")).toBe(before);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("sanitizes the renderCall preview for hostile paths", () => {
+		const renderCall = shim.createEditTool(process.cwd()).renderCall!;
+		const hostile = `${process.cwd()}/deep\tname.txt`;
+		const component = renderCall({ path: hostile } as never, undefined as never, undefined as never);
+		const rendered = (component as { render: (width: number) => readonly string[] }).render(200).join("\n");
+		expect(rendered).not.toContain("\t");
+		expect(rendered).not.toContain(process.cwd());
+	});
+
+	it("renders every text block, not only the first", () => {
+		const definition = shim.createEditTool(process.cwd());
+		const component = definition.renderResult!(
+			{
+				content: [
+					{ type: "text", text: "Successfully replaced 1 block." },
+					{ type: "text", text: "Warning: file.txt no longer parses after this edit." },
+				],
+			} as never,
+			undefined as never,
+			undefined as never,
+		);
+		const rendered = (component as { render: (width: number) => readonly string[] }).render(200).join("\n");
+		expect(rendered).toContain("Successfully replaced 1 block.");
+		expect(rendered).toContain("no longer parses");
 	});
 });
