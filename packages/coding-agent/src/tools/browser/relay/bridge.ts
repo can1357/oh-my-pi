@@ -1158,6 +1158,13 @@ export class RelayBridge {
 				method: msg.method,
 				params,
 			});
+			if (script && clientIdentifier && tab.runtimeGeneration !== rootGeneration) {
+				const replayed = this.#preloadScript(tab, sessionId, clientIdentifier);
+				if (replayed && replayed.rootGeneration === tab.runtimeGeneration) {
+					this.#forgetPreloadScript(tab, sessionId, clientIdentifier);
+					this.#enqueuePreloadScriptCleanup(tab, [replayed]);
+				}
+			}
 			// Both identifiers belong to the same debugger root. The primary
 			// removal can race a final-holder detach, so never send its companion
 			// against a replacement root where Chrome may reuse the identifier.
@@ -1330,6 +1337,7 @@ export class RelayBridge {
 			return;
 		}
 		const pendingSubscription = pageRef && msg.sessionId ? this.#trackPendingSubscription(tabId, msg) : null;
+		const rootGeneration = this.#tabs.get(tabId)?.runtimeGeneration;
 		try {
 			const result = await this.#rpc({
 				op: "send",
@@ -1347,6 +1355,20 @@ export class RelayBridge {
 					forwardingSessionIsCurrent,
 					pendingSubscription.sequence,
 				);
+				const tab = this.#tabs.get(tabId);
+				if (
+					forwardingSessionIsCurrent &&
+					tab &&
+					rootGeneration !== undefined &&
+					tab.runtimeGeneration !== rootGeneration
+				) {
+					const key = this.#subscriptionTrackingKey(msg);
+					const current = key ? this.#latestSubscriptionForKey(tab, key) : undefined;
+					if (key && current?.sequence === pendingSubscription.sequence) {
+						if (tab.restoring) tab.resumeSubscriptionReconcileAfterRestore = true;
+						this.#scheduleLiveSubscriptionReconcile(tab, [{ key, previous: undefined, next: current }]);
+					}
+				}
 			}
 			pendingSubscription?.resolve();
 			if (pageRef && msg.sessionId && !forwardingSessionIsCurrent) {
