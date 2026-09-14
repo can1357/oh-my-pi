@@ -23,6 +23,9 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// including its tariff and effort ladder, comes from the live /v1/models
 	// snapshot, so no bundled rows are frozen into models.json.
 	"charm-hyper",
+	// Account-scoped Portal `/v1/models`; discovery is live-only (see
+	// nousPortalModelManagerOptions). No models.json slice is generated.
+	"nous-portal",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {

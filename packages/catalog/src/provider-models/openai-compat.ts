@@ -989,6 +989,83 @@ export function gmiCloudModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 1c. Nous Portal
+// ---------------------------------------------------------------------------
+
+const NOUS_PORTAL_BASE_URL = "https://inference-api.nousresearch.com/v1";
+
+export interface NousPortalModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Map a discovered Nous Portal model to a full spec.
+ *
+ * Portal's `/v1/models` returns OpenAI-shaped `{id}` rows (and sometimes a
+ * display name) without limits, reasoning, or tariffs. Same-id bundled
+ * references are used when present; every other id is recovered from the
+ * canonical index for intrinsic capabilities. Pricing is never borrowed
+ * across providers — Portal bills against the account's subscription, so
+ * cost stays zeroed rather than inheriting another host's rate.
+ */
+function mapNousPortalModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	if (reference) {
+		return mapWithBundledReference(entry, defaults, reference);
+	}
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as
+		| ModelSpec<"openai-completions">
+		| undefined;
+	if (!canonical) {
+		return { ...defaults, name: toModelName(entry.name, defaults.name) };
+	}
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		...(canonical.thinking && { thinking: canonical.thinking }),
+		contextWindow,
+		maxTokens,
+	};
+}
+
+export function nousPortalModelManagerOptions(
+	config?: NousPortalModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? NOUS_PORTAL_BASE_URL;
+	// Direct options (same as Charm Hyper): `createOpenAICompatibleModelManagerOptions`
+	// requires a `GeneratedProvider`, which only exists after a models.json slice.
+	// Portal's catalog is account-scoped and must not be frozen into the bundle.
+	return {
+		providerId: "nous-portal",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "nous-portal",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => mapNousPortalModel(entry, defaults, undefined),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 2. Groq
 // ---------------------------------------------------------------------------
 
