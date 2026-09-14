@@ -13,6 +13,7 @@ import {
 	copyOAuthCredentialIdentity,
 	isAutomaticDisableCause,
 	isOAuthCredentialIdentityRecovered,
+	isDeliberateRemovalCause,
 	resolveOAuthCredentialIdentity,
 } from "../auth/sqlite-credential-store";
 import {
@@ -1130,7 +1131,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	async deleteAuthCredentialRemote(id: number, disabledCause: string): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
-		if (!found) return false;
+		if (!found) {
+			if (!isDeliberateRemovalCause(disabledCause.trim())) return false;
+			// A refresh can remove a peer-disabled row before a failed logout is retried.
+			// Only tombstones visible through this client account pool may be removed.
+			const disabled = await this.listDisabledCredentials();
+			if (!disabled.some(entry => entry.id === id)) return false;
+		}
 		const disabling = this.#client.disableCredential(id, disabledCause);
 		let localDisable = this.#localDisables.get(id);
 		if (!localDisable) {
@@ -1292,23 +1299,19 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Logout: disable every active credential for the provider on the broker,
-	 * then drop them from the local snapshot. Refresh fetches the authoritative
-	 * post-state in the background.
+	 * Whole-provider logout also clears prior tombstones, including unidentified
+	 * rows and history with no remaining active credentials. Reject providers
+	 * restricted by an account pool so hidden accounts and history are preserved.
+	 * Only drop the local snapshot after the broker persists the operation successfully.
 	 */
-	async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
-		const existing = this.listAuthCredentials(provider);
-		for (const entry of existing) {
-			try {
-				await this.#client.disableCredential(entry.id, disabledCause);
-			} catch (error) {
-				logger.warn("auth-broker disable during delete failed", {
-					provider,
-					id: entry.id,
-					error: String(error),
-				});
-			}
+	async deleteAuthCredentialsRemote(provider: string, _disabledCause: string): Promise<void> {
+		if (this.#accountPool?.has(provider)) {
+			throw new AIError.ConfigurationError(
+				`Cannot log out all ${provider} accounts while its broker account pool is restricted; remove individual accounts instead`,
+			);
 		}
+		this.#noteActivity();
+		await this.#client.logoutProvider(provider);
 		this.#removeProviderEntries(provider);
 		this.#maybeRefreshSnapshot("delete");
 	}

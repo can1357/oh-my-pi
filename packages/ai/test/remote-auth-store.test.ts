@@ -633,15 +633,21 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 						: { ...old.credential, access: "recovered", refresh: "recovered-refresh" },
 				);
 				await waitUntil(() => remote.listAuthCredentials(provider).length === 1);
+				const cleanupDb = new Database(path.join(tempDir, "agent.db"));
+				try {
+					cleanupDb.run("DROP TRIGGER retain_disabled_history");
+				} finally {
+					cleanupDb.close();
+				}
 				await serverStorage!.remove(provider);
 				await waitUntil(() => remote.listAuthCredentials(provider).length === 0);
 				const now = Date.now;
 				vi.spyOn(Date, "now").mockImplementation(() => now() + 1_000);
 				await remote.refreshSnapshot();
 				await Promise.allSettled(lookups.mock.results.map(result => result.value));
-				expect(await listDisabled(provider)).toContainEqual(
-					expect.objectContaining({ id: old.id, cause: "authentication failed" }),
-				);
+				expect(await listDisabled(provider)).toEqual([
+					expect.objectContaining({ cause: "deleted by user", provider, type }),
+				]);
 				expect(events).toEqual([]);
 			} finally {
 				remote.close();

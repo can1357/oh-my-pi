@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -207,6 +208,132 @@ describe("credential sign-out notices", () => {
 
 		await authStorage.set("anthropic", [oauthCredential(Date.now() + 3_600_000)]);
 		expect(await collectDisabledCredentialNotices(authStorage, Date.now())).toEqual([]);
+	});
+
+	it("coalesces repeated SQLite sign-outs before the startup cap without retiring forensic events", async () => {
+		const dbPath = path.join(tempDir, "agent.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		authStorage = new AuthStorage(store);
+		const retained = new Map<number, RetainedCredentialDisable>();
+		const nowMs = Math.floor(Date.now() / 1000) * 1000;
+		let disabledAtMs = nowMs - 20 * 60_000;
+		authStorage.onCredentialDisabled(event => {
+			retained.set(event.credentialId, { event, disabledAtMs });
+		});
+		const db = new Database(dbPath);
+		let latestId = 0;
+		try {
+			// Each re-login creates a new row; older disables keep their original clocks.
+			for (let index = 0; index < 18; index++) {
+				const email = index < 8 ? `distinct${index}@example.com` : "repeated@example.com";
+				await authStorage.set("anthropic", { ...oauthCredential(nowMs + 60_000), email });
+				latestId = authStorage.listStoredCredentials("anthropic")[0]!.id;
+				disabledAtMs += 60_000;
+				expect(authStorage.disableCredentialById(latestId, `invalid_grant generation-${index}`)).toBe(true);
+				db.prepare("UPDATE auth_credentials SET updated_at = ? WHERE id = ?").run(disabledAtMs / 1000, latestId);
+			}
+			const history = await store.listDisabledCredentials();
+			const retainedBefore = [...retained];
+			const notices = await collectDisabledCredentialNotices(authStorage, nowMs, undefined, retained);
+			expect(notices).toHaveLength(9);
+			expect(notices[0]).toContain("repeated@example.com");
+			expect(notices[0]).toContain("generation-17");
+			expect(notices[0]).toContain("2m ago");
+			expect(notices[1]).toContain("distinct7@example.com");
+			expect(notices[7]).toContain("distinct1@example.com");
+			expect(notices[8]).toContain("1 more");
+			expect(await store.listDisabledCredentials()).toEqual(history);
+			expect([...retained]).toEqual(retainedBefore);
+			// Suppressing the latest live announcement must not resurrect an older generation.
+			const announced = await collectDisabledCredentialNotices(authStorage, nowMs, id => id === latestId, retained);
+			expect(announced).toHaveLength(8);
+			expect(announced.join("\n")).not.toContain("repeated@example.com");
+			// Without a history endpoint the same projection applies to retained SDK events.
+			vi.spyOn(store, "listDisabledCredentials").mockRejectedValue(new Error("broker offline"));
+			const fallback = await collectDisabledCredentialNotices(authStorage, nowMs, undefined, retained);
+			expect(fallback).toHaveLength(9);
+			expect(fallback[0]).toContain("generation-17");
+			expect(fallback[1]).toContain("distinct7@example.com");
+			expect(fallback[8]).toContain("1 more");
+			expect([...retained]).toEqual(retainedBefore);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("merges a new SDK disable with older same-account forensic history before capping accounts", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		authStorage = new AuthStorage(store);
+		const session = new AgentSession({
+			agent: new Agent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+		});
+		const unsubscribe = authStorage.onCredentialDisabled(event => session.announceCredentialDisabled(event));
+		try {
+			for (let index = 0; index < 8; index++) {
+				await authStorage.set("anthropic", {
+					...oauthCredential(Date.now() + 60_000),
+					email: `distinct${index}@example.com`,
+				});
+				const id = authStorage.listStoredCredentials("anthropic")[0]!.id;
+				expect(authStorage.disableCredentialById(id, "invalid_grant")).toBe(true);
+			}
+			await authStorage.set("anthropic", oauthCredential(Date.now() + 60_000));
+			const oldId = authStorage.listStoredCredentials("anthropic")[0]!.id;
+			expect(authStorage.disableCredentialById(oldId, "invalid_grant older-generation")).toBe(true);
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const list = store.listDisabledCredentials.bind(store);
+			vi.spyOn(store, "listDisabledCredentials").mockImplementationOnce(async provider => {
+				const rows = await list(provider);
+				started.resolve();
+				await release.promise;
+				return rows;
+			});
+			const replay = session.getDisabledCredentialNotices();
+			await started.promise;
+			await authStorage.set("anthropic", { ...oauthCredential(Date.now() + 60_000), access: "new-access" });
+			const newId = authStorage.listStoredCredentials("anthropic")[0]!.id;
+			expect(authStorage.disableCredentialById(newId, "invalid_grant racing-generation")).toBe(true);
+			release.resolve();
+			const notices = await replay;
+			expect(notices).toHaveLength(9);
+			expect(notices[0]).toContain("racing-generation");
+			expect(notices.filter(notice => notice.includes("signed-out@example.com"))).toHaveLength(1);
+			expect(notices[8]).toContain("1 more");
+			expect((await store.listDisabledCredentials()).slice(-2).map(row => row.id)).toEqual([oldId, newId]);
+			const subsequent = await session.getDisabledCredentialNotices();
+			expect(subsequent).toHaveLength(9);
+			expect(subsequent[0]).toContain("racing-generation");
+			expect(subsequent[8]).toContain("1 more");
+		} finally {
+			unsubscribe();
+			await session.dispose();
+		}
+	});
+
+	it("preserves separately retained API-key generations and unknown OAuth accounts", async () => {
+		const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(":memory:");
+		store.listDisabledCredentials = undefined;
+		authStorage = new AuthStorage(store);
+		const retained = new Map<number, RetainedCredentialDisable>();
+		for (const credentialId of [1, 2, 3, 4]) {
+			retained.set(credentialId, {
+				event: {
+					credentialId,
+					provider: "anthropic",
+					credentialType: credentialId < 3 ? "api_key" : "oauth",
+					disabledCause: `disabled generation-${credentialId}`,
+				},
+				disabledAtMs: credentialId,
+			});
+		}
+		const notices = await collectDisabledCredentialNotices(authStorage, Date.now(), undefined, retained);
+		expect(notices).toHaveLength(4);
+		for (const id of retained.keys()) expect(notices.join("\n")).toContain(`generation-${id}`);
 	});
 
 	it("retires recovered OAuth teardown without losing a retained API-key notice", async () => {

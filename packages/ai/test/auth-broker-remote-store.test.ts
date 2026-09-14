@@ -1008,6 +1008,78 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(callbacks.at(-1)?.credentials).toHaveLength(3);
 	});
 
+	test.each(["selected", "empty"] as const)(
+		"rejects provider logout for a %s account pool without deleting visible or hidden state",
+		async pool => {
+			storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+			storage!.upsertCredential("anthropic", mintOAuthCredential("disabled", Date.now() + 120_000));
+			storage!.upsertCredential("anthropic", { type: "api_key", key: "visible-api-key" });
+			const entries = storage!.exportSnapshot().credentials;
+			const allowed = entries.find(entry => entry.identityKey?.includes("a@example.com"))!;
+			const disabled = entries.find(entry => entry.identityKey?.includes("disabled@example.com"))!;
+			expect(storage!.disableCredentialById(disabled.id, "invalid_grant")).toBe(true);
+			const client = new AuthBrokerClient({ url: handle!.url, token });
+			remote = new RemoteAuthCredentialStore({
+				client,
+				streamSnapshots: false,
+				accountPool: new Map([["anthropic", new Set(pool === "selected" ? [allowed.identityKey!] : [])]]),
+			});
+			const clientStorage = new AuthStorage(remote);
+			await clientStorage.revalidateCredentials();
+			expect(clientStorage.listOAuthAccounts("anthropic").map(account => account.email)).toEqual(
+				pool === "selected" ? ["a@example.com"] : [],
+			);
+			expect(await clientStorage.listDisabledCredentials("anthropic")).toEqual([]);
+			const localCredentials = clientStorage.listStoredCredentials("anthropic");
+			const localSnapshot = remote.snapshot;
+			const brokerSnapshot = storage!.exportSnapshot();
+			const brokerCredentials = store!.listAuthCredentials("anthropic");
+			const brokerHistory = await client.listDisabledCredentials("anthropic");
+			expect(brokerHistory.map(row => row.id)).toEqual([disabled.id]);
+
+			await expect(clientStorage.remove("anthropic")).rejects.toMatchObject({ name: "ConfigurationError" });
+
+			expect(clientStorage.listStoredCredentials("anthropic")).toEqual(localCredentials);
+			expect(remote.snapshot).toEqual(localSnapshot);
+			expect(storage!.exportSnapshot()).toMatchObject({
+				credentials: brokerSnapshot.credentials,
+				generation: brokerSnapshot.generation,
+			});
+			expect(store!.listAuthCredentials("anthropic")).toEqual(brokerCredentials);
+			expect(await client.listDisabledCredentials("anthropic")).toEqual(brokerHistory);
+		},
+	);
+
+	test("logs out a provider absent from the account pool and clears its prior history", async () => {
+		storage!.upsertCredential("openai-codex", mintOAuthCredential("disabled", Date.now() + 120_000));
+		const disabled = store!.listAuthCredentials("openai-codex")[0]!;
+		expect(storage!.disableCredentialById(disabled.id, "invalid_grant")).toBe(true);
+		storage!.upsertCredential("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));
+		const active = store!.listAuthCredentials("openai-codex")[0]!;
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({
+			client,
+			streamSnapshots: false,
+			accountPool: new Map([["anthropic", new Set()]]),
+		});
+		const clientStorage = new AuthStorage(remote);
+		await clientStorage.revalidateCredentials();
+		const restrictedCredentials = store!.listAuthCredentials("anthropic");
+		expect(clientStorage.listStoredCredentials("openai-codex").map(row => row.id)).toEqual([active.id]);
+		expect((await clientStorage.listDisabledCredentials("openai-codex")).map(row => row.id)).toEqual([disabled.id]);
+
+		await clientStorage.remove("openai-codex");
+
+		expect(clientStorage.listStoredCredentials("openai-codex")).toEqual([]);
+		expect(remote.listAuthCredentials("openai-codex")).toEqual([]);
+		expect(storage!.listStoredCredentials("openai-codex")).toEqual([]);
+		expect(store!.listAuthCredentials("openai-codex")).toEqual([]);
+		expect(
+			(await client.listDisabledCredentials("openai-codex")).map(row => ({ id: row.id, cause: row.cause })),
+		).toEqual([{ id: active.id, cause: "deleted by user" }]);
+		expect(store!.listAuthCredentials("anthropic")).toEqual(restrictedCredentials);
+	});
+
 	test("keeps disabled history within the same account pool as the active view", async () => {
 		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		storage!.upsertCredential("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));

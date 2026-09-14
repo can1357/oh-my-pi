@@ -505,6 +505,66 @@ describe("runUsageCommand disabled credential output", () => {
 		}
 	});
 
+	for (const json of [false, true]) {
+		it(`shows only the latest repeated SQLite sign-out in usage ${json ? "JSON" : "text"}`, async () => {
+			const profile = TempDir.createSync("@omp-usage-repeated-");
+			const originalExitCode = process.exitCode;
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			let authStorage: AuthStorage | undefined = new AuthStorage(store);
+			try {
+				let latestId = 0;
+				for (let generation = 0; generation < 3; generation++) {
+					await authStorage.set("anthropic", {
+						type: "oauth",
+						access: `access-${generation}`,
+						refresh: `refresh-${generation}`,
+						expires: Date.now() + HOUR,
+						email: "repeated@example.test",
+					});
+					latestId = authStorage.listStoredCredentials("anthropic")[0]!.id;
+					expect(authStorage.disableCredentialById(latestId, `invalid_grant generation-${generation}`)).toBe(true);
+				}
+				const history = await store.listDisabledCredentials();
+				expect(history.map(row => row.cause)).toEqual([
+					"invalid_grant generation-0",
+					"invalid_grant generation-1",
+					"invalid_grant generation-2",
+				]);
+				vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+				vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+				// The command owns its storage; inspect unchanged raw history before it closes.
+				const close = authStorage.close.bind(authStorage);
+				vi.spyOn(authStorage, "close").mockImplementation(() => {});
+				let output = "";
+				vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+					output += String(chunk);
+					return true;
+				});
+				vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+				await runUsageCommand({ json }, profile.join("models.yml"));
+				const after = await store.listDisabledCredentials();
+				close();
+				authStorage = undefined;
+				vi.restoreAllMocks();
+				expect(after).toEqual(history);
+				if (json) {
+					expect(JSON.parse(output).disabledCredentials).toEqual([
+						expect.objectContaining({ id: latestId, cause: "invalid_grant generation-2" }),
+					]);
+				} else {
+					expect(output.match(/repeated@example.test/g)).toHaveLength(1);
+					expect(output).toContain("generation-2");
+					expect(output).not.toContain("generation-0");
+					expect(output).not.toContain("generation-1");
+				}
+			} finally {
+				vi.restoreAllMocks();
+				authStorage?.close();
+				process.exitCode = originalExitCode;
+				await profile.remove();
+			}
+		});
+	}
 	for (const transition of ["revalidation fails", "disable during tombstone lookup"]) {
 		for (const json of [false, true]) {
 			it(`retains a real tombstone when ${transition} in ${json ? "JSON" : "text"}`, async () => {

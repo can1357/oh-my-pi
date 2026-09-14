@@ -13,6 +13,7 @@ import { $env, $envExact, getAgentDbPath, logger, untilAborted, withTimeout } fr
 import {
 	copyOAuthCredentialIdentity,
 	isAutomaticDisableCause,
+	isDeliberateRemovalCause,
 	isOAuthCredentialIdentityRecovered,
 	isSqliteCorruptionError,
 	normalizeDisabledCause,
@@ -257,6 +258,7 @@ export interface RevalidatedDisabledHistory {
  *
  * Loaded accounts retain resolved token claims and the broker authoritative key
  * even when the snapshot withholds refresh tokens.
+ * A summary with no recoverable identity likewise cannot prove a re-login.
  */
 export function isActionableCredentialDisable(
 	summary: DisabledCredentialSummary,
@@ -264,6 +266,7 @@ export function isActionableCredentialDisable(
 ): boolean {
 	if (summary.type !== "oauth" || !isAutomaticDisableCause(summary.cause)) return false;
 	const identity = resolveOAuthCredentialIdentity(summary.provider, summary);
+	if (identity.identifiers.length === 0) return true;
 	return !activeAccounts.some(account => {
 		if (account.provider !== summary.provider || account.type === "api_key") return false;
 		return isOAuthCredentialIdentityRecovered(
@@ -758,9 +761,12 @@ export interface AuthCredentialStore {
 	 */
 	deleteAuthCredentialRemote?(id: number, disabledCause: string): Promise<boolean>;
 	/**
-	 * Optional async write hook for clearing every credential for a provider
-	 * (logout). When present, `AuthStorage.remove` routes through this instead
-	 * of the sync `deleteAuthCredentialsForProvider`.
+	 * Optional async write hook for deliberate whole-provider logout, clearing
+	 * prior disabled history as well as active credentials. When present,
+	 * `AuthStorage.remove` routes through this instead of the sync
+	 * `deleteAuthCredentialsForProvider`. Reject on persistence failure and
+	 * update the in-memory snapshot only after success.
+	 * The cause remains "deleted by user" for existing store implementations.
 	 */
 	deleteAuthCredentialsRemote?(provider: string, disabledCause: string): Promise<void>;
 }
@@ -3390,7 +3396,7 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Remove credential for a provider.
+	 * Deliberately remove all credentials and prior disabled history for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
 		if (this.#store.deleteAuthCredentialsRemote) {
@@ -7802,6 +7808,8 @@ export class AuthStorage {
 	 * broker `GET /v1/credentials/disabled`). Empty when the backing store
 	 * keeps no tombstones or the remote broker predates the endpoint.
 	 * requireSupported rejects those cases so callers can safely interpret absence.
+	 * SQLite retains automatic OAuth failures for 30 days after disable, even
+	 * after recovery. Use `listActionableDisabledCredentials` for reminders.
 	 */
 	async listDisabledCredentials(
 		provider?: string,
@@ -8106,9 +8114,10 @@ export class AuthStorage {
 
 	/**
 	 * Disable the credential with the given id. Used by the auth-broker server
-	 * to honour `POST /v1/credential/:id/disable`. Returns `false` when no such
-	 * row exists. A {@link CredentialDisabledEvent} is emitted only for an
-	 * automatic cause: a remote client's own `remove()` arrives here as
+	 * to honour `POST /v1/credential/:id/disable`. Automatic disables return
+	 * `false` when no active row exists; deliberate removals also clear persisted
+	 * tombstones and succeed idempotently. A {@link CredentialDisabledEvent} is emitted only for an
+	 * automatic cause: a remote client's own `removeCredential()` arrives here as
 	 * `deleted by user`, and the event contract excludes user-initiated
 	 * removals just as the local path does.
 	 */
@@ -8141,6 +8150,12 @@ export class AuthStorage {
 				);
 			}
 			return disabled;
+		}
+		if (isDeliberateRemovalCause(disabledCause.trim())) {
+			// A peer may have disabled the selected row after the client snapshot.
+			// The deliberate-removal transaction also purges that tombstone.
+			this.#store.deleteAuthCredential(id, disabledCause);
+			return true;
 		}
 		return false;
 	}
