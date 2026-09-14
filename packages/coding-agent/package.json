@@ -36,6 +36,7 @@
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "oxlint .",
     "test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
+    "test:atomic-local-write": "bun test test/write-local-atomic.test.ts test/internal-urls/local-protocol-atomic-write.test.ts",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
     "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",

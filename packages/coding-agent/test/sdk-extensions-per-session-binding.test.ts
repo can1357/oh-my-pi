@@ -18,6 +18,15 @@ import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+interface CapturedExtensionBinding {
+	events: EventBus;
+	hasAtomicLocalWrite: boolean;
+}
+
+declare global {
+	var __bindings: CapturedExtensionBinding[] | undefined;
+	var __lastExtBinding: unknown;
+}
 
 describe("loadExtensions per-session binding (#2190 review fix)", () => {
 	let tmp: string;
@@ -44,7 +53,7 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 				"    configurable: true,",
 				"  });",
 				"  globalThis.__bindings = globalThis.__bindings || [];",
-				"  globalThis.__bindings.push({ events: api.events });",
+				"  globalThis.__bindings.push({ events: api.events, hasAtomicLocalWrite: api.hasAtomicLocalWrite });",
 				"}",
 			].join("\n"),
 		);
@@ -52,12 +61,12 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 
 	afterAll(async () => {
 		await removeWithRetries(tmp);
-		delete (globalThis as { __bindings?: unknown }).__bindings;
-		delete (globalThis as { __lastExtBinding?: unknown }).__lastExtBinding;
+		delete globalThis.__bindings;
+		delete globalThis.__lastExtBinding;
 	});
 
 	it("creates a distinct Extension and ExtensionAPI per call (fresh eventBus + runtime)", async () => {
-		(globalThis as { __bindings?: { events: EventBus }[] }).__bindings = [];
+		globalThis.__bindings = [];
 
 		const parentEventBus = new EventBus();
 		const subagentEventBus = new EventBus();
@@ -78,9 +87,10 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 		expect(subagent.runtime).not.toBe(parent.runtime);
 
 		// Each factory saw the eventBus passed to its own loadExtensions call.
-		const bindings = (globalThis as { __bindings?: { events: EventBus }[] }).__bindings ?? [];
+		const bindings = globalThis.__bindings ?? [];
 		expect(bindings).toHaveLength(2);
 		expect(bindings[0]?.events).toBe(parentEventBus);
 		expect(bindings[1]?.events).toBe(subagentEventBus);
+		expect(bindings.every(binding => binding.hasAtomicLocalWrite)).toBe(true);
 	});
 });
