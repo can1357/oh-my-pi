@@ -723,6 +723,29 @@ describe("callSessionTool", () => {
 		]);
 	});
 
+	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {
+		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist", status: "in_progress" }] }];
+		const persisted: TodoPhase[][] = [];
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			persistTodoPhases: next => persisted.push(next),
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+		const todoTool = new TodoTool(session);
+
+		await callSessionTool("todo", { op: "done", task: "Persist" }, { session });
+		expect(persisted).toEqual([[{ name: "Ship", tasks: [{ content: "Persist", status: "completed" }] }]]);
+
+		// Reads and rejected batches leave the branch untouched.
+		await callSessionTool("todo", { op: "view" }, { session });
+		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
+		expect(persisted).toHaveLength(1);
+	});
+
 	it("returns structured tool results when details or images are present", async () => {
 		const session = createSession([
 			createTool("custom", async () => ({

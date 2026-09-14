@@ -3,6 +3,7 @@ import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
+import { committedTodoPhases } from "../../tools/todo";
 import { ToolError } from "../../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { invokeEvalPrelude } from "../preludes";
@@ -295,6 +296,13 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			undefined,
 			options.session.getToolContext?.(),
 		);
+		if (name === "todo") {
+			// A bridged call emits no `todo` toolResult entry, the only thing branch
+			// rehydration reads; without this the in-memory update is lost on the
+			// next resume/rewind/fork and stale todos trigger a false reminder.
+			const phases = committedTodoPhases(result);
+			if (phases) options.session.persistTodoPhases?.(phases);
+		}
 		return normalizeAgentToolResult(name, normalizedArgs, result, options);
 	} catch (error) {
 		options.emitStatus?.({

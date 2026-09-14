@@ -4,7 +4,14 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type Message,
+	type Model,
+	retryTransientCompletion,
+} from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -19,7 +26,7 @@ import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/m
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
-const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: true });
+const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 // Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
@@ -279,13 +286,16 @@ export async function generateTitleOnline(
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
+		const messages: Message[] = [{ role: "user", content: userMessage, timestamp: Date.now() }];
+		if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
+
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(
 					model,
 					{
 						systemPrompt,
-						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+						messages,
 					},
 					{
 						apiKey: registry.resolver(model, sessionId),
@@ -342,6 +352,33 @@ export async function generateTitleOnline(
 		});
 		return null;
 	}
+}
+
+/**
+ * Open the `<title>` marker as a trailing assistant turn on hosts that continue
+ * it verbatim (`Model.supportsAssistantPrefill`). Some Ollama chat templates
+ * (LFM2.5) open a reasoning channel regardless of the disable flag, burning the
+ * whole output budget on thinking and never emitting a title. Committing the
+ * marker first skips the reasoning channel entirely.
+ */
+function titlePrefill(model: Model<Api>): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "<title>" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
 }
 
 function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string {

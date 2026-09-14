@@ -12355,7 +12355,7 @@
 				}
 			},
 			{
-				"source": "providers/ollama-cloud.kdl:5",
+				"source": "providers/ollama-cloud.kdl:7",
 				"class": "unknown",
 				"providers": [
 					"ollama-cloud"
@@ -12370,7 +12370,7 @@
 				}
 			},
 			{
-				"source": "providers/ollama-cloud.kdl:9",
+				"source": "providers/ollama-cloud.kdl:11",
 				"providers": [
 					"ollama-cloud"
 				],
@@ -12389,7 +12389,7 @@
 				}
 			},
 			{
-				"source": "providers/ollama-cloud.kdl:13",
+				"source": "providers/ollama-cloud.kdl:15",
 				"providers": [
 					"ollama-cloud"
 				],
@@ -12417,7 +12417,7 @@
 				}
 			},
 			{
-				"source": "providers/ollama-cloud.kdl:17",
+				"source": "providers/ollama-cloud.kdl:19",
 				"providers": [
 					"ollama-cloud"
 				],
@@ -12441,6 +12441,9 @@
 				],
 				"thinking": {
 					"mode": "effort"
+				},
+				"catalog": {
+					"supportsAssistantPrefill": true
 				}
 			},
 			{
@@ -12459,6 +12462,9 @@
 						"high",
 						"max"
 					]
+				},
+				"catalog": {
+					"supportsAssistantPrefill": true
 				}
 			},
 			{
