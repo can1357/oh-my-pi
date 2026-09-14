@@ -270,9 +270,7 @@ fn open_or_create_directory(
 		match open_directory_at(parent.as_raw_fd(), name, local_root_device.is_some()) {
 			Ok(directory) => {
 				if let Some(expected_device) = local_root_device {
-					heartbeat(cancel_token)?;
-					let actual_device =
-						private_directory_device(directory.as_raw_fd(), "descendant directory")?;
+					let actual_device = directory_device(directory.as_raw_fd(), "descendant directory")?.st_dev;
 					if actual_device != expected_device {
 						return Err(AtomicWriteError::new(
 							AtomicWriteErrorCode::UnsafePath,
@@ -356,10 +354,7 @@ fn openat2_is_unavailable(error: &io::Error) -> bool {
 	is_errno(error, libc::ENOSYS) || is_errno(error, libc::EINVAL)
 }
 
-fn private_directory_device(
-	fd: RawFd,
-	label: &str,
-) -> std::result::Result<libc::dev_t, AtomicWriteError> {
+fn directory_device(fd: RawFd, label: &str) -> std::result::Result<libc::stat, AtomicWriteError> {
 	let stat = fd_stat(fd).map_err(|error| precommit_io(&format!("inspecting {label}"), error))?;
 	if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
 		return Err(AtomicWriteError::new(
@@ -368,6 +363,14 @@ fn private_directory_device(
 			format!("{label} is not a directory"),
 		));
 	}
+	Ok(stat)
+}
+
+fn private_directory_device(
+	fd: RawFd,
+	label: &str,
+) -> std::result::Result<libc::dev_t, AtomicWriteError> {
+	let stat = directory_device(fd, label)?;
 	let owner = unsafe { libc::geteuid() };
 	let permissions = stat.st_mode & 0o777;
 	if stat.st_uid != owner || permissions & 0o022 != 0 {

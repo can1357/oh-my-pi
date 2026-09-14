@@ -145,6 +145,19 @@ describe("writeLocalUrlAtomically", () => {
 			});
 		});
 	});
+	it("maps malformed local write URLs to structured pre-commit errors", async () => {
+		await expect(
+			writeLocalUrlAtomically("not a URL", "content", {
+				getArtifactsDir: () => os.tmpdir(),
+				getSessionId: () => "malformed-url",
+			}),
+		).rejects.toMatchObject({
+			name: "AtomicLocalWriteError",
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+		});
+	});
+
 	it("canonicalizes trusted POSIX symlink ancestors without following a linked local root", async () => {
 		if (process.platform === "win32") return;
 		await withTempDir(async tempDir => {

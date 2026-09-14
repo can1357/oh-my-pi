@@ -364,7 +364,17 @@ function requireInvokingLocalProtocolOptions(options: LocalProtocolOptions): Loc
 }
 
 function parseAtomicLocalTarget(input: string | InternalUrl, options: LocalProtocolOptions): ParsedAtomicLocalTarget {
-	const url = typeof input === "string" ? parseInternalUrl(input) : input;
+	let url: InternalUrl;
+	try {
+		url = typeof input === "string" ? parseInternalUrl(input) : input;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message,
+		});
+	}
 	if (url.protocol.toLowerCase() !== "local:") {
 		throw new AtomicLocalWriteError({
 			code: "INVALID_INPUT",
