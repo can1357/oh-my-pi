@@ -74,13 +74,14 @@ describe("AgentSession model persistence", () => {
 		defaultRoleValue: string,
 		smolRoleValue: string,
 		lastRole = "smol",
+		cwd = tempDir.path(),
 	): Promise<string> {
 		const targetSessionFile = path.join(tempDir.path(), `target-${Bun.nanoseconds()}.jsonl`);
 		const timestamp = "2026-06-01T00:00:00.000Z";
 		await Bun.write(
 			targetSessionFile,
 			`${[
-				{ type: "session", version: 3, id: "target-session", timestamp, cwd: tempDir.path() },
+				{ type: "session", version: 3, id: "target-session", timestamp, cwd },
 				{
 					type: "model_change",
 					id: "default-model",
@@ -112,6 +113,7 @@ describe("AgentSession model persistence", () => {
 		persist?: boolean;
 		onSessionSwitch?: (ctx: ExtensionContext) => void;
 		onSessionBeforeSwitch?: () => { cancel: true };
+		sideStreamFn?: AgentSessionConfig["sideStreamFn"];
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -172,6 +174,7 @@ describe("AgentSession model persistence", () => {
 			modelRegistry,
 			codeModelBeforeNavigationHandler: options?.codeModelBeforeNavigationHandler,
 			codeModelAfterNavigationHandler: options?.codeModelAfterNavigationHandler,
+			sideStreamFn: options?.sideStreamFn,
 			extensionRunner,
 		});
 
@@ -264,6 +267,58 @@ describe("AgentSession model persistence", () => {
 		expect(await created.session.newSession()).toBe(false);
 		expect(outgoingRestorations).toBe(0);
 		expect(created.session.sessionManager.getSessionId()).toBe(beforeSessionId);
+	});
+
+	it("preserves the outgoing phase when destination cwd requires approval", async () => {
+		const targetCwd = TempDir.createSync("@pi-model-persistence-target-");
+		try {
+			const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const targetValue = modelValue(targetModel);
+			const targetSessionFile = await writeRoleModelSession(targetValue, targetValue, "default", targetCwd.path());
+			let outgoingRestorations = 0;
+			const created = await createSession({
+				codeModelBeforeNavigationHandler: async () => {
+					outgoingRestorations++;
+					return undefined;
+				},
+				persist: true,
+			});
+			const beforeSessionFile = created.session.sessionManager.getSessionFile();
+
+			expect(await created.session.switchSession(targetSessionFile)).toBe(false);
+			expect(outgoingRestorations).toBe(0);
+			expect(created.session.sessionManager.getSessionFile()).toBe(beforeSessionFile);
+		} finally {
+			targetCwd.removeSync();
+		}
+	});
+
+	it("preserves the outgoing phase when tree summarization fails", async () => {
+		let outgoingRestorations = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				outgoingRestorations++;
+				return undefined;
+			},
+			sideStreamFn: () => {
+				throw new Error("summary failed");
+			},
+		});
+		const targetId = created.session.sessionManager.appendMessage({
+			role: "user",
+			content: "first branch message",
+			timestamp: Date.now(),
+		});
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: "second branch message",
+			timestamp: Date.now(),
+		});
+		const beforeLeafId = created.session.sessionManager.getLeafId();
+
+		await expect(created.session.navigateTree(targetId, { summarize: true })).rejects.toThrow("summary failed");
+		expect(outgoingRestorations).toBe(0);
+		expect(created.session.sessionManager.getLeafId()).toBe(beforeLeafId);
 	});
 
 	it("awaits destination recovery beyond the extension timeout", async () => {

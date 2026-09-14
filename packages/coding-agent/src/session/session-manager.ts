@@ -1403,6 +1403,34 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
+	/**
+	 * Load a target session once and report the cwd that committing it will adopt.
+	 * The returned commit closes over the exact loaded snapshot so navigation can
+	 * finish cancellable preparation before mutating the active session.
+	 */
+	async prepareSessionFile(sessionFile: string): Promise<{
+		cwd: string;
+		recordedCwd: string;
+		commit: () => Promise<void>;
+	}> {
+		const resolvedSessionFile = path.resolve(sessionFile);
+		const loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
+		if (loaded.invalidHeader) {
+			throw new Error(
+				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+			);
+		}
+		const currentCwd = path.resolve(this.#cwd);
+		const header = loaded.entries[0]?.type === "session" ? loaded.entries[0] : undefined;
+		const recordedCwd = header?.cwd ? path.resolve(header.cwd) : currentCwd;
+		const cwd = recordedCwd !== currentCwd && (await directoryIsEnterable(recordedCwd)) ? recordedCwd : currentCwd;
+		return {
+			cwd,
+			recordedCwd,
+			commit: () => this.#setSessionFile(resolvedSessionFile, loaded),
+		};
+	}
+
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
 		await this.#setSessionFile(sessionFile);

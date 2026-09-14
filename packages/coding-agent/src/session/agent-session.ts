@@ -9138,6 +9138,26 @@ export class AgentSession {
 				return false;
 			}
 		}
+		const previousCwd = this.sessionManager.getCwd();
+		const preparedSession = switchingToDifferentSession
+			? await this.sessionManager.prepareSessionFile(sessionPath)
+			: undefined;
+		const targetCwd = preparedSession?.cwd ?? previousCwd;
+		const recordedCwd = preparedSession?.recordedCwd ?? this.sessionManager.getRecordedCwd() ?? previousCwd;
+		let cwdChangeTarget: string | undefined;
+		if (!options?.preserveLocalCwd) {
+			if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
+				return false;
+			}
+			if (options?.onCwdChange) {
+				if (path.resolve(targetCwd) !== path.resolve(previousCwd)) {
+					cwdChangeTarget = targetCwd;
+					if (!(await options.onCwdChange(targetCwd, previousCwd))) return false;
+				} else if (path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
+					return false;
+				}
+			}
+		}
 		if (await this.#codeModelBlocksNavigation()) return false;
 
 		this.#disconnectFromAgent();
@@ -9208,33 +9228,17 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
 
-		let cwdChangeTarget: string | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
 				// still observe message_end, then mute before swapping files.
 				await this.#advisors.drainAndDetachRecorders();
 			}
-			await this.sessionManager.setSessionFile(sessionPath);
+			if (preparedSession) await preparedSession.commit();
+			else await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
-			const newCwd = this.sessionManager.getCwd();
-			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
-			} else {
-				if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
-					throw SESSION_CWD_CHANGE_REJECTED;
-				}
-				if (options?.onCwdChange) {
-					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd)) {
-						cwdChangeTarget = newCwd;
-						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
-							throw SESSION_CWD_CHANGE_REJECTED;
-						}
-					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
-						throw SESSION_CWD_CHANGE_REJECTED;
-					}
-				}
 			}
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
@@ -9889,7 +9893,6 @@ export class AgentSession {
 				fromExtension = true;
 			}
 		}
-		if (await this.#codeModelBlocksNavigation()) return { cancelled: true };
 
 		// Run default summarizer if needed
 		let summaryText: string | undefined;
@@ -9933,6 +9936,7 @@ export class AgentSession {
 			summaryText = hookSummary.summary;
 			summaryDetails = hookSummary.details;
 		}
+		if (await this.#codeModelBlocksNavigation()) return { cancelled: true };
 
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.
