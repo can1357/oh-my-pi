@@ -23,20 +23,30 @@ import {
 	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
+import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
+import { getKeybindings, type Keybinding, replaceTabs, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import {
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	isCompiledBinary,
+	logger,
 	parseFrontmatter as parseOmpFrontmatter,
+	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "../config/keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
+import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../edit/normalize";
 import { EditTool } from "../edit";
+import { attemptEditAutoRepair } from "../edit/auto-repair";
+import { getEditStore } from "../edit/store";
+import { createLspWritethrough, writethroughNoop } from "../lsp/writethrough";
+import { summarizeCode } from "@oh-my-pi/pi-natives";
+import { assertEditableFile } from "../tools/auto-generated-guard";
+import { resolveToCwd } from "../tools/path-utils";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
 	discoverContextFiles,
@@ -57,7 +67,8 @@ import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
-import { formatBytes } from "../tools/render-utils";
+import { formatBytes, PREVIEW_LIMITS, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../tools/render-utils";
+import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "../utils/image-loading";
@@ -203,6 +214,23 @@ const legacyLsSchema = Type.Object({
 	limit: Type.Optional(Type.Number({ description: "Maximum entries" })),
 });
 
+const legacyEditSchema = Type.Object({
+	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+	edits: Type.Array(
+		Type.Object({
+			oldText: Type.String({
+				description:
+					"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+			}),
+			newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		}),
+		{
+			description:
+				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+		},
+	),
+});
+
 function markToolDefinition<TParams extends TSchema, TDetails>(
 	tool: ToolDefinition<TParams, TDetails>,
 ): ToolDefinition<TParams, TDetails> {
@@ -259,16 +287,189 @@ async function executeBuiltinTool(
 	return tool.execute(toolCallId, params, signal, onUpdate);
 }
 
+/**
+ * Upstream pi 0.84.2 advertised `edit` as `{path, edits: [{oldText, newText}]}`;
+ * omp's edit advertises its own active-mode schema (`{input}` for hashline,
+ * `{old_string, new_string}` for replace, …). Legacy extensions merge
+ * `parameters.properties` with their own fields (e.g. SoL-Pi's `then_run`) and
+ * forward the upstream-shaped input to the wrapped execute, so the shim must
+ * speak the upstream schema and translate it onto omp's replace-mode tool.
+ */
+function legacyEditTool(cwd: string): ToolDefinition {
+	const base = legacyBuiltinTool(cwd, "edit");
+	const session = legacyToolSession(cwd);
+	const replaceTool = new EditTool(session, "replace");
+	// Mirrors EditTool's createEditWritethrough exactly (same isolated settings).
+	const enableLsp = session.enableLsp ?? true;
+	const writethrough = enableLsp
+		? createLspWritethrough(cwd, {
+				enableFormat: enableLsp && session.settings.get("lsp.formatOnWrite"),
+				enableDiagnostics: enableLsp && session.settings.get("lsp.diagnosticsOnEdit"),
+			})
+		: writethroughNoop;
+
+	/** Same parse check auto-repair uses; `false` for files without a resolver. */
+	const parsed = (code: string, filePath: string): boolean =>
+		summarizeCode({ code: code.length === 0 ? "\n" : code, path: filePath }).parsed;
+
+	/** EditTool's post-apply parse-regression handling, adapted to the batch write. */
+	async function parseRegressionNote(
+		filePath: string,
+		prev: string,
+		next: string,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		if (parsed(prev, filePath) && !parsed(next, filePath)) {
+			const snapshot = { path: filePath, prev, next };
+			let repaired;
+			try {
+				repaired = await attemptEditAutoRepair({ session, snapshot, writethrough, signal });
+				if (repaired) getEditStore(session).invalidate(filePath);
+			} catch (error) {
+				logger.warn("Edit auto-repair failed", {
+					path: filePath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			const display = path.relative(cwd, filePath) || filePath;
+			return repaired
+				? `Note: ${display} stopped parsing after this edit; an automatic syntax repair (${repaired.model}) was applied on top:\n${repaired.diff}\nReview the repaired region; adjust it if the repair guessed wrong.`
+				: `Warning: ${display} no longer parses after this edit. The change was applied; re-read the edited region and fix the syntax, or revert if unintended.`;
+		}
+		return undefined;
+	}
+	const definition: LegacyBuiltinToolDefinition = {
+		...base,
+		[LEGACY_BUILTIN_TOOL_MARKER]: true as const,
+		description:
+			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping block of the current file content.",
+		parameters: arkToWireSchema(legacyEditSchema as never) as never,
+		approval: (args: unknown) => {
+			const target = (args as { path?: unknown } | null)?.path;
+			return typeof target === "string" ? resolveFileWriteApprovalTier(target) : "write";
+		},
+		execute: async (toolCallId, params, signal, onUpdate) => {
+			const { path, edits } = params as { path?: unknown; edits?: Array<{ oldText?: unknown; newText?: unknown }> };
+			if (typeof path !== "string" || !Array.isArray(edits) || edits.length === 0) {
+				throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
+			}
+			for (const edit of edits) {
+				if (typeof edit?.oldText !== "string" || typeof edit?.newText !== "string") {
+					throw new Error("Edit tool input is invalid. Every edits[] entry needs oldText and newText strings.");
+				}
+			}
+			if (edits.length === 1) {
+				// Keep omp's replace-mode seams (LSP diagnostics, checkpoints, fuzzy
+				// matching) for the common single-replacement call.
+				return replaceTool.execute(
+					toolCallId,
+					{ path, old_string: edits[0]!.oldText as string, new_string: edits[0]!.newText as string },
+					signal,
+					onUpdate,
+				);
+			}
+			// Multi-edit batches must honor upstream pi's contract — every edit is
+			// matched against the ORIGINAL file content, never incrementally — and
+			// must not persist earlier replacements when a later entry is invalid.
+			// Validate the whole list against one snapshot, then apply by index.
+			const batchPath = resolveToCwd(path as string, cwd);
+			// The direct write bypasses EditSession's native policy, so enforce the
+			// generated-file guard the single-edit branch gets for free.
+			await assertEditableFile(batchPath, path as string, Settings.isolated());
+			const raw = await Bun.file(batchPath).text();
+			const { bom, text: body } = stripBom(raw);
+			const normalized = normalizeToLF(body);
+			const replacement = edits as Array<{ oldText: string; newText: string }>;
+			const matches: Array<{ index: number; length: number; newText: string }> = [];
+			for (let i = 0; i < replacement.length; i++) {
+				const { oldText, newText } = replacement[i]!;
+				if (normalizeToLF(oldText).length === 0) {
+					throw new Error(`edits[${i}] in ${batchPath} has empty oldText. Provide the exact text to replace.`);
+				}
+				const index = normalized.indexOf(normalizeToLF(oldText));
+				if (index === -1) {
+					throw new Error(
+						`edits[${i}] oldText was not found in ${batchPath}. It must match the current file content exactly.`,
+					);
+				}
+				// Overlapping-aware count: "aaa".split("aa") reports one occurrence,
+				// but a second `aa` overlaps the first and makes the replacement
+				// ambiguous. Count every start position.
+				const needleText = normalizeToLF(oldText);
+				let occurrences = 0;
+				for (let at = normalized.indexOf(needleText); at !== -1; at = normalized.indexOf(needleText, at + 1)) {
+					occurrences++;
+				}
+				if (occurrences > 1) {
+					throw new Error(
+						`edits[${i}] oldText matches ${occurrences} locations in ${batchPath}. It must be unique in the original file; include more surrounding context.`,
+					);
+				}
+				matches.push({ index, length: normalizeToLF(oldText).length, newText: normalizeToLF(newText) });
+			}
+			matches.sort((a, b) => a.index - b.index);
+			for (let i = 1; i < matches.length; i++) {
+				const previous = matches[i - 1]!;
+				const current = matches[i]!;
+				if (previous.index + previous.length > current.index) {
+					throw new Error(
+						`Two edits[] entries overlap in ${batchPath}. Merge them into one edit or target disjoint regions.`,
+					);
+				}
+			}
+			let updated = "";
+			let cursor = 0;
+			for (const match of matches) {
+				updated += normalized.slice(cursor, match.index) + match.newText;
+				cursor = match.index + match.length;
+			}
+			updated += normalized.slice(cursor);
+			const ending = detectLineEnding(body);
+			const written = bom + restoreLineEndings(updated, ending);
+			// Commit through the shared LSP writethrough so watched-file
+			// notifications, format-on-write, and post-write cache invalidation
+			// behave exactly like the single-edit replace path.
+			const { finalContent } = await writethrough(batchPath, written, signal);
+			const content: AgentToolResult["content"] = [
+				{ type: "text", text: `Successfully replaced ${replacement.length} blocks in ${batchPath}.` },
+			];
+			const note = await parseRegressionNote(batchPath, body, finalContent, signal);
+			if (note) content.push({ type: "text", text: note });
+			return { content } satisfies AgentToolResult;
+		},
+	};
+	return markToolDefinition(definition);
+}
+
 function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName): ToolDefinition {
 	const tool = createRegistryTool(cwd, name);
 	const definition: LegacyBuiltinToolDefinition = {
 		name: tool.name,
 		label: tool.label,
 		description: tool.description,
-		parameters: tool.parameters,
+		// The built-in edit/write tools expose arktype schemas (callable, no
+		// `.properties`). Legacy extensions written against TypeBox merge
+		// `parameters.properties` with extra fields (e.g. SoL-Pi's `then_run`),
+		// so hand them the plain JSON-Schema document the wire already uses.
+		parameters: isArkSchema(tool.parameters)
+			? (arkToWireSchema(tool.parameters) as unknown as typeof tool.parameters)
+			: tool.parameters,
 		hidden: tool.hidden,
 		deferrable: tool.deferrable,
 		approval: tool.approval,
+		// omp renders built-ins through the per-name renderer registry, not through
+		// definition methods; legacy wrappers (SoL-Pi) invoke `renderCall!` on the
+		// definitions they wrap, so supply simple call/result renderers.
+		renderCall: (params, optionsArg, themeArg) => {
+			const theme = renderTheme(optionsArg, themeArg);
+			const raw = stringField(params, "path") ?? stringField(params, "input") ?? "";
+			// Hostile or file-derived preview text: strip terminal controls, shorten
+			// home leaks, expand tabs, and cap the width so the call line cannot
+			// break terminal layout.
+			const detail = truncateToWidth(replaceTabs(shortenEmbeddedPaths(sanitizeText(raw))), TRUNCATE_LENGTHS.LINE);
+			return new Text(`${themedTitle(theme, name)} ${themedMuted(theme, detail)}`.trimEnd(), 0, 0);
+		},
+		renderResult: legacyRenderResult,
 		execute: (toolCallId, params, signal, onUpdate) =>
 			executeBuiltinTool(cwd, name, toolCallId, params, signal, onUpdate),
 		[LEGACY_BUILTIN_TOOL_MARKER]: true,
@@ -313,14 +514,29 @@ function themedMuted(theme: LegacyThemeLike | undefined, text: string): string {
 	return theme ? theme.fg("toolOutput", text) : text;
 }
 
-function textResult(result: AgentToolResult<unknown> | undefined): string {
-	return result?.content.find(block => block.type === "text")?.text ?? "";
+/** Every text block joined — EditTool appends parse-regression warnings as a second block. */
+function allTextResult(result: AgentToolResult<unknown> | undefined): string {
+	const blocks = result?.content.filter(block => block.type === "text") ?? [];
+	return blocks.map(block => (block as { text: string }).text).join("\n\n");
 }
 
 function legacyRenderResult(result: AgentToolResult<unknown>, _options: unknown, themeArg: unknown): Text {
 	const theme = renderTheme(themeArg, undefined);
-	const output = textResult(result);
-	return new Text(output ? `\n${themedMuted(theme, output)}` : "", 0, 0);
+	const output = allTextResult(result);
+	if (!output) return new Text("", 0, 0);
+	// TUI sanitization contract: control sequences can clear or reposition the
+	// terminal, tabs break layout, absolute home paths leak, and file-derived
+	// output (diffs, errors) can be unbounded. The cap follows the shared preview
+	// policy instead of a local constant.
+	const sanitized = replaceTabs(shortenEmbeddedPaths(sanitizeText(output)));
+	const lines = sanitized.split("\n");
+	const visible = lines
+		.slice(0, PREVIEW_LIMITS.OUTPUT_EXPANDED)
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE));
+	if (lines.length > PREVIEW_LIMITS.OUTPUT_EXPANDED) {
+		visible.push(`… ${lines.length - PREVIEW_LIMITS.OUTPUT_EXPANDED} more lines`);
+	}
+	return new Text(`\n${themedMuted(theme, visible.join("\n"))}`, 0, 0);
 }
 
 function lineRangePath(readPath: string, offset: number | undefined, limit: number | undefined): string {
@@ -717,7 +933,7 @@ export function createEditToolDefinition(cwd: string, options?: EditToolOptions)
 				"defineTool() instead of passing operations to createEditTool()/createEditToolDefinition().",
 		);
 	}
-	return legacyBuiltinTool(cwd, "edit");
+	return legacyEditTool(cwd);
 }
 
 /** Create the legacy edit tool. */
@@ -744,7 +960,7 @@ export function createWriteTool(cwd: string, options?: WriteToolOptions): ToolDe
 
 /** Create legacy read, bash, edit, and write tools. */
 export function createCodingTools(cwd: string): ToolDefinition[] {
-	return LEGACY_CODING_TOOL_NAMES.map(name => legacyBuiltinTool(cwd, name));
+	return LEGACY_CODING_TOOL_NAMES.map(name => (name === "edit" ? legacyEditTool(cwd) : legacyBuiltinTool(cwd, name)));
 }
 
 /** Create legacy read, grep, find, and ls tools. */
@@ -1492,6 +1708,69 @@ export function getPackageDir(): string {
 // not forward them, so legacy extensions importing them fail Bun's static
 // export check during validation (issues #6583, #7174, #7403, #10278).
 export { calculateContextTokens, compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	type CutPointResult,
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+	findCutPoint as compactionFindCutPoint,
+	type SessionEntry as CompactionSessionEntry,
+} from "@oh-my-pi/pi-agent-core/compaction";
+
+// Upstream pi exported `findCutPoint(entries, startIndex, endIndex, keepRecentTokens)`
+// from the package root; omp's compaction core gained a leading `tokenizer` argument
+// (issue #2275 era). SoL-Pi's online-context-compact calls the 4-arg legacy shape, so
+// adapt in the shim rather than forcing extensions onto the new signature.
+export function findCutPoint(
+	entries: CompactionSessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+): CutPointResult {
+	return compactionFindCutPoint(entries, legacyTokenizer, startIndex, endIndex, keepRecentTokens);
+}
+
+/**
+ * Legacy `sessionEntryToContextMessages(entry)` export: upstream converted one
+ * session entry into its context messages. omp folds that conversion into
+ * `buildSessionContext`; expose a per-entry adapter with the same semantics
+ * (message → itself with a null-content guard, custom_message / branch_summary /
+ * compaction → their builder messages, everything else → none).
+ */
+export function sessionEntryToContextMessages(entry: CompactionSessionEntry): AgentMessage[] {
+	if (entry.type === "message") {
+		const message = entry.message;
+		if (
+			(message.role === "user" ||
+				message.role === "assistant" ||
+				message.role === "toolResult" ||
+				message.role === "custom") &&
+			message.content == null
+		) {
+			return [{ ...message, content: [] }];
+		}
+		return [message];
+	}
+	if (entry.type === "custom_message") {
+		return [
+			createCustomMessage(
+				entry.customType,
+				entry.content ?? [],
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.attribution,
+			),
+		];
+	}
+	if (entry.type === "branch_summary" && entry.summary) {
+		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
+	}
+	if (entry.type === "compaction") {
+		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+	}
+	return [];
+}
 
 const legacyTokenizer = new Tokenizer();
 
