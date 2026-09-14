@@ -8,12 +8,12 @@ import {
 	createSecurityFindingId,
 	createSecurityOccurrenceId,
 	createSecurityScanId,
-	type SecurityAccountRef,
 	type SecurityConfidenceLevel,
 	type SecurityDispositionStatus,
 	type SecurityEvidence,
 	type SecurityFinding,
 	type SecurityLocation,
+	type SecurityOAuthAccountRef,
 	type SecurityProducer,
 	type SecurityProvenance,
 	type SecurityScanBundle,
@@ -41,7 +41,7 @@ export type CodexSecurityCloudFetch = (input: string | URL | Request, init?: Req
 
 export interface CodexSecurityCloudClientOptions {
 	authStorage: AuthStorage;
-	account: SecurityAccountRef;
+	account: SecurityOAuthAccountRef;
 	baseUrl?: string;
 	fetch?: CodexSecurityCloudFetch;
 }
@@ -181,7 +181,7 @@ interface CloudRequestOptions {
 
 export class CodexSecurityCloudClient {
 	readonly #authStorage: AuthStorage;
-	readonly #account: SecurityAccountRef;
+	readonly #account: SecurityOAuthAccountRef;
 	readonly #baseUrl: string;
 	readonly #fetch: CodexSecurityCloudFetch;
 

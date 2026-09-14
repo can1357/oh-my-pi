@@ -3,8 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	canonicalSecurityJson,
+	createSecurityPlanId,
 	assertSecurityScanPlanFresh,
 	createSecurityScanPlan,
+	parseSecurityScanPlan,
 	prepareSecurityOutputDirectory,
 	type SecurityGitAdapter,
 	type SecurityTargetRequest,
@@ -68,8 +71,37 @@ describe("security preflight", () => {
 		const first = await plan();
 		const second = await plan();
 		expect(first.fingerprint).toBe(second.fingerprint);
-		expect(first.account.credentialId).toBe(17);
+		expect(first.account).toMatchObject({ provider: "openai-codex", authMode: "oauth", credentialId: 17 });
 		expect(first.model).toEqual({ provider: "openai-codex", modelId: "gpt-5.6-sol", thinkingLevel: "xhigh" });
+	});
+
+	test("legacy OAuth plans without authMode remain fresh", async () => {
+		const created = await plan();
+		const { authMode: _authMode, ...legacyAccount } = created.account;
+		const {
+			documentType: _documentType,
+			schemaVersion: _schemaVersion,
+			id: _id,
+			createdAt: _createdAt,
+			fingerprint: _fingerprint,
+			...material
+		} = created;
+		const legacyMaterial = { ...material, account: legacyAccount };
+		const legacyFingerprint = `omp-security-plan/v1:sha256:${Bun.SHA256.hash(canonicalSecurityJson(legacyMaterial), "hex")}`;
+		const legacyPlan = parseSecurityScanPlan({
+			...created,
+			account: legacyAccount,
+			id: createSecurityPlanId(legacyFingerprint),
+			fingerprint: legacyFingerprint,
+		});
+
+		await expect(
+			assertSecurityScanPlanFresh(
+				legacyPlan,
+				{ config: { security: { enabled: true } }, workflowFingerprint: "security-reviewer@fixture" },
+				adapter,
+			),
+		).resolves.toBeUndefined();
 	});
 
 	test("tree mutation makes a plan stale", async () => {

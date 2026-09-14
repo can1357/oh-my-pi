@@ -149,7 +149,9 @@ export const getSecurityContractSchemas = once(() => {
 		model: { provider: "string > 0", modelId: "string > 0", "thinkingLevel?": "string" },
 		account: {
 			provider: "string > 0",
-			credentialId: "number.integer >= 1",
+			"authMode?": "'oauth' | 'provider-native'",
+			"credentialSource?": "'aws'",
+			"credentialId?": "number.integer >= 1",
 			"accountId?": "string",
 			"email?": "string",
 			"organizationId?": "string",

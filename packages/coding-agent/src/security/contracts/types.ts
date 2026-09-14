@@ -157,14 +157,23 @@ export interface SecurityModelRef {
 	thinkingLevel?: string;
 }
 
-export interface SecurityAccountRef {
+export interface SecurityOAuthAccountRef {
 	provider: string;
+	authMode?: "oauth";
 	credentialId: number;
 	accountId?: string;
 	email?: string;
 	organizationId?: string;
 	organizationName?: string;
 }
+
+export interface SecurityProviderNativeAccountRef {
+	provider: "amazon-bedrock" | "bedrock-mantle";
+	authMode: "provider-native";
+	credentialSource: "aws";
+}
+
+export type SecurityAccountRef = SecurityOAuthAccountRef | SecurityProviderNativeAccountRef;
 
 export interface SecurityKnowledgeBaseRef {
 	path: string;

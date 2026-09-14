@@ -1,16 +1,24 @@
 import type { AgentOptions } from "@oh-my-pi/pi-agent-core";
-import type { OAuthAccessResolution } from "@oh-my-pi/pi-ai";
+import { AUTHENTICATED_SENTINEL, type Api, type Model, type OAuthAccessResolution } from "@oh-my-pi/pi-ai";
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import type { AuthStorage } from "../session/auth-storage";
-import type { SecurityAccountRef } from "./contracts";
+import type { SecurityAccountRef, SecurityOAuthAccountRef, SecurityProviderNativeAccountRef } from "./contracts";
 
 export interface ExactSecurityOAuthOptions {
 	authStorage: AuthStorage;
-	account: SecurityAccountRef;
+	account: SecurityOAuthAccountRef;
+}
+
+export interface ProviderNativeSecurityOptions {
+	modelRegistry: {
+		resolver(model: Pick<Model<Api>, "provider" | "baseUrl" | "id">, sessionId?: string): ApiKeyResolver;
+	};
+	account: SecurityProviderNativeAccountRef;
+	sessionId: string;
 }
 
 export function assertSecurityIdentityMatches(
-	account: SecurityAccountRef,
+	account: SecurityOAuthAccountRef,
 	resolution: {
 		credentialId?: number;
 		accountId?: string;
@@ -30,12 +38,28 @@ export function assertSecurityIdentityMatches(
 	}
 }
 
+const PROVIDER_NATIVE_SECURITY_PATHS: Record<string, true> = {
+	"amazon-bedrock\u0000bedrock-converse-stream": true,
+	"bedrock-mantle\u0000openai-responses": true,
+};
+
+export function isProviderNativeSecurityModel(model: Pick<Model<Api>, "provider" | "api">): boolean {
+	return PROVIDER_NATIVE_SECURITY_PATHS[`${model.provider}\u0000${model.api}`] === true;
+}
+
+function providerNativeAccount(provider: string): SecurityProviderNativeAccountRef {
+	if (provider !== "amazon-bedrock" && provider !== "bedrock-mantle") {
+		throw new Error(`Unsupported provider-native security provider: ${provider}`);
+	}
+	return { provider, authMode: "provider-native", credentialSource: "aws" };
+}
+
 export function selectSecurityAccount(
 	authStorage: AuthStorage,
 	provider: string,
 	requestedCredentialId?: number,
 	sessionId?: string,
-): SecurityAccountRef {
+): SecurityOAuthAccountRef {
 	const accounts = authStorage.listOAuthAccounts(provider, sessionId);
 	const selected =
 		requestedCredentialId !== undefined
@@ -50,7 +74,7 @@ export function selectSecurityAccount(
 			`Multiple OAuth accounts are available for ${provider}; supply credentialId to pin one exact account`,
 		);
 	}
-	const account: SecurityAccountRef = { provider, credentialId: selected.credentialId };
+	const account: SecurityOAuthAccountRef = { provider, authMode: "oauth", credentialId: selected.credentialId };
 	if (selected.accountId !== undefined) account.accountId = selected.accountId;
 	if (selected.email !== undefined) account.email = selected.email;
 	if (selected.orgId !== undefined) account.organizationId = selected.orgId;
@@ -58,9 +82,28 @@ export function selectSecurityAccount(
 	return account;
 }
 
+export async function selectSecurityAccountForModel(options: {
+	authStorage: AuthStorage;
+	model: Pick<Model<Api>, "provider" | "api">;
+	requestedCredentialId?: number;
+	sessionId?: string;
+	resolveApiKey: () => Promise<string | undefined>;
+}): Promise<SecurityAccountRef> {
+	if (options.requestedCredentialId === undefined && isProviderNativeSecurityModel(options.model)) {
+		const apiKey = await options.resolveApiKey();
+		if (apiKey === AUTHENTICATED_SENTINEL) return providerNativeAccount(options.model.provider);
+	}
+	return selectSecurityAccount(
+		options.authStorage,
+		options.model.provider,
+		options.requestedCredentialId,
+		options.sessionId,
+	);
+}
+
 export async function resolveExactSecurityOAuthAccess(
 	authStorage: AuthStorage,
-	account: SecurityAccountRef,
+	account: SecurityOAuthAccountRef,
 	options: { forceRefresh: boolean; signal?: AbortSignal },
 ): Promise<Extract<OAuthAccessResolution, { ok: true }>> {
 	const resolution = await authStorage.getOAuthAccessByCredentialId(account.provider, account.credentialId, options);
@@ -94,5 +137,20 @@ export function createExactSecurityOAuthResolver(
 			return resolution.accessToken;
 		};
 		return resolver;
+	};
+}
+
+export function createProviderNativeSecurityResolver(
+	options: ProviderNativeSecurityOptions,
+): NonNullable<AgentOptions["getApiKey"]> {
+	const { account, modelRegistry, sessionId } = options;
+	return model => {
+		if (model.provider !== account.provider) {
+			throw new Error("Security scan authentication provider mismatch");
+		}
+		if (!isProviderNativeSecurityModel(model)) {
+			throw new Error("Unsupported provider-native security model");
+		}
+		return modelRegistry.resolver(model, sessionId);
 	};
 }

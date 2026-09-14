@@ -24,7 +24,22 @@ export function parseSecurityScanPlan(value: unknown): SecurityScanPlan {
 	const { securityScanPlanSchema } = getSecurityContractSchemas();
 	const result = securityScanPlanSchema(value);
 	if (result instanceof type.errors) throw schemaError("Security scan plan", result);
-	return result as SecurityScanPlan;
+	const plan = result as SecurityScanPlan;
+	if (plan.account.provider !== plan.model.provider) {
+		throw new Error("Security scan authentication provider mismatch");
+	}
+	if (plan.account.authMode === "provider-native") {
+		if (
+			(plan.account.provider !== "amazon-bedrock" && plan.account.provider !== "bedrock-mantle") ||
+			plan.account.credentialSource !== "aws" ||
+			("credentialId" in plan.account && plan.account.credentialId !== undefined)
+		) {
+			throw new Error("Unsupported provider-native security authentication mode");
+		}
+	} else if (plan.account.credentialId === undefined) {
+		throw new Error("Security OAuth authentication requires a credential id");
+	}
+	return plan;
 }
 
 export function parseSecurityScanBundle(value: unknown): SecurityScanBundle {

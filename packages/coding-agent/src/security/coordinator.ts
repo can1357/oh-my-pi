@@ -16,7 +16,11 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import { createExactSecurityOAuthResolver, selectSecurityAccount } from "./auth";
+import {
+	createExactSecurityOAuthResolver,
+	createProviderNativeSecurityResolver,
+	selectSecurityAccountForModel,
+} from "./auth";
 import type {
 	SecurityCoverage,
 	SecurityModelRef,
@@ -244,10 +248,17 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		modelRegistry: input.host.modelRegistry,
 		settings: scanSettings,
 		model: input.model,
-		getApiKey: createExactSecurityOAuthResolver({
-			authStorage: input.host.authStorage,
-			account: input.plan.account,
-		}),
+		getApiKey:
+			input.plan.account.authMode === "provider-native"
+				? createProviderNativeSecurityResolver({
+						modelRegistry: input.host.modelRegistry,
+						account: input.plan.account,
+						sessionId: `security:${input.scanId}`,
+					})
+				: createExactSecurityOAuthResolver({
+						authStorage: input.host.authStorage,
+						account: input.plan.account,
+					}),
 		providerSessionId: `security:${input.scanId}`,
 		sessionManager: input.sessionManager,
 		customTools: [input.publicationTool],
@@ -426,12 +437,13 @@ export class SecurityCoordinator {
 		}
 		const model = input.model ?? this.#host.activeModel;
 		if (!model) throw new Error("Security scan preflight requires an active model");
-		const account = selectSecurityAccount(
-			this.#host.authStorage,
-			model.provider,
-			input.credentialId,
-			this.#host.sessionId,
-		);
+		const account = await selectSecurityAccountForModel({
+			authStorage: this.#host.authStorage,
+			model,
+			requestedCredentialId: input.credentialId,
+			sessionId: this.#host.sessionId,
+			resolveApiKey: () => this.#host.modelRegistry.getApiKey(model, this.#host.sessionId, { signal: input.signal }),
+		});
 		const store = await this.#openStore(this.#host.cwd);
 		const workRoot = path.join(store.projectDirectory, "work");
 		await fs.mkdir(workRoot, { recursive: true, mode: 0o700 });
@@ -465,6 +477,9 @@ export class SecurityCoordinator {
 		const store = await this.#openStore(this.#host.cwd);
 		const plan = await store.getPlan(input.planId);
 		if (!plan) throw new Error(`Unknown security scan plan: ${input.planId}`);
+		if (plan.account.provider !== plan.model.provider) {
+			throw new Error("Security scan authentication provider mismatch");
+		}
 		await assertSecurityScanPlanFresh(
 			plan,
 			{

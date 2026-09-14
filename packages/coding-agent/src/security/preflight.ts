@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type {
 	SecurityAccountRef,
+	SecurityOAuthAccountRef,
 	SecurityKnowledgeBaseRef,
 	SecurityModelRef,
 	SecurityOutputPlan,
@@ -312,6 +313,29 @@ interface SecurityPlanMaterial {
 	workflowFingerprint: string;
 }
 
+function fingerprintPlanMaterial(material: SecurityPlanMaterial): string {
+	return `omp-security-plan/v1:sha256:${Bun.SHA256.hash(canonicalSecurityJson(material), "hex")}`;
+}
+
+function materialFromPlan(plan: SecurityScanPlan): SecurityPlanMaterial {
+	return {
+		repositoryRoot: plan.repositoryRoot,
+		target: plan.target,
+		knowledgeBases: plan.knowledgeBases,
+		output: plan.output,
+		model: plan.model,
+		account: plan.account,
+		configFingerprint: plan.configFingerprint,
+		workflowFingerprint: plan.workflowFingerprint,
+	};
+}
+
+function legacyOAuthFingerprint(plan: SecurityScanPlan): string | undefined {
+	if (plan.account.authMode !== "oauth") return undefined;
+	const { authMode: _authMode, ...account } = plan.account;
+	return fingerprintPlanMaterial({ ...materialFromPlan(plan), account });
+}
+
 async function buildPlanMaterial(
 	request: SecurityPlanRequest,
 	adapter: SecurityGitAdapter,
@@ -327,14 +351,26 @@ async function buildPlanMaterial(
 		modelId: request.model.modelId,
 	};
 	if (request.model.thinkingLevel !== undefined) model.thinkingLevel = request.model.thinkingLevel;
-	const account: SecurityAccountRef = {
-		provider: request.account.provider,
-		credentialId: request.account.credentialId,
-	};
-	if (request.account.accountId !== undefined) account.accountId = request.account.accountId;
-	if (request.account.email !== undefined) account.email = request.account.email;
-	if (request.account.organizationId !== undefined) account.organizationId = request.account.organizationId;
-	if (request.account.organizationName !== undefined) account.organizationName = request.account.organizationName;
+	const account: SecurityAccountRef =
+		request.account.authMode === "provider-native"
+			? {
+					provider: request.account.provider,
+					authMode: "provider-native",
+					credentialSource: request.account.credentialSource,
+				}
+			: {
+					provider: request.account.provider,
+					authMode: "oauth",
+					credentialId: request.account.credentialId,
+				};
+	if (request.account.authMode !== "provider-native" && "credentialId" in request.account) {
+		const oauthAccount = account as SecurityOAuthAccountRef;
+		if (request.account.accountId !== undefined) oauthAccount.accountId = request.account.accountId;
+		if (request.account.email !== undefined) oauthAccount.email = request.account.email;
+		if (request.account.organizationId !== undefined) oauthAccount.organizationId = request.account.organizationId;
+		if (request.account.organizationName !== undefined)
+			oauthAccount.organizationName = request.account.organizationName;
+	}
 	return {
 		repositoryRoot: canonicalRoot,
 		target,
@@ -352,7 +388,7 @@ export async function createSecurityScanPlan(
 	adapter: SecurityGitAdapter = DEFAULT_SECURITY_GIT_ADAPTER,
 ): Promise<SecurityScanPlan> {
 	const material = await buildPlanMaterial(request, adapter);
-	const fingerprint = `omp-security-plan/v1:sha256:${Bun.SHA256.hash(canonicalSecurityJson(material), "hex")}`;
+	const fingerprint = fingerprintPlanMaterial(material);
 	return parseSecurityScanPlan({
 		documentType: "omp-security.scan-plan",
 		schemaVersion: "1.0",
@@ -403,7 +439,7 @@ export async function assertSecurityScanPlanFresh(
 	adapter: SecurityGitAdapter = DEFAULT_SECURITY_GIT_ADAPTER,
 ): Promise<void> {
 	const current = await createSecurityScanPlan(requestFromPlan(plan, freshness), adapter);
-	if (current.fingerprint !== plan.fingerprint) {
-		throw new StaleSecurityScanPlanError(plan.fingerprint, current.fingerprint);
-	}
+	if (current.fingerprint === plan.fingerprint) return;
+	if (plan.account.authMode === undefined && legacyOAuthFingerprint(current) === plan.fingerprint) return;
+	throw new StaleSecurityScanPlanError(plan.fingerprint, current.fingerprint);
 }

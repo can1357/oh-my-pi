@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { AUTHENTICATED_SENTINEL } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, type MockResponseSource, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { $ } from "bun";
@@ -110,6 +111,30 @@ function coordinatorWithMockSession(responses: MockResponseSource) {
 }
 
 describe("native security coordinator", () => {
+	test("Bedrock provider-native preflight does not require a stored OAuth account", async () => {
+		const mock = createMockModel({ id: "security-bedrock", provider: "amazon-bedrock", responses: [] });
+		const model = { ...mock.model, api: "bedrock-converse-stream" } as unknown as typeof mock.model;
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue(AUTHENTICATED_SENTINEL);
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings,
+				authStorage,
+				modelRegistry,
+				activeModel: model,
+				sessionId: "parent-session",
+				agentId: "Main",
+			},
+			{ openStore: storeFactory, gitAdapter },
+		);
+		const plan = await coordinator.preflight({ model });
+		expect(plan.account).toEqual({
+			provider: "amazon-bedrock",
+			authMode: "provider-native",
+			credentialSource: "aws",
+		});
+	});
+
 	test("scripted mock model publishes a canonical completed scan and restartable session", async () => {
 		const { coordinator, mock } = coordinatorWithMockSession([
 			{

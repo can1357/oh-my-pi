@@ -1,13 +1,28 @@
 import { describe, expect, test, vi } from "bun:test";
+import { AUTHENTICATED_SENTINEL, type Model } from "@oh-my-pi/pi-ai";
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { createExactSecurityOAuthResolver, selectSecurityAccount } from "../../src/security";
+import {
+	createExactSecurityOAuthResolver,
+	createProviderNativeSecurityResolver,
+	selectSecurityAccount,
+	selectSecurityAccountForModel,
+} from "../../src/security";
 import type { AuthStorage } from "../../src/session/auth-storage";
 
 function model() {
 	const value = getBundledModel("openai-codex", "gpt-5.6-sol");
 	if (!value) throw new Error("Expected bundled Codex model");
 	return value;
+}
+
+function bedrockModel(): Model {
+	return {
+		...model(),
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+	} as Model;
 }
 
 describe("exact security OAuth resolver", () => {
@@ -22,7 +37,12 @@ describe("exact security OAuth resolver", () => {
 			42,
 			"session-a",
 		);
-		expect(selected).toEqual({ provider: "openai-codex", credentialId: 42, accountId: "workspace-b" });
+		expect(selected).toEqual({
+			provider: "openai-codex",
+			authMode: "oauth",
+			credentialId: 42,
+			accountId: "workspace-b",
+		});
 		expect(listOAuthAccounts).toHaveBeenCalledWith("openai-codex", "session-a");
 	});
 
@@ -45,6 +65,45 @@ describe("exact security OAuth resolver", () => {
 		expect(await exact({ lastChance: false, error: new Error("401") })).toBe("refreshed");
 		expect(await exact({ lastChance: true, error: new Error("401") })).toBeUndefined();
 		expect(getOAuthAccessByCredentialId.mock.calls.map(call => call[1])).toEqual([42, 42]);
+	});
+
+	test("selects the upstream Bedrock provider-native mode without an OAuth row", async () => {
+		const selected = await selectSecurityAccountForModel({
+			authStorage: { listOAuthAccounts: vi.fn(() => []) } as unknown as AuthStorage,
+			model: bedrockModel(),
+			resolveApiKey: async () => AUTHENTICATED_SENTINEL,
+		});
+		expect(selected).toEqual({
+			provider: "amazon-bedrock",
+			authMode: "provider-native",
+			credentialSource: "aws",
+		});
+	});
+
+	test("rejects an unsupported provider without a pinned OAuth account", () => {
+		expect(() =>
+			selectSecurityAccount({ listOAuthAccounts: vi.fn(() => []) } as unknown as AuthStorage, "unsupported"),
+		).toThrow("stored OAuth account");
+	});
+
+	test("keeps provider-native resolution on the pinned Bedrock provider", async () => {
+		const resolve = vi.fn(async () => "resolved");
+		const apiKeyResolver = vi.fn(() => resolve);
+		const resolver = createProviderNativeSecurityResolver({
+			modelRegistry: { resolver: apiKeyResolver },
+			account: { provider: "amazon-bedrock", authMode: "provider-native", credentialSource: "aws" },
+			sessionId: "security-session",
+		});
+		const returned = resolver(bedrockModel());
+		expect(returned).toBe(resolve);
+		expect(apiKeyResolver).toHaveBeenCalledWith(
+			expect.objectContaining({ provider: "amazon-bedrock" }),
+			"security-session",
+		);
+		const wrongProviderModel = { ...bedrockModel(), provider: "anthropic" } as unknown as Parameters<
+			typeof resolver
+		>[0];
+		expect(() => resolver(wrongProviderModel)).toThrow("provider mismatch");
 	});
 
 	test("rejects a model whose provider crosses the pinned OAuth boundary", async () => {
