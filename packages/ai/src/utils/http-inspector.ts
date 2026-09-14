@@ -20,7 +20,16 @@ export type CapturedHttpErrorResponse = {
 	bodyJson?: unknown;
 };
 
-const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
+/**
+ * Matches any header name whose value carries a credential, so a persisted dump
+ * never leaks one. A substring match — not a hand-maintained allow-list — so
+ * provider-specific auth headers (`x-goog-api-key`, `x-amz-security-token`, …)
+ * are redacted without enumerating every provider's spelling; the fixed list it
+ * replaced silently leaked any auth header it did not name. Redacting a benign
+ * header that happens to match is harmless: dumps exist to diagnose the request
+ * body, not its transport headers.
+ */
+const SENSITIVE_HEADER_PATTERN = /key|token|secret|auth|credential|cookie/i;
 
 /**
  * Build the JSON persisted for a rejected request. Request fields stay at the
@@ -167,7 +176,7 @@ function redactHeaders(headers: Record<string, string> | undefined): Record<stri
 
 	const redacted: Record<string, string> = {};
 	for (const [key, value] of Object.entries(headers)) {
-		if (SENSITIVE_HEADERS.includes(key.toLowerCase())) {
+		if (SENSITIVE_HEADER_PATTERN.test(key)) {
 			redacted[key] = "[redacted]";
 			continue;
 		}
