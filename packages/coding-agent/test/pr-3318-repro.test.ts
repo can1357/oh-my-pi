@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
 
 describe("PR 3318 repro", () => {
@@ -23,6 +24,7 @@ describe("PR 3318 repro", () => {
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
 			},
+			settings: Settings.isolated(),
 		} as never);
 
 		expect(text).toContain("scoped-account: 1.00 requests used");
