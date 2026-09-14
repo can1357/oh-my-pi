@@ -360,15 +360,17 @@ describe("AgentSession model persistence", () => {
 		const selector = formatModelStringWithRouting(routed);
 		const targetSessionFile = await writeRoleModelSession(modelValue(defaultModel), selector, "temporary");
 		let observedSelector: string | undefined;
+		let observedSession: AgentSession | undefined;
 		const created = await createSession({
 			initialModel: defaultModel,
 			modelRoles: { default: modelValue(defaultModel) },
 			persist: true,
-			onSessionSwitch: ctx => {
-				const current = ctx.models.current();
+			onSessionSwitch: () => {
+				const current = observedSession?.model;
 				observedSelector = current ? formatModelStringWithRouting(current) : undefined;
 			},
 		});
+		observedSession = created.session;
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(created.session.model && formatModelStringWithRouting(created.session.model)).toBe(selector);
