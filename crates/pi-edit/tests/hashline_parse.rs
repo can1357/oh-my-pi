@@ -649,6 +649,31 @@ fn input_reports_all_detected_foreign_syntax_on_first_failure() {
 }
 
 #[test]
+fn input_reports_contextual_unified_hunks_on_first_failure() {
+	let error = Patch::parse("@@ -1,3 +1,3 @@ fn main\n-old\n+new", &options())
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("Detected incompatible unified diff syntax"), "{error}");
+	assert!(
+		error.contains("Discard the incompatible body and rewrite existing-file changes"),
+		"{error}"
+	);
+}
+
+#[test]
+fn input_preserves_delete_and_move_operations_in_rewrite_guidance() {
+	let error = Patch::parse(
+		"*** Begin Patch\n*** Delete File: old.ts\n*** Update File: current.ts\n*** Move to: \
+		 renamed.ts\n*** End Patch",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("Use `REM` to delete a file"), "{error}");
+	assert!(error.contains("`MV DEST` to move or rename it"), "{error}");
+}
+
+#[test]
 fn input_routes_apply_patch_add_file_to_write() {
 	let error = Patch::parse(
 		"*** Begin Patch\n*** Add File: a.ts\n+export const value = 1;\n*** End Patch",

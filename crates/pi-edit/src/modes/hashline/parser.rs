@@ -78,7 +78,9 @@ fn apply_patch_operation_flags(line: &str) -> (bool, bool) {
 }
 
 fn is_unified_hunk_line(line: &str) -> bool {
-	line.starts_with("@@") && line.ends_with("@@")
+	line
+		.strip_prefix("@@")
+		.is_some_and(|rest| rest.contains("@@"))
 }
 
 pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
