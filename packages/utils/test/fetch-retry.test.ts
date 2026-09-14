@@ -205,6 +205,15 @@ describe("extractRetryHint", () => {
 		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});
 
+	it("yields to the relative retry hint over a longer naive reset-at stamp", () => {
+		// A naive stamp is the provider's wall clock in an unknown zone: it
+		// cannot disambiguate against a conflicting relative signal without
+		// guessing the zone, so the unambiguous signal wins regardless of
+		// which is longer.
+		const naiveWall = new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		expect(extractRetryHint(undefined, `Your limit will reset at ${naiveWall} retry-after-ms=5000`)).toBe(5000);
+	});
+
 	it("parses Chinese '将在 YYYY-MM-DD HH:MM:SS 重置' reset timestamp in error body", () => {
 		const future = new Date(Date.now() + 3_600_000).toISOString().replace("T", " ").slice(0, 19);
 		const hint = extractRetryHint(undefined, `已达到使用上限。您的限额将在 ${future} 重置。`);
