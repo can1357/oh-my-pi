@@ -463,10 +463,17 @@ async function fetchDynamicModels<TApi extends Api>(
 ): Promise<Model<TApi>[] | null> {
 	try {
 		const models = await fetcher();
-		if (models === null) {
+		if (!Array.isArray(models)) {
 			return null;
 		}
-		return normalizeModelList<TApi>(models);
+		const normalized: Model<TApi>[] = [];
+		for (const model of models) {
+			// Filtering invalid rows would turn a malformed response into a
+			// successful partial/empty catalog and prune valid cached models.
+			if (!isModelLike(model)) return null;
+			normalized.push(buildModel(model as ModelSpec<TApi>));
+		}
+		return normalized;
 	} catch {
 		return null;
 	}
