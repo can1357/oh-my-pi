@@ -885,6 +885,31 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(true);
 	});
 
+	// A member in *key* position is a sibling of the error object reporting the
+	// field, not a segment under it: the proxy refused `cache_control` itself and
+	// wrote its own `type`/`code` keys after the message. Reading those as
+	// nesting vetoes the exact 400 the fallback exists for, so an endpoint whose
+	// error shape is always message-first would never receive a breakpoint-free
+	// replay — the whole fallback would be dead against it. The joiner here is
+	// `","`, three characters, so every counted version of the rule vetoed these
+	// as well; only the key/segment distinction admits them.
+	it.each([
+		[
+			"a message-first body whose next key is type",
+			`{"message":"Unsupported parameter: cache_control","type":"invalid_request_error"}`,
+		],
+		[
+			"an OpenAI-compatible error object naming the field as param",
+			`{"error":{"param":"cache_control","type":"invalid_request_error","code":"unknown_parameter"}}`,
+		],
+		[
+			"a pretty-printed body that spaces the sibling key off its colon",
+			`{\n\t"message": "Unsupported parameter: cache_control",\n\t"type" : "invalid_request_error"\n}`,
+		],
+	])("detects a 400 refusing the cache_control field in %s", (_shape, message) => {
+		expect(isCacheControlUnsupported(makeStatusError(400, `400 ${message}`))).toBe(true);
+	});
+
 	it("keeps caching enabled when a 400 rejects the number of cache_control blocks", () => {
 		// Anthropic's breakpoint cap: the endpoint does support prompt caching, so
 		// disabling it for the rest of the session would be the wrong fallback.
@@ -909,7 +934,10 @@ describe("isCacheControlUnsupported", () => {
 	// non-alphanumeric characters. So the rows cover one message per distinct
 	// path syntax a validator emits, plus one where a pretty-printer breaks the
 	// joiner across lines; separator *width* is no longer a dimension, and the
-	// three `CacheControlEphemeral` members each appear at least once.
+	// three `CacheControlEphemeral` members each appear at least once. Two rows
+	// carry a key-shaped `type` sibling further along the body: the member that
+	// decides nesting is the one adjacent to the field, and a later key must not
+	// be able to lift the veto.
 	it.each([
 		["a dotted path naming ttl", `messages.0.content.0.cache_control.ttl: unsupported value "1h"`],
 		[
@@ -918,8 +946,12 @@ describe("isCacheControlUnsupported", () => {
 		],
 		["a spaced JSONPath naming scope across a line break", '$["cache_control"]\n\t[ "scope" ]: unsupported value'],
 		[
-			"a Pydantic location array naming ttl",
-			`{"loc":["body","messages",0,"content",0,"cache_control","ttl"],"msg":"Extra inputs are not permitted"}`,
+			"a Pydantic location array naming ttl ahead of a type key",
+			`{"loc":["body","messages",0,"content",0,"cache_control","ttl"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}`,
+		],
+		[
+			"a dotted path naming ttl inside a message-first body",
+			`{"message":"Unsupported parameter","param":"messages.0.content.0.cache_control.ttl","type":"invalid_request_error"}`,
 		],
 		[
 			"a JSON Pointer naming scope",

@@ -296,32 +296,47 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 //
 // Nesting is decided by the member name that follows, never by the punctuation
 // that joins them: validators serialize the same path as `.ttl`, `["ttl"]`,
-// `"]["ttl"`, `/ttl`, `[:ttl]` or `","ttl"`, and that set of syntaxes is
-// unbounded while `CacheControlEphemeral`'s members are not (`type`, `ttl`,
+// `"]["ttl"`, `/ttl`, `[:ttl]`, `-> ttl` or `","ttl"`, and that set of syntaxes
+// is unbounded while `CacheControlEphemeral`'s members are not (`type`, `ttl`,
 // `scope` — see `anthropic-wire.ts`). So the lookahead skips an unbounded run
-// of non-alphanumeric characters and asks only what the next token is. There
-// is deliberately no length budget: sizing one means enumerating joiner
-// shapes, which has now been reported wrong three times, and a count adds
-// nothing the separator class does not already guarantee.
+// of non-alphanumeric characters and asks only what the next token is. There is
+// deliberately no length budget: sizing one means enumerating joiner shapes,
+// which has now been reported wrong three times, and a count adds nothing the
+// separator class does not already guarantee.
 //
-// That class carries the whole invariant. Letters and digits are excluded from
-// it, so any run of punctuation and whitespace between the field name and a
-// member name means the member IS the next token — an intervening word ends
+// That class carries the rest of the invariant. Letters and digits are excluded
+// from it, so any run of punctuation and whitespace between the field name and
+// a member name means the member IS the next token — an intervening word ends
 // the run, and no later sentence can supply the name. `_` is in the class, but
-// `\bcache_control\b` cannot match when a word character follows it, so the
-// run can never begin with one; an `_` only appears after punctuation has
-// already terminated the field name.
+// `\bcache_control\b` cannot match when a word character follows it, so the run
+// can never begin with one; an `_` only appears after punctuation has already
+// terminated the field name.
 //
-// What an unbounded run does admit is a member name reached across an
-// arbitrarily wide joiner — an error object whose `loc` array ends at
-// `cache_control` and whose next key is `type`, as in
-// `…,"cache_control"],"type":"extra_forbidden"`. Neither Pydantic v1
-// (`loc`, `msg`, `type`) nor v2 (`type`, `loc`, `msg`) orders its keys that
-// way; both put words between the two. That false veto is accepted anyway: it
-// costs one failed turn, whereas a false field-level match latches
-// `cacheControlUnsupported` through a *succeeding* replay and suppresses
-// supported 5m caching for the rest of the session.
-const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?![^A-Za-z0-9]*(?:type|ttl|scope)\b)/i;
+// What the run cannot tell apart on its own is a member *under* the field from
+// a sibling key of the error object that reports it, because `,` joins both: a
+// message-first body such as
+// `{"message":"Unsupported parameter: cache_control","type":"invalid_request_error"}`
+// puts `type` three characters past the field, and so does the legitimate
+// location array `["cache_control","ttl"]`. What separates them is what follows
+// the member, not what precedes it. A sibling is a key, so its name is closed
+// by a quote and then a colon (`"type":`). A path segment is a value or a bare
+// token, so it is closed by `"]`, `",`, `"/`, `]`, or by the message's own `:`
+// with no quote before it — never by `":`. Hence the inner lookahead: the veto
+// fires for a segment and stands down for a key, which is what lets the
+// breakpoint-free replay reach a proxy whose 400 is always message-first. It
+// also settles the case this rule used to concede — a `loc` array that ends at
+// `cache_control` with `"type"` as the next key is field-level, and now reads
+// that way.
+//
+// Two shapes stay ambiguous under any rule of this kind. An unquoted key
+// (`\ntype: invalid_request_error`) is indistinguishable from a dotted path's
+// trailing segment, so it reads as nesting and costs at most one failed turn. A
+// body that echoes the field's own value object (`cache_control: {"ttl":"1h"}`)
+// puts a member in key position whichever member was refused, so it reads as
+// field-level — the direction that latches `cacheControlUnsupported` through a
+// *succeeding* replay and suppresses supported 5m caching for the session. The
+// same bytes carry both readings; no textual rule separates them.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?![^A-Za-z0-9]*(?:type|ttl|scope)\b(?!["']\s*:))/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
 	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
 // Strict JSON decoders and OpenAI-compatible validators express the same schema
