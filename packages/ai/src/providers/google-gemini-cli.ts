@@ -292,6 +292,7 @@ export interface AntigravityProviderSessionState extends ProviderSessionState {
 	lastExecutionId?: string;
 	foldedModels?: Set<string>;
 	hasLoggedSystemInstructionFold?: boolean;
+	systemConventionsNonce?: string;
 }
 
 const ANTIGRAVITY_PROVIDER_SESSION_STATE_KEY = "google-antigravity-session-state";
@@ -365,10 +366,17 @@ export function foldSystemPromptsIntoContents(
 	prependPartsToContents(contents, parts);
 }
 
-export function sanitizeAntigravitySystemInstruction(text: string): string {
+export function deriveAntigravityConventionsNonce(sessionId?: string): string {
+	if (!sessionId) {
+		return randomUUID().slice(0, 8);
+	}
+	return createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
+}
+
+export function sanitizeAntigravitySystemInstruction(text: string, nonce?: string): string {
 	if (!text.includes("<system-conventions>")) return text;
-	const nonce = crypto.randomUUID().slice(0, 8);
-	return text.replaceAll("<system-conventions>", `<system-conventions id="${nonce}">`);
+	const resolvedNonce = nonce ?? randomUUID().slice(0, 8);
+	return text.replaceAll("<system-conventions>", `<system-conventions id="${resolvedNonce}">`);
 }
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
@@ -598,6 +606,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			const baseUrl = model.baseUrl?.trim();
 			let endpoints: string[];
 			providerState = isAntigravity ? getAntigravityProviderSessionState(options?.providerSessionState) : undefined;
+			if (isAntigravity && providerState) {
+				providerState.sessionId ??= options?.sessionId ?? randomSignedDecimalSessionId();
+				providerState.systemConventionsNonce ??= deriveAntigravityConventionsNonce(providerState.sessionId);
+			}
 
 			if (isAntigravity) {
 				const mode = options?.antigravityEndpointMode ?? "auto";
@@ -1063,7 +1075,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							}
 							foldSystemInstructionIntoContents(
 								requestBody.request,
-								isAntigravity ? sanitizeAntigravitySystemInstruction : undefined,
+								isAntigravity
+									? text => sanitizeAntigravitySystemInstruction(text, providerState?.systemConventionsNonce)
+									: undefined,
 							);
 							requestBodyJson = JSON.stringify(requestBody);
 							if (rawRequestDump) {
@@ -1465,20 +1479,29 @@ export function buildRequest(
 	const state = isAntigravity ? getAntigravityProviderSessionState(options.providerSessionState) : undefined;
 	const shouldFold = isAntigravity && systemPrompts.length > 0 && Boolean(state?.foldedModels?.has(wireModelId));
 
+	if (isAntigravity) {
+		if (state) {
+			state.sessionId ??= options.sessionId ?? randomSignedDecimalSessionId();
+			state.systemConventionsNonce ??= deriveAntigravityConventionsNonce(state.sessionId);
+		}
+	}
+	const nonce =
+		state?.systemConventionsNonce ??
+		(isAntigravity
+			? deriveAntigravityConventionsNonce(options.sessionId ?? deriveAntigravitySessionId(context))
+			: undefined);
+	const sanitize = isAntigravity ? (text: string) => sanitizeAntigravitySystemInstruction(text, nonce) : undefined;
+
 	// System instruction is an object with parts, not a plain string. Antigravity
 	// tags it with role "user" to mirror the real client.
 	if (systemPrompts.length > 0) {
 		if (shouldFold) {
-			foldSystemPromptsIntoContents(
-				contents,
-				systemPrompts,
-				isAntigravity ? sanitizeAntigravitySystemInstruction : undefined,
-			);
+			foldSystemPromptsIntoContents(contents, systemPrompts, sanitize);
 		} else {
 			request.systemInstruction = {
 				...(isAntigravity ? { role: "user" } : {}),
 				parts: systemPrompts.map(text => ({
-					text: isAntigravity ? sanitizeAntigravitySystemInstruction(text) : text,
+					text: sanitize ? sanitize(text) : text,
 				})),
 			};
 		}

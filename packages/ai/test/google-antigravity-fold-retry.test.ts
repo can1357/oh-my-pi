@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { isAntigravitySynthetic429, isUsageLimitOutcome, parseRateLimitReason } from "@oh-my-pi/pi-ai/error/rate-limit";
 import {
+	deriveAntigravityConventionsNonce,
 	getAntigravityProviderSessionState,
 	sanitizeAntigravitySystemInstruction,
 	streamGoogleGeminiCli,
@@ -343,5 +344,74 @@ describe("google-antigravity synthetic 429 systemInstruction fold retry", () => 
 		);
 		// Plain text without tag remains unchanged
 		expect(sanitizeAntigravitySystemInstruction("Plain system prompt")).toBe("Plain system prompt");
+	});
+
+	it("derives deterministic 8-character hex nonce from session id", () => {
+		const nonce1 = deriveAntigravityConventionsNonce("test-session-1");
+		const nonce2 = deriveAntigravityConventionsNonce("test-session-1");
+		const nonce3 = deriveAntigravityConventionsNonce("test-session-2");
+		expect(nonce1).toHaveLength(8);
+		expect(nonce1).toBe(nonce2);
+		expect(nonce1).not.toBe(nonce3);
+		expect(sanitizeAntigravitySystemInstruction("<system-conventions>\ntest\n</system-conventions>", nonce1)).toBe(
+			`<system-conventions id="${nonce1}">\ntest\n</system-conventions>`,
+		);
+	});
+
+	it("preserves identical system-conventions nonce across turns within the same session", async () => {
+		const requests: Array<{ body: any }> = [];
+		const fetchMock: FetchImpl = async (_url, init) => {
+			const body = JSON.parse(init?.body as string);
+			requests.push({ body });
+			return new Response(
+				"data: " +
+					JSON.stringify({
+						candidates: [
+							{
+								content: { role: "model", parts: [{ text: "ok" }] },
+								finishReason: "STOP",
+							},
+						],
+					}) +
+					"\n\n",
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+		};
+
+		const sessionStateMap = new Map<string, ProviderSessionState>();
+		const contextTurn1: Context = {
+			systemPrompt: ["<system-conventions>\nTurn rules\n</system-conventions>"],
+			messages: [{ role: "user", content: "turn 1", timestamp: 1 }],
+		};
+
+		const stream1 = streamGoogleGeminiCli(antigravityModel, contextTurn1, {
+			apiKey: JSON.stringify({ token: "fake-token", projectId: "test-proj" }),
+			antigravityEndpointMode: "production",
+			providerSessionState: sessionStateMap,
+			fetch: fetchMock,
+		});
+		await stream1.result();
+
+		const contextTurn2: Context = {
+			systemPrompt: ["<system-conventions>\nTurn rules\n</system-conventions>"],
+			messages: [{ role: "user", content: "turn 2", timestamp: 2 }],
+		};
+
+		const stream2 = streamGoogleGeminiCli(antigravityModel, contextTurn2, {
+			apiKey: JSON.stringify({ token: "fake-token", projectId: "test-proj" }),
+			antigravityEndpointMode: "production",
+			providerSessionState: sessionStateMap,
+			fetch: fetchMock,
+		});
+		await stream2.result();
+
+		expect(requests).toHaveLength(2);
+		const turn1Text = requests[0].body.request.systemInstruction.parts[0].text;
+		const turn2Text = requests[1].body.request.systemInstruction.parts[0].text;
+		expect(turn1Text).toMatch(/<system-conventions id="[a-f0-9]{8}">/);
+		expect(turn1Text).toBe(turn2Text);
 	});
 });
