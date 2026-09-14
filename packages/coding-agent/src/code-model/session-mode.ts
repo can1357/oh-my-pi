@@ -1,5 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { formatModelStringWithRouting } from "../config/model-resolver";
+import { formatModelStringWithRouting, parsePersistedModelSelector } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type {
 	ExtensionAPI,
@@ -135,7 +135,9 @@ export function installCodeModelSession(
 
 	function snapshot(ctx: ExtensionContext): ModelState {
 		const fallbackPrimary = hooks.getRetryFallbackPrimary?.();
-		const model = fallbackPrimary ? ctx.models.resolve(fallbackPrimary.selector) : ctx.models.current();
+		const model = fallbackPrimary
+			? parsePersistedModelSelector(fallbackPrimary.selector, ctx.models.list()).model
+			: ctx.models.current();
 		if (!model) {
 			const identifier = fallbackPrimary?.selector ?? "the current session model";
 			throw new Error(`The available model catalogue must contain ${identifier}.`);
@@ -217,8 +219,11 @@ export function installCodeModelSession(
 		const retryFallback = hooks.getRetryFallbackPrimary?.();
 		const fallbackEffort =
 			retryFallback && "fallbackEffort" in retryFallback ? retryFallback.fallbackEffort : previous.coding.effort;
+		const latest = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
+		// Legacy phase snapshots predate explicit role attribution.
+		const codingRoleMatches = previous.original.role === undefined || latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE;
 		const codingStateMatches =
-			(sameModel(active, previous.coding) && effort === previous.coding.effort) ||
+			(codingRoleMatches && sameModel(active, previous.coding) && effort === previous.coding.effort) ||
 			(retryFallbackIsActive(ctx) && effort === fallbackEffort);
 		if (!options.force && !interrupted && !codingStateMatches && !currentMatches(ctx, previous.original)) {
 			save(undefined);
@@ -332,9 +337,13 @@ export function installCodeModelSession(
 
 	async function prepareNavigation(ctx: ExtensionContext) {
 		if (busy) return { cancel: true as const };
-		if (!state) return undefined;
+		if (!state) {
+			reviewPending = false;
+			return undefined;
+		}
 		try {
 			await guarded(() => restore(ctx));
+			reviewPending = false;
 			return undefined;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

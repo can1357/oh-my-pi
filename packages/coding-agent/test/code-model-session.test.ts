@@ -206,6 +206,21 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
+	it("requires the exact retry primary before starting a coding phase", async () => {
+		const state = harness();
+		const sibling = { ...state.main, id: "reviewer-new" };
+		state.setFallback();
+		state.ctx.models.list = () => [state.coding, state.fallback, sibling];
+		const resolve = state.ctx.models.resolve;
+		state.ctx.models.resolve = selector => (selector === "main/reviewer" ? sibling : resolve(selector));
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () => ({ selector: "main/reviewer", effort: ThinkingLevel.Low }),
+		});
+		await expect(session.run("start", state.ctx)).rejects.toThrow("catalogue must contain main/reviewer");
+		expect(state.current()).toBe(state.fallback);
+		expect(state.branch.filter(entry => entry.type === "custom")).toHaveLength(0);
+	});
+
 	it("restores the main model when a retry fallback applies its own effort", async () => {
 		const state = harness();
 		const session = installCodeModelSession(state.pi, state.settings, {
@@ -361,6 +376,18 @@ describe("code-model session phase", () => {
 		expect(state.current()).toBe(state.manual);
 		expect(state.effort()).toBe(ThinkingLevel.XHigh);
 	});
+
+	it("preserves a named-role selection matching the coding model and effort", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings);
+		await session.run("start", state.ctx);
+		state.setCurrent(state.coding, ThinkingLevel.High, "slow");
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(false);
+		expect(state.current()).toBe(state.coding);
+		expect(state.effort()).toBe(ThinkingLevel.High);
+		expect(state.branch.findLast(entry => entry.type === "model_change")?.role).toBe("slow");
+	});
 	it("rolls back the original model state when entering fails", async () => {
 		const state = harness({ setModelAllowed: false });
 		const session = installCodeModelSession(state.pi, state.settings);
@@ -477,6 +504,45 @@ describe("code-model session phase", () => {
 		state.setModelAllowed(true);
 		const finished = await session.run("finish", state.ctx);
 		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(
+			await finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx),
+		).toBeUndefined();
+	});
+
+	it.each([
+		["session_before_switch", "session_switch"],
+		["session_before_branch", "session_branch"],
+		["session_before_tree", "session_tree"],
+	])("consumes pending review when %s recovers navigation", async (beforeEvent, afterEvent) => {
+		const state = harness();
+		let finalizer: CodeModelBeforeIdleHandler | undefined;
+		const session = installCodeModelSession(state.pi, state.settings, {
+			registerBeforeIdle: handler => {
+				finalizer = handler;
+			},
+		});
+		await session.run("start", state.ctx);
+		state.setModelAllowed(false);
+		const stop = state.handlers.get("session_stop");
+		if (!stop || !finalizer) throw new Error("Expected terminal restoration handlers");
+		await expect(
+			stop(
+				{
+					type: "session_stop",
+					messages: [],
+					last_assistant_message: { role: "assistant", stopReason: "stop", content: [], timestamp: Date.now() },
+					signal: new AbortController().signal,
+				},
+				state.ctx,
+			),
+		).rejects.toThrow("authentication");
+		await finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx);
+		state.setModelAllowed(true);
+		expect(await state.handlers.get(beforeEvent)?.({ type: beforeEvent }, state.ctx)).toBeUndefined();
+		state.branch.splice(0);
+		state.setSessionId("destination-session");
+		await state.handlers.get(afterEvent)?.({ type: afterEvent }, state.ctx);
 		expect(state.current()).toBe(state.main);
 		expect(
 			await finalizer({ type: "session_before_idle", messages: [], willContinue: false }, state.ctx),
