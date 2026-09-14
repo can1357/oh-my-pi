@@ -1,0 +1,7 @@
+// Catalog entry for "siliconflow"; no deployment-contract compat rules are needed.
+
+provider "siliconflow" {
+	default-model "zai-org/GLM-5.1"
+	env "SILICONFLOW_API_KEY"
+	dynamic-models-authoritative #true
+}

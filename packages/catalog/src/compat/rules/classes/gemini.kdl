@@ -66,8 +66,8 @@ class "gemini" {
 			}
 		}
 	}
-	// Gemini 3.7 Flash is the one Flash revision whose native thinkingLevel does
-	// not accept `minimal` (400 THINKING_LEVEL_MINIMAL). Only the direct
+	// Gemini 3.7+ Flash native thinkingLevel does not accept `minimal`
+	// (400 THINKING_LEVEL_MINIMAL; observed on 3.7 and 3.8). Only the direct
 	// google-level transports emit `thinkingLevel` on the wire, so the tier is
 	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
 	// never send the rejected value and keep the four-tier ladder. The collapsed
@@ -76,7 +76,7 @@ class "gemini" {
 	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
 	on "google" "google-vertex" "opencode-zen" {
 		family "flash" {
-			revision ">=3.7 <3.8" {
+			revision ">=3.7" {
 				thinking-efforts "low" "medium" "high"
 			}
 		}

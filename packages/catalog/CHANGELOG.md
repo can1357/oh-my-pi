@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `getCatalogProviderEntry` and the `CATALOG_PROVIDERS` constant in favor of `providerEntry` and `providerEntries`
+
+### Added
+
+- Added support for DeepInfra, LiteLLM, Qwen Portal, SiliconFlow, and SiliconFlow-CN providers
+- Added support for Gemini 3.8 Flash models
+
+### Changed
+
+- Provider catalog entries (default model, env keys, discovery wiring) and the bundled fallback rows for providers that cannot be discovered at generation time (Anthropic, OpenAI Daybreak, xAI OAuth, Meta, Muse Code, Bedrock Mantle, Devin, Z.AI, Sakana, ai&, Abliteration, Yolo-Auto, GMI Cloud, Fire Pass, QwenCloud Token Plan, Cloudflare AI Gateway, GitLab Duo Workflow) now live in `src/compat/rules/providers/<id>.kdl` and compile into `rules.json`; `KnownProvider` is generated from them, and the generator bundles seed rows by each entry's declared `bundle` policy instead of per-provider code.
+
 ## [18.1.22] - 2026-09-14
 
 ### Added

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
+
+### Fixed
+
+- `openrouter/<vendor>/<model>@upstream` now resolves when the first-party provider bundles the same id (e.g. `google/gemini-*`), instead of failing with "model not found".
+- Kept the subagent `yield` tool as a direct function call instead of mounting it through `xd://`.
+- Git TUI staging now honors `.gitattributes` `text`/`eol` and clean filters, so "Stage All" no longer leaves `eol=crlf` files (e.g. `*.cmd`) dirty with no visible diff.
+- Browsers spawned via `app.path` into an omp-owned profile no longer trigger the macOS "wants to use your confidential information in Safe Storage" keychain dialog.
+
 ## [18.1.22] - 2026-09-14
 
 ### Breaking Changes

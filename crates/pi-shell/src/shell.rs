@@ -675,11 +675,12 @@ async fn create_session_for_run(
 		shell.register_builtin(name, registration);
 	}
 	// In-process command-line utility builtins (see
-	// `pi_builtins::utility_builtins`): consistent, cross-platform implementations
-	// that run without spawning a process and resolve paths against the shell
-	// working directory. The whole set can be disabled (falling back to system
-	// binaries) via PI_DISABLE_UUTILS_BUILTINS; the destructive trio additionally
-	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	// `pi_builtins::utility_builtins`): consistent, cross-platform
+	// implementations that run without spawning a process and resolve paths
+	// against the shell working directory. The whole set can be disabled
+	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
+	// destructive trio additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE, and
+	// `rm`/`mv` have their own switches.
 	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled =
@@ -883,9 +884,9 @@ async fn run_shell_command_single(
 		// When the capture cap is exceeded the output was streamed raw and never
 		// buffered, so nothing was minimized — leave `minimized` absent, matching
 		// every other passthrough path and `apply_shell_minimizer`. Previously a
-		// `too-large` result with empty `text`/`original_text` was emitted, which a
-		// consumer keying off `minimized` presence could mistake for a real rewrite
-		// that produced empty output.
+		// `too-large` result with empty `text`/`original_text` was emitted, which
+		// a consumer keying off `minimized` presence could mistake for a real
+		// rewrite that produced empty output.
 		if !buffered.exceeded {
 			let minimized = match minimizer_mode {
 				minimizer::engine::MinimizerMode::WholeCommand => minimizer::apply(
@@ -902,12 +903,13 @@ async fn run_shell_command_single(
 				},
 			};
 			// Surface telemetry only when the filter actually rewrote the output
-			// and kept the original buffer — same contract as `apply_shell_minimizer`
-			// in `pi-natives`. A supported filter that runs but leaves the output
-			// unchanged (e.g. a short `git diff --name-only`) reports `changed:
-			// false` with no `original_text` and must NOT set `minimized`, or API
-			// consumers keying off `result.minimized` are misled. The separate
-			// `too-large` reason path above is unaffected.
+			// and kept the original buffer — same contract as
+			// `apply_shell_minimizer` in `pi-natives`. A supported filter that
+			// runs but leaves the output unchanged (e.g. a short `git diff
+			// --name-only`) reports `changed: false` with no `original_text`
+			// and must NOT set `minimized`, or API consumers keying off
+			// `result.minimized` are misled. The separate `too-large` reason
+			// path above is unaffected.
 			if minimized.changed
 				&& let Some(original_text) = minimized.original_text
 			{
@@ -945,7 +947,8 @@ async fn run_shell_command_segmented_chain(
 		.await;
 	};
 
-	// When minimizer is disabled, don't segment — stream the original single path.
+	// When minimizer is disabled, don't segment — stream the original single
+	// path.
 	if !config.enabled {
 		return run_shell_command_single(
 			session,
@@ -1690,7 +1693,8 @@ async fn read_output(
 
 					match err.error_len() {
 						Some(p) => {
-							// Invalid byte sequence: emit replacement and drop those bytes.
+							// Invalid byte sequence: emit replacement and drop those
+							// bytes.
 							emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
 							// copy p..it to the beginning of the buffer
 							buf.copy_within(p..it, 0);
@@ -1699,7 +1703,8 @@ async fn read_output(
 							// invalid sequence
 						},
 						None => {
-							// Incomplete UTF-8 sequence at end: keep bytes for next read.
+							// Incomplete UTF-8 sequence at end: keep bytes for next
+							// read.
 							break;
 						},
 					}
@@ -1904,7 +1909,8 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 		use std::os::unix::io::{FromRawFd, IntoRawFd};
 		let r = r.into_raw_fd();
 		let w = w.into_raw_fd();
-		// SAFETY: We just obtained these fds from os_pipe and own them exclusively.
+		// SAFETY: We just obtained these fds from os_pipe and own them
+		// exclusively.
 		unsafe { (FromRawFd::from_raw_fd(r), FromRawFd::from_raw_fd(w)) }
 	};
 
@@ -1913,7 +1919,8 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 		use std::os::windows::io::{FromRawHandle, IntoRawHandle};
 		let r = r.into_raw_handle();
 		let w = w.into_raw_handle();
-		// SAFETY: We just obtained these handles from os_pipe and own them exclusively.
+		// SAFETY: We just obtained these handles from os_pipe and own them
+		// exclusively.
 		unsafe { (FromRawHandle::from_raw_handle(r), FromRawHandle::from_raw_handle(w)) }
 	};
 
@@ -3038,8 +3045,8 @@ mod tests {
 			"signalling an ancestor must be refused: {output:?}"
 		);
 		assert!(output.contains("ancestor=1"), "the ancestor kill must report failure: {output:?}");
-		// The same guard must leave a process outside our ancestry alone, or `kill`
-		// would be useless.
+		// The same guard must leave a process outside our ancestry alone, or
+		// `kill` would be useless.
 		assert!(output.contains("child=0"), "an unrelated child must remain signallable: {output:?}");
 	}
 
@@ -3487,9 +3494,9 @@ mod tests {
 		let source_info = SourceInfo::from("pi-natives:test");
 
 		// Bounded, side-effect-free invocations. `pgrep`/`pkill`/`pidwait` render
-		// their own help; `sleep`/`timeout`/`top` are given the smallest amount of
-		// work that still exercises dispatch; `nohup` with no operand is a usage
-		// error, which is still the builtin answering.
+		// their own help; `sleep`/`timeout`/`top` are given the smallest amount
+		// of work that still exercises dispatch; `nohup` with no operand is a
+		// usage error, which is still the builtin answering.
 		let probes = [
 			("nohup", "nohup"),
 			("pgrep", "pgrep --help"),
@@ -3502,7 +3509,8 @@ mod tests {
 		];
 
 		// Pin the registry contents rather than deriving the probe list from it:
-		// a test that skips whatever the registry omits cannot notice an omission.
+		// a test that skips whatever the registry omits cannot notice an
+		// omission.
 		let mut registered: Vec<&'static str> =
 			pi_builtins::process_builtins::<brush_core::extensions::DefaultShellExtensions>()
 				.into_iter()
@@ -3753,7 +3761,8 @@ mod tests {
 			.await
 			.expect("tail");
 		assert_eq!(read("tail.txt"), "3\n4\n");
-		// grep: matching lines from a cwd-resolved file (single file => no prefix).
+		// grep: matching lines from a cwd-resolved file (single file => no
+		// prefix).
 		session
 			.shell
 			.run_string("grep ba data.txt > grep.txt", &si, &params)
@@ -4231,7 +4240,8 @@ mod tests {
 		assert!(tmp.join("keep.log").exists(), "-delete must not touch unmatched files");
 
 		// -exec substitutes the operand-relative path and runs in the shell cwd,
-		// so the relative `{}` resolves and the child's redirect lands in the cwd.
+		// so the relative `{}` resolves and the child's redirect lands in the
+		// cwd.
 		session
 			.shell
 			.run_string(
@@ -4655,8 +4665,8 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		// while the background job cannot write the marker until its 1s sleep
 		// elapses. Wait well past that delay so a job that outlived the dropped
 		// session has demonstrably had its chance to run — the pre-fix leak fires
-		// at ~1s and is caught here; the fixed path aborts the task on drop and the
-		// marker never appears.
+		// at ~1s and is caught here; the fixed path aborts the task on drop and
+		// the marker never appears.
 		time::sleep(Duration::from_millis(2000)).await;
 
 		assert!(
@@ -4723,8 +4733,8 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(!result.cancelled);
 		assert!(!result.timed_out);
 		assert_eq!(output, "");
-		// `false && printf` short-circuits: nothing is rewritten, so a no-op chain
-		// must surface no minimizer telemetry (None).
+		// `false && printf` short-circuits: nothing is rewritten, so a no-op
+		// chain must surface no minimizer telemetry (None).
 		assert!(result.minimized.is_none(), "chain noop must not surface telemetry");
 	}
 
@@ -4794,7 +4804,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(output.ends_with('x'));
 		// Output exceeded the capture cap: streamed raw and never buffered, so
 		// nothing was minimized. `minimized` must be absent (not a `too-large`
-		// result with empty `text`, which would mislead presence-keyed consumers).
+		// result with empty `text`, which would mislead presence-keyed
+		// consumers).
 		assert!(result.minimized.is_none());
 	}
 
@@ -4981,11 +4992,12 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn embedded_external_command_runs_in_its_own_session() {
 		use std::io::Read as _;
 
-		// SAFETY: `getsid(0)` only queries the current process session; the return
-		// value is checked. Inside a PID namespace (the containerized CI runner)
-		// the host's session leader can live outside the namespace, so `getsid(0)`
-		// legitimately reports 0 — only -1 is a real failure. The child-session
-		// invariants below (own session, distinct from host) stay meaningful.
+		// SAFETY: `getsid(0)` only queries the current process session; the
+		// return value is checked. Inside a PID namespace (the containerized CI
+		// runner) the host's session leader can live outside the namespace, so
+		// `getsid(0)` legitimately reports 0 — only -1 is a real failure. The
+		// child-session invariants below (own session, distinct from host) stay
+		// meaningful.
 		let host_sid = unsafe { libc::getsid(0) };
 		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 
@@ -5004,7 +5016,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
 		params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 
-		// (pid_tx, pid_rx) — reader task signals the test as soon as it has the PID.
+		// (pid_tx, pid_rx) — reader task signals the test as soon as it has the
+		// PID.
 		let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<i32>();
 		let reader_handle = tokio::task::spawn_blocking(move || {
 			let mut buf = Vec::new();
@@ -5053,8 +5066,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		// Snapshot the child's session ID immediately, while the child is still
 		// in `sleep`. POSIX guarantees `getsid` against a live PID returns the
 		// session of that process.
-		// SAFETY: `child_pid` is a positive PID from the child; errors are reported via
-		// the checked return value.
+		// SAFETY: `child_pid` is a positive PID from the child; errors are
+		// reported via the checked return value.
 		let child_sid = unsafe { libc::getsid(child_pid) };
 		assert!(
 			child_sid > 0,
@@ -5249,7 +5262,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let child_dead = time::timeout(Duration::from_secs(5), async {
 			loop {
 				// SAFETY: `child_pid` came from the foreground `sh` spawned by the
-				// snapshot; `kill(pid, 0)` only probes whether that process still exists.
+				// snapshot; `kill(pid, 0)` only probes whether that process still
+				// exists.
 				let kill_result = unsafe { libc::kill(child_pid, 0) };
 				if kill_result == -1 {
 					let err = std::io::Error::last_os_error();
@@ -5361,8 +5375,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("reader closed pid channel without sending");
 		assert!(child_pid > 0, "got non-positive child pid: {child_pid}");
 
-		// SAFETY: `child_pid` is a live positive PID (still in `sleep`); the return
-		// value is checked.
+		// SAFETY: `child_pid` is a live positive PID (still in `sleep`); the
+		// return value is checked.
 		let child_sid = unsafe { libc::getsid(child_pid) };
 		assert!(
 			child_sid > 0,

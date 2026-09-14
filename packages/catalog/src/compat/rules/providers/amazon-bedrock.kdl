@@ -1,6 +1,8 @@
 // Provider-wire compat for "amazon-bedrock"; regenerated from the frozen census using deployment contract selectors.
 
 provider "amazon-bedrock" {
+	default-model "us.anthropic.claude-opus-4-8"
+
 	class "anthropic" {
 		family "opus" {
 			revision ">=4.6 <4.7" {

@@ -1,6 +1,12 @@
 // Provider-wire compat for "cursor"; regenerated from the frozen census using deployment contract selectors.
 
 provider "cursor" {
+	default-model "claude-4.6-opus-high"
+	env "CURSOR_ACCESS_TOKEN"
+	discovery label="Cursor" oauth-provider="cursor" {
+		env "CURSOR_API_KEY"
+	}
+
 	thinking-mode "effort"
 	class "anthropic" {
 		family "fable" {

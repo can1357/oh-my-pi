@@ -100,10 +100,15 @@ describe("Muse Code subscription usage", () => {
 		let now = startedAt;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		// Count only Muse key-endpoint calls: `fetchUsageReports` also fans out to
+		// every provider with an ambient env key (ZAI_API_KEY, SYNTHETIC_API_KEY…),
+		// and those hit the same mock.
 		let requests = 0;
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
 			usageFetch: Object.assign(
-				() => {
+				(input: string | URL | Request) => {
+					const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+					if (!url.includes("/muse-code/key")) return Promise.resolve(new Response(null, { status: 503 }));
 					requests += 1;
 					return Promise.resolve(
 						requests === 1
