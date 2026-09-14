@@ -231,11 +231,10 @@ fn center_truncate_match(text: &str, max_chars: usize) -> String {
 	}
 
 	// Heuristic:
-	// - If the line has significant leading whitespace, bias toward the code
-	//   region shortly after indentation (common for grep hits inside indented
-	//   code).
-	// - If the line is effectively one long token, bias earlier so identifiers
-	//   that appear before a long suffix still remain visible.
+	// - If the line has significant leading whitespace, bias toward the code region
+	//   shortly after indentation (common for grep hits inside indented code).
+	// - If the line is effectively one long token, bias earlier so identifiers that
+	//   appear before a long suffix still remain visible.
 	// - Otherwise center in the middle of the full line.
 	// Count leading whitespace in CHARS, not bytes: this value is compared and
 	// combined with char-based quantities (`char_count`, `max_chars`) and used

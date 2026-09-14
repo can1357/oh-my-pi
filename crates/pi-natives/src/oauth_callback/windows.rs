@@ -176,24 +176,23 @@ pub(super) fn restore(context: &Context, snapshot: &Snapshot) -> Result<()> {
 	// must recognize both encodings as owned — otherwise the project's own value
 	// looks externally changed, the journal is retained, and every later start
 	// retries the same failed recovery.
-	let (command, legacy_command) = if let Ok(normalized) =
-		relay_command(&context.helper_path, &context.callback_path)
-	{
-		// The legacy encoding is 8 units longer on verbatim disk paths; if the
-		// normalized command fits but the legacy one exceeds the command limit,
-		// no older binary could have installed it, so treat it as no match
-		// rather than failing recovery.
-		let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)
-			.ok()
-			.filter(|legacy| *legacy != normalized);
-		(normalized, legacy)
-	} else {
-		// The only way the normalized form fails while the legacy form succeeds
-		// is the shell refusal of volume/device paths; fall back so those dead
-		// registrations still clean up instead of wedging recovery.
-		let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)?;
-		(legacy.clone(), Some(legacy))
-	};
+	let (command, legacy_command) =
+		if let Ok(normalized) = relay_command(&context.helper_path, &context.callback_path) {
+			// The legacy encoding is 8 units longer on verbatim disk paths; if the
+			// normalized command fits but the legacy one exceeds the command limit,
+			// no older binary could have installed it, so treat it as no match
+			// rather than failing recovery.
+			let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)
+				.ok()
+				.filter(|legacy| *legacy != normalized);
+			(normalized, legacy)
+		} else {
+			// The only way the normalized form fails while the legacy form succeeds
+			// is the shell refusal of volume/device paths; fall back so those dead
+			// registrations still clean up instead of wedging recovery.
+			let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)?;
+			(legacy.clone(), Some(legacy))
+		};
 	let owned = owned_values(context, &command);
 	let legacy_owned = legacy_command
 		.as_ref()

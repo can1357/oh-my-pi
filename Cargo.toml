@@ -15,6 +15,7 @@ members = [
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
+   "crates/vendor/cfg_aliases",
 ]
 resolver = "3"
 
