@@ -340,8 +340,9 @@ function ModelsTable({
 								) : (
 									<MiniSparkline
 										timestamps={trendData.map(d => d.timestamp)}
-										values={trendData.map(d => d.avgTokensPerSecond ?? 0)}
+										values={trendData.map(d => d.avgTokensPerSecond)}
 										color={trendColor}
+										showPoints={trendData.filter(point => point.requests > 0).length <= 30}
 									/>
 								)
 							}
@@ -397,17 +398,25 @@ function ModelsTable({
 											</div>
 										</div>
 									</div>
-									<div className="h-[200px]">
-										{trendData.length === 0 ? (
-											<DetailChartEmpty />
-										) : (
-											<PerformanceChart
-												data={trendData}
-												color={trendColor}
-												chartTheme={chartTheme}
-												timeRange={timeRange}
-											/>
-										)}
+									<div>
+										<div className="mb-2 text-xs text-[var(--text-muted)] tabular-nums">
+											Bucket averages ·{" "}
+											{trendData.reduce((sum, point) => sum + point.requests, 0).toLocaleString()} requests{" "}
+											across {trendData.filter(point => point.requests > 0).length.toLocaleString()} active
+											buckets
+										</div>
+										<div className="h-[180px]">
+											{trendData.length === 0 ? (
+												<DetailChartEmpty />
+											) : (
+												<PerformanceChart
+													data={trendData}
+													color={trendColor}
+													chartTheme={chartTheme}
+													timeRange={timeRange}
+												/>
+											)}
+										</div>
 									</div>
 								</div>
 							}
@@ -429,25 +438,45 @@ function PerformanceChart({
 		timestamp: number;
 		avgTtftSeconds: number | null;
 		avgTokensPerSecond: number | null;
+		requests: number;
 	}>;
 	color: string;
 	chartTheme: TableChartTheme;
 	timeRange: TimeRange;
 }) {
 	const chartData = useMemo(() => {
+		const showPointMarkers = data.filter(point => point.requests > 0).length <= 30;
+		const ttftValues = data.map(point => point.avgTtftSeconds);
+		const throughputValues = data.map(point => point.avgTokensPerSecond);
+		const ttftPointRadius = ttftValues.map((value, index) => {
+			if (value === null) return 0;
+			const isolated = ttftValues[index - 1] == null && ttftValues[index + 1] == null;
+			return showPointMarkers || isolated ? (data[index].requests < 5 ? 3 : 2) : 0;
+		});
+		const throughputPointRadius = throughputValues.map((value, index) => {
+			if (value === null) return 0;
+			const isolated = throughputValues[index - 1] == null && throughputValues[index + 1] == null;
+			return showPointMarkers || isolated ? (data[index].requests < 5 ? 3 : 2) : 0;
+		});
 		return {
 			labels: data.map(d => formatRangeTick(d.timestamp, timeRange)),
 			datasets: [
 				{
-					label: "TTFT",
-					data: data.map(d => d.avgTtftSeconds ?? null),
+					label: "TTFT (s)",
+					data: ttftValues,
 					...lineSeriesStyle("#5ad8e6"),
+					spanGaps: false,
+					pointRadius: ttftPointRadius,
+					pointHoverRadius: 4,
 					yAxisID: "y" as const,
 				},
 				{
-					label: "Tokens/s",
-					data: data.map(d => d.avgTokensPerSecond ?? null),
+					label: "Output (tok/s)",
+					data: throughputValues,
 					...lineSeriesStyle(color),
+					spanGaps: false,
+					pointRadius: throughputPointRadius,
+					pointHoverRadius: 4,
 					yAxisID: "y1" as const,
 				},
 			],
@@ -455,11 +484,24 @@ function PerformanceChart({
 	}, [data, color, timeRange]);
 
 	const options = useMemo(() => {
+		const scales = detailChartScalesDualAxis(chartTheme);
 		return {
 			responsive: true,
 			maintainAspectRatio: false,
 			plugins: detailChartPlugins(chartTheme),
-			scales: detailChartScalesDualAxis(chartTheme),
+			scales: {
+				...scales,
+				y: {
+					...scales.y,
+					beginAtZero: true,
+					title: { display: true, text: "TTFT (seconds)", color: chartTheme.tick },
+				},
+				y1: {
+					...scales.y1,
+					beginAtZero: true,
+					title: { display: true, text: "Output (tokens/s)", color: chartTheme.tick },
+				},
+			},
 		};
 	}, [chartTheme]);
 

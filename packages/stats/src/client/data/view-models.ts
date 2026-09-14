@@ -157,7 +157,18 @@ export function buildModelPerformanceLookup(
 					const start = anchor - (bucketCount - 1) * bucketMs;
 					return Array.from({ length: bucketCount }, (_, index) => start + index * bucketMs);
 				})()
-			: Array.from(new Set(points.map(p => p.timestamp))).sort((a, b) => a - b);
+			: (() => {
+					const observed = Array.from(new Set(points.map(point => point.timestamp))).sort((a, b) => a - b);
+					const withGapMarkers: number[] = [];
+					for (const timestamp of observed) {
+						const previous = withGapMarkers.at(-1);
+						if (previous !== undefined && timestamp - previous > bucketMs) {
+							withGapMarkers.push(previous + bucketMs);
+						}
+						withGapMarkers.push(timestamp);
+					}
+					return withGapMarkers;
+				})();
 	const bucketIndex = new Map(buckets.map((timestamp, index) => [timestamp, index]));
 	const seriesByKey = new Map<string, ModelPerformanceSeries>();
 
