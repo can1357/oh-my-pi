@@ -141,7 +141,7 @@ Side-channel artifacts outside the model tool result:
    - `performance`: `startCpuProfile()`, wait for Enter/Escape, stop profiling, read a 30-second work profile with `getWorkProfile(30)`, then bundle via `createReportBundle()`
    - `work`: read `getWorkProfile(30)`, write a temp SVG, open it externally
    - `dump`: create a report bundle immediately
-   - `memory`: force GC, call `Bun.generateHeapSnapshot("v8")`, then bundle
+   - `memory`: force GC, collect numeric process and heap statistics with `collectMemoryStats()`, then bundle
    - `logs`: build a `DebugLogSource` and mount `DebugLogViewerComponent`
    - `raw-sse`: resolve a `RawSseDebugBuffer` from the session and mount `RawSseViewerComponent`
    - `remote-debugger`: reuse or start a loopback JavaScriptCore `RemoteInspectorServer` socket and display its host/port; the Bun API is process-wide and has no stop operation
@@ -252,7 +252,7 @@ GDB example for an OpenOCD remote target:
   - `raw-sse` — live view over the session’s `RawSseDebugBuffer`; supports tail-follow, scrolling, copy-all.
   - `remote-debugger` — starts or reuses the process-wide JavaScriptCore WebKit inspector on `127.0.0.1` and an automatically reserved port; it is experimental, cannot be stopped/rebound, and requires a compatible Safari/WebKit inspector client.
   - `performance` — CPU profile + 30-second work profile + report bundle.
-  - `memory` — heap snapshot + report bundle.
+  - `memory` — numeric memory statistics (`memory.json`) + report bundle.
   - `dump` — report bundle without profiler artifacts.
   - `work` — standalone work-profile flamegraph export/open.
   - `system` — formatted OS/arch/CPU/memory/version/cwd/shell/terminal dump.
@@ -264,6 +264,8 @@ GDB example for an OpenOCD remote target:
 - Filesystem
   - Resolves program/file/cwd paths against the session cwd.
   - Report creation writes `.tar.gz` bundles and may read the session JSONL, artifact files, subagent session JSONLs, and log files.
+  - Memory reports include only numeric process/heap counters, not heap snapshots or runtime-derived type names. Session data, artifacts, logs, settings, raw SSE diagnostics, and environment values may still contain private data; review the archive before sharing. Environment redaction matches variable names, not arbitrary secrets in values.
+  - Older memory reports containing `heap.heapsnapshot` must be treated as credential-bearing files. Do not share them; if one was already shared, revoke or rotate exposed provider and MCP credentials, including OAuth refresh tokens, and remove shared copies.
   - Work-profile export writes `/tmp/work-profile-<timestamp>.svg`.
   - Log source reads daily log files from the logs dir.
   - Artifact-cache cleanup removes session artifact directories older than the cutoff.
@@ -275,7 +277,7 @@ GDB example for an OpenOCD remote target:
   - Spawns debugger adapters (`gdb`, `lldb-dap`, `python -m debugpy.adapter`, `dlv`, and others from `defaults.json`) detached.
   - Reverse DAP `runInTerminal` requests spawn the debuggee detached via `ptree.spawn()`.
   - `getWorkProfile(30)` comes from `@oh-my-pi/pi-natives`.
-  - CPU profiling uses `node:inspector/promises`; heap snapshots use `Bun.generateHeapSnapshot("v8")`; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
+  - CPU profiling uses `node:inspector/promises`; memory statistics use `process.memoryUsage()` and numeric counters from `bun:jsc`'s `heapStats()` after GC; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
   - `openPath()` launches the OS default file/browser handler for artifact dirs and SVGs.
   - Log/raw-SSE viewers can call `copyToClipboard()`.
 - Session state (transcript, memory, jobs, checkpoints, registries)
