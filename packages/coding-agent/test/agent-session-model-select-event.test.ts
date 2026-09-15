@@ -5,7 +5,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	ExtensionRunner,
+	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
+	testSetSessionShutdownHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionAPI, ModelSelectEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -26,6 +30,8 @@ type GateGlobal = typeof globalThis & {
  * of a guessed delay.
  */
 let deliveries: Array<PromiseWithResolvers<void>> = [];
+/** Delivery order across model_select and session_shutdown handlers. */
+let order: string[] = [];
 let runner: ExtensionRunner;
 
 function armDelivery(count = 1): void {
@@ -73,7 +79,11 @@ describe("AgentSession model_select extension event", () => {
 					const gate = gateGlobal.__ompModelSelectGate;
 					if (gate && (park === undefined || park === event.model.id)) await gate;
 					events.push(event);
+					order.push("model_select");
 					deliveries[events.length - 1]?.resolve();
+				});
+				pi.on("session_shutdown", () => {
+					order.push("session_shutdown");
 				});
 			},
 			tempDir.path(),
@@ -97,6 +107,7 @@ describe("AgentSession model_select extension event", () => {
 
 		events = [];
 		modelChangedCount = 0;
+		order = [];
 		armDelivery();
 		session = new AgentSession({
 			agent,
@@ -258,6 +269,43 @@ describe("AgentSession model_select extension event", () => {
 		expect(session.thinkingLevel).toBe(Effort.High);
 		expect(observed?.modelMatches).toBe(true);
 		expect(observed?.lastModelChange).toBe("anthropic/claude-sonnet-4-6");
+	});
+
+	it("resolves dispose within the shutdown bound while a handler is parked, then fences new deliveries", async () => {
+		testSetSessionShutdownHandlerTimeoutMs(50);
+		try {
+			const gate = Promise.withResolvers<void>();
+			(globalThis as GateGlobal).__ompModelSelectGate = gate.promise;
+			await session.setModel(bundledAnthropicModel("claude-sonnet-4-6"));
+
+			// The only model_select handler is parked mid-delivery; dispose must
+			// not wait for it beyond the shutdown drain bound.
+			await session.dispose();
+
+			gate.resolve();
+			await waitForDeliveries();
+			await drainMicrotasks();
+			expect(events).toHaveLength(1);
+			// Post-shutdown emits are no-ops: nothing is delivered after the
+			// session (and its extension host) is gone.
+			runner.emitModelSelect({
+				model: bundledAnthropicModel("claude-opus-4-5"),
+				previousModel: undefined,
+				source: "set",
+			});
+			await drainMicrotasks();
+			expect(events).toHaveLength(1);
+		} finally {
+			testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
+		}
+	});
+
+	it("delivers an in-flight model_select before session_shutdown handlers", async () => {
+		await session.setModel(bundledAnthropicModel("claude-sonnet-4-6"));
+		// Delivery is queued (microtask chain) but has not run when dispose
+		// starts; the shutdown drain must settle it BEFORE session_shutdown.
+		await session.dispose();
+		expect(order).toEqual(["model_select", "session_shutdown"]);
 	});
 });
 

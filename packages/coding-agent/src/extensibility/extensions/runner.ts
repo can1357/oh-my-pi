@@ -387,6 +387,16 @@ export type ShutdownHandler = () => void;
  * Emit `session_shutdown`, dispose file-write-fallback registrations, and clear
  * timers owned by an extension runner.
  *
+ * Before anything else this fences and drains the detached `model_select`
+ * delivery chain: `beginShutdown()` stops new deliveries from queueing, and
+ * `drainModelSelect` waits (bounded by the shutdown-handler budget) for the
+ * in-flight pass to settle. Without the drain a parked handler could resume
+ * after `disposeFileFallbacks`/`clearManagedTimers` below — registering
+ * `ctx.setTimeout`/`setInterval` handles after `clearAll`, touching a
+ * torn-down session's context — and extensions would observe `model_select`
+ * after `session_shutdown`. The drain runs even when no shutdown handlers are
+ * registered: the chain belongs to the runner, not to that event.
+ *
  * Returns whether any shutdown handlers were present. Fallback disposal and timer
  * cleanup run even when a handler fails so extension background work — and a
  * fallback bound to this session's context — cannot outlive its host.
@@ -394,6 +404,8 @@ export type ShutdownHandler = () => void;
 export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner | undefined): Promise<boolean> {
 	if (!extensionRunner) return false;
 	try {
+		extensionRunner.beginShutdown();
+		await extensionRunner.drainModelSelect(sessionShutdownHandlerTimeoutMs);
 		if (!extensionRunner.hasHandlers("session_shutdown")) return false;
 		await extensionRunner.emit({
 			type: "session_shutdown",
@@ -524,8 +536,14 @@ export class ExtensionRunner {
 	 * notification-only delivery detached from the switch (the chain head is
 	 * never awaited by `AgentSession`) while preserving FIFO handler order.
 	 * Kept non-rejecting so a failed pass never wedges the queue.
+	 *
+	 * Torn down cooperatively at shutdown: `beginShutdown` fences new appends
+	 * and `drainModelSelect` bounds the wait on the current head so teardown
+	 * stays prompt (see `emitSessionShutdownEvent`).
 	 */
 	#modelSelectChain: Promise<void> = Promise.resolve();
+	/** Set by {@link beginShutdown}; once true, `model_select` delivery is over for this runner. */
+	#shutdownStarted = false;
 	/**
 	 * Dedup markers for `tool_call` emission, keyed `${toolCallId}:${toolName}`.
 	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
@@ -864,13 +882,43 @@ export class ExtensionRunner {
 	 * fire-and-forget and never awaits the returned promise, so a slow
 	 * handler cannot delay a switch (including retry-fallback on the error
 	 * path). Handler errors are logged, never thrown, and never wedge the
-	 * chain.
+	 * chain. No-op once {@link beginShutdown} has fenced the runner: nothing
+	 * may be delivered after `session_shutdown`.
 	 */
 	emitModelSelect(event: Omit<ModelSelectEvent, "type">): void {
+		if (this.#shutdownStarted) return;
 		if (!this.hasHandlers("model_select")) return;
 		this.#modelSelectChain = this.#modelSelectChain
 			.then(() => this.emit({ type: "model_select", ...event }))
 			.catch(error => logger.warn("model_select extension notification failed", { error: String(error) }));
+	}
+
+	/** Mark this runner as shutting down: `model_select` delivery stops queueing immediately. */
+	beginShutdown(): void {
+		this.#shutdownStarted = true;
+	}
+
+	/**
+	 * Wait for the in-flight `model_select` delivery pass (the current chain
+	 * head) to settle, bounded by `timeoutMs`; never rejects. A pass that
+	 * overruns the bound is abandoned with a warning — teardown must stay
+	 * prompt, and {@link beginShutdown} has already fenced off later passes,
+	 * so the abandoned handler is the only loose end (its own
+	 * `#runHandlerWithTimeout` budget still aborts it eventually). The timer
+	 * is `unref`'d so the drain itself can never keep the process alive,
+	 * matching the bounded-wait discipline in `raceHandlerWithTimeout`.
+	 */
+	async drainModelSelect(timeoutMs: number): Promise<void> {
+		const { promise: timedOut, resolve: onTimeout } = Promise.withResolvers<true>();
+		const timer = setTimeout(() => onTimeout(true), timeoutMs);
+		timer.unref?.();
+		try {
+			if (await Promise.race([this.#modelSelectChain.then(() => false), timedOut])) {
+				logger.warn("model_select delivery still in flight at shutdown; abandoning it", { timeoutMs });
+			}
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	/**
