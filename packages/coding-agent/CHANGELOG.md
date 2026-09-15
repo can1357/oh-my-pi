@@ -1065,6 +1065,10 @@
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
 
+### Changed
+
+- Documented a map-reduce sub-call pattern for the eval tool (slice a long input inside the kernel, run one `completion` per slice through `parallel`, aggregate in code, load large sources via in-kernel `read` rather than the outer `read` tool's `:raw` form) and routed bulk per-chunk semantic work there instead of subagent fan-out.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes
