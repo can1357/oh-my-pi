@@ -1565,6 +1565,83 @@ providers:
 		expect(ProviderDiscoverySchema.allows({ type: "lm-studio", injectV1: false })).toBe(false);
 		expect(ProviderDiscoverySchema.allows({ type: "proxy", injectV1: false })).toBe(false);
 	});
+	test("ProviderDiscoverySchema validates pricing configuration", () => {
+		const validPricing = {
+			input: "pricing.input",
+			output: "pricing.output",
+			cacheRead: "pricing.cacheRead",
+		};
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", pricing: validPricing })).toBe(true);
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, unit: "per-1m" },
+			}),
+		).toBe(true);
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, unit: "per-token", cacheWrite: "pricing.cacheWrite" },
+			}),
+		).toBe(true);
+
+		// Invalid unit
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, unit: "per-billion" },
+			}),
+		).toBe(false);
+
+		// Empty paths
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, input: "" },
+			}),
+		).toBe(false);
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, output: "" },
+			}),
+		).toBe(false);
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, cacheRead: "" },
+			}),
+		).toBe(false);
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, cacheWrite: "" },
+			}),
+		).toBe(false);
+
+		// Non-string path
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { ...validPricing, input: 123 },
+			}),
+		).toBe(false);
+
+		// Missing required field
+		expect(
+			ProviderDiscoverySchema.allows({
+				type: "openai-models-list",
+				pricing: { input: "pricing.input", output: "pricing.output" },
+			}),
+		).toBe(false);
+
+		// Pricing on other discovery types rejected
+		expect(ProviderDiscoverySchema.allows({ type: "lm-studio", pricing: validPricing })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "proxy", pricing: validPricing })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "ollama", pricing: validPricing })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", pricing: validPricing })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "litellm", pricing: validPricing })).toBe(false);
+	});
 	test("llama.cpp discovery marks per-model architecture image modalities as vision-capable", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
@@ -2362,12 +2439,13 @@ providers:
 		const proxiedCompat = proxied?.compat as OpenAICompat | undefined;
 		expect(proxiedCompat?.supportsReasoningEffort).toBe(true);
 		expect(proxiedCompat?.omitReasoningEffort).toBe(false);
-		// Proxy pricing is untrusted even when the identity resolves.
-		expect(proxied?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-		// Unknown model ids stay on the default fallback path.
+		const bundledGpt5 = getBundledModel("openai", "gpt-5");
+		expect(proxied?.cost).toEqual(bundledGpt5?.cost);
+		// Unknown model ids stay on the default fallback path with zero pricing.
 		const unknown = registry.find("openai-test", "unknown-proxy-model");
 		expect(unknown?.contextWindow).toBe(128000);
 		expect(unknown?.reasoning).toBe(false);
+		expect(unknown?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	});
 
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {
@@ -2501,6 +2579,285 @@ providers:
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		expect(registry.find("lm-studio-test", "local-vlm")?.input).toEqual(["text", "image"]);
+	});
+
+	test("openai-models-list extracts pricing from configured dot-paths with per-1m and per-token scaling", async () => {
+		writeRawModelsJson({
+			"custom-pricing-proxy": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: {
+					type: "openai-models-list",
+					pricing: {
+						input: "rates.in",
+						output: "rates.out",
+						cacheRead: "rates.cache.read",
+						cacheWrite: "rates.cache.write",
+						unit: "per-token",
+					},
+				},
+			},
+			"default-unit-proxy": {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: {
+					type: "openai-models-list",
+					pricing: {
+						input: "pricing.input_rate",
+						output: "pricing.output_rate",
+						cacheRead: "pricing.cache_read_rate",
+					},
+				},
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "token-scaled",
+								rates: {
+									in: "0.000002",
+									out: 0.000006,
+									cache: {
+										read: 0.0000005,
+										write: "0.0000015",
+									},
+								},
+							},
+							{
+								id: "sanitized-model",
+								rates: {
+									in: -0.000002,
+									out: "invalid-number",
+									cache: {
+										read: 0,
+										write: Number.NaN,
+									},
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "http://127.0.0.1:9993/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "per-1m-default",
+								pricing: {
+									input_rate: "2.5",
+									output_rate: 10,
+									cache_read_rate: 1.25,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		// per-token scaling: multiplied by 1,000,000
+		const tokenScaled = registry.find("custom-pricing-proxy", "token-scaled");
+		expect(tokenScaled?.cost).toEqual({
+			input: 2,
+			output: 6,
+			cacheRead: 0.5,
+			cacheWrite: 1.5,
+		});
+
+		// negative, non-numeric, or absent numbers become 0 independently
+		const sanitized = registry.find("custom-pricing-proxy", "sanitized-model");
+		expect(sanitized?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		// default unit is per-1m; optional cacheWrite omitted falls back to 0
+		const per1mDefault = registry.find("default-unit-proxy", "per-1m-default");
+		expect(per1mDefault?.cost).toEqual({
+			input: 2.5,
+			output: 10,
+			cacheRead: 1.25,
+			cacheWrite: 0,
+		});
+	});
+
+	test("openai-models-list auto-detects input_per_1m_usd/output_per_1m_usd and prompt/completion pricing", async () => {
+		writeRawModelsJson({
+			"auto-pricing-proxy": {
+				baseUrl: "http://127.0.0.1:9992",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9992/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "per-1m-auto",
+								pricing: {
+									input_per_1m_usd: 1.5,
+									output_per_1m_usd: "4.5",
+								},
+							},
+							{
+								id: "openrouter-per-token-auto",
+								pricing: {
+									prompt: "0.000001",
+									completion: 0.000003,
+								},
+							},
+							{
+								id: "malformed-auto",
+								pricing: {
+									input_per_1m_usd: -5,
+									output_per_1m_usd: "not-a-number",
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		// input_per_1m_usd / output_per_1m_usd: unscaled, cacheRead/Write 0
+		expect(registry.find("auto-pricing-proxy", "per-1m-auto")?.cost).toEqual({
+			input: 1.5,
+			output: 4.5,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		// prompt / completion: per-token scaled by 1,000,000, cacheRead/Write 0
+		expect(registry.find("auto-pricing-proxy", "openrouter-per-token-auto")?.cost).toEqual({
+			input: 1,
+			output: 3,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		// malformed / negative auto-detected members sanitize to 0
+		expect(registry.find("auto-pricing-proxy", "malformed-auto")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+	});
+
+	test("modelOverrides[id].cost takes precedence over discovered pricing", async () => {
+		writeRawModelsJson({
+			"override-priority-proxy": {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+				modelOverrides: {
+					"discovered-model": {
+						cost: {
+							input: 9,
+						},
+					},
+				},
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9991/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "discovered-model",
+								pricing: {
+									input_per_1m_usd: 2,
+									output_per_1m_usd: 5,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		// modelOverrides.cost.input wins (9), output retains discovered value (5), cache fields remain 0
+		expect(registry.find("override-priority-proxy", "discovered-model")?.cost).toEqual({
+			input: 9,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+	});
+
+	test("lm-studio discovery leaves pricing at zero even with priced rows", async () => {
+		writeRawModelsJson({
+			"lm-studio-pricing-test": {
+				baseUrl: "http://127.0.0.1:9990",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "lm-studio" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9990/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "local-model",
+								pricing: {
+									input_per_1m_usd: 10,
+									output_per_1m_usd: 20,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "http://127.0.0.1:9990/api/v0/models") {
+				return new Response(JSON.stringify({ data: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(registry.find("lm-studio-pricing-test", "local-model")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 	});
 
 	test("proxy discovery honors API-reported context_length and endpoint routing", async () => {

@@ -107,6 +107,18 @@ providers:
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
+- `discovery.pricing`: optional object for `openai-models-list` discovery to extract token pricing from `/models` responses:
+  ```yaml
+  discovery:
+    type: openai-models-list
+    pricing:
+      input: "pricing.input_per_1m_usd"
+      output: "pricing.output_per_1m_usd"
+      cacheRead: "pricing.cache_read_input_per_1m_usd"
+      cacheWrite: "pricing.cache_creation_input_per_1m_usd" # optional
+      unit: "per-1m" # optional: "per-1m" (default) or "per-token"
+  ```
+  Paths are dot-separated keys walked against each raw model entry in `data[]`. When `unit` is `"per-token"`, rates are converted to USD per 1M tokens by multiplying by 1,000,000. Missing, non-numeric, or negative numbers resolve to `0`. When `cacheWrite` is omitted, it defaults to `0`.
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, and `glm5`. Omit it to use catalog identity policy; unknown models retain the fast local estimate.
@@ -230,7 +242,15 @@ The status line's `cost` segment appends **↑** for peak or **↓** for off-pea
 
 An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-price override and disables inherited time-based pricing for that model. Omitting `cost` preserves catalog pricing. `models.yml` does **not** accept a `timeBased` schedule; that metadata belongs to the catalog's [KDL pricing rules](../packages/catalog/src/compat/rules/README.md#time-based-pricing).
 
-A custom model in `models.yml` that omits `cost` inherits its reference row's card, schedule included. That lookup is keyed by model id and prefers the row with the widest limits, so `deepseek-v4-flash` resolves to a reseller's flat card while `deepseek-flash` resolves to the scheduled first-party one. Discovered proxy and gateway models are the opposite case: their pricing is provider-specific and rarely matches the bundled catalog, so discovery keeps them at a local-unknown zero cost and no tariff applies to them.
+A custom model in `models.yml` that omits `cost` inherits its reference row's card, schedule included. That lookup is keyed by model id and prefers the row with the widest limits, so `deepseek-v4-flash` resolves to a reseller's flat card while `deepseek-flash` resolves to the scheduled first-party one.
+
+For `openai-models-list` discovery, token rates are resolved using the following precedence:
+1. **Configured mapping**: If `discovery.pricing` is specified, rates are extracted from the configured paths (`unit` defaults to `per-1m`).
+2. **Auto-detection (per 1M)**: If the raw model entry's `pricing` object contains `input_per_1m_usd` or `output_per_1m_usd`, those rates are used directly (cache fields set to `0`).
+3. **Auto-detection (per token)**: If the raw model entry's `pricing` object contains `prompt` or `completion`, those values are scaled by 1,000,000 to USD per 1M tokens (cache fields set to `0`).
+4. **Catalog reference fallback**: Otherwise, pricing falls back to the matched bundled reference model's `cost` (or four `0` fields if unknown).
+
+Explicit `modelOverrides[id].cost` retains the highest priority and overrides any discovered pricing. Discovered models from other providers (such as `lm-studio`, `ollama`, or `llama.cpp`) continue to default to zero cost.
 
 ## Runtime discovery integration
 

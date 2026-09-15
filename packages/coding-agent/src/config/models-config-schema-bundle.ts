@@ -272,6 +272,28 @@ export const getModelsConfigSchemaBundle = once(() => {
 		return true;
 	});
 
+	const DiscoveryPricingSchema = type({
+		input: "string",
+		output: "string",
+		cacheRead: "string",
+		"cacheWrite?": "string",
+		"unit?": '"per-1m" | "per-token"',
+	}).narrow((value, ctx) => {
+		if (typeof value.input === "string" && value.input.length === 0) {
+			return ctx.mustBe("pricing.input a non-empty string");
+		}
+		if (typeof value.output === "string" && value.output.length === 0) {
+			return ctx.mustBe("pricing.output a non-empty string");
+		}
+		if (typeof value.cacheRead === "string" && value.cacheRead.length === 0) {
+			return ctx.mustBe("pricing.cacheRead a non-empty string");
+		}
+		if (value.cacheWrite !== undefined && typeof value.cacheWrite === "string" && value.cacheWrite.length === 0) {
+			return ctx.mustBe("pricing.cacheWrite a non-empty string");
+		}
+		return true;
+	});
+
 	const ProviderDiscoverySchema = type({
 		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm"',
 		"timeoutMs?": "number",
@@ -283,9 +305,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 * returns a different, smaller model list.
 		 */
 		"injectV1?": "boolean",
+		"pricing?": DiscoveryPricingSchema,
 	}).narrow((value, ctx) => {
 		if (value.injectV1 !== undefined && value.type !== "openai-models-list") {
 			return ctx.mustBe("injectV1 only on openai-models-list discovery");
+		}
+		if (value.pricing !== undefined && value.type !== "openai-models-list") {
+			return ctx.mustBe("pricing only on openai-models-list discovery");
 		}
 		if (
 			value.timeoutMs !== undefined &&

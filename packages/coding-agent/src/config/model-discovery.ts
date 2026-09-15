@@ -22,7 +22,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { ModelCost, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -805,6 +805,67 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	return modalities.has("image") ? ["text", "image"] : ["text"];
 }
 
+function resolveDotPath(target: unknown, dotPath: string): unknown {
+	const segments = dotPath.split(".");
+	let current: unknown = target;
+	for (const segment of segments) {
+		if (!isRecord(current)) return undefined;
+		current = current[segment];
+	}
+	return current;
+}
+
+function sanitizePricingValue(value: unknown, unit: "per-1m" | "per-token"): number {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+	return unit === "per-token" ? parsed * 1_000_000 : parsed;
+}
+
+function resolveOpenAIModelsListCost(
+	item: Record<string, unknown>,
+	pricingConfig: NonNullable<ProviderDiscovery["pricing"]> | undefined,
+	referenceCost: ModelCost | undefined,
+): ModelCost {
+	if (pricingConfig) {
+		const unit = pricingConfig.unit ?? "per-1m";
+		return {
+			input: sanitizePricingValue(resolveDotPath(item, pricingConfig.input), unit),
+			output: sanitizePricingValue(resolveDotPath(item, pricingConfig.output), unit),
+			cacheRead: sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheRead), unit),
+			cacheWrite:
+				pricingConfig.cacheWrite !== undefined
+					? sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheWrite), unit)
+					: 0,
+		};
+	}
+
+	const rawPricing = item.pricing;
+	if (isRecord(rawPricing)) {
+		if ("input_per_1m_usd" in rawPricing || "output_per_1m_usd" in rawPricing) {
+			return {
+				input: sanitizePricingValue(rawPricing.input_per_1m_usd, "per-1m"),
+				output: sanitizePricingValue(rawPricing.output_per_1m_usd, "per-1m"),
+				cacheRead: 0,
+				cacheWrite: 0,
+			};
+		}
+		if ("prompt" in rawPricing || "completion" in rawPricing) {
+			return {
+				input: sanitizePricingValue(rawPricing.prompt, "per-token"),
+				output: sanitizePricingValue(rawPricing.completion, "per-token"),
+				cacheRead: 0,
+				cacheWrite: 0,
+			};
+		}
+	}
+
+	if (referenceCost) {
+		return referenceCost;
+	}
+
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
+
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -842,15 +903,18 @@ export async function discoverOpenAIModelsList(
 				}
 				headers = h;
 				return (await res.json()) as {
-					data?: Array<{
-						id?: string;
-						max_model_len?: unknown;
-						context_length?: unknown;
-						input?: unknown;
-						input_modalities?: unknown;
-						architecture?: unknown;
-						mode?: unknown;
-					}>;
+					data?: Array<
+						Record<string, unknown> & {
+							id?: string;
+							max_model_len?: unknown;
+							context_length?: unknown;
+							input?: unknown;
+							input_modalities?: unknown;
+							architecture?: unknown;
+							mode?: unknown;
+							pricing?: unknown;
+						}
+					>;
 				};
 			}),
 			nativeMetadataPromise,
@@ -903,10 +967,10 @@ export async function discoverOpenAIModelsList(
 					extractOpenAIModelsListInputCapabilities(item) ??
 					reference?.input ?? ["text"],
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
-				// Proxy/gateway pricing is provider-specific and rarely matches
-				// upstream bundled catalogs, so keep costs local-unknown even
-				// when we successfully recover the upstream model identity.
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost:
+					providerConfig.discovery.type === "openai-models-list"
+						? resolveOpenAIModelsListCost(item, providerConfig.discovery.pricing, reference?.cost)
+						: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
 				// Cap the reference's output limit at the discovered context
 				// window so an ID collision with a larger bundled model can
