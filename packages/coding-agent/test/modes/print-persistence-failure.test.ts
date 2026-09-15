@@ -72,6 +72,7 @@ function assistantSession(manager: SessionManager, dispose: () => Promise<void>)
 		settings: { get: () => false },
 		sessionManager: manager,
 		getLastAssistantMessage: () => assistant(""),
+		getDisabledCredentialNotices: async () => [],
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => true,
@@ -96,6 +97,7 @@ describe("headless persistence-failure surface", () => {
 			settings: { get: () => false },
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
+			getDisabledCredentialNotices: async () => [],
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
@@ -143,6 +145,7 @@ describe("headless persistence-failure surface", () => {
 			settings: { get: () => false },
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
+			getDisabledCredentialNotices: async () => [],
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
@@ -198,6 +201,7 @@ describe("headless persistence-failure surface", () => {
 				},
 			},
 			getLastAssistantMessage: () => assistant(""),
+			getDisabledCredentialNotices: async () => [],
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
@@ -239,6 +243,7 @@ describe("headless persistence-failure surface", () => {
 			settings: { get: () => false },
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
+			getDisabledCredentialNotices: async () => [],
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
@@ -346,7 +351,7 @@ describe("headless persistence-failure surface", () => {
 			});
 			return call;
 		};
-		const session = { dispose } as unknown as AgentSession;
+		const session = { dispose, getDisabledCredentialNotices: async () => [] } as unknown as AgentSession;
 
 		// The hazard: runRootCommand disposed a second time after print mode, and
 		// the cached rejection escaped through main()'s fatal handler.

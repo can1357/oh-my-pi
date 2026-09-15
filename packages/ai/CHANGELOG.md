@@ -19,6 +19,9 @@
 - ChatGPT accounts that have exhausted a plan's usage window but still have available Codex credit can now continue to be selected for Codex requests.
 - Cursor requests now honor explicit max-mode markers on wire-backed models instead of inferring the mode from the model suffix.
 - OpenAI-compatible chat responses containing only structured tool calls now report time to first token correctly.
+### Fixed
+
+- An OAuth credential the auth layer disables automatically (definitive refresh failure, upstream token invalidation, Copilot hard-401 retirement, broker disable) is now logged with its provider, account, and cause and reported through `credential_disabled`, so a session can no longer degrade to a sibling account with no record of what happened. Display surfaces name a classified cause (`sign-in expired`, `token revoked`, …) rather than provider-controlled text, and a managed MCP provider id loses its URL query structurally; the verbatim cause stays in the store ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.2.1] - 2026-09-15
 

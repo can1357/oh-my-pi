@@ -652,6 +652,8 @@ async function runInteractiveMode(
 			// `emitNotice` fired before the UI subscribed and was silently lost.
 			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
 		}
+		// Replay retained auth notices after subscription and transcript restoration.
+		await mode.announceDisabledCredentials();
 
 		for (const notify of notifs) {
 			if (!notify) {
@@ -2247,6 +2249,22 @@ export async function runRootCommand(
 			}
 
 			if (!isInteractive && !session.model) {
+				// A silently signed-out account is exactly what empties a scripted
+				// run's pool, and this exit is the only thing the user would
+				// otherwise see; a run that proceeds announces it after subscribing.
+				if (mode !== "rpc" && mode !== "rpc-ui") {
+					for (const notice of await session.getDisabledCredentialNotices()) {
+						// This exit happens before print mode subscribes, so JSON consumers
+						// would otherwise lose the sign-out in exactly the run it explains.
+						if (mode === "json") {
+							process.stdout.write(
+								`${JSON.stringify({ type: "notice", level: "warning", message: notice, source: "auth" })}\n`,
+							);
+						} else {
+							process.stderr.write(`${notice}\n`);
+						}
+					}
+				}
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}
@@ -2258,6 +2276,17 @@ export async function runRootCommand(
 				process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
 				process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
 				process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
+				// `process.exit` can terminate before a piped or back-pressured stream
+				// drains, truncating exactly the sign-out explanation this exit exists
+				// to deliver. A trailing zero-length write flushes everything queued
+				// ahead of it on each stream.
+				await Promise.all(
+					[process.stdout, process.stderr].map(stream => {
+						const drained = Promise.withResolvers<void>();
+						stream.write("", () => drained.resolve());
+						return drained.promise;
+					}),
+				);
 				process.exit(1);
 			}
 
