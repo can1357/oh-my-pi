@@ -332,6 +332,36 @@ export async function pickElectronTarget(
 	return pickPageFromList(fallbackPages, options);
 }
 
+/** Result of {@link resolveAttachTarget}: the page to drive, and whether omp created it. */
+export interface ResolvedAttachTarget {
+	page: Page;
+	/** True when omp created this page itself rather than adopting one that already existed. */
+	ownsTarget: boolean;
+}
+
+/**
+ * Resolve the page an attach-mode tab worker should drive, choosing between
+ * adopting an existing tab and forcing a brand-new one.
+ *
+ * `forceFresh` is for the relay's default (no `app.target`) path: instead of
+ * guessing at "the visible tab" — which silently hijacks whatever the user or
+ * another concurrent omp session happens to be looking at — open a tab omp
+ * owns outright, mirroring how Claude in Chrome always drives a tab it opened
+ * itself. `Target.createTarget` auto-joins the relay's "omp" tab group (see
+ * `relay/bridge.ts` `#claimTab`), so the fresh tab is visibly and structurally
+ * isolated from the rest of the user's browsing. An explicit `matcher` is a
+ * deliberate request to attach a specific existing tab and always wins.
+ */
+export async function resolveAttachTarget(
+	browser: Browser,
+	options: { matcher?: string; preferVisible?: boolean; forceFresh?: boolean } = {},
+): Promise<ResolvedAttachTarget> {
+	if (options.forceFresh && !options.matcher) {
+		return { page: await browser.newPage(), ownsTarget: true };
+	}
+	return { page: await pickElectronTarget(browser, options), ownsTarget: false };
+}
+
 async function enrichPages(pages: Page[]): Promise<Array<{ page: Page; url: string; title: string }>> {
 	return await Promise.all(
 		pages.map(async page => ({

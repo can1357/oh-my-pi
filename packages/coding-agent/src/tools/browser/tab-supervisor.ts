@@ -13,7 +13,7 @@ import { webpExclusionForModel } from "../../utils/image-loading";
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { ToolAbortError, ToolError } from "../tool-errors";
-import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
+import { gracefulKillTreeOnce, resolveAttachTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
 import { CmuxTab, runCmuxCode } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { DEFAULT_VIEWPORT } from "./launch";
@@ -106,6 +106,12 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	backend: "worker";
 	worker: WorkerHandle;
 	activateForScreenshot: boolean;
+	/**
+	 * True when omp created this page itself (headless always; a relay-forced
+	 * fresh tab) rather than adopting a pre-existing user tab. Only owned
+	 * targets are closed on release — an adopted tab belongs to the user.
+	 */
+	ownsTarget: boolean;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -365,6 +371,13 @@ async function acquireTabImpl(
 	try {
 		initPayload = await buildInitPayload(browser, opts);
 		worker = await spawnTabWorker();
+		// Headless workers report their own created target via a `page-created`
+		// message once they exist; an attach-mode target omp created itself
+		// (forced-fresh relay tab) is already known here, before the worker
+		// that will drive it can crash mid-init and leave it untracked.
+		if (initPayload.mode === "attach" && initPayload.ownsTarget) {
+			workerPageTargets.set(worker, initPayload.targetId);
+		}
 	} catch (error) {
 		// Failing before the worker took its own hold must release the
 		// temporary one, or the browser's refCount never reaches 0 again.
@@ -447,6 +460,7 @@ async function acquireTabImpl(
 		dialogPolicy: opts.dialogs,
 		kindTag: browser.kind.kind,
 		activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
+		ownsTarget: initPayload.mode === "headless" || initPayload.ownsTarget === true,
 		ownerSessionId: opts.ownerSessionId,
 		persist: opts.persist ?? false,
 		lastActivityAt: Date.now(),
@@ -838,7 +852,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.kindTag === "headless") {
+	if (forced && (tab.kindTag === "headless" || tab.ownsTarget)) {
 		try {
 			await waitForTabCleanup(
 				tab,
@@ -1222,14 +1236,19 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			timeoutMs: opts.timeoutMs,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
-	// target may be backgrounded, so retain activation for target-correct pixels.
+	// Connected and relay browsers are user-driven. A relay drive with no
+	// explicit target never adopts "the visible tab" — that guesswork silently
+	// hijacks whatever the user or another concurrent omp session happens to be
+	// looking at. Instead it forces a brand-new tab omp owns outright (the
+	// relay auto-groups it under "omp"; see relay/bridge.ts #claimTab),
+	// mirroring Claude in Chrome. An explicit target is a deliberate request to
+	// attach an existing tab and keeps the old adopt-and-avoid-raising behavior.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const page = await pickElectronTarget(browser.browser, {
+	const { page, ownsTarget } = await resolveAttachTarget(browser.browser, {
 		matcher: opts.target,
 		preferVisible: !activateForScreenshot,
+		forceFresh: browser.kind.kind === "relay",
 	});
 	const targetId = await targetIdForPage(page);
 	return {
@@ -1242,6 +1261,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		waitUntil: opts.waitUntil,
 		timeoutMs: opts.timeoutMs,
 		activateForScreenshot,
+		ownsTarget,
 	};
 }
 
@@ -1397,7 +1417,7 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 		return;
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
+	if (tab.kindTag === "headless" || tab.ownsTarget) await closeOrphanTarget(tab);
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
 	const scope = sharedScopeOf(tab.browser);

@@ -963,8 +963,8 @@ export class WorkerCore {
 	#unsub: () => void;
 	#isolated: boolean;
 	#uninstallRejectionGuard: () => void;
-	#mode?: WorkerInitPayload["mode"];
 	#activateForScreenshot = true;
+	#ownsTarget = false;
 	#dialogPolicy?: DialogPolicy;
 	#dialogHandler?: (dialog: Dialog) => void;
 	#openDialog?: OpenDialogInfo;
@@ -1068,7 +1068,7 @@ export class WorkerCore {
 
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
-			this.#mode = payload.mode;
+			this.#ownsTarget = payload.mode === "headless" || payload.ownsTarget === true;
 			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			this.#browser = await puppeteer.connect({
@@ -1122,11 +1122,12 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
-			// A failed headless init leaves the worker's page orphaned in the shared
-			// browser (the supervisor retries with a fresh worker), so close it before
-			// reporting. Attach mode adopts an existing target — never close it.
+			// A failed init leaves an omp-owned page orphaned in the shared browser
+			// (the supervisor retries with a fresh worker), so close it before
+			// reporting. An adopted attach-mode target belongs to the user — never
+			// close that one.
 			const page = this.#page;
-			if (payload.mode === "headless" && page && !page.isClosed()) {
+			if (this.#ownsTarget && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -2193,7 +2194,7 @@ export class WorkerCore {
 		this.#clearElementCache();
 		const page = this.#page;
 		if (this.#dialogHandler && page && !page.isClosed()) page.off("dialog", this.#dialogHandler);
-		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		if (this.#ownsTarget && page && !page.isClosed()) await page.close().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();
