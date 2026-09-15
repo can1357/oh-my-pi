@@ -32,7 +32,11 @@ import {
 } from "../../modes/components/read-tool-group";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { StrippedToolCallsPlaceholder } from "../../modes/components/stripped-tool-calls-placeholder";
-import { ToolActivityContainer } from "../../modes/components/tool-activity";
+import {
+	isToolActivityComponent,
+	supportsToolOutputDetails,
+	ToolActivityContainer,
+} from "../../modes/components/tool-activity";
 import {
 	ToolExecutionComponent,
 	type ToolExecutionHandle,
@@ -1010,9 +1014,14 @@ export class UiHelpers {
 			// setting toggled mid-replay already reached the staged container while
 			// this one kept the older flags. `addChild` below stamps the visible
 			// container's flags onto every transferred block, so re-sync them here or
-			// the replay would lay out under the stale presentation.
-			visibleChatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
-			visibleChatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
+			// the replay would lay out under the stale presentation. Hosts may pass a
+			// bare container, so ask for the capability rather than assuming it.
+			if (isToolActivityComponent(visibleChatContainer)) {
+				visibleChatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
+			}
+			if (supportsToolOutputDetails(visibleChatContainer)) {
+				visibleChatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
+			}
 			if (preservedChatChildren) {
 				visibleChatContainer.clear();
 			} else {
