@@ -922,6 +922,19 @@ export class UiHelpers {
 		return true;
 	}
 
+	/**
+	 * A replay yields to terminal input between entries, so a display toggle that
+	 * landed mid-replay reached only the staged container. `addChild` stamps a
+	 * container's own flags onto the blocks it takes, so the container a replay
+	 * hands children back to has to carry the current presentation first. Hosts
+	 * may pass a bare container, so ask for the capability rather than assuming
+	 * it.
+	 */
+	#syncTranscriptVisibility(container: TranscriptContainer): void {
+		if (isToolActivityComponent(container)) container.setToolActivityVisible(!this.ctx.hideToolActivity);
+		if (supportsToolOutputDetails(container)) container.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
+	}
+
 	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
 		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
 		let context = this.ctx.viewSession.buildTranscriptSessionContext({
@@ -1014,14 +1027,8 @@ export class UiHelpers {
 			// setting toggled mid-replay already reached the staged container while
 			// this one kept the older flags. `addChild` below stamps the visible
 			// container's flags onto every transferred block, so re-sync them here or
-			// the replay would lay out under the stale presentation. Hosts may pass a
-			// bare container, so ask for the capability rather than assuming it.
-			if (isToolActivityComponent(visibleChatContainer)) {
-				visibleChatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
-			}
-			if (supportsToolOutputDetails(visibleChatContainer)) {
-				visibleChatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
-			}
+			// the replay would lay out under the stale presentation.
+			this.#syncTranscriptVisibility(visibleChatContainer);
 			if (preservedChatChildren) {
 				visibleChatContainer.clear();
 			} else {
@@ -1056,6 +1063,10 @@ export class UiHelpers {
 			}
 		} finally {
 			if (!committed) {
+				// A replay that failed mid-flight leaves the visible container showing
+				// the presentation it had before the attempt, while the toggle that
+				// landed during the yield already moved the context and the setting.
+				this.#syncTranscriptVisibility(visibleChatContainer);
 				this.ctx.chatContainer = visibleChatContainer;
 				this.ctx.transcriptMessageComponents = previousTranscriptMessageComponents;
 				this.ctx.pendingTools = previousPendingTools;

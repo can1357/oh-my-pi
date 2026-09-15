@@ -324,6 +324,34 @@ describe("tool output details", () => {
 		expect(Bun.stripANSI(row)).toContain("1.1K");
 	});
 
+	it("keeps a folded read row inside a narrow terminal that cannot fit its usage", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/usage.ts" }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "line 1" }] }, false, "read-0");
+		group.attachUsage(
+			["read-0"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+			new Date(2026, 0, 2, 3, 4, 5).getTime(),
+			1_234_567,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(24);
+
+		expect(rows).toHaveLength(1);
+		expect(Bun.stringWidth(Bun.stripANSI(rows[0] ?? ""))).toBeLessThanOrEqual(24);
+	});
+
 	it("keeps an interrupted call neutral while folded", () => {
 		// Steering interrupts a pending call and reports `isError`; the full card
 		// renders the placeholder neutrally, so the folded row must not claim failure.

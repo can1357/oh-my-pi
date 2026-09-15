@@ -525,6 +525,32 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		expect(card?.render(120)).toHaveLength(1);
 	});
 
+	it("applies the fold to the restored transcript when a staged replay fails", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": false } });
+		const transcript = transcriptWith([assistantToolCall("bash-broken", "bash", { command: "ls -la" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, false, false, true);
+		// A block already on screen: the failed replay hands this container back to
+		// the context, and it has to carry the presentation the settings describe.
+		const card = new ToolExecutionComponent("bash", { command: "ls -la" }, {}, undefined, {
+			requestRender: vi.fn(),
+			requestComponentRender: vi.fn(),
+			resetDisplay: vi.fn(),
+		});
+		card.updateResult({ content: [{ type: "text", text: "file-a" }] }, false);
+		chatContainer.addChild(card);
+		ctx.pendingMessagesContainer = {
+			disposeChildren() {
+				throw new Error("replay failed");
+			},
+		} as unknown as Container;
+
+		await expect(new UiHelpers(ctx).renderInitialMessages()).rejects.toThrow("replay failed");
+
+		expect(chatContainer.children).toContain(card);
+		expect(card.render(120)).toHaveLength(1);
+		card.stopAnimation();
+	});
+
 	it("hides read-result images while tool output details are folded", async () => {
 		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
 		setTerminalImageProtocol(ImageProtocol.Sixel);

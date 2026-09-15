@@ -387,8 +387,11 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					.map((line, index) => {
 						const usage = this.#summaryUsage[index];
 						if (!usage) return truncateToWidth(line, contentWidth);
-						const room = Math.max(1, contentWidth - visibleWidth(usage));
-						return `${truncateToWidth(line, room)}${usage}`;
+						// A narrow terminal can make the numbers wider than the row they
+						// share; the suffix gives way first so nothing wraps.
+						const usageWidth = visibleWidth(usage);
+						if (usageWidth >= contentWidth) return truncateToWidth(usage, contentWidth);
+						return `${truncateToWidth(line, contentWidth - usageWidth)}${usage}`;
 					})
 					.join("\n");
 			},
