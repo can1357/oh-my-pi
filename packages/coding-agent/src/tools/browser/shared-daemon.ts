@@ -39,6 +39,17 @@ export function sharedBrowserDaemonName(headless: boolean): string {
 	return headless ? "omp.browser.headless" : "omp.browser.headed";
 }
 
+/**
+ * Terminal daemon records that cannot be attached to. A dead record is not
+ * proof that the Chromium the broker launched is gone: on Windows the root
+ * process is observed exiting (`failed`, exit code 255) while its child tree
+ * stays alive, so these must be stopped before a replacement start rather than
+ * silently started over (issue #7900).
+ */
+export function isDeadDaemonRecord(snapshot: DaemonSnapshot): boolean {
+	return snapshot.state === "exited" || snapshot.state === "failed";
+}
+
 function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
 }
@@ -84,7 +95,7 @@ export async function ensureSharedBrowser(opts: {
 	for (let attempt = 0; attempt < ENSURE_ATTEMPTS; attempt++) {
 		throwIfAborted(opts.signal);
 		const existing = await describeQuietly(client, name, "Shared browser", opts.signal);
-		if (existing && existing.state !== "exited" && existing.state !== "failed") {
+		if (existing && !isDeadDaemonRecord(existing)) {
 			const settled =
 				existing.readyAt !== undefined ? existing : await waitReady(client, name, "Shared browser", opts.signal);
 			const wsEndpoint = wsEndpointOf(settled);
@@ -96,6 +107,12 @@ export async function ensureSharedBrowser(opts: {
 			await stopQuietly(client, name, "Shared browser", opts.signal);
 			continue;
 		}
+		// Starting over a terminal record leaks whatever survived it: the broker
+		// forgets the old generation, so the Chromium tree that outlived its root
+		// process is never reaped and every subsequent acquisition spawns another
+		// one (issue #7900). Stop first — the broker owns the tree kill, and
+		// stopping an already-dead daemon is a no-op.
+		if (existing) await stopQuietly(client, name, "Shared browser", opts.signal);
 		try {
 			const started = await client.request(
 				{
