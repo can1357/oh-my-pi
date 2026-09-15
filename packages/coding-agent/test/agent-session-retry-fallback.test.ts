@@ -1005,6 +1005,85 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
+	it("reports an aborted usage fallback swap as set then restore", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled aborted-swap models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel().stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								state: "reserve",
+								remainingFraction: 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		const emitModelSelect = vi.fn();
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner: {
+				emit: vi.fn().mockResolvedValue(undefined),
+				emitModelSelect,
+				hasHandlers: vi.fn().mockReturnValue(false),
+				emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			} as unknown as ExtensionRunner,
+		});
+		// Abort the turn from inside the swap's synchronous `model_changed`
+		// fan-out: the fallback has committed on the agent, but
+		// `applyRetryFallbackCandidate` re-checks its signal only after the swap
+		// settles — so the swap is observed, rolled back, and reported as a
+		// `set` followed by a `restore`. session.abort()'s synchronous prefix
+		// aborts the usage-preflight controller that owns that signal.
+		let abortedMidSwap = false;
+		session.subscribe(event => {
+			if (event.type === "model_changed" && !abortedMidSwap) {
+				abortedMidSwap = true;
+				void session?.abort();
+			}
+		});
+
+		await session.prompt("Abort the usage fallback swap mid-flight");
+
+		expect(abortedMidSwap).toBe(true);
+		expect(requestedModels).toEqual([]);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(
+			emitModelSelect.mock.calls.map(call => ({
+				source: call[0].source,
+				model: call[0].model.id,
+				previousModel: call[0].previousModel?.id,
+			})),
+		).toEqual([
+			{ source: "set", model: fallbackModel.id, previousModel: primaryModel.id },
+			{ source: "restore", model: primaryModel.id, previousModel: fallbackModel.id },
+		]);
+	});
 	it("defers usage fallback for a queued steer until the active stream finishes", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -1480,9 +1559,11 @@ describe("AgentSession retry fallback", () => {
 					],
 				};
 			});
+		const emitModelSelect = vi.fn();
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
-			emitModelSelect: vi.fn(),
+			emitModelSelect,
+			// Asserted below: the setup hand-off is a temporary (prewalk-shaped) set.
 			hasHandlers: vi.fn().mockReturnValue(false),
 			emitBeforeAgentStart: vi.fn(async () => {
 				if (!session) throw new Error("Expected active session");
@@ -1503,6 +1584,12 @@ describe("AgentSession retry fallback", () => {
 		expect(usageHealth).toHaveBeenCalledTimes(2);
 		expect(usageChecks).toEqual([primaryModel.id, setupTarget.id]);
 		expect(requestedModels).toEqual([]);
+		expect(emitModelSelect).toHaveBeenCalledTimes(1);
+		expect(emitModelSelect.mock.calls[0]?.[0]).toMatchObject({
+			source: "set",
+			model: setupTarget,
+			previousModel: primaryModel,
+		});
 	});
 
 	it("restarts usage preflight when the model changes during a health request", async () => {
@@ -3643,11 +3730,13 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		const emitModelSelect = vi.fn();
 		const sessionStopCalls: number[] = [];
 		const sessionStopLastAssistantMessages: Array<AssistantMessage | undefined> = [];
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
-			emitModelSelect: vi.fn(),
+			emitModelSelect,
+			// Asserted below: same-model retries never fire model_select.
 			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
 			emitSessionStop: vi.fn((event: { last_assistant_message?: AssistantMessage }) => {
@@ -3670,6 +3759,9 @@ describe("AgentSession retry fallback", () => {
 		await session.prompt("Next prompt should not replay the refusal");
 		await session.waitForIdle();
 
+		// Model fallback is disabled and both turns stay on the same model, so
+		// no `model_select` may fire.
+		expect(emitModelSelect).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(2);
 		const replayedAssistantText = mock.calls[1]?.context.messages
 			.filter((message): message is AssistantMessage => message.role === "assistant")
@@ -4867,11 +4959,18 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		const emitModelSelect = vi.fn();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			extensionRunner: {
+				emit: vi.fn().mockResolvedValue(undefined),
+				emitModelSelect,
+				hasHandlers: vi.fn().mockReturnValue(false),
+				emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			} as unknown as ExtensionRunner,
 		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -4913,6 +5012,18 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: undefined,
 			isFallback: false,
 		});
+		// The fallback swap reports `set`; the cooldown-expiry revert reports
+		// `restore` — each after its swap transaction fully commits.
+		expect(
+			emitModelSelect.mock.calls.map(call => ({
+				source: call[0].source,
+				model: call[0].model.id,
+				previousModel: call[0].previousModel?.id,
+			})),
+		).toEqual([
+			{ source: "set", model: fallbackModel.id, previousModel: primaryModel.id },
+			{ source: "restore", model: primaryModel.id, previousModel: fallbackModel.id },
+		]);
 	});
 
 	it("keeps credit with the fallback when a restored primary fails without serving", async () => {

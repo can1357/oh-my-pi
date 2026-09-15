@@ -10,7 +10,11 @@ import {
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionAPI, ModelSelectEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionAPI,
+	ExtensionError,
+	ModelSelectEvent,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -21,6 +25,8 @@ type GateGlobal = typeof globalThis & {
 	__ompModelSelectGate?: Promise<void>;
 	/** Park only the handler for this model id; other events pass through. */
 	__ompModelSelectParkFor?: string;
+	/** Throw from the next delivery (handler-error isolation test). */
+	__ompModelSelectThrowOnce?: boolean;
 	/** Per-test action run inside the handler before the event is recorded. */
 	__ompModelSelectAction?: (api: ExtensionAPI, event: ModelSelectEvent) => void | Promise<void>;
 };
@@ -70,6 +76,10 @@ describe("AgentSession model_select extension event", () => {
 			pi => {
 				pi.on("model_select", async event => {
 					const gateGlobal = globalThis as GateGlobal;
+					if (gateGlobal.__ompModelSelectThrowOnce) {
+						gateGlobal.__ompModelSelectThrowOnce = false;
+						throw new Error("model_select handler exploded");
+					}
 					const action = gateGlobal.__ompModelSelectAction;
 					if (action) await action(pi, event);
 					// Park on the optional gate — either unconditionally (detached
@@ -106,8 +116,8 @@ describe("AgentSession model_select extension event", () => {
 		});
 
 		events = [];
-		modelChangedCount = 0;
 		order = [];
+		modelChangedCount = 0;
 		armDelivery();
 		session = new AgentSession({
 			agent,
@@ -128,6 +138,7 @@ describe("AgentSession model_select extension event", () => {
 			const gateGlobal = globalThis as GateGlobal;
 			gateGlobal.__ompModelSelectGate = undefined;
 			gateGlobal.__ompModelSelectParkFor = undefined;
+			gateGlobal.__ompModelSelectThrowOnce = undefined;
 			gateGlobal.__ompModelSelectAction = undefined;
 		}
 	});
@@ -286,7 +297,6 @@ describe("AgentSession model_select extension event", () => {
 			await waitForDeliveries();
 			await drainMicrotasks();
 			expect(events).toHaveLength(1);
-			// Post-shutdown emits are no-ops: nothing is delivered after the
 			// session (and its extension host) is gone.
 			runner.emitModelSelect({
 				model: bundledAnthropicModel("claude-opus-4-5"),
@@ -306,6 +316,86 @@ describe("AgentSession model_select extension event", () => {
 		// starts; the shutdown drain must settle it BEFORE session_shutdown.
 		await session.dispose();
 		expect(order).toEqual(["model_select", "session_shutdown"]);
+	});
+
+	it("labels a session-switch model restore as restore", async () => {
+		// The shared session's in-memory manager cannot load another session's
+		// file, so build a file-backed switch pair here (the beforeEach session
+		// stays untouched; this test disposes its own).
+		const target = bundledAnthropicModel("claude-sonnet-4-6");
+		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+		// A message entry is required for flush() to materialize the file; the
+		// model_change entry is what switchSession restores the model from.
+		targetManager.appendMessage({ role: "user", content: "target session", timestamp: 1 });
+		targetManager.appendModelChange(`${target.provider}/${target.id}`, "default");
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected target session file");
+
+		const runtime = new ExtensionRuntime();
+		const delivered = Promise.withResolvers<void>();
+		const restoreEvents: ModelSelectEvent[] = [];
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("model_select", event => {
+					restoreEvents.push(event);
+					delivered.resolve();
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"model-select-restore-recorder",
+		);
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const restoreRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const switcher = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: bundledAnthropicModel("claude-sonnet-4-5"),
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			extensionRunner: restoreRunner,
+		});
+		try {
+			expect(await switcher.switchSession(targetFile)).toBe(true);
+			await delivered.promise;
+
+			expect(restoreEvents).toHaveLength(1);
+			expect(restoreEvents[0]?.source).toBe("restore");
+			expect(restoreEvents[0]?.model.id).toBe(target.id);
+			expect(restoreEvents[0]?.previousModel?.id).toBe("claude-sonnet-4-5");
+			expect(switcher.model?.id).toBe(target.id);
+		} finally {
+			await switcher.dispose();
+		}
+	});
+
+	it("a throwing handler does not wedge the chain", async () => {
+		const gateGlobal = globalThis as GateGlobal;
+		gateGlobal.__ompModelSelectThrowOnce = true;
+		const handlerErrors: ExtensionError[] = [];
+		runner.onError(error => handlerErrors.push(error));
+
+		await session.setModel(bundledAnthropicModel("claude-sonnet-4-6"));
+		await drainMicrotasks();
+		expect(events).toHaveLength(0);
+
+		armDelivery();
+		await session.setModel(bundledAnthropicModel("claude-opus-4-5"));
+		await waitForDeliveries();
+
+		expect(events.map(event => event.model.id)).toEqual(["claude-opus-4-5"]);
+		expect(handlerErrors).toHaveLength(1);
+		expect(handlerErrors[0]?.event).toBe("model_select");
 	});
 });
 
