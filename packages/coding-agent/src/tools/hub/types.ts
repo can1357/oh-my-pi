@@ -7,6 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJobType } from "../../async";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
+import type { OutputMeta } from "../output-meta";
 import type { StructuredSubagentOutput } from "../../task/types";
 import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
@@ -74,6 +75,10 @@ export interface JobSnapshot {
 	advisor?: boolean;
 	resultText?: string;
 	errorText?: string;
+	/** Source-output metadata retained for per-job warnings and persisted row rendering. */
+	meta?: OutputMeta;
+	/** Capture error in historical snapshots; new snapshots store source metadata in `meta`. */
+	artifactError?: OutputMeta["artifactError"];
 	structured?: StructuredSubagentOutput;
 	/**
 	 * `agent://<id>` handle backing this job's artifacts — the job-row's
@@ -111,10 +116,17 @@ export interface AgentActivitySnapshot {
 	 * wiring up or a stale registration that `hub cancel <id>` clears (#8634).
 	 */
 	live: boolean;
+	/**
+	 * Acceptance time of the agent's final result, when the registry recorded
+	 * one. With `live: false` this is an accepted run the parent may cancel
+	 * instead of waiting on (#11079).
+	 */
+	acceptedAt?: number;
 }
 
 /** Result details for messaging and job ops; fields are disjoint per op. */
 export interface CoordinationDetails {
+	meta?: OutputMeta;
 	op: HubOp;
 	from?: string;
 	to?: string;

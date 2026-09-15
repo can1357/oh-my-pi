@@ -36,6 +36,7 @@ function createFlushHarness(): FlushHarness {
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
+			onPersistenceError: () => () => {},
 		},
 		settings: { get: () => false },
 		getLastAssistantMessage: () => undefined,

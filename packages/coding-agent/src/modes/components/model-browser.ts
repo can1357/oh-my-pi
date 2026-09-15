@@ -358,17 +358,21 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 /** Both token legs at zero cost — the condition {@link formatCostPair} renders as `free`. */
 function isFreeModel(model: Model): boolean {
 	const cost = model.cost;
-	return !cost || (cost.input <= 0 && cost.output <= 0);
+	return !cost || (cost.input === 0 && cost.output === 0);
 }
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
 function formatCostPair(model: Model): string {
 	if (isFreeModel(model)) return "free";
 	const cost = model.cost;
+
 	const fmt = (n: number): string => {
-		if (n <= 0) return "0";
+		if (!Number.isFinite(n) || n < 0) return "?";
+		if (n > 0 && n < 0.01) {
+			return n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
+		}
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
-		return s.replace(/\.?0+$/, "");
+		return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
 }

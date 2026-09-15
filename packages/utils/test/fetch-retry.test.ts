@@ -139,6 +139,34 @@ describe("extractRetryHint", () => {
 	it("parses 'will reset in 2h' phrasing", () => {
 		expect(extractRetryHint(undefined, "will reset in 2h")).toBe(2 * 60 * 60_000);
 	});
+	// OpenCode Go quota errors use "Resets in …" with day units and compound
+	// remainders (upstream `formatRetryTime`: "2hr 15min", "3 days", "45min").
+	// Without these the exhausted credential falls back to the 60s heuristic
+	// and is reselected while the cap is still active.
+	it("parses OpenCode Go 'Resets in 45min' as 45 minutes", () => {
+		expect(
+			extractRetryHint(
+				undefined,
+				"429 5-hour usage limit reached. Resets in 45min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go",
+			),
+		).toBe(45 * 60_000);
+	});
+
+	it("parses OpenCode Go compound 'Resets in 2hr 15min' as 2h15m", () => {
+		expect(
+			extractRetryHint(
+				undefined,
+				"429 5-hour usage limit reached. Resets in 2hr 15min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go",
+			),
+		).toBe((2 * 60 + 15) * 60_000);
+	});
+
+	it("parses OpenCode Go day-unit resets", () => {
+		expect(extractRetryHint(undefined, "429 Weekly usage limit reached. Resets in 3 days.")).toBe(
+			3 * 24 * 60 * 60_000,
+		);
+		expect(extractRetryHint(undefined, "429 Monthly usage limit reached. Resets in 1 day.")).toBe(24 * 60 * 60_000);
+	});
 
 	// A quota body can carry both a generic retry hint and the account reset
 	// window ("Please retry in 5s. Your limit will reset in 13 minutes"). The
@@ -214,9 +242,29 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, `Your limit will reset at ${naiveWall} retry-after-ms=5000`)).toBe(5000);
 	});
 
-	it("parses Chinese '将在 YYYY-MM-DD HH:MM:SS 重置' reset timestamp in error body", () => {
-		const future = new Date(Date.now() + 3_600_000).toISOString().replace("T", " ").slice(0, 19);
-		const hint = extractRetryHint(undefined, `已达到使用上限。您的限额将在 ${future} 重置。`);
+	it("reads a naive Chinese reset stamp as UTC without a provider offset", () => {
+		const targetMs = Date.parse("2099-09-01T09:44:51Z");
+		const expected = targetMs - Date.now();
+		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。");
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("applies naiveResetTimezoneOffset to a naive Chinese reset stamp", () => {
+		const targetMs = Date.parse("2099-09-01T09:44:51+08:00");
+		const expected = targetMs - Date.now();
+		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。", {
+			naiveResetTimezoneOffset: "+08:00",
+		});
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("keeps a configured reset over a shorter retry-after-ms", () => {
+		const future = new Date(Date.now() + 3_600_000 + 8 * 60 * 60_000).toISOString().slice(0, 19).replace("T", " ");
+		const hint = extractRetryHint(undefined, `Your limit will reset at ${future} retry-after-ms=5000`, {
+			naiveResetTimezoneOffset: "+08:00",
+		});
 		expect(hint).toBeGreaterThan(3_500_000);
 		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});

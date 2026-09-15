@@ -6,6 +6,10 @@
 // low/medium/high) wins equal-rank ties instead of erroring.
 
 provider "ollama" priority=-1 {
+	default-model "gpt-oss:20b"
+	env "OLLAMA_API_KEY"
+	allow-unauthenticated #true
+
 	// Replaces both Ollama empty-length finish baselines.
 	empty-length-finish-is-context-error #true
 	thinking-efforts "low" "medium" "high" "max"

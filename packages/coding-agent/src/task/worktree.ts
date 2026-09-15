@@ -123,23 +123,38 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
  * --exclude-standard` already omits gitignored bulk, so this only trips on
  * pathological non-ignored content; when it does we refuse the isolated spawn
  * with an actionable error instead of trapping the host.
+ *
+ * The staged and unstaged diffs are rendered under this budget inside the
+ * native renderer (`diffText({ maxBytes })`): their size is unknowable before
+ * rendering and can dwarf the working tree itself (index-vs-HEAD of a jj
+ * conflict commit exported to git spans every conflict side), so the cap has
+ * to stop the renderer rather than measure its output afterwards. The budget
+ * bounds content, not RSS: a patch is briefly held twice while it crosses the
+ * native boundary, and each nested repo is captured against its own budget.
  */
 export const ISOLATION_BASELINE_MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
 
 /**
- * Thrown when a repo's uncommitted content exceeds
- * {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}. Surfaced verbatim so the
- * caller can report the real cause (oversized working tree) rather than
- * masking it as a missing git repository.
+ * Thrown when a repo's uncommitted content exceeds the isolation-snapshot
+ * budget. Surfaced verbatim so the caller can report the real cause
+ * (oversized working tree) rather than masking it as a missing git repository.
+ *
+ * `contentBytes` is the measured total when the untracked stat pass tripped
+ * the budget, and `undefined` when a staged or unstaged diff crossed it while
+ * rendering — the renderer stops at the cap, so the full size is unknown.
  */
 export class IsolationBaselineTooLargeError extends Error {
 	constructor(
 		readonly repoRoot: string,
-		readonly contentBytes: number,
+		readonly contentBytes: number | undefined,
+		readonly budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	) {
+		const measured =
+			contentBytes === undefined
+				? `more than ${formatBytes(budgetBytes)} of uncommitted content`
+				: `${formatBytes(contentBytes)} of uncommitted content, over the ${formatBytes(budgetBytes)} isolation-snapshot budget`;
 		super(
-			`Working tree at ${repoRoot} carries ${formatBytes(contentBytes)} of uncommitted content, ` +
-				`over the ${formatBytes(ISOLATION_BASELINE_MAX_CONTENT_BYTES)} isolation-snapshot budget. ` +
+			`Working tree at ${repoRoot} carries ${measured}. ` +
 				`Isolated task snapshots buffer this content in memory, so proceeding would exhaust the host. ` +
 				`Commit or gitignore the bulk (untracked files that aren't ignored are the usual culprit), ` +
 				`or set \`task.isolation.enabled: false\` to run tasks without isolation.`,
@@ -182,21 +197,40 @@ async function captureUntrackedPatch(
 	return untrackedDiffs.filter((diff): diff is string => !!diff?.trim()).join("\n");
 }
 
-async function captureRepoBaseline(repoRoot: string): Promise<RepoBaseline> {
+/**
+ * Capture a repo's pre-spawn baseline: head, staged and unstaged binary diffs,
+ * and the untracked-file patch, keeping the buffered content under
+ * `budgetBytes`. The two diffs are rendered natively under the remaining
+ * budget, so an oversized change set fails inside the renderer instead of
+ * after the whole patch is in memory.
+ */
+async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promise<RepoBaseline> {
 	const repo = vcs.requireGit(repoRoot);
 	const headCommit = (await repo.headSha()) ?? "";
-	const staged = await repo.diffText({ binary: true, cached: true });
-	const unstaged = await repo.diffText({ binary: true });
+	let staged: string;
+	let unstaged: string;
+	try {
+		staged = await repo.diffText({ binary: true, cached: true, maxBytes: budgetBytes });
+		// The renderer's cap and the budget are UTF-8 bytes; a render that
+		// succeeded is at most `budgetBytes` of them, so the remainder is never
+		// negative.
+		unstaged = await repo.diffText({ binary: true, maxBytes: budgetBytes - Buffer.byteLength(staged) });
+	} catch (error) {
+		if (vcs.isVcsError(error) && error.code === "OutputTooLarge") {
+			throw new IsolationBaselineTooLargeError(repoRoot, undefined, budgetBytes);
+		}
+		throw error;
+	}
 	const untracked = await repo.lsFiles(true, true);
 	// Gate before capturing the untracked patch: that step embeds every
 	// untracked byte into one in-memory string, so an oversized tree must be
 	// refused here rather than after buffering gigabytes (#8939). Untracked
-	// bytes come from stat (no reads); staged/unstaged are already captured
-	// binary diffs, so their string length is their in-memory footprint.
+	// bytes come from stat (no reads); staged/unstaged are already rendered
+	// binary diffs, charged at their byte size.
 	const untrackedBytes = await sumUntrackedBytes(repoRoot, untracked);
-	const contentBytes = untrackedBytes + staged.length + unstaged.length;
-	if (contentBytes > ISOLATION_BASELINE_MAX_CONTENT_BYTES) {
-		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes);
+	const contentBytes = untrackedBytes + Buffer.byteLength(staged) + Buffer.byteLength(unstaged);
+	if (contentBytes > budgetBytes) {
+		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes, budgetBytes);
 	}
 	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked, repo);
 	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
@@ -230,12 +264,23 @@ async function writeSyntheticTree(
 	}
 }
 
-export async function captureBaseline(repoRoot: string): Promise<WorktreeBaseline> {
-	const [root, nestedPaths] = await Promise.all([captureRepoBaseline(repoRoot), discoverNestedRepos(repoRoot)]);
+/**
+ * Capture the baseline of `repoRoot` and every nested repo under it. Each repo
+ * baseline may buffer at most `budgetBytes` of uncommitted content (the
+ * isolation-snapshot budget, {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}).
+ */
+export async function captureBaseline(
+	repoRoot: string,
+	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+): Promise<WorktreeBaseline> {
+	const [root, nestedPaths] = await Promise.all([
+		captureRepoBaseline(repoRoot, budgetBytes),
+		discoverNestedRepos(repoRoot),
+	]);
 	const nested = await Promise.all(
 		nestedPaths.map(async relativePath => ({
 			relativePath,
-			baseline: await captureRepoBaseline(path.join(repoRoot, relativePath)),
+			baseline: await captureRepoBaseline(path.join(repoRoot, relativePath), budgetBytes),
 		})),
 	);
 	return { root, nested };

@@ -206,6 +206,8 @@ export type SymbolKey =
 	| "md.colorSwatch"
 	// Advisor note rail
 	| "advisor.rail"
+	// Skill callout rail (user turn that opened with a skill chip)
+	| "skill.rail"
 	// Language/file type icons
 	| "lang.default"
 	| "lang.typescript"
@@ -565,6 +567,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "■",
 	// Advisor note rail (heavier than md.quoteBorder so notes read as a distinct voice)
 	"advisor.rail": "▎",
+	"skill.rail": "▎",
 	// Language/file icons (emoji-centric, no Nerd Font required)
 	"lang.default": "⌘",
 	"lang.typescript": "🟦",
@@ -1013,6 +1016,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "■",
 	// pick: ▎ | alt: ┃ │
 	"advisor.rail": "▎",
+	"skill.rail": "▎",
 	// Language icons (nerd font devicons)
 	"lang.default": "",
 	"lang.typescript": "\u{E628}",
@@ -1291,6 +1295,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"md.bullet": "*",
 	"md.colorSwatch": "[]",
 	"advisor.rail": "|",
+	"skill.rail": "|",
 	// Language icons (ASCII uses abbreviations)
 	"lang.default": "code",
 	"lang.typescript": "ts",

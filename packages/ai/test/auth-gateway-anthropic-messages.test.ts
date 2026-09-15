@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
 import type {
 	ToolSearchServerToolUseBlockParam,
@@ -6,8 +7,9 @@ import type {
 	WebSearchServerToolUseBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function emptyUsage(): AssistantMessage["usage"] {
@@ -489,6 +491,71 @@ describe("anthropic-messages parseRequest", () => {
 		expect(assistant?.content).toHaveLength(2);
 		expect(assistant?.content.every(block => block.type === "text")).toBe(true);
 		expect(assistant?.content.some(block => block.type === "anthropicServerTool")).toBe(false);
+	});
+
+	it("stamps replayed assistant turns with the dispatched model id, not the wire alias", () => {
+		const assistantTurn = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "answer" }],
+		};
+		const base = { max_tokens: 64, messages: [{ role: "user" as const, content: "hi" }, assistantTurn] };
+
+		const prefixed = parseRequest({ ...base, model: "anthropic/claude-fable-5-1" });
+		expect(prefixed.context.messages.find(m => m.role === "assistant")?.model).toBe("claude-fable-5-1");
+		expect(prefixed.modelId).toBe("anthropic/claude-fable-5-1");
+
+		const bare = parseRequest({ ...base, model: "claude-fable-5-1" });
+		expect(bare.context.messages.find(m => m.role === "assistant")?.model).toBe("claude-fable-5-1");
+
+		// Another provider's prefix does not describe this route, so it stays put.
+		const foreign = parseRequest({ ...base, model: "zenmux/claude-opus-4-8" });
+		expect(foreign.context.messages.find(m => m.role === "assistant")?.model).toBe("zenmux/claude-opus-4-8");
+	});
+
+	it("stamps a tool-calling replayed turn as toolUse", () => {
+		const parsed = parseRequest({
+			model: "anthropic/claude-fable-5-1",
+			max_tokens: 64,
+			messages: [
+				{ role: "user", content: "check the shards" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "prior reasoning", signature: "sig-1" },
+						{ type: "text", text: "checking" },
+						{ type: "tool_use", id: "toolu_01", name: "bash", input: { cmd: "check" } },
+					],
+				},
+				{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_01", content: "runs=63" }] },
+				{ role: "assistant", content: [{ type: "text", text: "every ticker is one run" }] },
+				{ role: "user", content: "so is it sorted?" },
+			],
+		});
+		const assistants = parsed.context.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(2);
+		expect(assistants[0].stopReason).toBe("toolUse");
+		expect(assistants[1].stopReason).toBe("stop");
+
+		const model: Model<"anthropic-messages"> = buildModel({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-fable-5-1",
+			name: "Claude Fable 5.1",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		});
+		const wire = convertAnthropicMessages(parsed.context.messages, model, false);
+		const replayed = wire.find(message => message.role === "assistant");
+		expect(replayed?.content).toContainEqual({
+			type: "thinking",
+			thinking: "prior reasoning",
+			signature: "sig-1",
+		});
+		expect(JSON.stringify(replayed?.content)).not.toContain('"text":"prior reasoning"');
 	});
 });
 

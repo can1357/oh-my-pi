@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$envExact,
+	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
 	setInteractiveHost,
+	stripGitRepoLocationEnv,
 } from "@oh-my-pi/pi-utils/env";
 
 const tempDirs: string[] = [];
@@ -110,7 +112,7 @@ describe("parseEnvFile", () => {
 			EXPORTED: "value",
 			COMMENTED: "secret",
 			QUOTED_HASH: "keep # this",
-			NO_SPACE: "http://host/path#frag",
+			NO_SPACE: "http://host/path",
 		});
 	});
 
@@ -120,6 +122,18 @@ describe("parseEnvFile", () => {
 		expect(parseEnvFile(filePath)).toEqual({
 			JSON: '{\\"a\\":1}',
 			SINGLE: "it\\'s",
+		});
+	});
+
+	it("parses quoted multiline and escaped-newline values across the whole file", () => {
+		const filePath = writeTempEnv(
+			['MULTILINE="first', 'second"', 'ESCAPED_NEWLINE="first\\nsecond"', "BACKTICK=`first", "second`"].join("\n"),
+		);
+
+		expect(parseEnvFile(filePath)).toEqual({
+			MULTILINE: "first\nsecond",
+			ESCAPED_NEWLINE: "first\nsecond",
+			BACKTICK: "first\nsecond",
 		});
 	});
 });
@@ -169,6 +183,23 @@ describe("filterProcessEnv", () => {
 });
 
 describe("filterChildShellEnv", () => {
+	it("removes quoted multiline project values without a launch snapshot", () => {
+		const cwd = path.dirname(
+			writeTempEnv(['MULTILINE="first', 'second"', 'ESCAPED_NEWLINE="first\\nsecond"'].join("\n")),
+		);
+
+		expect(
+			filterChildShellEnv(
+				{
+					MULTILINE: "first\nsecond",
+					ESCAPED_NEWLINE: "first\nsecond",
+					UNCHANGED: "parent-value",
+				},
+				cwd,
+			),
+		).toEqual({ UNCHANGED: "parent-value" });
+	});
+
 	it("uses the supplied mode for an isolated environment and cwd", async () => {
 		const cwd = path.dirname(writeTempEnv(""));
 		fs.writeFileSync(
@@ -197,6 +228,28 @@ describe("filterChildShellEnv", () => {
 
 		expect(exitCode, stderr).toBe(0);
 		expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
+	});
+
+	it("drops inherited git repo-location overrides", () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		// A bash call with `cwd` in a secondary worktree must not mutate the
+		// primary one: forwarding the agent's own repo-location variables makes
+		// child `git` ignore the command's cwd (issue #11082).
+		expect(
+			filterChildShellEnv(
+				{
+					GIT_DIR: "/primary/.git",
+					GIT_COMMON_DIR: "/primary/.git",
+					GIT_WORK_TREE: "/primary",
+					GIT_INDEX_FILE: "/primary/.git/index",
+					GIT_OBJECT_DIRECTORY: "/primary/.git/objects",
+					GIT_ALTERNATE_OBJECT_DIRECTORIES: "/primary/.git/objects",
+					GIT_EDITOR: "true",
+					GIT_AUTHOR_NAME: "Agent",
+				},
+				cwd,
+			),
+		).toEqual({ GIT_EDITOR: "true", GIT_AUTHOR_NAME: "Agent" });
 	});
 
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
@@ -265,6 +318,20 @@ describe("filterChildShellEnv", () => {
 			expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
 		},
 	);
+});
+
+describe("stripGitRepoLocationEnv", () => {
+	it("matches case-insensitively on win32 and exactly on POSIX", () => {
+		// Windows env lookups are case-insensitive, so a `git_dir` block binds
+		// there; POSIX names are case-sensitive and must not be over-stripped.
+		const win32Env: Record<string, string> = { GIT_DIR: "a", git_dir: "b", GIT_WORK_TREE: "c", KEEP: "d" };
+		stripGitRepoLocationEnv(win32Env, "win32");
+		expect(win32Env).toEqual({ KEEP: "d" });
+
+		const posixEnv: Record<string, string> = { GIT_DIR: "a", git_dir: "b", KEEP: "d" };
+		stripGitRepoLocationEnv(posixEnv, "linux");
+		expect(posixEnv).toEqual({ git_dir: "b", KEEP: "d" });
+	});
 });
 
 describe("isBunTestRuntime", () => {

@@ -15,7 +15,7 @@ import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
+import { formatModelSelectorValue, formatModelStringWithRouting } from "../config/model-resolver";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
@@ -696,7 +696,7 @@ function buildModelReport(
 	}
 	return {
 		selector,
-		model: formatModelString(model),
+		model: formatModelStringWithRouting(model),
 		thinking,
 		results,
 		stats: successes.length === 0 ? null : computeBenchStats(successes),
@@ -943,7 +943,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	try {
-		const targets = resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each
@@ -960,7 +960,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		const reports: BenchModelReport[] = [];
 		for (const { selector, model, thinking } of targets) {
 			if (!json) {
-				const resolvedModel = formatModelSelectorValue(formatModelString(model), thinking);
+				const resolvedModel = formatModelSelectorValue(formatModelStringWithRouting(model), thinking);
 				const resolvedNote = selector === resolvedModel ? "" : chalk.dim(` (${selector})`);
 				print(`${chalk.bold(resolvedModel)}${resolvedNote}`);
 				progress = {

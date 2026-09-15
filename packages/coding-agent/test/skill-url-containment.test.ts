@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
-import { resolveSkillUrlToPath } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
+import { expandInternalUrls, resolveSkillUrlToPathAsync } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
 
 let tempDir: string;
 let pluginRoot: string;
@@ -30,6 +30,7 @@ beforeAll(async () => {
 	skillDir = path.join(pluginRoot, "skills", "docs");
 	await fs.mkdir(path.join(skillDir, "references"), { recursive: true });
 	await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: docs\ndescription: d\n---\nBody\n");
+	await fs.writeFile(path.join(skillDir, "synthesized.md"), "Synthesized body\n");
 	// A legitimate shared file elsewhere INSIDE the plugin root.
 	await fs.mkdir(path.join(pluginRoot, "shared"), { recursive: true });
 	await fs.writeFile(path.join(pluginRoot, "shared", "inside.md"), "inside contents\n");
@@ -49,30 +50,78 @@ afterAll(async () => {
 });
 
 describe("bash skill:// expansion containment", () => {
-	it("resolves in-root symlinks to their canonical target", () => {
-		const resolved = resolveSkillUrlToPath("skill://docs/references/ok.md", [pluginSkill()]);
-		// The canonical realpath is returned, never the symlink path.
-		expect(resolved).toBe(path.join(pluginRoot, "shared", "inside.md"));
+	it("resolves a bare URI to the configured instruction file", async () => {
+		const skill: Skill = { ...pluginSkill(), filePath: path.join(skillDir, "synthesized.md") };
+
+		await expect(resolveSkillUrlToPathAsync("skill://docs", [skill])).resolves.toBe(skill.filePath);
 	});
 
-	it("rejects symlinks escaping the plugin root", () => {
-		// §4.1: the package boundary applies to every file the client reads or
-		// executes, including skill resources handed to bash.
-		expect(() => resolveSkillUrlToPath("skill://docs/references/leak.md", [pluginSkill()])).toThrow(
+	it("rejects a bare URI whose instruction file escapes the plugin root", async () => {
+		const skill: Skill = { ...pluginSkill(), filePath: outsideFile };
+
+		await expect(resolveSkillUrlToPathAsync("skill://docs", [skill])).rejects.toThrow(
 			"resolves outside the plugin root",
 		);
 	});
 
-	it("fails closed on dangling symlinks instead of handing bash a writable outside path", () => {
-		expect(() => resolveSkillUrlToPath("skill://docs/references/dangle.md", [pluginSkill()])).toThrow(
+	it("fails closed on a bare URI whose instruction file is missing", async () => {
+		const skill: Skill = { ...pluginSkill(), filePath: path.join(skillDir, "gone.md") };
+
+		await expect(resolveSkillUrlToPathAsync("skill://docs", [skill])).rejects.toThrow("does not exist");
+	});
+
+	it("resolves a bare URI to the base directory for directory callers", async () => {
+		const skill: Skill = { ...pluginSkill(), filePath: path.join(skillDir, "synthesized.md") };
+
+		await expect(resolveSkillUrlToPathAsync("skill://docs", [skill], { forDirectory: true })).resolves.toBe(skillDir);
+	});
+
+	it("rejects a directory bare URI whose base escapes the plugin root", async () => {
+		const skill: Skill = { ...pluginSkill(), baseDir: tempDir };
+
+		await expect(resolveSkillUrlToPathAsync("skill://docs", [skill], { forDirectory: true })).rejects.toThrow(
+			"resolves outside the plugin root",
+		);
+	});
+
+	it("resolves in-root symlinks to their canonical target", async () => {
+		const resolved = await resolveSkillUrlToPathAsync("skill://docs/references/ok.md", [pluginSkill()]);
+		// The canonical realpath is returned, never the symlink path.
+		expect(resolved).toBe(path.join(pluginRoot, "shared", "inside.md"));
+	});
+
+	it("rejects symlinks escaping the plugin root", async () => {
+		// §4.1: the package boundary applies to every file the client reads or
+		// executes, including skill resources handed to bash.
+		await expect(resolveSkillUrlToPathAsync("skill://docs/references/leak.md", [pluginSkill()])).rejects.toThrow(
+			"resolves outside the plugin root",
+		);
+	});
+
+	it("fails closed on dangling symlinks instead of handing bash a writable outside path", async () => {
+		await expect(resolveSkillUrlToPathAsync("skill://docs/references/dangle.md", [pluginSkill()])).rejects.toThrow(
 			"does not exist",
 		);
 	});
 
-	it("leaves uncontained (non-plugin) skills unrestricted", () => {
+	it("leaves uncontained (non-plugin) skills unrestricted", async () => {
 		const local: Skill = { ...pluginSkill(), containRoot: undefined };
-		const resolved = resolveSkillUrlToPath("skill://docs/references/leak.md", [local]);
+		const resolved = await resolveSkillUrlToPathAsync("skill://docs/references/leak.md", [local]);
 		expect(resolved).toBe(path.join(skillDir, "references", "leak.md"));
+	});
+
+	it("rejects escaping resources during command expansion instead of passing the token through", async () => {
+		await expect(
+			expandInternalUrls("cat skill://docs/references/leak.md", { skills: [pluginSkill()] }),
+		).rejects.toThrow("resolves outside the plugin root");
+	});
+
+	it("rejects escaping bare instruction files during command expansion", async () => {
+		const skill: Skill = { ...pluginSkill(), filePath: outsideFile };
+
+		await expect(expandInternalUrls("cat skill://docs", { skills: [skill] })).rejects.toThrow(
+			"resolves outside the plugin root",
+		);
 	});
 });
 

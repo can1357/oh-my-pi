@@ -45,8 +45,11 @@ export function resolveEditMode(session: EditModeSessionLike): EditMode {
 		if (
 			identity.class === "kimi" ||
 			identity.class === "mimo" ||
+			identity.class === "minimax" ||
 			identity.class === "deepseek" ||
-			identity.class === "stepfun"
+			identity.class === "stepfun" ||
+			identity.family === "codex-spark" ||
+			(identity.class === "glm" && identity.family === "flash" && identity.revision === "5.3.0")
 		) {
 			return "replace";
 		}

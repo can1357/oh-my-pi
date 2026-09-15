@@ -1,6 +1,10 @@
 // Provider-wire compat for "opencode-go"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-go" {
+	default-model "kimi-k2.7-code"
+	env "OPENCODE_API_KEY"
+	dynamic-models-authoritative #true
+
 	// The Flash lanes accept images despite their IDs lacking a vision suffix;
 	// verified against the gateway (unguessable pixel-rendered text read back
 	// verbatim). Mirrors the OpenRouter carve-out for deepseek-v4.1-flash.

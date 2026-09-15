@@ -6,6 +6,7 @@
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { isUserRequestEntry, type TranscriptEntry, userTurnDraft } from "../../session/session-context";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { type ThemeColor, theme } from "../theme/theme";
 import type { ChatTranscriptBuilder } from "./chat-transcript-builder";
@@ -25,7 +26,7 @@ export interface OutlineTarget {
 	/** One past the last child rendered by this entry. */
 	end: number;
 	/** Entries this target spans: the turn plus any folded tool results. */
-	entries: SessionMessageEntry[];
+	entries: TranscriptEntry[];
 }
 
 /** Composed rows of one column plus the outline's line range within them. */
@@ -96,7 +97,7 @@ export class OutlineRowCache {
  * are skipped. Usage rows flushed at the head of an append are attributed
  * to the turn above.
  */
-export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: SessionMessageEntry[]): OutlineTarget[] {
+export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: TranscriptEntry[]): OutlineTarget[] {
 	const targets: OutlineTarget[] = [];
 	for (const entry of entries) {
 		const children = builder.container.children;
@@ -110,7 +111,7 @@ export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: Se
 			start++;
 		}
 		const previous = targets.at(-1);
-		if (entry.message.role === "toolResult" && previous) {
+		if (entry.type === "message" && entry.message.role === "toolResult" && previous) {
 			previous.entryId = entry.id;
 			previous.entries.push(entry);
 			if (after > previous.end) previous.end = after;
@@ -120,7 +121,7 @@ export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: Se
 		targets.push({
 			entryId: entry.id,
 			turnId: entry.id,
-			isUserTurn: entry.message.role === "user" && userMessageHasText(entry.message),
+			isUserTurn: isUserTurnEntry(entry),
 			start,
 			end: after,
 			entries: [entry],
@@ -228,6 +229,22 @@ export function positionRail(
 	const rail = `${moreLeft ? theme.fg("dim", "… ") : "  "}${dots.join(" ")}${moreRight ? theme.fg("dim", " …") : ""}`;
 	const pad = Math.max(0, Math.floor((width - visibleWidth(rail)) / 2));
 	return " ".repeat(pad) + rail;
+}
+
+/**
+ * A turn the user can rewind past and re-edit: a user message with prompt
+ * text, or a user-initiated custom message (skill / collab prompt).
+ */
+export function isUserTurnEntry(entry: TranscriptEntry): boolean {
+	if (entry.type === "message" && entry.message.role === "user") return userMessageHasText(entry.message);
+	return isUserRequestEntry(entry);
+}
+
+/** Single-line label for a user turn: its prompt text, or the custom message's draft. */
+export function userTurnLabel(entry: TranscriptEntry): string | undefined {
+	if (entry.type === "message" && entry.message.role === "user") return userMessageText(entry.message);
+	const draft = userTurnDraft(entry);
+	return draft === undefined ? undefined : draft.replace(/\s+/g, " ").trim();
 }
 
 /** Plain text of a user message (string or text blocks), single line. */

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parseEnv } from "node:util";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 
 export * from "./worker-host";
@@ -64,6 +65,48 @@ export function filterProcessEnv(env: Record<string, string | undefined>): Recor
 	}
 	return result;
 }
+/**
+ * Git variables that pin a repository location. They describe the checkout the
+ * agent process itself was launched from (git hooks, `git --git-dir` wrappers),
+ * so forwarding them to a child shell makes `git` ignore the command's `cwd`
+ * and mutate the wrong worktree or index. Stripped from child shell envs so git
+ * rediscovers the repository from the working directory. Mirrors the
+ * `env_remove` list in `crates/pi-vcs/src/git/cli.rs`.
+ */
+const GIT_REPO_LOCATION_ENV_NAMES = [
+	"GIT_DIR",
+	"GIT_COMMON_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+] as const;
+
+/**
+ * Removes {@link GIT_REPO_LOCATION_ENV_NAMES} from a copied child env in place.
+ *
+ * Windows environment lookups are case-insensitive, so a block that spells a
+ * variable `git_dir` is just as binding there; match case-insensitively on
+ * win32 and exactly elsewhere (POSIX env names are case-sensitive).
+ */
+export function stripGitRepoLocationEnv(
+	env: Record<string, string>,
+	platform: NodeJS.Platform = process.platform,
+): void {
+	if (platform !== "win32") {
+		for (const name of GIT_REPO_LOCATION_ENV_NAMES) {
+			delete env[name];
+		}
+		return;
+	}
+	const folded = new Set<string>(GIT_REPO_LOCATION_ENV_NAMES.map(name => name.toLowerCase()));
+	for (const key of Object.keys(env)) {
+		if (folded.has(key.toLowerCase())) {
+			delete env[key];
+		}
+	}
+}
+
 // Bun autoloads the project's dotenv files into `process.env` before user code
 // runs — including inside `bun build --compile` binaries — so a snapshot of
 // `Bun.env` is only pre-dotenv when autoloading was explicitly disabled. Linux
@@ -180,48 +223,24 @@ export function filterChildShellEnv(
 			delete result[key];
 		}
 	}
+	// Last, after dotenv merging: no source (inherited, launcher, or dotenv) may
+	// pin the child shell to the agent's own repository.
+	stripGitRepoLocationEnv(result);
 	return result;
 }
 
 /**
- * Parse one dotenv line with Bun-compatible semantics: an optional `export`
- * prefix, full-line `#` comments, inline `#` comments after whitespace on
- * unquoted values, and single/double/backtick quoting (a `#` inside quotes
- * stays literal). Returns undefined for blank lines, comments, and malformed
- * names.
- */
-function parseEnvLine(line: string): { key: string; value: string } | undefined {
-	const trimmed = line.trim();
-	if (!trimmed || trimmed.startsWith("#")) return undefined;
-	const eqIndex = trimmed.indexOf("=");
-	if (eqIndex === -1) return undefined;
-	let key = trimmed.slice(0, eqIndex).trim();
-	const exported = key.match(/^export[ \t]+(.*)$/);
-	if (exported) key = exported[1].trim();
-	if (!isValidEnvName(key)) return undefined;
-	const raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
-	const quote = raw[0];
-	if (quote === '"' || quote === "'" || quote === "`") {
-		let close = raw.indexOf(quote, 1);
-		while (close !== -1 && raw[close - 1] === "\\") close = raw.indexOf(quote, close + 1);
-		return { key, value: close === -1 ? raw.slice(1) : raw.slice(1, close) };
-	}
-	const commentIndex = raw.search(/[ \t]#/);
-	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd() };
-}
-
-/**
- * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
+ * Parses a complete .env file with the runtime's dotenv grammar, then retains
+ * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
-			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
+		const parsed = parseEnv(fs.readFileSync(filePath, "utf-8"));
+		for (const key in parsed) {
+			const value = parsed[key];
+			if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
 		}
 	} catch {
 		// File doesn't exist or can't be read - return empty result

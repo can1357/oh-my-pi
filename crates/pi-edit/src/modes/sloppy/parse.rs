@@ -20,6 +20,9 @@ use crate::error::EditError;
 
 const OPENER: &str = markers::OPEN;
 const REWRITE_HEADER: &str = markers::PUT;
+// JSON keeps literal insertion lines out of legacy rewrite recovery and control
+// parsing.
+const AFTER_HEADER: &str = "\0AFTER ";
 const SELECT_OPEN: &str = markers::SELECT_OPEN;
 const SELECT_CLOSE: &str = markers::SELECT_CLOSE;
 const SELECT_DIVIDER: &str = markers::SELECT_DIVIDER;
@@ -45,8 +48,8 @@ regex!(
 	r#"(?iu)(?:path|file)\s*=\s*(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"'>]+))"#
 );
 regex!(ALL_ATTRIBUTE_RE, r#"(?iu)\ball\b(?:\s*=\s*(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"'>]+)))?"#);
-regex!(INLINE_TAG_RE, r"(?iu)^<(SM:FIND|SM:PUT)>(.*)</(SM:FIND|SM:PUT)>$");
-regex!(BLOCK_TAG_RE, r"(?iu)^<(/?)(SM:FIND|SM:PUT)\s*(/?)>$");
+regex!(INLINE_TAG_RE, r"(?iu)^<(SM:FIND|SM:PUT|SM:AFTER)>(.*)</(SM:FIND|SM:PUT|SM:AFTER)>$");
+regex!(BLOCK_TAG_RE, r"(?iu)^<(/?)(SM:FIND|SM:PUT|SM:AFTER)\s*(/?)>$");
 regex!(ENVELOPE_WORDS_RE, r"(?iu)^\s*(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)\b");
 regex!(
 	ENVELOPE_LINE_RE,
@@ -88,6 +91,13 @@ enum TagLine {
 	CloseFind,
 	Put { inline: Option<String> },
 	ClosePut,
+	After { inline: Option<String> },
+	CloseAfter,
+}
+
+struct TagRewrite {
+	lines: Vec<String>,
+	after: bool,
 }
 
 #[derive(Debug)]
@@ -140,6 +150,8 @@ fn parse_tag_line(line: &str) -> Option<TagLine> {
 				.map_or(String::new(), |value| value.as_str().to_owned());
 			return Some(if open.eq_ignore_ascii_case("SM:FIND") {
 				TagLine::Find { inline: Some(inline) }
+			} else if open.eq_ignore_ascii_case("SM:AFTER") {
+				TagLine::After { inline: Some(inline) }
 			} else {
 				TagLine::Put { inline: Some(inline) }
 			});
@@ -148,9 +160,12 @@ fn parse_tag_line(line: &str) -> Option<TagLine> {
 
 	let captures = BLOCK_TAG_RE.captures(trimmed)?;
 	let find = captures.get(2)?.as_str().eq_ignore_ascii_case("SM:FIND");
+	let after = captures.get(2)?.as_str().eq_ignore_ascii_case("SM:AFTER");
 	if captures.get(1).is_some_and(|value| value.as_str() == "/") {
 		return Some(if find {
 			TagLine::CloseFind
+		} else if after {
+			TagLine::CloseAfter
 		} else {
 			TagLine::ClosePut
 		});
@@ -161,6 +176,8 @@ fn parse_tag_line(line: &str) -> Option<TagLine> {
 		.then(String::new);
 	Some(if find {
 		TagLine::Find { inline }
+	} else if after {
+		TagLine::After { inline }
 	} else {
 		TagLine::Put { inline }
 	})
@@ -178,9 +195,19 @@ fn envelope_line(line: &str) -> bool {
 pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
 	let mut result = Vec::new();
 	let mut skipping = false;
+	let mut after = false;
 	let mut index = 0;
 	while index < lines.len() {
 		let mut line = lines[index].to_owned();
+		if after {
+			after = !matches!(parse_tag_line(&line), Some(TagLine::CloseAfter));
+			result.push(line);
+			index += 1;
+			continue;
+		}
+		if !skipping && matches!(parse_tag_line(&line), Some(TagLine::After { inline: None })) {
+			after = true;
+		}
 		if line.trim() == "***" && index + 1 < lines.len() && envelope_words(lines[index + 1]) {
 			line = format!("*** {}", lines[index + 1].trim());
 			index += 1;
@@ -220,13 +247,15 @@ fn flush_compiled(
 	sections: &mut Vec<CompiledSection>,
 	all: bool,
 	find_lines: &mut Vec<String>,
-	put_lines: &mut Option<Vec<String>>,
+	put_lines: &mut Option<TagRewrite>,
 ) {
 	let find = trim_blank(find_lines);
-	let put = put_lines.as_deref().map(trim_blank);
+	let put = put_lines.take();
 	find_lines.clear();
-	*put_lines = None;
-	if find.is_empty() && put.as_ref().is_none_or(Vec::is_empty) {
+	if find.is_empty()
+		&& put.as_ref().is_none_or(|rewrite| {
+			!rewrite.after && rewrite.lines.iter().all(|line| line.trim().is_empty())
+		}) {
 		return;
 	}
 	if sections.is_empty() {
@@ -234,6 +263,19 @@ fn flush_compiled(
 	}
 	let ir = &mut sections.last_mut().expect("section exists").ir;
 	ir.push(format!("{OPENER}{}", if all { "*" } else { "" }));
+	if let Some(TagRewrite { lines, after: true }) = &put {
+		ir.extend(find);
+		let mut text = lines.join("\n");
+		if !lines.is_empty() {
+			text.push('\n');
+		}
+		ir.push(format!(
+			"{AFTER_HEADER}{}",
+			serde_json::to_string(&text).expect("string serialization")
+		));
+		return;
+	}
+	let put = put.map(|rewrite| trim_blank(&rewrite.lines));
 	if find.is_empty() {
 		if let Some(put) = put {
 			ir.extend(put);
@@ -261,7 +303,7 @@ fn compile_tag_surface(lines: &[String]) -> (Vec<CompiledSection>, bool) {
 	let mut all = false;
 	let mut state = State::Idle;
 	let mut find_lines = Vec::new();
-	let mut put_lines: Option<Vec<String>> = None;
+	let mut put_lines: Option<TagRewrite> = None;
 
 	for line in lines {
 		let Some(tag) = parse_tag_line(line) else {
@@ -269,6 +311,7 @@ fn compile_tag_surface(lines: &[String]) -> (Vec<CompiledSection>, bool) {
 				State::Put => put_lines
 					.as_mut()
 					.expect("put buffer exists")
+					.lines
 					.push(line.clone()),
 				State::Find => find_lines.push(line.clone()),
 				State::Between if !line.trim().is_empty() => find_lines.push(line.clone()),
@@ -281,6 +324,7 @@ fn compile_tag_surface(lines: &[String]) -> (Vec<CompiledSection>, bool) {
 			continue;
 		};
 		saw_tags = true;
+		let after = matches!(tag, TagLine::After { .. });
 		match tag {
 			TagLine::Open { path, all: next_all } => {
 				flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
@@ -308,16 +352,22 @@ fn compile_tag_surface(lines: &[String]) -> (Vec<CompiledSection>, bool) {
 					state = State::Between;
 				}
 			},
-			TagLine::Put { inline } => {
-				put_lines = Some(Vec::new());
+			TagLine::Put { inline } | TagLine::After { inline } => {
+				put_lines = Some(TagRewrite { lines: Vec::new(), after });
 				state = State::Put;
 				if let Some(inline) = inline {
-					put_lines.as_mut().expect("put buffer exists").push(inline);
+					if !inline.is_empty() {
+						put_lines
+							.as_mut()
+							.expect("put buffer exists")
+							.lines
+							.push(inline);
+					}
 					flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
 					state = State::Idle;
 				}
 			},
-			TagLine::ClosePut => {
+			TagLine::ClosePut | TagLine::CloseAfter => {
 				flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
 				state = State::Idle;
 			},
@@ -411,7 +461,7 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 			};
 			block = match tag {
 				TagLine::Find { inline: None } => Block::Find,
-				TagLine::Put { inline: None } => Block::Put,
+				TagLine::Put { inline: None } | TagLine::After { inline: None } => Block::Put,
 				_ => Block::Outside,
 			};
 			last = scan;
@@ -1418,10 +1468,13 @@ pub fn create_operation(
 		OperationRewrite::Explicit { text } => {
 			create_operation_text(source_pattern_text, &text, all, operation_number, true)
 		},
-		OperationRewrite::Inline { replacements } => Ok(Operation {
+		OperationRewrite::After { ref text } if text.is_empty() => Err(parse_error(format!(
+			"Operation {operation_number} has an empty <SM:AFTER>; include the new lines to insert."
+		))),
+		OperationRewrite::After { .. } | OperationRewrite::Inline { .. } => Ok(Operation {
 			pattern_text: source_pattern_text.to_owned(),
 			source_pattern_text: source_pattern_text.to_owned(),
-			rewrite: OperationRewrite::Inline { replacements },
+			rewrite,
 			all,
 			assumed_deletion: false,
 			desired_state: false,
@@ -1497,8 +1550,8 @@ fn finish_operation(
 			)?;
 			let note = format!(
 				"Note: operation {number}'s REWRITE contained only {ADD_LINE} add lines; they were \
-				 inserted after the kept MATCH. A <SM:PUT> replaces the <SM:FIND> match with its \
-				 stated final text — to insert, restate the kept lines plus the new lines in <SM:PUT>."
+				 inserted after the kept MATCH. Use <SM:AFTER> with only the new lines to insert \
+				 after <SM:FIND>; <SM:PUT> replaces the match."
 			);
 			operation.recovery_note = Some(
 				operation
@@ -1684,8 +1737,10 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 	{
 		lines.insert(0, OPENER.to_owned());
 	}
-	lines = recover_alternating_separators(&lines, content).unwrap_or(lines);
-	lines = recover_bracket_pairs(&lines, content).unwrap_or(lines);
+	if !lines.iter().any(|line| line.starts_with(AFTER_HEADER)) {
+		lines = recover_alternating_separators(&lines, content).unwrap_or(lines);
+		lines = recover_bracket_pairs(&lines, content).unwrap_or(lines);
+	}
 	#[derive(Clone, Copy, PartialEq, Eq)]
 	enum State {
 		Outside,
@@ -1695,7 +1750,7 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 	let mut operations = Vec::new();
 	let mut state = State::Outside;
 	let mut all = false;
-	let mut pattern_lines = Vec::new();
+	let mut pattern_lines: Vec<String> = Vec::new();
 	let mut rewrite_lines = Vec::new();
 	let mut reference_separator: Option<String> = None;
 	let mut pending = Vec::new();
@@ -1705,6 +1760,25 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 		let parsed_opener = parse_opener(line);
 		let trimmed = line.trim();
 		let register_reference = REFERENCE_RE.captures(trimmed);
+		if let Some(encoded) = line.strip_prefix(AFTER_HEADER) {
+			let number = operations.len() + 1;
+			if state != State::Pattern || pattern_lines.iter().all(|line| line.trim().is_empty()) {
+				return Err(parse_error(format!(
+					"Operation {number} needs a non-empty <SM:FIND> before <SM:AFTER>."
+				)));
+			}
+			let text = serde_json::from_str(encoded)
+				.map_err(|error| parse_error(format!("Invalid <SM:AFTER> body: {error}")))?;
+			operations.push(create_operation(
+				&normalize_block(&pattern_lines, false),
+				OperationRewrite::After { text },
+				all,
+				content,
+				number,
+			)?);
+			state = State::Outside;
+			continue;
+		}
 		if is_ordinal_opener(line) {
 			return Err(parse_error(format!(
 				"{trimmed} is not a valid opener. Use a <SM:FIND> that matches once — add context \
@@ -1846,11 +1920,14 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 		State::Outside => {},
 	}
 	if operations.is_empty() {
-		return Err(parse_error("Empty patch. Provide at least one <SM:FIND>/<SM:PUT> pair."));
+		return Err(parse_error(
+			"Empty patch. Provide <SM:FIND> followed by <SM:PUT> or <SM:AFTER>.",
+		));
 	}
 	for (index, operation) in operations.iter().enumerate() {
 		let rewrites: Vec<&str> = match &operation.rewrite {
 			OperationRewrite::Explicit { text } => vec![text],
+			OperationRewrite::After { .. } => continue,
 			OperationRewrite::Inline { replacements } => {
 				replacements.iter().map(String::as_str).collect()
 			},
@@ -1877,7 +1954,7 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 				return false;
 			}
 			let rewrites: Vec<&str> = match &other.rewrite {
-				OperationRewrite::Explicit { text } => vec![text],
+				OperationRewrite::Explicit { text } | OperationRewrite::After { text } => vec![text],
 				OperationRewrite::Inline { replacements } => {
 					replacements.iter().map(String::as_str).collect()
 				},
@@ -1931,7 +2008,7 @@ fn operation_pattern(operation: &Operation, pattern_text: Option<&str>) -> Strin
 			render_inline_pattern(pattern, replacements)
 		},
 		OperationRewrite::Inline { .. } => operation.source_pattern_text.clone(),
-		OperationRewrite::Explicit { .. } => pattern.to_owned(),
+		OperationRewrite::Explicit { .. } | OperationRewrite::After { .. } => pattern.to_owned(),
 	}
 }
 
@@ -1966,6 +2043,15 @@ pub fn ir_to_xml(lines: &[&str]) -> String {
 			);
 			out.push("<SM:FIND>".to_owned());
 			state = State::Find;
+		} else if let Some(text) = line
+			.strip_prefix(AFTER_HEADER)
+			.and_then(|encoded| serde_json::from_str::<String>(encoded).ok())
+			.filter(|_| state == State::Find)
+		{
+			out.push("</SM:FIND>".to_owned());
+			out.push(format!("<SM:AFTER>\n{text}</SM:AFTER>"));
+			out.push("</SM:EDIT>".to_owned());
+			state = State::Idle;
 		} else if line.trim() == REWRITE_HEADER && state == State::Find {
 			out.push("</SM:FIND>".to_owned());
 			out.push("<SM:PUT>".to_owned());
@@ -1993,6 +2079,11 @@ pub fn operation_payload(
 	match &operation.rewrite {
 		OperationRewrite::Inline { .. } => {
 			format!("{open}\n<SM:FIND>\n{pattern}\n</SM:FIND>\n</SM:EDIT>")
+		},
+		OperationRewrite::After { text } => {
+			format!(
+				"{open}\n<SM:FIND>\n{pattern}\n</SM:FIND>\n<SM:AFTER>\n{text}</SM:AFTER>\n</SM:EDIT>"
+			)
 		},
 		OperationRewrite::Explicit { text } => {
 			let put = if text.is_empty() {

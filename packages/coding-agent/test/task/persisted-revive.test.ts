@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,7 +14,11 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -48,13 +53,33 @@ interface RevivedSessionHandle {
 	observer: () => IrcWakeObserver | undefined;
 	/** Reply obligations the wake monitor registered via `trackIrcReply`. */
 	trackedReplies: Promise<void>[];
-	/** Text the stubbed session reports as its last assistant message. */
+	/** Text the stubbed session reports as its last assistant message (a `stop`ped turn). */
 	setLastAssistantText: (text: string) => void;
+	/** Report a terminal wake turn: provider error, abort, or empty completion. */
+	setLastAssistantStop: (stop: LastAssistantStop) => void;
+}
+
+/** Shape of a terminal assistant message the stub can report from a failed/cancelled wake turn. */
+interface LastAssistantStop {
+	stopReason: string;
+	errorMessage?: string;
+	provider?: string;
+	model?: string;
+	content?: Array<{ type: string; text?: string }>;
 }
 
 function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
-	let lastAssistantText: string | undefined;
+	let lastAssistant:
+		| {
+				role: "assistant";
+				content: Array<{ type: string; text?: string }>;
+				stopReason: string;
+				errorMessage?: string;
+				provider?: string;
+				model?: string;
+		  }
+		| undefined;
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		...createSessionDefaults(),
@@ -69,10 +94,8 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		trackIrcReply: (pending: Promise<void>) => {
 			trackedReplies.push(pending);
 		},
-		getLastAssistantMessage: () =>
-			lastAssistantText === undefined
-				? undefined
-				: { role: "assistant", content: [{ type: "text", text: lastAssistantText }], stopReason: "stop" },
+		subscribeRunState: () => () => {},
+		getLastAssistantMessage: () => lastAssistant,
 		extensionRunner,
 	} as unknown as AgentSession;
 	return {
@@ -80,7 +103,17 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		observer: () => observer,
 		trackedReplies,
 		setLastAssistantText: text => {
-			lastAssistantText = text;
+			lastAssistant = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+		},
+		setLastAssistantStop: stop => {
+			lastAssistant = {
+				role: "assistant",
+				content: stop.content ?? [],
+				stopReason: stop.stopReason,
+				errorMessage: stop.errorMessage,
+				provider: stop.provider,
+				model: stop.model,
+			};
 		},
 	};
 }
@@ -175,6 +208,48 @@ describe("persisted subagent revival", () => {
 		expect(initialize).toHaveBeenCalledTimes(1);
 		expect(onError).toHaveBeenCalledTimes(1);
 		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
+	});
+
+	it("anchors wake-turn artifacts to the revived ref's own dir, not the root session's (#11563)", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-artifacts-dir-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		// Run the real wake monitor (call through) so the assertion is tied to the
+		// component that actually writes <id>.md, not a stubbed seam.
+		const realAttach = executorModule.attachIrcWakeTurnMonitor;
+		let capturedArtifactsDir: string | undefined;
+		const attachSpy = vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((session, options) => {
+			capturedArtifactsDir = options.artifactsDir;
+			return realAttach(session, options);
+		});
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The real monitor ran and installed its observer...
+		expect(attachSpy).toHaveBeenCalledTimes(1);
+		expect(handle?.observer()).toBeDefined();
+		// ...anchored to the revived ref's own tree (dirname of its session file),
+		// which is where finalizeRunResult writes <id>.md, not the live root dir.
+		expect(capturedArtifactsDir).toBe(path.dirname(sessionFile));
+		expect(capturedArtifactsDir).not.toBe(path.join(cwd, "parent"));
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
@@ -617,6 +692,82 @@ describe("persisted subagent revival", () => {
 			IrcBus.resetGlobalForTests();
 		});
 
+		it("relays the attributed provider error when the wake turn fails", async () => {
+			// A failed wake turn (provider error / exhausted fallback chain) must not
+			// look like a healthy peer that chose not to answer: the waiter needs the
+			// attributed [provider/model] error, not a generic "stopped without replying".
+			const cwd = makeTempDir("@pi-revive-relay-failed-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const finish = observer?.([wakeRecord("Main")]);
+			handle.setLastAssistantStop({
+				stopReason: "error",
+				errorMessage: "402 usage balance exhausted",
+				provider: "some-provider",
+				model: "some-model",
+			});
+			const reply = IrcBus.global().wait("Main", { from: ref.id }, 5000);
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			const msg = await reply;
+			expect(msg).not.toBeNull();
+			expect(msg?.replyTo).toBe("irc-42");
+			expect(msg?.body).toContain("[some-provider/some-model]");
+			expect(msg?.body).toContain("402 usage balance exhausted");
+			expect(msg?.body).toContain(`history://${ref.id}`);
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+
+		it("relays a cancellation notice when the wake turn is aborted", async () => {
+			const cwd = makeTempDir("@pi-revive-relay-aborted-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const finish = observer?.([wakeRecord("Main")]);
+			handle.setLastAssistantStop({ stopReason: "aborted" });
+			const reply = IrcBus.global().wait("Main", { from: ref.id }, 5000);
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			const msg = await reply;
+			expect(msg).not.toBeNull();
+			expect(msg?.replyTo).toBe("irc-42");
+			expect(msg?.body.toLowerCase()).toContain("cancel");
+			expect(msg?.body).toContain(`history://${ref.id}`);
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+
+		it("relays a no-output notice when the wake turn completes without producing anything", async () => {
+			const cwd = makeTempDir("@pi-revive-relay-empty-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			// No setLastAssistant* call: the turn completes with zero output and never
+			// answers its waker. Previously the relay dropped the empty body silently.
+			const finish = observer?.([wakeRecord("Main")]);
+			const reply = IrcBus.global().wait("Main", { from: ref.id }, 5000);
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			const msg = await reply;
+			expect(msg).not.toBeNull();
+			expect(msg?.replyTo).toBe("irc-42");
+			expect(msg?.body.toLowerCase()).toContain("no output");
+			expect(msg?.body).toContain(`history://${ref.id}`);
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+
 		it("stays silent when the agent already answered its waker during the turn", async () => {
 			const cwd = makeTempDir("@pi-revive-relay-answered-");
 			const { ref, handle } = await reviveWithWaker(cwd);
@@ -675,6 +826,207 @@ describe("persisted subagent revival", () => {
 			AgentLifecycleManager.resetGlobalForTests();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
+		});
+
+		it("reports the failure even after the agent sent a progress ping to the waker", async () => {
+			// `sentSince` cannot tell "already answered" from "pinged 'on it'".
+			// A progress ping is not an answer, so a failed wake turn must still
+			// tell the waker it died instead of being suppressed as a duplicate.
+			const cwd = makeTempDir("@pi-revive-relay-partial-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const delivered: IrcMessage[] = [];
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "Main",
+				kind: "main",
+				status: "idle",
+				session: {
+					deliverIrcMessage: async (msg: IrcMessage) => {
+						delivered.push(msg);
+						return "injected" as const;
+					},
+				} as unknown as AgentSession,
+			});
+			const bus = IrcBus.global();
+			const finish = observer?.([wakeRecord("Main")]);
+			await bus.send({ from: ref.id, to: "Main", body: "on it" });
+			handle.setLastAssistantStop({
+				stopReason: "error",
+				errorMessage: "402 usage balance exhausted",
+				provider: "some-provider",
+				model: "some-model",
+			});
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			expect(delivered).toHaveLength(2);
+			expect(delivered[0]?.body).toBe("on it");
+			const notice = delivered[1];
+			expect(notice?.wakeRelay).toBe(true);
+			expect(notice?.body).toContain("402 usage balance exhausted");
+			expect(notice?.body.toLowerCase()).toContain("earlier in this turn");
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+
+		it("relays the error message without the stack trace when the wake turn throws", async () => {
+			// A thrown turn error's stack belongs in `done.error`/logs, not in the
+			// waking peer's model context.
+			const cwd = makeTempDir("@pi-revive-relay-thrown-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const boom = new Error("boom while waking");
+			boom.stack = "boom while waking\n    at deepInternal (secret.ts:99:1)";
+			const finish = observer?.([wakeRecord("Main")]);
+			const reply = IrcBus.global().wait("Main", { from: ref.id }, 5000);
+			await finish?.(boom);
+			await handle.trackedReplies[0];
+
+			const msg = await reply;
+			expect(msg).not.toBeNull();
+			expect(msg?.body).toContain("boom while waking");
+			expect(msg?.body).not.toContain("secret.ts:99");
+			expect(msg?.body).not.toContain("at deepInternal");
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+	});
+});
+
+describe("buildWakeRelayBody", () => {
+	// A wake turn can yield an artifact and then fail on a later provider call
+	// (`finalizeRunResult` rewrites `<id>.md` on `hasYield`, and the error lane
+	// does not exclude a prior yield). The observer seam cannot drive a real
+	// yield, so pin the message contract here: the failure notice must report
+	// the recorded artifact, never claim nothing was produced.
+	it("reports the recorded artifact when a yielded turn then fails", () => {
+		const result = {
+			index: 0,
+			id: "SmokeKid",
+			agent: "scout",
+			agentSource: "bundled",
+			task: "follow up",
+			exitCode: 1,
+			output: "# Partial report\n\nrows written before the 402",
+			stderr: "",
+			truncated: false,
+			durationMs: 1200,
+			tokens: 0,
+			requests: 2,
+			error: "402 usage balance exhausted",
+			outputPath: "/tmp/SmokeKid.md",
+		} satisfies SingleResult;
+
+		const body = buildWakeRelayBody({
+			id: "SmokeKid",
+			yielded: true,
+			result,
+			turnText: "",
+			error: "[some-provider/some-model] 402 usage balance exhausted",
+			aborted: false,
+			abortReason: undefined,
+			finalizeError: undefined,
+			alreadyMessaged: false,
+		});
+
+		expect(body).toContain("Wake turn failed: [some-provider/some-model] 402 usage balance exhausted");
+		expect(body).not.toContain("No answer was produced");
+		expect(body).toContain("# Partial report");
+		expect(body).toContain("history://SmokeKid");
+	});
+
+	describe("fail-closed revival", () => {
+		function entryType(line: string): string | undefined {
+			const parsed: { type?: string } = JSON.parse(line);
+			return parsed.type;
+		}
+
+		async function entriesOfType(
+			sessionFile: string,
+			keep: (type: string | undefined) => boolean,
+		): Promise<string[]> {
+			return (await Bun.file(sessionFile).text())
+				.split("\n")
+				.filter(line => line.trim().length > 0 && keep(entryType(line)));
+		}
+
+		it("refuses a transcript that vanished between the peek and the locked open", async () => {
+			const cwd = makeTempDir("@pi-revive-vanished-");
+			const sessionFile = await createPersistedSession(cwd);
+			const ref = createRef(sessionFile);
+			// The factory's lock-free peek succeeds here; the file disappears
+			// before the reviver takes the single-writer lock.
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await fs.promises.rm(sessionFile);
+
+			await expect(reviver(ref)).rejects.toThrow(/ENOENT/);
+			// Fail closed without minting: the missing path stays missing.
+			expect(await Bun.file(sessionFile).exists()).toBe(false);
+		});
+
+		it("refuses a transcript deleted between open's snapshot read and its adoption", async () => {
+			const cwd = makeTempDir("@pi-revive-stale-read-");
+			const sessionFile = await createPersistedSession(cwd);
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			// Delete the transcript from inside its own snapshot read: open()
+			// has resolved loadSessionFile but has not adopted the snapshot
+			// yet, so the reviver must fail closed on the fresh state instead
+			// of reviving stale history. Single-shot: only the snapshot read
+			// mutates, so the publish-time re-read observes the deletion.
+			const originalReadText = FileSessionStorage.prototype.readText;
+			const readTextSpy = vi.spyOn(FileSessionStorage.prototype, "readText").mockImplementationOnce(async function (
+				this: FileSessionStorage,
+				p: string,
+			) {
+				const text = await originalReadText.call(this, p);
+				await fs.promises.rm(p);
+				return text;
+			});
+			try {
+				await expect(reviver(ref)).rejects.toThrow(/ENOENT/);
+				// Fail closed without minting: the missing path stays missing.
+				expect(await Bun.file(sessionFile).exists()).toBe(false);
+			} finally {
+				readTextSpy.mockRestore();
+			}
+		});
+
+		it("refuses a transcript truncated to header+session_init without rewriting it", async () => {
+			const cwd = makeTempDir("@pi-revive-truncated-");
+			const sessionFile = await createPersistedSession(cwd);
+			const truncated = `${(await entriesOfType(sessionFile, type => type === "session" || type === "session_init")).join("\n")}\n`;
+			await Bun.write(sessionFile, truncated);
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+
+			await expect(reviver(ref)).rejects.toThrow(/no message history/);
+			// The parked transcript is evidence, not scratch space: untouched.
+			expect(await Bun.file(sessionFile).text()).toBe(truncated);
+		});
+
+		it("rebuilds the contract from the reopened file, not the stale peek capture", async () => {
+			const cwd = makeTempDir("@pi-revive-contract-");
+			const sessionFile = await createPersistedSession(cwd);
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			// The file is replaced after the peek: same messages, no session_init.
+			const withoutInit = `${(await entriesOfType(sessionFile, type => type !== "session_init")).join("\n")}\n`;
+			await Bun.write(sessionFile, withoutInit);
+
+			await expect(reviver(ref)).rejects.toThrow(/no persisted session contract/);
+			expect(await Bun.file(sessionFile).text()).toBe(withoutInit);
 		});
 	});
 });
