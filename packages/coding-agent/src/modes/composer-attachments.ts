@@ -1,8 +1,63 @@
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "../extensibility/skills";
 import { SYMBOL_PRESETS } from "./theme/symbols";
 import { theme } from "./theme/theme";
 
 /** Attachment chip kinds staged in the composer: images, video previews, and large text pastes. */
 export type ChipKind = "image" | "video" | "paste";
+
+/** Compact atomic composer token for an invoked skill in the active symbol preset. */
+export function skillChipLabel(name: string): string {
+	const icon =
+		typeof theme === "undefined"
+			? SYMBOL_PRESETS.unicode["icon.extensionSkill"]
+			: theme.symbol("icon.extensionSkill");
+	return `${icon} ${name}`;
+}
+
+/** Canonical `/skill:<name>` token a skill chip expands to on submit. */
+export function skillToken(name: string): string {
+	return `/skill:${name}`;
+}
+
+/**
+ * Soft-pill styling for a skill chip: bold skill label color over the custom-message
+ * tint. `restore` re-arms the surrounding foreground/background after the chip.
+ */
+export function skillChipStyle(label: string, restore = "\x1b[39m\x1b[49m"): string {
+	if (typeof theme === "undefined") return label;
+	return `${theme.getBgAnsi("customMessageBg")}${theme.getFgAnsi("customMessageLabel")}\x1b[1m${label}\x1b[22m${restore}`;
+}
+
+/** Every glyph a skill chip may start with, across all symbol presets. */
+const SKILL_ICONS = [...new Set(Object.values(SYMBOL_PRESETS).map(m => m["icon.extensionSkill"]))];
+
+/** Skill names as they appear in chips: word characters and dashes, dots only between segments. */
+const SKILL_NAME_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+
+const SKILL_CHIP_SOURCE = `(?:${SKILL_ICONS.map(icon =>
+	/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon),
+).join("|")}) (${SKILL_NAME_SOURCE})(?![\\w-])`;
+
+/**
+ * Replaces `/skill:<name>` tokens for known skills with compact chip labels and
+ * registers each label's token as its atomic editor expansion. Leaves the text
+ * untouched when skill tokens are not invocations in this draft (see
+ * {@link allowsSkillTokens}).
+ */
+export function collapseSkillTokens(
+	text: string,
+	isKnown: (name: string) => boolean,
+	register: (label: string, expansion: string) => void,
+): string {
+	if (!text.includes("/skill:") || !allowsSkillTokens(text)) return text;
+	SKILL_TOKEN_RE.lastIndex = 0;
+	return text.replace(SKILL_TOKEN_RE, (match, delimiter: string, name: string) => {
+		if (!isKnown(name)) return match;
+		const label = skillChipLabel(name);
+		register(label, skillToken(name));
+		return `${delimiter}${label}`;
+	});
+}
 
 const CHIP_ICON_KEY = { image: "chip.image", video: "chip.video", paste: "chip.paste" } as const;
 
@@ -59,8 +114,11 @@ export function attachmentSgr(kind: ChipKind, n: number): string {
 
 /** Matches expanded image, video, and paste markers, including optional marker metadata. */
 export const PLACEHOLDER_REGEX = /\[(Image|Video|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
-/** Matches either an expanded attachment marker or a compact composer chip token. */
-export const COMPOSER_TOKEN_REGEX = new RegExp(`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}`, "gu");
+/** Matches an expanded attachment marker, a compact attachment chip, or a skill chip. */
+export const COMPOSER_TOKEN_REGEX = new RegExp(
+	`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}|${SKILL_CHIP_SOURCE}`,
+	"gu",
+);
 
 const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
@@ -134,9 +192,11 @@ export interface PlaceholderRenderers {
 	renderText: (text: string) => string;
 	/** Renders one parsed marker or compact chip token. */
 	renderReference: (label: string, kind: PlaceholderKind, index: number, form: "marker" | "chip") => string;
+	/** Renders one skill chip (`<icon> <name>`). */
+	renderSkill: (label: string, name: string) => string;
 }
 
-/** Renders text while treating expanded markers and compact chips as distinct references. */
+/** Renders text while treating expanded markers, attachment chips, and skill chips as distinct references. */
 export function renderPlaceholders(text: string, renderers: PlaceholderRenderers): string {
 	COMPOSER_TOKEN_REGEX.lastIndex = 0;
 	let result = "";
@@ -152,6 +212,8 @@ export function renderPlaceholders(text: string, renderers: PlaceholderRenderers
 		if (label.startsWith("[")) {
 			const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : match[1] === "Video" ? "video" : "image";
 			result += renderers.renderReference(label, kind, Number(match[2]), "marker");
+		} else if (match[3] !== undefined) {
+			result += renderers.renderSkill(label, match[3]);
 		} else {
 			const index = Number(label.slice(label.lastIndexOf("#") + 1));
 			result += renderers.renderReference(label, chipLabelKind(label), index, "chip");

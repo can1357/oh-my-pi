@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, type MockResponseSource, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $ } from "bun";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -115,6 +116,23 @@ function coordinatorWithMockSession(responses: MockResponseSource) {
 }
 
 describe("native security coordinator", () => {
+	test("preflight accepts provider-owned Bedrock auth without an OAuth row", async () => {
+		const bedrockModel = getBundledModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+		if (!bedrockModel) throw new Error("Expected bundled Bedrock model");
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings,
+				authStorage,
+				modelRegistry,
+				activeModel: bedrockModel,
+			},
+			{ openStore: storeFactory, gitAdapter },
+		);
+		const plan = await coordinator.preflight();
+		expect(plan.account).toEqual({ provider: "amazon-bedrock", api: "bedrock-converse-stream" });
+	});
+
 	test("scripted mock model publishes a canonical completed scan and restartable session", async () => {
 		const { coordinator, mock } = coordinatorWithMockSession([
 			{

@@ -1364,8 +1364,8 @@ mod tests {
 			kept_text.contains("<section class=\"sec5\">"),
 			"all sibling sections should surface"
 		);
-		// The <style> raw text stays folded as one elided span — no CSS interior leaks
-		// into kept content.
+		// The <style> raw text stays folded as one elided span — no CSS interior
+		// leaks into kept content.
 		assert!(!kept_text.contains(".rule0 {"), "oversized style body must stay folded");
 	}
 }

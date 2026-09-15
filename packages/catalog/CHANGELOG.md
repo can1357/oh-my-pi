@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `getCatalogProviderEntry` and the `CATALOG_PROVIDERS` constant in favor of `providerEntry` and `providerEntries`
+
+### Added
+
+- Added support for DeepInfra, LiteLLM, Qwen Portal, SiliconFlow, and SiliconFlow-CN providers
+- Added support for Gemini 3.8 Flash models
+
+### Changed
+
+- Provider catalog entries (default model, env keys, discovery wiring) and the bundled fallback rows for providers that cannot be discovered at generation time (Anthropic, OpenAI Daybreak, xAI OAuth, Meta, Muse Code, Bedrock Mantle, Devin, Z.AI, Sakana, ai&, Abliteration, Yolo-Auto, GMI Cloud, Fire Pass, QwenCloud Token Plan, Cloudflare AI Gateway, GitLab Duo Workflow) now live in `src/compat/rules/providers/<id>.kdl` and compile into `rules.json`; `KnownProvider` is generated from them, and the generator bundles seed rows by each entry's declared `bundle` policy instead of per-provider code.
+
+## [18.1.22] - 2026-09-14
+
+### Added
+
+- Enabled assistant prefill support for Ollama models
+
+### Fixed
+
+- OpenCode Zen GPT-6 Astra requests now use the Responses endpoint instead of failing through chat completions with HTTP 500 ([#12030](https://github.com/can1357/oh-my-pi/issues/12030)).
+
 ## [18.1.20] - 2026-09-13
 
 ### Fixed

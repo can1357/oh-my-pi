@@ -21,7 +21,6 @@ function makeSession(manager: AsyncJobManager): ToolSession {
 		cwd: process.cwd(),
 		settings: {
 			get(key: string): unknown {
-				if (key === "async.pollWaitDuration") return "5m";
 				if (key === "irc.timeoutMs") return 120_000;
 				return undefined;
 			},

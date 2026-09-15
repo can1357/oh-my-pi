@@ -356,7 +356,13 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
-import { getRestorableSessionModels } from "./session-context";
+import {
+	getRestorableSessionModels,
+	isTranscriptEntry,
+	isUserRequestEntry,
+	transcriptEntryMessage,
+	userTurnDraft,
+} from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -9896,14 +9902,19 @@ export class AgentSession {
 		// model consumes it, mirroring a live `ask` completion (issue #6483).
 		let isAskReanswerCompletion = false;
 
-		if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-			// User message: leaf = parent (null if root), text goes to editor
+		if (isTranscriptEntry(targetEntry) && isUserRequestEntry(targetEntry)) {
+			// User request (plain prompt, or a user-invoked skill/collab prompt): leaf = parent
+			// (null if root), the draft the user typed goes back to the editor with its images.
 			newLeafId = targetEntry.parentId;
-			editorText = this.#extractUserMessageText(targetEntry.message.content);
-			const targetImages = this.#extractUserMessageImages(targetEntry.message.content);
+			editorText = userTurnDraft(targetEntry);
+			const request = transcriptEntryMessage(targetEntry);
+			const targetImages =
+				request && (request.role === "user" || request.role === "custom")
+					? this.#extractUserMessageImages(request.content)
+					: [];
 			if (targetImages.length > 0) editorImages = targetImages;
 		} else if (targetEntry.type === "custom_message" && targetEntry.customType !== SKILL_PROMPT_MESSAGE_TYPE) {
-			// Custom message: leaf = parent (null if root), text goes to editor
+			// Other custom message: leaf = parent (null if root), text goes to editor
 			newLeafId = targetEntry.parentId;
 			editorText =
 				typeof targetEntry.content === "string"
@@ -9935,10 +9946,10 @@ export class AgentSession {
 			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId);
 			isAskReanswerCompletion = true;
 		} else {
-			// Non-user message (or a user-invoked skill-prompt injection): land the
-			// leaf on the selected node so it stays on the active branch. Skill
-			// prompts are custom_message entries but must not be re-editable — their
-			// content is a large expanded body, not a user turn (issue #5374).
+			// Non-user message (or an agent/autoload skill-prompt injection): land the
+			// leaf on the selected node so it stays on the active branch. Injected skill
+			// prompts must not be re-editable — their content is a large expanded body,
+			// not a user turn (issue #5374).
 			newLeafId = targetId;
 		}
 
@@ -10129,10 +10140,10 @@ export class AgentSession {
 		return "";
 	}
 
-	/** Image parts of a stored user message, in submission order — index N-1 backs the
+	/** Image parts of a stored user request, in submission order — index N-1 backs the
 	 *  `[Image #N]` marker in the message text, so restoring them alongside the text keeps
 	 *  positional markers resolvable on resubmit. */
-	#extractUserMessageImages(content: UserMessage["content"]): ImageContent[] {
+	#extractUserMessageImages(content: UserMessage["content"] | CustomMessage["content"]): ImageContent[] {
 		if (!Array.isArray(content)) return [];
 		return content.filter((c): c is ImageContent => c.type === "image");
 	}

@@ -1114,6 +1114,13 @@ export interface Model<TApi extends Api = Api> {
 	/** Whether this model requires tool-result images hoisted into sibling user content blocks. */
 	requiresToolResultImageHoisting?: boolean;
 	/**
+	 * Whether the host continues a trailing assistant message verbatim instead of
+	 * treating it as a completed turn (Ollama, on both its native and OpenAI-compat
+	 * endpoints). Callers that need a committed output prefix (session titling)
+	 * read this before appending one. Rule-owned via `supports-assistant-prefill`.
+	 */
+	supportsAssistantPrefill?: boolean;
+	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
 	 * e.g. GitHub Copilot long-context variants (`claude-opus-4.7-1m` requests
@@ -1295,6 +1302,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
 	| "requiresToolResultImageHoisting"
+	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */

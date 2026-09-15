@@ -373,13 +373,15 @@ function resolveBedrockInferenceProfileReference(
 	return resolveBedrockInferenceProfileModelId(modelId, availableModels);
 }
 
-const UPSTREAM_ROUTING_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+/** Bare slug (`cerebras`) or tiered/regional slug (`google-ai-studio/priority`, `google-vertex/global/flex`). */
+const UPSTREAM_ROUTING_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/i;
 
 /**
  * Split a trailing `@<upstream>` provider-routing selector off a model pattern.
  *
  * `openrouter/z-ai/glm-4.7@cerebras` -> base `openrouter/z-ai/glm-4.7`, upstream
- * `cerebras`. A `:thinking` suffix after the slug is kept on the base
+ * `cerebras`. Tiered upstreams keep their path (`...@google-ai-studio/priority`).
+ * A `:thinking` suffix after the slug is kept on the base
  * (`...@cerebras:high` -> base `...:high`). Returns undefined when there is no
  * `@` or the suffix is not a bare provider slug, so model ids that legitimately
  * contain `@` (`claude-opus-4-8@default`, `workers-ai/@cf/...`) are never split.
@@ -2107,7 +2109,10 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	let parsed = parseModelPattern(pattern, candidates, preferences, {
+	// Keep the explicit provider on the pattern: the raw-id phase provider-locks
+	// `google/gemini-x` to the bundled `google` provider unless the selector
+	// names the aggregator carrying it (`openrouter/google/gemini-x@upstream`).
+	let parsed = parseModelPattern(provider ? `${provider}/${pattern}` : pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 	if (!parsed.model && !provider) {

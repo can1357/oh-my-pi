@@ -27,7 +27,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
-import type { SessionMessageEntry } from "../../session/session-entries";
+import { type TranscriptEntry, transcriptEntryMessage } from "../../session/session-context";
 import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
@@ -113,7 +113,7 @@ export class ChatTranscriptBuilder {
 	}
 
 	/** Discard all components and rebuild the whole transcript from `entries`. */
-	rebuild(entries: SessionMessageEntry[]): void {
+	rebuild(entries: TranscriptEntry[]): void {
 		this.reset();
 		for (const entry of entries) this.#appendEntry(entry);
 		// Flush the trailing turn's usage row only once its tools are materialized
@@ -123,7 +123,7 @@ export class ChatTranscriptBuilder {
 	}
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
-	append(entries: SessionMessageEntry[]): void {
+	append(entries: TranscriptEntry[]): void {
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
@@ -173,9 +173,11 @@ export class ChatTranscriptBuilder {
 		this.reset();
 	}
 
-	#appendEntry(entry: SessionMessageEntry): void {
+	#appendEntry(entry: TranscriptEntry): void {
+		const message = transcriptEntryMessage(entry);
+		if (!message) return;
 		const before = this.container.children.length;
-		this.#appendChatMessage(entry.message);
+		this.#appendChatMessage(message);
 		const components = this.container.children.slice(before);
 		if (components.length > 0) this.#entryComponents.set(entry.id, components);
 	}
@@ -311,7 +313,7 @@ export class ChatTranscriptBuilder {
 						this.#trackExpandable(collapsed);
 						this.container.addChild(collapsed);
 					} else {
-						this.container.addChild(new UserMessageComponent(textContent, false));
+						this.container.addChild(new UserMessageComponent(textContent));
 					}
 				}
 				break;

@@ -1,6 +1,9 @@
 // Provider-wire compat for "google-vertex"; regenerated from the frozen census using deployment contract selectors.
 
 provider "google-vertex" {
+	default-model "gemini-3.1-pro-preview"
+	allow-unauthenticated #true
+
 	// Replaces google-shared.ts stripping functionCall/functionResponse ids for Vertex.
 	supports-function-part-id #false
 	// Replaces the hard-coded provider exclusion in anthropic.ts context_management gating.

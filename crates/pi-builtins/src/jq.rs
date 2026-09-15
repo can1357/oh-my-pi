@@ -607,7 +607,7 @@ mod filter {
 		Report { message, labels: Vec::from([(found_range, found, Color::Red)]) }
 	}
 
-	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String>;
+	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String, Option<Color>>;
 
 	impl Report {
 		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
@@ -620,13 +620,19 @@ mod filter {
 				let text = text.into_iter().map(color_maybe).collect::<Vec<_>>();
 				Label::new(range)
 					.with_text(text.join(""))
-					.with_style(move |s| color.apply(s).to_string())
+					.with_style(Some(color))
 			});
-			Block::new(idx, labels).unwrap().map_code(|c| {
-				let c = c.replace('\t', "    ");
-				let w = xutf::width_str(&c);
-				CodeWidth::new(c, core::cmp::max(w, 1))
-			})
+			Block::new(idx, labels)
+				.unwrap()
+				.map_code(|c| {
+					let c = c.replace('\t', "    ");
+					let w = xutf::width_str(&c);
+					CodeWidth::new(c, core::cmp::max(w, 1))
+				})
+				.with_paint(|f, color, value| match color {
+					Some(color) => write!(f, "{}", color.apply(value)),
+					None => write!(f, "{value}"),
+				})
 		}
 	}
 

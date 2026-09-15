@@ -168,7 +168,7 @@ describe("Yolo-Auto provider discovery", () => {
 	test("prefers curated metadata over a stale previous bundle", async () => {
 		// A credentialed `gen:models` run bakes live discovery into
 		// models.json; that previous bundle row must not shadow later
-		// corrections to YOLO_AUTO_STATIC_MODELS. Simulate a stale bundle row
+		// corrections to the yolo-auto seed. Simulate a stale bundle row
 		// (262K context, no template dialect) and require the curated surface.
 		const originalGetBundledModels = modelsModule.getBundledModels;
 		vi.spyOn(modelsModule, "getBundledModels").mockImplementation((provider => {

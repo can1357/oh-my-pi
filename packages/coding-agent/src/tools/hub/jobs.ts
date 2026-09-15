@@ -33,14 +33,6 @@ import {
 } from "../render-utils";
 import type { AgentActivitySnapshot, CancelOutcome, CoordinationDetails, HubRenderArgs, JobSnapshot } from "./types";
 
-const WAIT_DURATION_MS: Record<string, number> = {
-	"5s": 5_000,
-	"10s": 10_000,
-	"30s": 30_000,
-	"1m": 60_000,
-	"5m": 5 * 60_000,
-};
-
 /**
  * A wait snapshot where every watched job is still running and nothing was
  * cancelled — pure "still waiting" noise once a newer wait exists. The TUI
@@ -52,20 +44,6 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	if (!d || !Array.isArray(d.jobs) || d.jobs.length === 0) return false;
 	if (d.cancelled?.length) return false;
 	return d.jobs.every(job => job?.status === "running");
-}
-
-/** Poll window for a job-watching wait: `async.pollWaitDuration` fixed value or smart ladder. */
-export function resolvePollWindow(
-	session: ToolSession,
-	manager: AsyncJobManager,
-	ownerId: string | undefined,
-): { waitMs: number; smart: boolean } {
-	const pollSetting = session.settings.get("async.pollWaitDuration");
-	const smart = pollSetting === "smart";
-	const waitMs = smart
-		? manager.nextPollWaitMs(ownerId)
-		: ((pollSetting ? WAIT_DURATION_MS[pollSetting] : undefined) ?? WAIT_DURATION_MS["30s"]);
-	return { waitMs, smart };
 }
 
 /**
