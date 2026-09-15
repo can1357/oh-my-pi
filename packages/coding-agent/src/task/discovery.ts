@@ -24,6 +24,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import { isModelRoleAliasShaped } from "../config/model-resolver";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
@@ -40,7 +41,7 @@ export interface DiscoveryResult {
 interface AgentDirectory {
 	dir: string;
 	source: AgentSource;
-	ignoreModel?: boolean | ((model: string[] | undefined) => boolean);
+	ignoreModel?: boolean | ((model: string[] | undefined) => string[] | undefined);
 }
 
 /**
@@ -57,7 +58,8 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
 				.readFile(filePath, "utf-8")
 				.then(content => {
 					const agent = parseAgent(filePath, content, source, "warn");
-					if (typeof ignoreModel === "function" ? ignoreModel(agent.model) : ignoreModel) agent.model = undefined;
+					if (typeof ignoreModel === "function") agent.model = ignoreModel(agent.model);
+					else if (ignoreModel) agent.model = undefined;
 					return agent;
 				})
 				.catch(error => {
@@ -138,7 +140,10 @@ export async function discoverAgents(
 		orderedDirs.push({
 			dir: agentsDir,
 			source: plugin.scope === "project" ? "project" : "user",
-			ignoreModel: model => !model?.every(selector => selector.startsWith("@")),
+			ignoreModel: model => {
+				const roleAliases = model?.filter(isModelRoleAliasShaped);
+				return roleAliases?.length ? roleAliases : undefined;
+			},
 		});
 	}
 

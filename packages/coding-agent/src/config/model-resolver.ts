@@ -1084,6 +1084,11 @@ function modelRoleAliasPrefixLength(value: string): number | undefined {
 	return MODEL_ROLE_ALIAS_PREFIXES.find(prefix => value.startsWith(prefix))?.length;
 }
 
+/** Whether `value` is shaped like a role alias (`@role`, `pi/role`, or `*`), regardless of whether the role exists. */
+export function isModelRoleAliasShaped(value: string): boolean {
+	return modelRoleAliasPrefixLength(value.trim()) !== undefined;
+}
+
 function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | undefined {
 	const normalized = value.trim();
 	const prefixLength = modelRoleAliasPrefixLength(normalized);

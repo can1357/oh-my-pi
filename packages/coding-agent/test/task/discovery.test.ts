@@ -199,20 +199,16 @@ describe("discoverAgents", () => {
 		const pluginDir = path.join(tempHome, "model-plugin");
 		await fs.mkdir(path.join(pluginDir, "agents"), { recursive: true });
 		for (const [name, model] of [
-			["plugin-role-agent", "@plan"],
+			["plugin-role-agent", '["@plan", "sonnet"]'],
+			["plugin-legacy-role-agent", "pi/slow"],
+			["plugin-default-role-agent", '"*"'],
 			["plugin-provider-agent", "anthropic/claude-x"],
 			["plugin-claude-agent", "sonnet"],
+			["plugin-all-claude-agent", '["sonnet", "opus"]'],
 		] as const) {
 			await fs.writeFile(
 				path.join(pluginDir, "agents", `${name}.md`),
-				[
-					"---",
-					`name: ${name}`,
-					`description: ${name}`,
-					`model: "${model}"`,
-					"---",
-					"body",
-				].join("\n"),
+				["---", `name: ${name}`, `description: ${name}`, `model: ${model}`, "---", "body"].join("\n"),
 			);
 		}
 		await injectPluginDirRoots(tempHome, [pluginDir], projectDir);
@@ -221,7 +217,10 @@ describe("discoverAgents", () => {
 		const byName = new Map(agents.map(agent => [agent.name, agent]));
 
 		expect(byName.get("plugin-role-agent")?.model).toEqual(["@plan"]);
+		expect(byName.get("plugin-legacy-role-agent")?.model).toEqual(["pi/slow"]);
+		expect(byName.get("plugin-default-role-agent")?.model).toEqual(["*"]);
 		expect(byName.get("plugin-provider-agent")?.model).toBeUndefined();
 		expect(byName.get("plugin-claude-agent")?.model).toBeUndefined();
+		expect(byName.get("plugin-all-claude-agent")?.model).toBeUndefined();
 	});
 });
