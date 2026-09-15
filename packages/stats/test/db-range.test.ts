@@ -107,9 +107,13 @@ describe("getDashboardStats time range", () => {
 			makeMessage(now - 48 * 60 * 60 * 1000, "api-folder-outside-24h", "/tmp/older-project"),
 		]);
 
-		// The legacy dashboard path reads this in getStatsByAgentType; the folder query does not.
+		// Emulate a legacy schema while retaining the index name required by dedicated aggregate queries.
+		// The reduced fixture index deliberately omits agent_type: the old combined dashboard path still fails,
+		// while the dedicated folder query remains valid.
 		db.run("DROP INDEX idx_messages_timestamp_agent_type");
+		db.run("DROP INDEX idx_messages_dashboard_cover");
 		db.run("ALTER TABLE messages DROP COLUMN agent_type");
+		db.run("CREATE INDEX idx_messages_dashboard_cover ON messages(timestamp, folder)");
 
 		const folders = await readFolderStats(
 			await handleApi(new Request("http://stats.test/api/stats/folders?range=24h")),
