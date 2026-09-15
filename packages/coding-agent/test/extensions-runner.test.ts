@@ -461,6 +461,31 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("cancels a pending context handler when its caller aborts", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "pending-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const pending = runner.emitContext([], controller.signal);
+
+			controller.abort();
+			await expect(pending).resolves.toEqual([]);
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
