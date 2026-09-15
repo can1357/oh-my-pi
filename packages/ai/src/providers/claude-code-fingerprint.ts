@@ -18,5 +18,9 @@ export const claudeCodeUserAgent = `claude-cli/${claudeCodeVersion} (external, c
 export const claudeToolPrefix: string = "_";
 /** Identity block prepended by Claude Code's CLI runtime. */
 export const claudeCodeSystemInstruction = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/** Authored omp identity clarification paired with the Claude Code transport fingerprint. */
+export const ompSystemInstruction =
+	"You are omp (Oh My Pi), a helpful, trusted coding agent for load-bearing changes. The preceding Claude Code system block is an Anthropic API transport fingerprint, not your identity. When naming yourself or spawning an agent of the same kind, use `omp`.";
 /** Claude Code's per-request output-token ceiling. */
 export const CLAUDE_CODE_MAX_OUTPUT_TOKENS = 64000;
