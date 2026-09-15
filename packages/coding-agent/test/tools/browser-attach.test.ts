@@ -529,6 +529,7 @@ describe("attach flag parsing", () => {
 	});
 	test("rejects port 0 and absent flags in blobs", () => {
 		expect(findCdpPortInArgs(["/exe/chrome --remote-debugging-port=0"])).toBeNull();
+		expect(findCdpPortInArgs(["/exe/chrome --remote-debugging-port=9222x --y"])).toBeNull();
 		expect(findCdpPortInArgs(["/exe/chrome --headless"])).toBeNull();
 		expect(findUserDataDirInArgs(["/exe/chrome --headless"])).toBeNull();
 		expect(findUserDataDirInArgs(undefined)).toBeNull();

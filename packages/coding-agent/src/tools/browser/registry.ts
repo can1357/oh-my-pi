@@ -261,6 +261,8 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	}
 	const appArgs = kind.args ?? [];
 	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs });
+	// TEMP-DEBUG: tracing CI-only reuse failure (remove before merge).
+	console.log(`[dbg-reuse] lookup exe=${exe} -> ${reused ? `REUSE ${reused.cdpUrl}` : "SPAWN"}`);
 	let cdpUrl: string;
 	let pid: number;
 	let subprocess: Subprocess | undefined;
@@ -270,6 +272,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		pid = reused.pid;
 	} else {
 		const port = await findFreeCdpPort();
+		console.log(`[dbg-reuse] SPAWNING ${exe} port=${port} profile=${appArgs.find(a => a.includes("user-data-dir"))}`);
 		const launchArgs = [...appArgs, `--remote-debugging-port=${port}`];
 		const child = Bun.spawn([exe, ...launchArgs], {
 			cwd: opts.cwd,
