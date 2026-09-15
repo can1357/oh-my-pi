@@ -13,12 +13,13 @@ import {
  * Reporter screenshot showed parent session on DeepSeek V4 Pro dispatching a
  * task subagent that resolved to `qwen3.6-plus-free` — an opencode-zen model
  * the user has no working credentials for. The dispatch hit a provider that
- * could not serve the model and surfaced a confusing API rejection instead of
- * silently using the parent's already-authenticated model.
+ * could not serve the model and surfaced a confusing API rejection.
  *
- * The fix: at dispatch time, if the resolved subagent model has no working
- * credentials, fall back to the parent session's active model (which by
- * definition has working auth — the parent turn is using it).
+ * The fix: at dispatch time, walk the eligible ladder (all configured
+ * patterns) looking for one with working credentials. If none found,
+ * return the primary resolution unchanged so the caller's error path
+ * surfaces a meaningful failure. NEVER silently inherit the parent's
+ * model when explicit patterns were supplied.
  */
 
 const parentModel: Model<Api> = buildModel({
@@ -76,7 +77,7 @@ function createMockRegistry(options: MockRegistryOptions): ModelLookupRegistry &
 }
 
 describe("issue #985: subagent dispatch auth fallback", () => {
-	test("falls back to parent active model when resolved subagent model has no auth", async () => {
+	test("returns primary unchanged when resolved subagent model has no auth (no parent fallback for explicit patterns)", async () => {
 		const registry = createMockRegistry({
 			models: [parentModel, unauthedTaskModel],
 			authedProviders: new Set(["deepseek"]), // user has DeepSeek; opencode-zen unauthed
@@ -88,9 +89,11 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 			registry,
 		);
 
-		expect(result.authFallbackUsed).toBe(true);
-		expect(result.model?.provider).toBe("deepseek");
-		expect(result.model?.id).toBe("deepseek-v4-pro");
+		// Explicit patterns → NEVER parent fallback. Returns unauthed primary
+		// so the caller's error path surfaces a meaningful failure.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
+		expect(result.model?.id).toBe("qwen3.6-plus-free");
 	});
 
 	test("does not fall back when resolved subagent model has working auth", async () => {
@@ -212,7 +215,7 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 		expect(result.model?.provider).toBe("opencode-zen");
 		expect(result.model?.id).toBe("qwen3.6-plus-free");
 	});
-	test("forwards sessionId to getApiKey for the fallback model", async () => {
+	test("forwards sessionId to getApiKey for eligible ladder candidates", async () => {
 		const receivedSessionIds: string[] = [];
 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
 			getAvailable: () => [parentModel, unauthedTaskModel],
@@ -231,11 +234,13 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 			"subagent-session-456",
 		);
 
-		expect(receivedSessionIds).toEqual(["opencode-zen:subagent-session-456", "deepseek:subagent-session-456"]);
-		expect(result.authFallbackUsed).toBe(true);
-		expect(result.model?.provider).toBe("deepseek");
+		// sessionId forwarded to the eligible ladder candidate. No parent
+		// fallback for explicit patterns.
+		expect(receivedSessionIds).toEqual(["opencode-zen:subagent-session-456"]);
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
 	});
-	test("preserves the requested model warning when auth falls back", async () => {
+	test("preserves the requested model warning when no eligible candidate has auth", async () => {
 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
 			getAvailable: () => [parentModel, unauthedTaskModel],
 			getApiKey: async (model: Model<Api>) => (model.provider === "deepseek" ? "sk-test" : undefined),
@@ -247,13 +252,15 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 			registry,
 		);
 
-		expect(result.authFallbackUsed).toBe(true);
+		// Warning preserved, primary returned, no parent fallback.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
 		expect(result.warning).toBe(
 			'Invalid thinking level "invalid" in pattern "qwen3.6-plus-free:invalid". Using default instead.',
 		);
 	});
 
-	test("still falls back when getApiKey returns undefined even with sessionId", async () => {
+	test("returns primary unchanged when getApiKey returns undefined even with sessionId", async () => {
 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
 			getAvailable: () => [parentModel, unauthedTaskModel],
 			getApiKey: async (model: Model<Api>, _sessionId?: string) => {
@@ -271,6 +278,222 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 			"subagent-session-456",
 		);
 
+		// Explicit patterns → no parent fallback even when primary has no auth.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
+		expect(result.model?.id).toBe("qwen3.6-plus-free");
+	});
+});
+
+// --- Eligible-ladder boundary tests (subagent auth boundary fix) ---
+
+const authedCheapModel: Model<Api> = buildModel({
+	id: "glm-4.7",
+	name: "GLM 4.7",
+	api: "openai-completions",
+	provider: "zhipu",
+	baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 8192,
+});
+
+const keylessLocalModel: Model<Api> = buildModel({
+	id: "llama-3.3",
+	name: "Llama 3.3",
+	api: "openai-completions",
+	provider: "ollama",
+	baseUrl: "http://localhost:11434/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 8192,
+});
+
+const frontierModel: Model<Api> = buildModel({
+	id: "claude-opus-4",
+	name: "Claude Opus 4",
+	api: "openai-completions",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+});
+
+describe("subagent auth boundary: eligible ladder walk", () => {
+	test("cheap single pin missing auth + authenticated expensive parent: NOT parent, returns primary", async () => {
+		// Subagent configured with single cheap model, no auth. Parent is
+		// expensive but authed. Resolver walks ladder (1 entry, no auth),
+		// returns primary unchanged. NEVER falls back to parent when
+		// explicit patterns were supplied.
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// Explicit patterns → no parent fallback. Returns unauthed primary.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
+		expect(result.model?.id).toBe("qwen3.6-plus-free");
+	});
+
+	test("explicit eligible second cheap candidate: uses ladder candidate instead of parent", async () => {
+		// Subagent configured with [cheap-unauthed, cheap-authed]. Resolver
+		// walks ladder: first candidate has no auth, second has auth → uses
+		// second. Never touches parent model.
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, authedCheapModel],
+			authedProviders: new Set(["deepseek", "zhipu"]), // parent + second cheap
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free", "zhipu/glm-4.7"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// Second eligible candidate has auth → uses it, no parent fallback.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("zhipu");
+		expect(result.model?.id).toBe("glm-4.7");
+	});
+
+	test("all eligible absent: returns primary unchanged when parent also lacks auth", async () => {
+		// All eligible candidates and parent have no auth. Resolver returns
+		// first eligible candidate unchanged — error path surfaces downstream.
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, authedCheapModel],
+			authedProviders: new Set(), // nothing authed
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free", "zhipu/glm-4.7"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// No auth anywhere → returns first eligible candidate unchanged.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
+		expect(result.model?.id).toBe("qwen3.6-plus-free");
+	});
+
+	test("keyless allowed: kNoAuth model stays in eligible ladder without parent fallback", async () => {
+		// Keyless local model (ollama) is treated as authenticated (kNoAuth).
+		// Even when parent has auth, keyless model wins.
+		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+			getAvailable: () => [parentModel, keylessLocalModel],
+			getApiKey: async (model: Model<Api>) => {
+				if (model.provider === "deepseek") return "sk-test";
+				if (model.provider === "ollama") return kNoAuth;
+				return undefined;
+			},
+		} as never;
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["ollama/llama-3.3"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// Keyless model (kNoAuth) is treated as authenticated → no fallback.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("ollama");
+		expect(result.model?.id).toBe("llama-3.3");
+	});
+
+	test("explicit frontier request unaffected: single authed pattern resolves directly", async () => {
+		// Frontier model (Opus) with auth. No ladder walking needed.
+		const registry = createMockRegistry({
+			models: [parentModel, frontierModel],
+			authedProviders: new Set(["deepseek", "anthropic"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["anthropic/claude-opus-4"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// Frontier model has auth → resolves directly.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-opus-4");
+	});
+
+	test("eligible ladder skips unauthenticated models until finding authed one", async () => {
+		// Three cheap candidates: first two unauthed, third authed.
+		const thirdCheapModel: Model<Api> = buildModel({
+			id: "mimo-v2.5-pro",
+			name: "MiMo v2.5 Pro",
+			api: "openai-completions",
+			provider: "xiaomi-token-plan-sgp",
+			baseUrl: "https://api.xiaomi.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, authedCheapModel, thirdCheapModel],
+			authedProviders: new Set(["deepseek", "xiaomi-token-plan-sgp"]), // parent + third cheap
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free", "zhipu/glm-4.7", "xiaomi-token-plan-sgp/mimo-v2.5-pro"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// First two have no auth, third has auth → uses third, no parent fallback.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("xiaomi-token-plan-sgp");
+		expect(result.model?.id).toBe("mimo-v2.5-pro");
+	});
+
+	test("unresolved cheap selector + authenticated parent: NOT parent, returns undefined", async () => {
+		// Model not in registry (stale registry). Resolver can't resolve it.
+		// Even with authed parent, explicit patterns → no parent fallback.
+		const registry = createMockRegistry({
+			models: [parentModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["xiaomi-token-plan-sgp/mimo-v2.5-pro"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		// Model not in registry, no eligible candidate → returns undefined, NOT parent.
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model).toBeUndefined();
+	});
+
+	test("empty patterns + authenticated parent: permits parent inheritance", async () => {
+		// No explicit patterns. Parent fallback is the ordinary path.
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback([], "deepseek/deepseek-v4-pro", registry);
+
+		// No patterns → parent inheritance allowed.
 		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");

@@ -1606,15 +1606,28 @@ export function resolveModelOverride(
 }
 
 /**
- * Resolve a list of override patterns to the first matching model, with an
- * auth-aware fallback to the parent session's active model.
+ * Resolve a list of override patterns to the first matching model with
+ * working auth, walking the full eligible ladder. When explicit patterns
+ * are supplied, **never** silently inherit the parent session's active
+ * model — if no eligible candidate has working credentials, the caller's
+ * existing error path surfaces a meaningful failure downstream.
  *
- * If the resolved subagent model has no working credentials (provider has no
- * usable auth), and the parent's active model resolves with working auth,
- * use the parent's model instead. This prevents subagent dispatch from
- * silently routing to a provider the user can't actually call (e.g.
- * `modelRoles.task` pointing at an unqualified id whose only available
- * provider variant has no configured credentials — see #985).
+ * Each pattern in `modelPatterns` is resolved in order. The first model
+ * whose provider has working credentials (or is keyless / kNoAuth) wins.
+ * This prevents subagent dispatch from silently routing to the parent's
+ * provider when an eligible cheaper candidate simply lacked credentials
+ * (see #985).
+ *
+ * `authFallbackUsed` is `true` **only** when the selected model came from
+ * the parent's active pattern, meaning the caller's retry-fallback chain
+ * is correctly skipped (the chosen model is outside the subagent's
+ * eligible ladder). When an eligible-ladder candidate wins — even if it is
+ * not the primary — `authFallbackUsed` is `false` and the retry chain is
+ * installed normally.
+ *
+ * Parent fallback is permitted **only** when no explicit model patterns
+ * were supplied (empty `modelPatterns`), preserving ordinary parent
+ * inheritance for callers that genuinely have no subagent selection.
  *
  * `sessionId` is forwarded to `getApiKey` so that session-sticky OAuth
  * credentials resolve correctly during the pre-flight auth check. Without it,
@@ -1627,9 +1640,10 @@ export function resolveModelOverride(
  * configured local model is never silently rerouted to the parent's remote
  * provider (see #1008).
  *
- * If neither the subagent nor the parent has working auth, returns the
- * primary resolution unchanged so the existing error path still surfaces
- * a meaningful failure downstream.
+ * If no eligible pattern resolves a model, or if every resolved model
+ * lacks auth, returns the first pattern's resolution unchanged (or
+ * `{ explicitThinkingLevel: false }` when nothing resolved at all) so the
+ * existing error path still surfaces a meaningful failure downstream.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1644,29 +1658,78 @@ export async function resolveModelOverrideWithAuthFallback(
 	authFallbackUsed: boolean;
 	warning?: string;
 }> {
-	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
-		return { ...primary, authFallbackUsed: false };
+	if (modelPatterns.length === 0) {
+		// No explicit selection — permit ordinary parent inheritance.
+		if (parentActiveModelPattern) {
+			const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
+			if (fallback.model) {
+				const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
+				if (isAuthenticated(fallbackKey) || fallbackKey === kNoAuth) {
+					return { ...fallback, authFallbackUsed: true };
+				}
+			}
+		}
+		return { explicitThinkingLevel: false, authFallbackUsed: false };
 	}
 
-	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
-	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
-		return { ...primary, authFallbackUsed: false };
+	const availableModels = modelRegistry.getAvailable();
+	const matchPreferences = getModelMatchPreferences(settings);
+
+	// Walk the eligible ladder: try each pattern, return the first model with
+	// working credentials (or keyless / kNoAuth).
+	let firstResult:
+		| {
+				model?: Model<Api>;
+				thinkingLevel?: ConfiguredThinkingLevel;
+				explicitThinkingLevel: boolean;
+				warning?: string;
+		  }
+		| undefined;
+	let ladderWarning: string | undefined;
+	for (const pattern of modelPatterns) {
+		const resolved = resolveModelRoleValue(pattern, availableModels, {
+			settings,
+			matchPreferences,
+		});
+		if (!firstResult) {
+			firstResult = {
+				model: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
+				warning: resolved.warning,
+			};
+		}
+		if (resolved.model) {
+			const key = await modelRegistry.getApiKey(resolved.model, sessionId);
+			if (key === kNoAuth || isAuthenticated(key)) {
+				return {
+					model: resolved.model,
+					thinkingLevel: resolved.thinkingLevel,
+					explicitThinkingLevel: resolved.explicitThinkingLevel,
+					authFallbackUsed: false,
+					warning: resolved.warning,
+				};
+			}
+			if (!ladderWarning && resolved.warning) ladderWarning = resolved.warning;
+		} else if (!ladderWarning && resolved.warning) {
+			ladderWarning = resolved.warning;
+		}
 	}
 
-	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
-	if (!fallback.model) {
-		return { ...primary, authFallbackUsed: false };
-	}
-	if (modelsAreEqual(fallback.model, primary.model)) {
-		return { ...primary, authFallbackUsed: false };
-	}
-	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
-	if (!isAuthenticated(fallbackKey)) {
-		return { ...primary, authFallbackUsed: false };
-	}
-
-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
+	// Explicit patterns were supplied but none have working auth.
+	// NEVER fall back to parent — return the first pattern's resolution
+	// unchanged so the existing error path surfaces a meaningful failure.
+	const primary = firstResult ?? { explicitThinkingLevel: false };
+	return {
+		...primary,
+		authFallbackUsed: false,
+		warning:
+			primary.warning ??
+			ladderWarning ??
+			(primary.model
+				? `Model ${formatModelString(primary.model)} has no configured credentials; no eligible candidate in the configured ladder has working auth.`
+				: undefined),
+	};
 }
 
 /**

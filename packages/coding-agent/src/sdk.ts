@@ -2380,7 +2380,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// window.
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
-			const runtimeResolved = deferredModelPatterns.some(pattern =>
+			let runtimeResolved = deferredModelPatterns.some(pattern =>
 				pattern.split(",").some(selector => {
 					const trimmedSelector = selector.trim();
 					if (!trimmedSelector) return false;
@@ -2399,6 +2399,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					return Boolean(resolved.model);
 				}),
 			);
+			if (!runtimeResolved) {
+				// An extension or provider onboarding flow can update models.yml after
+				// the registry's initial snapshot. Reload only unresolved explicit
+				// selections, then re-resolve before any discovery fallback.
+				await logger.time("resolveModelConfigDeferredRetry", () => modelRegistry.refresh("offline"));
+				runtimeResolved = deferredModelPatterns.some(pattern =>
+					pattern.split(",").some(selector => {
+						const trimmedSelector = selector.trim();
+						if (!trimmedSelector) return false;
+						return Boolean(
+							resolveCliModel({
+								cliModel: trimmedSelector,
+								modelRegistry,
+								settings,
+								preferences: matchPreferences,
+							}).model,
+						);
+					}),
+				);
+			}
 			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
 				await logger.time("resolveModelDiscoveryFallbackNonRuntime", () =>
 					modelRegistry.refresh("online-if-uncached"),
@@ -2563,27 +2583,33 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					selectedThinkingLevel = retryFallback.originalThinkingLevel;
 					selectedExplicitThinkingLevel = true;
 				}
-				let authFallbackUsed = false;
 				if (options.modelPatternAuthFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
-						const fallback = parseModelPattern(
-							options.modelPatternAuthFallback,
-							resolutionModels,
-							matchPreferences,
-						);
-						if (fallback.model) {
-							const fallbackKey = await modelRegistry.getApiKey(fallback.model);
-							if (isAuthenticated(fallbackKey)) {
-								selectedModel = fallback.model;
-								selectedThinkingLevel = fallback.thinkingLevel;
-								selectedExplicitThinkingLevel = fallback.explicitThinkingLevel;
-								authFallbackUsed = true;
+						// Walk remaining expanded patterns to find one with auth
+						// within the eligible ladder. NEVER fall back to parent.
+						for (
+							let candidateIndex = patternIndex + 1;
+							candidateIndex < expandedModelPatterns.length;
+							candidateIndex++
+						) {
+							const candidate = parseModelPattern(
+								expandedModelPatterns[candidateIndex].pattern,
+								resolutionModels,
+								matchPreferences,
+							);
+							if (!candidate.model) continue;
+							const candidateKey = await modelRegistry.getApiKey(candidate.model);
+							if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
+								selectedModel = candidate.model;
+								selectedThinkingLevel = candidate.thinkingLevel;
+								selectedExplicitThinkingLevel = candidate.explicitThinkingLevel;
+								break;
 							}
 						}
 					}
 				}
-				if (!authFallbackUsed && options.modelPatternFallbackRole) {
+				if (options.modelPatternFallbackRole) {
 					const primarySelector = formatModelSelectorValue(
 						formatModelStringWithRouting(primary.model),
 						primary.thinkingLevel,
