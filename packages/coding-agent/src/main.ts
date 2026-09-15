@@ -35,6 +35,7 @@ import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
 	formatModelSelectorValue,
+	parseModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -66,6 +67,7 @@ import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import type * as SetupWizardModule from "./modes/setup-wizard";
 import type { SetupScene } from "./modes/setup-wizard";
+import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
@@ -96,7 +98,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { SessionManager } from "./session/session-manager";
+import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
@@ -325,7 +327,14 @@ export function buildModelScopeNotification(
 export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
-		"markPendingSubmissionStarted" | "finishPendingSubmission" | "showError" | "checkShutdownRequested"
+		| "markPendingSubmissionStarted"
+		| "finishPendingSubmission"
+		| "showError"
+		| "checkShutdownRequested"
+		| "skillCommands"
+		| "renderOptimisticSkillMessage"
+		| "clearOptimisticSkillMessage"
+		| "optimisticSkillMessagePending"
 	> &
 		Partial<Pick<InteractiveMode, "loopPrompt" | "pauseLoop">>,
 	session: Pick<AgentSession, "prompt" | "promptCustomMessage" | "isStreaming">,
@@ -355,6 +364,16 @@ export async function submitInteractiveInput(
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
 			return;
 		}
+		const skillHost = {
+			skillCommands: mode.skillCommands,
+			session,
+			showError: mode.showError.bind(mode),
+			renderOptimisticSkillMessage: mode.renderOptimisticSkillMessage.bind(mode),
+			clearOptimisticSkillMessage: mode.clearOptimisticSkillMessage.bind(mode),
+			get optimisticSkillMessagePending() {
+				return mode.optimisticSkillMessagePending;
+			},
+		};
 		if (input.customType) {
 			const message = {
 				customType: input.customType,
@@ -374,6 +393,15 @@ export async function submitInteractiveInput(
 				synthetic: true,
 				expandPromptTemplates: false,
 				userInitiated: input.userInitiated,
+			});
+		} else if (isKnownSkillCommand(skillHost, input.text)) {
+			// Resubmitted skill text must dispatch through the skill path, or the
+			// model receives a literal `/skill:` token.
+			await invokeSkillCommandFromText(skillHost, input.text, streamingBehavior, {
+				images: input.images,
+				imageLinks: input.imageLinks,
+				optimistic: true,
+				propagateErrors: true,
 			});
 		} else {
 			let forwarded = false;
@@ -730,6 +758,14 @@ export class SessionResolutionError extends Error {
 	}
 }
 
+function exitForSessionResolutionError(error: SessionResolutionError): never {
+	process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
+	if (error.hint) {
+		process.stderr.write(`${chalk.dim(error.hint)}\n`);
+	}
+	process.exit(1);
+}
+
 function resolveForeignSessionSource(
 	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume">,
 ): ForeignSessionSource | undefined {
@@ -993,13 +1029,30 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 	parsed.continue = false;
 	parsed.messages.splice(messageIndex, 1);
 }
+const FORK_NOT_FOUND_HINT =
+	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
 
-/** Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager. */
+function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
+	if (!parsed.noSession) return;
+	if (parsed.resume !== undefined) {
+		throw new SessionResolutionError("--resume requires session persistence");
+	}
+	if (parsed.continue) {
+		throw new SessionResolutionError("--continue requires session persistence");
+	}
+}
+/**
+ * Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager.
+ *
+ * `nativeFlagOwnership: "preliminary"` is reserved for the startup parse,
+ * before extensions establish whether a built-in-named flag belongs to them.
+ */
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
+	options: { nativeFlagOwnership?: "preliminary" | "resolved" } = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
 		if (parsed.noSession) {
@@ -1007,19 +1060,34 @@ export async function createSessionManager(
 		}
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
-			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+			try {
+				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+			} catch (err) {
+				if (err instanceof ForkSourceNotFoundError) {
+					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
+				}
+				throw err;
+			}
 		}
 		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new SessionResolutionError(
-				`Session "${forkSource}" not found.`,
-				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
-			);
+			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 		}
-		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+		try {
+			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+		} catch (err) {
+			if (err instanceof ForkSourceNotFoundError) {
+				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
+			}
+			throw err;
+		}
 	}
 
 	if (parsed.noSession) {
+		normalizeContinueSessionArgs(parsed);
+		if (options.nativeFlagOwnership !== "preliminary") {
+			validateSessionPersistenceArgs(parsed);
+		}
 		return SessionManager.inMemory();
 	}
 	normalizeContinueSessionArgs(parsed);
@@ -1311,7 +1379,21 @@ export async function buildSessionOptions(
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		let resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		// A target from a configured discovery provider is absent from the cold
+		// startup catalog. Refresh only the provider named by the selector: a
+		// typo, missing role, or extension-only provider must not make startup
+		// await unrelated remote discovery before prewalk degrades (issue #11820).
+		if (resolved.error || !resolved.model) {
+			const requestedProvider = parseModelString(rolePattern)?.provider.toLowerCase();
+			const discoverableProvider = requestedProvider
+				? modelRegistry.getDiscoverableProviders().find(provider => provider.toLowerCase() === requestedProvider)
+				: undefined;
+			if (discoverableProvider) {
+				await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
+				resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+			}
+		}
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
@@ -1451,6 +1533,16 @@ interface RunRootCommandDependencies {
 	forceSetupWizard?: boolean;
 }
 const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
+
+/**
+ * Settle the session's dispose promise without letting a failure the caller has
+ * already reported escape as a raw fatal dump. `AgentSession.dispose()` memoizes
+ * its first call, so awaiting it again after print mode swallowed a store
+ * failure rethrows the identical rejection (issue #11493).
+ */
+export async function disposeSessionQuietly(session: AgentSession): Promise<void> {
+	await session.dispose().catch(() => undefined);
+}
 
 export async function runRootCommand(
 	parsed: Args,
@@ -1746,20 +1838,18 @@ export async function runRootCommand(
 					parsedArgs,
 					cwd,
 					settingsInstance,
+					promptMoveSession,
+					{ nativeFlagOwnership: "preliminary" },
 				);
 			}
 		} catch (error: unknown) {
 			if (error instanceof SessionResolutionError) {
-				process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
-				if (error.hint) {
-					process.stderr.write(`${chalk.dim(error.hint)}\n`);
-				}
-				process.exit(1);
+				exitForSessionResolutionError(error);
 			}
 			throw error;
 		}
 
-		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager) {
+		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager && !parsedArgs.noSession) {
 			const previousCwd = cwd;
 			const recordedCwd = sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
 			const resumedProject = await switchToResumedProject(
@@ -1789,8 +1879,11 @@ export async function runRootCommand(
 			process.exit(0);
 		}
 
-		// Handle --resume (no value): show session picker
-		if (parsedArgs.resume === true && !parsedArgs.fork) {
+		// Handle --resume (no value): show session picker. Skipped under
+		// --no-session — createSessionManager already returned an ephemeral manager,
+		// and the deferred persistence check below (after extension flag ownership is
+		// resolved) rejects a native --resume, so the picker must not run first.
+		if (parsedArgs.resume === true && !parsedArgs.fork && !parsedArgs.noSession) {
 			const folderSessions = await logger.time(
 				"SessionManager.list",
 				SessionManager.list,
@@ -1957,6 +2050,14 @@ export async function runRootCommand(
 			};
 			const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 			normalizeContinueSessionArgs(initialArgs, rawArgs);
+			try {
+				validateSessionPersistenceArgs(initialArgs);
+			} catch (error: unknown) {
+				if (error instanceof SessionResolutionError) {
+					exitForSessionResolutionError(error);
+				}
+				throw error;
+			}
 			if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
 				throw new Error(
 					`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
@@ -2165,7 +2266,7 @@ export async function runRootCommand(
 				if ($env.PI_TIMING) {
 					logger.printTimings();
 				}
-				await session.dispose();
+				await disposeSessionQuietly(session);
 				stopThemeWatcher();
 				await postmortem.quit(exitCode);
 			}

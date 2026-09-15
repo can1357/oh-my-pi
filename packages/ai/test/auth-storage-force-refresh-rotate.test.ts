@@ -867,6 +867,9 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(outcome.switched).toBe(false);
 		expect(outcome.retryAtMs).toBeUndefined();
 		expect(outcome.blockedUntilMs).toBeDefined();
+		expect(outcome.requestedBlockedUntilMs).toBeDefined();
+		expect(outcome.requestedBlockedUntilMs!).toBeGreaterThanOrEqual(blockedBefore + 3_600_000);
+		expect(outcome.requestedBlockedUntilMs!).toBeLessThanOrEqual(blockedAfter + 3_600_000);
 		expect(outcome.blockedUntilMs!).toBeGreaterThanOrEqual(blockedBefore + 3_600_000);
 		expect(outcome.blockedUntilMs!).toBeLessThanOrEqual(blockedAfter + 3_600_000);
 	});

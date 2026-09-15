@@ -295,6 +295,7 @@ libc = "0.2"
 os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
+   "Win32_Globalization",
    "Win32_Media_Audio",
    "Win32_Media_Multimedia",
    "Win32_Security",
@@ -322,6 +323,7 @@ arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 clipboard-win = "5.4"
 icy_sixel = "0.7"
 portable-pty = "0.9"
+shlex = "2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Search & File Walking

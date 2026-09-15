@@ -52,6 +52,7 @@ import {
 	type GroupTypeMap,
 	getDefault,
 	SETTINGS_SCHEMA,
+	STATUS_LINE_SEGMENT_IDS,
 	type SettingPath,
 	type SettingValue,
 } from "./settings-schema";
@@ -59,6 +60,30 @@ import {
 // Re-export types that callers need
 export type * from "./settings-schema";
 export * from "./settings-schema";
+
+const STATUS_LINE_SEGMENT_PATHS = ["statusLine.leftSegments", "statusLine.rightSegments"] as const;
+const warnedUnknownStatusLineSegments = new Set<string>();
+
+function getUnknownStatusLineSegments(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const unknown = new Set<string>();
+	for (const segment of value) {
+		if (!STATUS_LINE_SEGMENT_IDS.some(id => id === segment)) {
+			unknown.add(typeof segment === "string" ? JSON.stringify(segment) : String(segment));
+		}
+	}
+	return [...unknown];
+}
+
+function assertKnownStatusLineSegments(path: SettingPath, value: unknown): void {
+	if (path !== "statusLine.leftSegments" && path !== "statusLine.rightSegments") return;
+	const unknown = getUnknownStatusLineSegments(value);
+	if (unknown.length === 0) return;
+	const noun = unknown.length === 1 ? "segment" : "segments";
+	throw new Error(
+		`Unknown status line ${noun}: ${unknown.join(", ")}. Valid segments: ${STATUS_LINE_SEGMENT_IDS.join(", ")}`,
+	);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -686,6 +711,7 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		assertKnownStatusLineSegments(path, value);
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -1964,35 +1990,65 @@ export class Settings {
 
 		let settings: RawSettings = {};
 		let migrated = false;
+		let migratedSettingsJson = false;
 
-		// 1. Migrate from settings.json
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
 		try {
 			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
 				migrated = true;
-				try {
-					fs.renameSync(settingsJsonPath, `${settingsJsonPath}.bak`);
-				} catch {}
+				migratedSettingsJson = true;
+			} else {
+				logger.warn("Settings: ignoring non-object legacy settings.json", { path: settingsJsonPath });
 			}
-		} catch {}
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.warn("Settings: failed to read legacy settings.json", {
+					path: settingsJsonPath,
+					error: String(error),
+				});
+			}
+		}
 
-		// 2. Migrate from agent.db
 		try {
 			const dbSettings = this.#storage?.getSettings();
 			if (dbSettings) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(dbSettings as RawSettings));
 				migrated = true;
 			}
-		} catch {}
+		} catch (error) {
+			logger.warn("Settings: failed to read legacy agent.db settings", { error: String(error) });
+		}
 
-		// 3. Write merged settings
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
 				await this.#writeYamlAtomically(this.#configPath, settings);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
-			} catch {}
+			} catch (error) {
+				logger.warn("Settings: failed to write migrated config.yml", {
+					path: this.#configPath,
+					error: String(error),
+				});
+				return;
+			}
+
+			if (migratedSettingsJson) {
+				try {
+					await fs.promises.rename(settingsJsonPath, `${settingsJsonPath}.bak`);
+				} catch (error) {
+					logger.warn("Settings: failed to archive settings.json after migration", {
+						path: settingsJsonPath,
+						error: String(error),
+					});
+				}
+			}
+
+			try {
+				this.#storage?.clearMigratedSettings();
+			} catch (error) {
+				logger.warn("Settings: failed to clear migrated agent.db settings", { error: String(error) });
+			}
 		}
 	}
 
@@ -2286,6 +2342,33 @@ export class Settings {
 		}
 		delete raw["providers.parallelFetch"];
 
+		// Retired local title models (replaced by the LFM2.5/Falcon refresh) map to
+		// their closest current equivalents. Without this a pinned retired key
+		// passes through as a stale string and title generation silently skips
+		// every turn instead of falling back (no online fallback by design).
+		const RETIRED_TINY_TITLE_MODELS: Record<string, string> = {
+			"lfm2-350m": "lfm2.5-350m",
+			"lfm2-700m": "lfm2.5-350m",
+			"qwen3-0.6b": "lfm2.5-350m",
+			"qwen2.5-0.5b": "lfm2.5-230m",
+			"gemma-270m": "falcon-h1-90m",
+		};
+		const migrateTinyModelValue = (value: unknown): string | undefined =>
+			typeof value === "string" ? RETIRED_TINY_TITLE_MODELS[value] : undefined;
+		// Quoted-dotted flat keys (`"providers.tinyModel"` in YAML/legacy JSON)
+		// promote into the nested setting; nested wins when both are present.
+		const flatTinyModel = migrateTinyModelValue(raw["providers.tinyModel"]);
+		if (flatTinyModel !== undefined) {
+			const providersRoot = isRecord(raw.providers) ? raw.providers : {};
+			if (typeof providersRoot.tinyModel !== "string") providersRoot.tinyModel = flatTinyModel;
+			raw.providers = providersRoot;
+			delete raw["providers.tinyModel"];
+		}
+		if (providersObj) {
+			const migrated = migrateTinyModelValue(providersObj.tinyModel);
+			if (migrated !== undefined) providersObj.tinyModel = migrated;
+		}
+
 		// codexResets.autoRedeem: boolean -> tri-state enum.
 		// Existing explicit false keeps the old "do not run" behavior; missing
 		// config now falls through to the new "unset" default, which asks before
@@ -2350,6 +2433,10 @@ export class Settings {
 				}
 				delete hindsightObj.agentName;
 			}
+			// mentalModelRefreshIntervalMs removed: the mental-model block is now
+			// frozen for the session lifetime rather than re-listed on a timer that
+			// rewrote the cached prompt prefix mid-session (#11961).
+			delete hindsightObj.mentalModelRefreshIntervalMs;
 		}
 
 		// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
@@ -2686,6 +2773,8 @@ export class Settings {
 		}
 		delete raw["computer.backend"];
 
+		delete raw["hindsight.mentalModelRefreshIntervalMs"];
+
 		return raw;
 	}
 
@@ -3013,6 +3102,17 @@ export class Settings {
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
 	}
 
+	#warnUnknownStatusLineSegments(): void {
+		for (const path of STATUS_LINE_SEGMENT_PATHS) {
+			const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
+			for (const segment of getUnknownStatusLineSegments(value)) {
+				if (warnedUnknownStatusLineSegments.has(segment)) continue;
+				warnedUnknownStatusLineSegments.add(segment);
+				logger.warn(`Settings: unknown status line segment ${segment}`, { setting: path });
+			}
+		}
+	}
+
 	#rebuildMerged(): void {
 		this.#revision++;
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
@@ -3021,6 +3121,7 @@ export class Settings {
 		this.#resolvedCache.clear();
 		this.#groupCache.clear();
 		this.#editVariantCache = undefined;
+		this.#warnUnknownStatusLineSegments();
 	}
 
 	#fireAllHooks(): void {
@@ -3315,6 +3416,7 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
+	warnedUnknownStatusLineSegments.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();

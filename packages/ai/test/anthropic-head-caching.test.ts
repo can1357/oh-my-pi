@@ -16,6 +16,7 @@ import { describe, expect, it } from "bun:test";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, CacheRetention, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
@@ -162,6 +163,29 @@ describe("anthropic head caching (general API-key path)", () => {
 		if (!Array.isArray(trailing.content)) return;
 		const lastBlock = trailing.content[trailing.content.length - 1] as { cache_control?: { type?: string } };
 		expect(lastBlock.cache_control?.type).toBe("ephemeral");
+	});
+
+	it("keeps rolling and decimation breakpoints before per-call context", async () => {
+		const messages: Message[] = [
+			{ role: "user", content: "stable user", timestamp: 1 },
+			assistantMessage("stable assistant", 2),
+		];
+		const perCallMessage: Message = {
+			role: "developer",
+			content: "per-call context",
+			attribution: "agent",
+			timestamp: 3,
+		};
+		markPerCallContextMessage(perCallMessage);
+		messages.push(perCallMessage);
+		for (let turn = 1; turn <= 15; turn++) {
+			messages.push({ role: "user", content: `later user ${turn}`, timestamp: turn * 2 + 2 });
+			messages.push(assistantMessage(`later assistant ${turn}`, turn * 2 + 3));
+		}
+
+		const body = await captureWireBody(undefined, { ...CONTEXT, messages });
+
+		expect(findCachedMessageIndices(body)).toEqual([0, 1]);
 	});
 
 	it("stays within Anthropic's 4-breakpoint budget", async () => {

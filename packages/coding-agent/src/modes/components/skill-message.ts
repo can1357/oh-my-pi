@@ -22,6 +22,12 @@ import { type UserBubbleOptions, UserMessageComponent, userBubbleColor } from ".
  */
 export class SkillMessageComponent extends Container {
 	#expanded = false;
+	// Canonical and replayed skill cards finalize immediately so they retire to
+	// native scrollback like any settled block. An optimistically-painted
+	// `/skill:` row (issue #11217) is instead held live until its canonical
+	// `message_start` reconciles it, so it stays removable and never leaves a
+	// duplicate behind in scrollback if reconcile swaps it out.
+	#transcriptBlockFinalized = true;
 
 	constructor(
 		private readonly message: CustomMessage<SkillPromptDetails>,
@@ -36,6 +42,26 @@ export class SkillMessageComponent extends Container {
 			this.#expanded = expanded;
 			this.#rebuild();
 		}
+	}
+
+	/**
+	 * Transcript finalization contract (see `FinalizableBlock`): an optimistic
+	 * `/skill:` row reports `false` so the container keeps it live and removable
+	 * until reconcile; every other skill card is finalized on creation.
+	 */
+	isTranscriptBlockFinalized(): boolean {
+		return this.#transcriptBlockFinalized;
+	}
+
+	/** Hold this card live as an unreconciled optimistic `/skill:` row (#11217). */
+	markTranscriptBlockPending(): void {
+		this.#transcriptBlockFinalized = false;
+	}
+
+	/** Finalize an optimistic row adopted in place after it already retired to
+	 *  scrollback before its canonical `message_start` arrived (#11217). */
+	markTranscriptBlockFinalized(): void {
+		this.#transcriptBlockFinalized = true;
 	}
 
 	override invalidate(): void {

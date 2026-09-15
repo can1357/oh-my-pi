@@ -293,6 +293,12 @@ export interface CompiledExcludeModels {
 	match: CompiledMatchList;
 }
 
+/** Exact upstream discovery modes excluded from one provider's coding-model roster. */
+export interface CompiledExcludeDiscoveryModes {
+	provider: string;
+	modes: string[];
+}
+
 /** Provider plan-requirement tiers keyed by matcher token lists. */
 export interface CompiledPlanRequirement {
 	provider: string;
@@ -306,6 +312,12 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
+export interface CompiledRetryResetTimezone {
+	provider: string;
+	offset: string;
+}
+
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
@@ -316,10 +328,13 @@ export interface CompiledBehavior {
 	hostedDefaults: CompiledHostedDefault[];
 	apiRoutes: CompiledApiRoutes[];
 	modelLimits: CompiledModelLimits[];
+	excludeDiscoveryModes: CompiledExcludeDiscoveryModes[];
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
+	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	referenceIsolatedProviders: string[];
 }
 
 /**
@@ -672,4 +687,12 @@ export interface ResolvedAxes {
 	wire: Record<string, unknown>;
 	thinking: Record<string, unknown>;
 	catalog: Record<string, unknown>;
+	/**
+	 * Reasoning capability after the exact-model effort upgrade: `true` when the
+	 * target reported reasoning or an exact rule declares a ladder for it (the
+	 * reviewed correction to metadata-less discovery rows). Compat resolvers
+	 * read this instead of the raw spec flag, or one id resolves two different
+	 * wire contracts depending on whether it came from discovery or the bake.
+	 */
+	reasoning: boolean;
 }

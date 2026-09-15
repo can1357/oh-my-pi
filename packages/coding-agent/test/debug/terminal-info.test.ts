@@ -81,6 +81,8 @@ describe("collectTerminalState", () => {
 			"CMUX_WORKSPACE_ID",
 			"CMUX_SURFACE_ID",
 			"CMUX_REMOTE_TRANSPORT",
+			"WMUX",
+			"WMUX_SURFACE_ID",
 		] as const;
 		const previous = new Map<string, string | undefined>();
 		for (const key of keys) {
@@ -96,6 +98,12 @@ describe("collectTerminalState", () => {
 			Bun.env.HERDR_PANE_ID = "p1";
 			expect(collectTerminalState(runtime).multiplexer).toBe("herdr");
 			delete Bun.env.HERDR_PANE_ID;
+			Bun.env.WMUX = "1";
+			expect(collectTerminalState(runtime).multiplexer).toBe("wmux");
+			delete Bun.env.WMUX;
+			Bun.env.WMUX_SURFACE_ID = "3f2a";
+			expect(collectTerminalState(runtime).multiplexer).toBe("wmux");
+			delete Bun.env.WMUX_SURFACE_ID;
 			Bun.env.HERDR_SOCKET_PATH = "/tmp/x";
 			expect(collectTerminalState(runtime).multiplexer).toBeNull();
 		} finally {

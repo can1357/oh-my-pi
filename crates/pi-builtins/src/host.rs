@@ -240,7 +240,8 @@ impl Host {
 	///
 	/// Every path argument must go through this before touching the
 	/// filesystem: the host process's current directory is unrelated to the
-	/// shell's.
+	/// shell's. Windows aliases (`/c/...`, `/tmp`) are rewritten to native
+	/// paths by `brush_core::sys::fs::normalize_shell_path`.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
 		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
 		let path = normalized_path.as_ref();
@@ -1253,10 +1254,11 @@ mod testing {
 
 	#[cfg(windows)]
 	#[test]
-	fn resolves_msys_drive_aliases_to_native_drive() {
+	fn resolves_msys_and_tmp_aliases_to_native_locations() {
 		let (host, _) = Host::for_test("test", "", r"C:\workspace");
 
 		assert_eq!(host.resolve("/c/Users/Adam/file.txt"), PathBuf::from(r"C:\Users\Adam\file.txt"));
+		assert_eq!(host.resolve("/tmp/probe"), std::env::temp_dir().join("probe"));
 	}
 
 	/// Parses `argv` and runs `U` against an in-memory host, mirroring what the

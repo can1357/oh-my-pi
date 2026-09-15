@@ -136,6 +136,20 @@ fn remote_start_is_unsupported_without_creating_storage() {
 	fs::remove_dir_all(home).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_env_is_unsupported_without_creating_storage() {
+	let _serial = TEST_SERIAL.lock();
+	let home = temp_home("wsl");
+	let core = core(home.clone(), environment(&[("WSL_DISTRO_NAME", "Ubuntu")]));
+	assert!(matches!(
+		start_blocking(&core, CancelToken::default()).unwrap(),
+		StartOutcome::Unsupported
+	));
+	assert!(!home.join(".omp").exists());
+	fs::remove_dir_all(home).unwrap();
+}
+
 #[test]
 fn prepare_failure_releases_lease_and_removes_private_artifacts() {
 	let _serial = TEST_SERIAL.blocking_lock();
@@ -297,4 +311,44 @@ fn journal_rejects_traversal_and_unknown_fields() {
 		"extra":true
 	}"#;
 	assert!(serde_json::from_slice::<Journal>(json).is_err());
+}
+
+#[test]
+fn darwin_compiler_selection_respects_cc_and_wrappers() {
+	use std::ffi::OsStr;
+
+	let single = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new("clang-18")));
+	assert_eq!(single.get_program(), "clang-18");
+	assert_eq!(single.get_args().count(), 0);
+
+	let wrapped = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new("ccache clang")));
+	assert_eq!(wrapped.get_program(), "ccache");
+	let args: Vec<_> = wrapped.get_args().collect();
+	assert_eq!(args, vec![OsStr::new("clang")]);
+
+	let quoted = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new(
+		r#"ccache "/Applications/Xcode 16.app/Contents/Developer/usr/bin/clang""#,
+	)));
+	assert_eq!(quoted.get_program(), "ccache");
+	let quoted_args: Vec<_> = quoted.get_args().collect();
+	assert_eq!(quoted_args, vec![OsStr::new(
+		"/Applications/Xcode 16.app/Contents/Developer/usr/bin/clang"
+	)]);
+
+	let escaped = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new(
+		r"/path\ with\ spaces/clang -fuse-ld=lld",
+	)));
+	assert_eq!(escaped.get_program(), "/path with spaces/clang");
+	let escaped_args: Vec<_> = escaped.get_args().collect();
+	assert_eq!(escaped_args, vec![OsStr::new("-fuse-ld=lld")]);
+
+	let fallback = super::darwin_compiler::darwin_compiler_command(None);
+	assert_eq!(fallback.get_program(), "/usr/bin/xcrun");
+	let fallback_args: Vec<_> = fallback.get_args().collect();
+	assert_eq!(fallback_args, vec![OsStr::new("clang")]);
+
+	let empty = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new("   ")));
+	assert_eq!(empty.get_program(), "/usr/bin/xcrun");
+	let empty_args: Vec<_> = empty.get_args().collect();
+	assert_eq!(empty_args, vec![OsStr::new("clang")]);
 }
