@@ -264,6 +264,45 @@ describe("fetchMarketplace", () => {
 		).rejects.toThrow(/git clone failed/);
 	});
 
+	it("url source writes the fetched catalog to <cacheDir>/<name>/marketplace.json", async () => {
+		const text = JSON.stringify({
+			name: "url-marketplace",
+			owner: { name: "x" },
+			plugins: [],
+		});
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(async () => new Response(text), { preconnect: fetch.preconnect }),
+		);
+		try {
+			const result = await fetchMarketplace("https://example.com/marketplace.json", tmpDir);
+			expect(result.catalog.name).toBe("url-marketplace");
+			// The public contract: URL fetches persist the raw bytes to the cache.
+			const cached = path.join(tmpDir, "url-marketplace", "marketplace.json");
+			expect(fs.readFileSync(cached, "utf8")).toBe(text);
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
+	it("url source with persistCache:false leaves the cache untouched", async () => {
+		const text = JSON.stringify({
+			name: "url-marketplace",
+			owner: { name: "x" },
+			plugins: [],
+		});
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(async () => new Response(text), { preconnect: fetch.preconnect }),
+		);
+		try {
+			const result = await fetchMarketplace("https://example.com/marketplace.json", tmpDir, {
+				persistCache: false,
+			});
+			expect(result.catalog.name).toBe("url-marketplace");
+			expect(fs.existsSync(path.join(tmpDir, "url-marketplace"))).toBe(false);
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
 	it.skip("url source throws on non-2xx response", async () => {
 		await expect(fetchMarketplace("https://example.com/nonexistent-catalog-xyz.json", tmpDir)).rejects.toThrow(
 			/HTTP [45]\d\d/,

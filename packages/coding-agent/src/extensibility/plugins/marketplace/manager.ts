@@ -19,7 +19,6 @@ import { cachePlugin } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
-	addMarketplaceEntry,
 	collectReferencedPaths,
 	getInstalledPlugin,
 	getMarketplaceEntry,
@@ -27,6 +26,7 @@ import {
 	readMarketplacesRegistry,
 	removeInstalledPlugin,
 	removeMarketplaceEntry,
+	upsertMarketplaceEntry,
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
@@ -43,6 +43,8 @@ import { buildPluginId, parsePluginId } from "./types";
 
 const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
+/** Snapshot copies from a forced repoint older than this are swept as stale. */
+const BACKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function assertRuntimePackageName(name: string): string {
 	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
@@ -74,6 +76,7 @@ export interface MarketplaceManagerOptions {
 
 export class MarketplaceManager {
 	#opts: MarketplaceManagerOptions;
+	#backupSweep: Promise<void> | undefined;
 
 	constructor(options: MarketplaceManagerOptions) {
 		this.#opts = options;
@@ -87,24 +90,100 @@ export class MarketplaceManager {
 		this.#opts.clearPluginRootsCache?.(extra);
 	}
 
+	/**
+	 * Belt-and-braces recovery for repoints interrupted by a crash, run once
+	 * per manager instance on the first cache-touching entry point.
+	 *
+	 * addMarketplace snapshots the old cache to `<name>.bak~<ts>` (a copy)
+	 * before promoting a new clone, so an interrupt anywhere in that window
+	 * leaves either the old cache intact plus a stale snapshot, or the final
+	 * dir missing with the snapshot still on disk. Restore the newest snapshot
+	 * when the final dir is missing — the registry still names a source whose
+	 * cache must exist — and delete snapshots older than a day when it isn't
+	 * (younger ones may belong to a repoint in flight in another process).
+	 */
+	#sweepBackupsOnce(): Promise<void> {
+		this.#backupSweep ??= this.#sweepBackups().catch(() => {});
+		return this.#backupSweep;
+	}
+
+	async #sweepBackups(): Promise<void> {
+		const cacheDir = this.#opts.marketplacesCacheDir;
+		const entries = await fs.readdir(cacheDir, { withFileTypes: true }).catch(() => []);
+		const backups = new Map<string, { path: string; ts: number }[]>();
+		for (const entry of entries) {
+			const match = /^(.+)\.bak~(\d+)$/.exec(entry.name);
+			if (!match || !entry.isDirectory()) continue;
+			const list = backups.get(match[1]) ?? [];
+			list.push({ path: path.join(cacheDir, entry.name), ts: Number(match[2]) });
+			backups.set(match[1], list);
+		}
+		const cutoff = Date.now() - BACKUP_MAX_AGE_MS;
+		for (const [name, list] of backups) {
+			list.sort((a, b) => b.ts - a.ts);
+			const finalDir = path.join(cacheDir, name);
+			const finalExists = await fs
+				.stat(finalDir)
+				.then(() => true)
+				.catch(() => false);
+			if (!finalExists) {
+				const newest = list.shift();
+				if (newest) await fs.rename(newest.path, finalDir).catch(() => {});
+			}
+			for (const stale of list) {
+				if (stale.ts < cutoff) await fs.rm(stale.path, { recursive: true, force: true }).catch(() => {});
+			}
+		}
+	}
+
 	// ── Marketplace lifecycle ─────────────────────────────────────────────────
 
-	async addMarketplace(source: string): Promise<MarketplaceRegistryEntry> {
+	/**
+	 * Register a marketplace, or repoint an existing one at a new source with
+	 * `force`.
+	 *
+	 * A marketplace that has moved (a repo renamed, a mirror stood up for
+	 * machines that cannot reach the original) otherwise has to be removed and
+	 * re-added, since the registry keys on the catalog name and there is no
+	 * other way to change `sourceUri`. Remove first is a worse default than it
+	 * looks: it is two commands where one will do, and if the new source turns
+	 * out to be unreachable the user is left with no marketplace at all.
+	 */
+	async addMarketplace(source: string, options: { force?: boolean } = {}): Promise<MarketplaceRegistryEntry> {
+		await this.#sweepBackupsOnce();
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
-		const existingNames = new Set(reg.marketplaces.map(m => m.name));
+		// persistCache: false — the URL branch must not touch the cached catalog
+		// before `prevCatalog` below snapshots the old bytes for rollback.
+		const { catalog, clonePath } = await fetchMarketplace(source, this.#opts.marketplacesCacheDir, {
+			persistCache: false,
+		});
+		const replacing = reg.marketplaces.some(m => m.name === catalog.name);
 
-		const { catalog, clonePath } = await fetchMarketplace(source, this.#opts.marketplacesCacheDir);
-
-		if (existingNames.has(catalog.name)) {
+		if (replacing && !options.force) {
 			if (clonePath) {
 				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
 			}
 			throw new Error(`Marketplace "${catalog.name}" already exists`);
 		}
 
-		// Promote the temp clone to its final cache location now that we know it's not a duplicate.
-		if (clonePath) {
-			await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
+		// When repointing, the old cache is snapshotted as a copy rather than
+		// renamed aside: the live cache never disappears, so a crash anywhere
+		// below leaves either the old cache intact (plus a stale .bak~* for the
+		// sweep) or the new cache fully promoted. Any failure below — promote or
+		// catalog/registry write — restores from the copy; otherwise the registry
+		// would still name the old source while discovery reads the new clone.
+		const finalDir = path.join(this.#opts.marketplacesCacheDir, catalog.name);
+		let backupDir: string | undefined;
+		if (clonePath && replacing) {
+			const candidate = `${finalDir}.bak~${Date.now()}`;
+			try {
+				await fs.cp(finalDir, candidate, { recursive: true });
+				backupDir = candidate;
+			} catch (err) {
+				await fs.rm(candidate, { recursive: true, force: true }).catch(() => {});
+				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
+				throw new Error(`Could not snapshot marketplace "${catalog.name}"; nothing was changed.`, { cause: err });
+			}
 		}
 
 		const sourceType = classifySource(source);
@@ -113,9 +192,13 @@ export class MarketplaceManager {
 		const catalogPath = path.resolve(
 			expandTilde(path.join(this.#opts.marketplacesCacheDir, catalog.name, "marketplace.json")),
 		);
-
-		// Persist the fetched catalog so subsequent reads don't require re-fetching.
-		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+		// Non-git repoints have no clone to back up, but the catalog write below
+		// still replaces the old catalog in place. Snapshot it before anything
+		// touches the file so a failed write can put the genuinely-old bytes
+		// back — otherwise the new catalog goes live while the registry keeps
+		// naming the old source.
+		const prevCatalog =
+			replacing && !clonePath ? await fs.readFile(catalogPath, "utf8").catch(() => undefined) : undefined;
 
 		const now = new Date().toISOString();
 		const entry: MarketplaceRegistryEntry = {
@@ -126,12 +209,45 @@ export class MarketplaceManager {
 			addedAt: now,
 			updatedAt: now,
 		};
+		const updated = upsertMarketplaceEntry(reg, entry);
 
-		const updated = addMarketplaceEntry(reg, entry);
-		await writeMarketplacesRegistry(this.#opts.marketplacesRegistryPath, updated);
+		try {
+			// Promote inside the rollback scope: it removes the live cache before
+			// renaming the clone into place, and a failure in that window must
+			// restore from the snapshot copy.
+			if (clonePath) {
+				await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
+			}
+			// Persist the fetched catalog so subsequent reads don't require re-fetching.
+			await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+			await writeMarketplacesRegistry(this.#opts.marketplacesRegistryPath, updated);
+		} catch (err) {
+			if (clonePath) {
+				// Drop the temp clone; a no-op when the promote already consumed it.
+				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
+			}
+			if (backupDir) {
+				// Put the old cache back so the still-unchanged registry keeps
+				// pointing at a repository that exists.
+				await fs.rm(finalDir, { recursive: true, force: true }).catch(() => {});
+				await fs.rename(backupDir, finalDir).catch(() => {});
+			} else if (replacing && !clonePath) {
+				// Same for non-git sources: undo the catalog write so it stays
+				// consistent with the registry, which still names the old source.
+				if (prevCatalog !== undefined) await fs.writeFile(catalogPath, prevCatalog).catch(() => {});
+				else await fs.rm(catalogPath, { force: true }).catch(() => {});
+			}
+			throw err;
+		}
+		if (backupDir) {
+			await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
+		}
 
-		logger.debug("Marketplace added", { name: catalog.name, sourceType });
-		return entry;
+		logger.debug(replacing ? "Marketplace repointed" : "Marketplace added", { name: catalog.name, sourceType });
+		// Read back rather than returning `entry`: a repoint keeps the original
+		// `addedAt`, so the two disagree and the caller would report a creation
+		// date that is not the one on disk.
+		return getMarketplaceEntry(updated, catalog.name) ?? entry;
 	}
 
 	async removeMarketplace(name: string): Promise<void> {
@@ -149,13 +265,18 @@ export class MarketplaceManager {
 	}
 
 	async updateMarketplace(name: string): Promise<MarketplaceRegistryEntry> {
+		await this.#sweepBackupsOnce();
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const existing = getMarketplaceEntry(reg, name);
 		if (!existing) {
 			throw new Error(`Marketplace "${name}" not found`);
 		}
 
-		const { catalog, clonePath } = await fetchMarketplace(existing.sourceUri, this.#opts.marketplacesCacheDir);
+		// persistCache: false — a URL fetch must not overwrite the cached catalog
+		// before the name-drift check below decides the update may proceed.
+		const { catalog, clonePath } = await fetchMarketplace(existing.sourceUri, this.#opts.marketplacesCacheDir, {
+			persistCache: false,
+		});
 
 		// Guard against upstream catalog silently renaming itself — the registry
 		// entry is keyed by name, so a drift would corrupt the entry on next read.
@@ -212,6 +333,7 @@ export class MarketplaceManager {
 	// ── Plugin discovery ──────────────────────────────────────────────────────
 
 	async listAvailablePlugins(marketplace?: string): Promise<MarketplacePluginEntry[]> {
+		await this.#sweepBackupsOnce();
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 
 		if (marketplace !== undefined) {
