@@ -27,14 +27,15 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `disallowedTools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
 Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.ts`):
 
 - missing `name` or `description` => invalid (`null`), caller treats as parse failure
-- `tools` accepts CSV or array; if provided, `yield` is auto-added
+- `tools` accepts CSV or array; if provided, `yield` is auto-added. A declared `tools` list is a **hard allowlist** for the subagent: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog (built-ins are filtered as before). Subagents that do not declare `tools` inherit the full parent tool set; top-level sessions are unaffected. The semantics match Claude Code's subagent `tools:` contract, so the frontmatter of `.claude/agents/*.md` definitions ports as-is (copy it into an OMP discovery root — direct cross-harness roots are not scanned, see below).
+- `disallowedTools` accepts CSV or array of exact tool names or `mcp__*` / `mcp__<server>_*` wildcards (trailing `*` = prefix match), removed from the subagent's active set after the allowlist. `disallowedTools: [mcp__*]` drops all MCP tools; `disallowedTools: [mcp__db_*]` drops one server. Works with or without a `tools` allowlist. Mirrors Claude Code's `disallowedTools` semantics with omp's `mcp__<server>_<tool>` naming. The `<server>` in a wildcard is the **sanitized** tool-name prefix (`createMCPToolName` lowercases and collapses non-`[a-z_]` characters — a server named `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`). Hidden protocol tools (`yield`, `goal`, `think`) can never be disallowed — stripping the subagent terminator would leave a `requireYieldTool` session unable to yield. Disallowing `read` or `write` also suppresses `xd://` mounting for custom/extension/MCP tools: the transport they depend on is unavailable, so the tools surface top-level instead and are never advertised as `xd://` targets the model cannot reach. A lone `disallowedTools: ["*"]` strips every non-hidden tool (bare `*` is the deny-everything-but-protocol escape hatch). Pattern matching is case-sensitive for non-MCP names: frontmatter `mcp__*` patterns normalize to the minted lowercase form, but an exact custom-tool pattern must match the registered name.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data

@@ -254,6 +254,12 @@ export interface AgentSessionConfig {
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Subagent tool scoping: every runtime active-set mutation preserves the startup scope. */
+	enforceToolAllowlist?: boolean;
+	/** Names the enforced `tools:` allowlist permits (hidden protocol tools are always permitted). */
+	allowedToolNames?: ReadonlySet<string>;
+	/** Disallow patterns removed from every runtime selection (trailing `*` = prefix wildcard). */
+	disallowedToolPatterns?: readonly string[];
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Time-traveling stream-rule manager. */

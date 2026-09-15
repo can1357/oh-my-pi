@@ -29,6 +29,8 @@ import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
+import { extractResourceUri, resolveTargetServer } from "../internal-urls/mcp-protocol";
+import { MCPManager } from "../mcp/manager";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getExperimentalContextSession } from "./context-notes";
@@ -2686,6 +2688,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			throw new ToolError(e instanceof Error ? e.message : String(e));
 		}
 		const scheme = urlMeta.protocol.replace(/:$/, "").toLowerCase();
+		// `mcp://` resolves through the process-global router, which has no
+		// session, so a scoped subagent could otherwise read any connected
+		// server's resources by URI even though the scope excludes that server
+		// everywhere else (the Cursor resource adapter gate covers only its own
+		// frames). Gate here, against the session the read tool is bound to,
+		// using the same URI→server resolution the router performs so the two
+		// cannot disagree about which server a URI belongs to.
+		// The MCP handler answers TWO URL forms: the `mcp://<uri>` wrapper and a
+		// server-advertised native URI whose scheme no OMP handler claims
+		// (`ags://secret`). Gate on the router's own fallback predicate rather than
+		// `scheme === "mcp"`, or the native form stays readable while the scope
+		// excludes its server everywhere else.
+		if (internalRouter.routesToMcpResources(url)) {
+			const mcpManager = MCPManager.instance();
+			const serverName = mcpManager ? resolveTargetServer(mcpManager, extractResourceUri(urlMeta)) : undefined;
+			if (serverName !== undefined && this.session.isMCPServerResourceAllowed?.(serverName) === false) {
+				throw new ToolError(`No MCP server has resource "${url}".`);
+			}
+		}
 		let hasExtraction = false;
 		if (scheme === "agent") {
 			const hasPathExtraction = urlMeta.pathname && urlMeta.pathname !== "/" && urlMeta.pathname !== "";
