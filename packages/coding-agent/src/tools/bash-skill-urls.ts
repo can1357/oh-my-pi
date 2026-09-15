@@ -78,16 +78,30 @@ function parseSkillUrlTarget(
 	if (!parsed) {
 		throw new ToolError(`Invalid skill:// URL: ${url}`);
 	}
-
 	let rawSkillSegment = parsed[1];
 	if (!rawSkillSegment) {
 		throw new ToolError(`skill:// URL requires a skill name: ${url}`);
 	}
-	// Decode percent-encoded colons (%3A) used for namespaced skill names
-	try {
-		rawSkillSegment = decodeURIComponent(rawSkillSegment);
-	} catch {
-		// Leave as-is if decoding fails
+	// Decode percent-encoded characters; namespaced names and colon suffixes
+	// are matched against decoded skill names.
+	const decode = (segment: string) => {
+		try {
+			return decodeURIComponent(segment);
+		} catch {
+			return segment;
+		}
+	};
+	rawSkillSegment = decode(rawSkillSegment);
+	// A collision-namespaced skill (`<plugin>/<name>`) spans the host and the
+	// first path segment. Skill names never contain `/`, so an exact match is
+	// unambiguous and wins over a bare skill sharing the namespace's name.
+	const namespacedSegment = parsed[2] ? /^\/([^/?#]+)(\/[^?#]*)?$/.exec(parsed[2]) : null;
+	if (namespacedSegment) {
+		const namespaced = `${rawSkillSegment}/${decode(namespacedSegment[1])}`;
+		if (skills.some(s => s.name === namespaced)) {
+			rawSkillSegment = namespaced;
+			parsed[2] = namespacedSegment[2] ?? "";
+		}
 	}
 
 	// Resolve skill name by longest-prefix match against registered skills.

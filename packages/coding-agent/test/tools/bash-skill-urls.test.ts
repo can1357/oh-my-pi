@@ -72,6 +72,48 @@ describe("expandInternalUrls", () => {
 		);
 	});
 
+	it("expands collision-namespaced skills before treating the path as relative", async () => {
+		const skills = [
+			createSkill("calendar", "/tmp/skills/first/calendar"),
+			createSkill("second/calendar", "/tmp/skills/second/calendar"),
+		];
+		const bare = path.join(skills[0].baseDir, "SKILL.md");
+		const namespaced = path.join(skills[1].baseDir, "SKILL.md");
+		const nested = path.join(skills[1].baseDir, "scripts/init.py");
+		const relative = path.join(skills[0].baseDir, "second/calendar");
+		await expect(
+			expandInternalUrls("cat skill://calendar skill://second/calendar skill://second/calendar/scripts/init.py", {
+				skills,
+			}),
+		).resolves.toBe(`cat ${shellEscape(bare)} ${shellEscape(namespaced)} ${shellEscape(nested)}`);
+		// A bare skill still owns relative paths that are not a loaded namespaced name.
+		await expect(expandInternalUrls("cat skill://calendar/second/calendar", { skills })).resolves.toBe(
+			`cat ${shellEscape(relative)}`,
+		);
+	});
+
+	it("prefers an exact namespaced skill over a bare skill sharing the namespace", async () => {
+		// A plugin directory named like its own skill yields the alias `calendar/calendar`.
+		const skills = [
+			createSkill("calendar", "/tmp/skills/first/calendar"),
+			createSkill("calendar/calendar", "/tmp/skills/calendar/calendar"),
+		];
+		await expect(expandInternalUrls("cat skill://calendar/calendar", { skills })).resolves.toBe(
+			`cat ${shellEscape(path.join(skills[1].baseDir, "SKILL.md"))}`,
+		);
+		await expect(expandInternalUrls("cat skill://calendar/calendar/notes.md", { skills })).resolves.toBe(
+			`cat ${shellEscape(path.join(skills[1].baseDir, "notes.md"))}`,
+		);
+	});
+
+	it("decodes percent-encoded namespace segments before matching", async () => {
+		const skills = [createSkill("my plugin/calendar", "/tmp/skills/my plugin/calendar")];
+		const target = path.join(skills[0].baseDir, "SKILL.md");
+		await expect(expandInternalUrls("cat skill://my%20plugin/calendar", { skills })).resolves.toBe(
+			`cat ${shellEscape(target)}`,
+		);
+	});
+
 	it("passes caller cwd to the router when expanding memory URLs", async () => {
 		const cwd = "/tmp/session-b";
 		const sourcePath = "/tmp/session-b-memory/memory_summary.md";
