@@ -3074,18 +3074,18 @@ export class StatusLineComponent implements Component {
 	}
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
-	const statusLine = this.#buildStatusLine(width, "box", previewTitle);
-	// With a two-line overflow the reported width is the widest line, which is
-	// what the editor budgets per row. A single-line bar keeps today's value.
-	let borderWidth = 0;
-	for (const line of statusLine.dimmedContent.split("\n")) {
-		const lineWidth = visibleWidth(line);
-		if (lineWidth > borderWidth) borderWidth = lineWidth;
-	}
-	return {
-		content: statusLine.dimmedContent,
-		width: borderWidth,
-		revision: this.#widthEpochRevision,
+		const statusLine = this.#buildStatusLine(width, "box", previewTitle);
+		// With a two-line overflow the reported width is the widest line, which is
+		// what the editor budgets per row. A single-line bar keeps today's value.
+		let borderWidth = 0;
+		for (const line of statusLine.dimmedContent.split("\n")) {
+			const lineWidth = visibleWidth(line);
+			if (lineWidth > borderWidth) borderWidth = lineWidth;
+		}
+		return {
+			content: statusLine.dimmedContent,
+			width: borderWidth,
+			revision: this.#widthEpochRevision,
 		};
 	}
 
