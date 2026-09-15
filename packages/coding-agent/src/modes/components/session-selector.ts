@@ -150,13 +150,35 @@ function compareFuzzyRank(a: RankedSessionMatch, b: RankedSessionMatch): number 
 	return a.score - b.score || compareSessionRecency(a.session, b.session) || a.index - b.index;
 }
 
+/** Exact titles lead partial titles; other matches retain their existing order. */
+function prioritizeTitleMatches(
+	sessions: SessionInfo[],
+	tokens: string[],
+	literal: RankedSessionMatch[],
+): SessionInfo[] {
+	const query = tokens.join(" ");
+	const exact: SessionInfo[] = [];
+	const partial: SessionInfo[] = [];
+	const titleMatches = new Set<SessionInfo>();
+	// Title hits are literal matches, already ranked by recency and source index.
+	for (const { session } of literal) {
+		const title = session.title?.trim().toLowerCase().replace(/\s+/g, " ");
+		if (title === query) exact.push(session);
+		else if (title && isLiteralMatch(title, tokens)) partial.push(session);
+		else continue;
+		titleMatches.add(session);
+	}
+	if (titleMatches.size === 0) return sessions;
+	return [...exact, ...partial, ...sessions.filter(session => !titleMatches.has(session))];
+}
+
 /**
  * Filter and rank session picker search results.
  *
- * Resume search narrows a recency-sorted list: once every query token appears
- * as a literal substring, newer sessions should beat a slightly better fuzzy
- * position match. Pure fuzzy/acronym matches still sort by fuzzy score after
- * literal matches, but weak pure fuzzy tokens are dropped as noise.
+ * Exact and partial title matches lead. Other literal matches rank by recency
+ * rather than a slightly better fuzzy position match. Pure fuzzy/acronym
+ * matches still sort by fuzzy score after literal matches, but weak pure
+ * fuzzy tokens are dropped as noise.
  *
  * This is the synchronous reference implementation; {@link SessionList} runs
  * the same primitives incrementally so huge listings never block a keystroke.
@@ -183,7 +205,7 @@ export function rankSessionSearchMatches(allSessions: SessionInfo[], query: stri
 	const out: SessionInfo[] = [];
 	for (const match of literal) out.push(match.session);
 	for (const match of fuzzyMatches) out.push(match.session);
-	return out;
+	return prioritizeTitleMatches(out, tokens, literal);
 }
 
 /**
@@ -463,17 +485,19 @@ class SessionList implements Component {
 	}
 
 	/**
-	 * Rebuild {@link #filteredSessions} from the current literal, fuzzy, and
-	 * history inputs: literal matches first (recency), fuzzy-only matches below
-	 * (score), prompt-history matches promoted to the top when present.
+	 * Rebuild {@link #filteredSessions} with title matches first, then other
+	 * prompt-history hits, literal matches (recency), and fuzzy-only hits (score).
 	 */
 	#composeFiltered(): void {
 		this.#fuzzyRanked.sort(compareFuzzyRank);
 		const base: SessionInfo[] = [];
 		for (const match of this.#literalRanked) base.push(match.session);
 		for (const match of this.#fuzzyRanked) base.push(match.session);
-		this.#filteredSessions =
-			this.#historyIds.length > 0 ? mergeSessionRanking(this.#allSessions, base, this.#historyIds) : base;
+		this.#filteredSessions = prioritizeTitleMatches(
+			this.#historyIds.length > 0 ? mergeSessionRanking(this.#allSessions, base, this.#historyIds) : base,
+			tokenizeSessionQuery(this.#searchInput.getValue()),
+			this.#literalRanked,
+		);
 		this.#selectedIndex = Math.min(this.#selectedIndex, Math.max(0, this.#filteredSessions.length - 1));
 	}
 

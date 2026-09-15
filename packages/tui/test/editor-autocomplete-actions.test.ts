@@ -72,6 +72,41 @@ describe("Editor async autocomplete scheduling", () => {
 	});
 });
 
+describe("Editor slash argument autocomplete", () => {
+	it("re-evaluates a closed popup after typing an argument separator", async () => {
+		const argumentPrefixes: string[] = [];
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{
+						name: "probe",
+						getArgumentCompletions(argumentPrefix) {
+							argumentPrefixes.push(argumentPrefix);
+							return /^\S+\s/.test(argumentPrefix) ? [{ value: "scope", label: "scope" }] : null;
+						},
+					},
+				],
+				"/tmp",
+			),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		const popupClosed = onceAutocompleteUpdate(editor);
+		for (const char of "probe a") editor.handleInput(char);
+		await popupClosed;
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(argumentPrefixes).toEqual(["a"]);
+
+		const popupOpened = onceAutocompleteUpdate(editor);
+		editor.handleInput(" ");
+		await popupOpened;
+		expect(argumentPrefixes).toEqual(["a", "a "]);
+		expect(editor.isShowingAutocomplete()).toBeTrue();
+	});
+});
+
 class HashActionProvider implements AutocompleteProvider {
 	async getSuggestions(
 		lines: string[],
@@ -247,6 +282,47 @@ describe("Editor slash autocomplete acceptance", () => {
 			expect(editor.getText()).toBe("@packages/");
 			expect(editor.isShowingAutocomplete()).toBe(true);
 			expect(submitted).toBe("");
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	it("submits a slash-command directory argument with Enter instead of chaining into it", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-slash-directory-enter-"));
+		try {
+			const normalizedBaseDir = baseDir.replace(/\\/g, "/");
+			const target = `${normalizedBaseDir}/sibling`;
+			fs.mkdirSync(path.join(target, "child"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const getSuggestions = provider.getSuggestions;
+			let chainedRequests = 0;
+			provider.getSuggestions = (...args) => {
+				chainedRequests += 1;
+				return getSuggestions.call(provider, ...args);
+			};
+			editor.setAutocompleteProvider(provider);
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+
+			editor.setText(`/move ${target}`);
+			const autocompleteOpened = onceAutocompleteUpdate(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+			expect(editor.isShowingAutocomplete()).toBe(true);
+
+			// Enter with the popup open accepts the selection and returns; it never
+			// submits. A chained regular request would reopen it on the directory's
+			// children, so let the queued callback run before observing the state.
+			editor.handleInput("\r");
+			await Promise.resolve();
+			expect(chainedRequests).toBe(0);
+			expect(editor.isShowingAutocomplete()).toBe(false);
+
+			editor.handleInput("\r");
+			expect(submitted).toBe(`/move ${target}/`);
 		} finally {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}

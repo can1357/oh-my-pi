@@ -13,10 +13,11 @@ import {
 	type ViewportSize,
 } from "@oh-my-pi/pi-tui/tui";
 import { sliceWithWidth, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./components/custom-editor";
 import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
-import { getEditorTheme, initThemeSync, theme } from "./theme/theme";
+import { ensureThemeSync, getEditorTheme, theme } from "./theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
 
@@ -252,14 +253,26 @@ export class Composer implements TerminalFrameProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
+	// Smallest below-transcript chrome height (editor + status + any transient
+	// inline dialog) seen since mount. Retirement is billed against this
+	// persistent baseline, never the transient peak, so a dialog or tall editor
+	// that later shrinks never leaves committed transcript rows the live viewport
+	// cannot reclaim (#11007). The baseline is terminal-height independent — the
+	// editor and status floors do not scale with rows — so it is retained across
+	// resizes rather than rediscovered from whatever chrome is expanded at the
+	// moment the height changes.
+	#retirementBelowFloor: number | undefined;
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
 	#transferred = false;
 
 	constructor(options: ComposerOptions = {}) {
-		if (typeof theme === "undefined") initThemeSync();
-		this.#exit = options.exit ?? (code => process.exit(code));
+		ensureThemeSync();
+		// Host-owned hard exit: route through postmortem so a double-Ctrl-C during
+		// an open extension-load guard window exits cleanly instead of throwing
+		// ExtensionExitError through the guarded process.exit (#11789).
+		this.#exit = options.exit ?? (code => postmortem.exitProcess(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };
 		this.#statusSnapshot = options.status;
@@ -291,6 +304,11 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#applyStatusSnapshot();
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
+		// They deliberately mirror the interactive editor's contract so a stalled startup
+		// never behaves differently from a healthy one: Ctrl+C clears the draft and a second
+		// press exits 130 — the unconditional abort, draft or not; Ctrl+D exits 0 on an
+		// empty draft and otherwise forward-deletes (see CustomEditor's app.exit handling),
+		// so typing while the session loads cannot be lost to a mistyped delete.
 		this.editor.setActionKeys("app.clear", ["ctrl+c"]);
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
 		this.editor.onClear = () => this.#handleInterrupt();
@@ -372,7 +390,16 @@ export class Composer implements TerminalFrameProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		//
+		// Retirement is billed against the persistent below-transcript chrome
+		// baseline, not the transient peak: a confirmation dialog or a tall
+		// multi-line editor swapped in below the transcript clips the live tail
+		// for its lifetime, but must not permanently commit transcript rows to
+		// native history — otherwise a later shrink cannot refill the freed rows
+		// and the editor drifts up above a band of blank rows (#11007).
+		this.#retirementBelowFloor =
+			this.#retirementBelowFloor === undefined ? after.length : Math.min(this.#retirementBelowFloor, after.length);
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + this.#retirementBelowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];

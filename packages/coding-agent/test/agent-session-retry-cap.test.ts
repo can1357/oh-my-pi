@@ -99,6 +99,7 @@ describe("AgentSession retry delay cap", () => {
 			"opencode-go",
 			"openrouter",
 			"github-copilot",
+			"zai",
 			"cursor",
 		]) {
 			authStorage.removeRuntimeApiKey(provider);
@@ -196,20 +197,19 @@ describe("AgentSession retry delay cap", () => {
 
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
 		// Contract: with the opt-in set, a provider-stated usage-limit reset
-		// sleeps until the reset instead of failing fast. Uses the reported
-		// ZAI shape (Zhipu 5h 使用上限 with an absolute reset timestamp,
-		// single credential so no rotation can save it); the bypass keys off
-		// Flag.UsageLimit, so every provider whose exhaustion classifies as
-		// a usage limit is covered.
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		// sleeps until the reset instead of failing fast. Uses Z.AI's English
+		// code-1308 shape: a timezone-naive Beijing reset timestamp plus a
+		// shorter retry-after-ms, with one credential so rotation cannot save it.
+		const model = getBundledModel("zai", "glm-5.3");
 		if (!model) {
-			throw new Error("Expected bundled Anthropic test model to exist");
+			throw new Error("Expected bundled Z.AI test model to exist");
 		}
+		authStorage.setRuntimeApiKey("zai", "zai-test-key");
 
-		// Reset two hours out, formatted like the provider timestamp (parsed
-		// as UTC, so toISOString stays exact); bounds below absorb test time.
-		const resetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
-		const usageLimitError = `429 已达到 5 小时的使用上限。您的限额将在 ${resetStamp} 重置。`;
+		// Reset two hours out, formatted as the Beijing wall clock Z.AI reports;
+		// the provider policy applies UTC+8 before longest-window selection.
+		const resetStamp = new Date(Date.now() + 7_200_000 + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const usageLimitError = `429 code 1308, Usage limit reached for 5 hour. Your limit will reset at ${resetStamp} retry-after-ms=5000`;
 
 		const mock = createMockModel({
 			responses: [{ throw: usageLimitError }, { content: ["recovered after usage reset"], stopReason: "stop" }],

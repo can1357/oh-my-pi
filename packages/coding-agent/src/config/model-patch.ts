@@ -6,9 +6,13 @@ import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-refere
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createLiveConfigHeaders } from "./model-config-values";
 import type { ModelOverride } from "./models-config-schema";
-/** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
+/** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
 	baseUrl?: string;
+	/** APIs covered by the provider `baseUrl`: effective APIs of custom models
+	 * inheriting that URL, plus a provider-level `api` for override-only
+	 * configs. `undefined` preserves the historical provider-wide override. */
+	baseUrlApis?: readonly Api[];
 	headers?: Record<string, string>;
 	apiKey?: string;
 	authHeader?: boolean;
@@ -19,6 +23,28 @@ export interface ProviderOverride {
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
 	requestMetadata?: Model<Api>["requestMetadata"];
+}
+
+/**
+ * Single decision point for provider `baseUrl` application, shared by every
+ * composition path (built-in load, cached load, discovery merge, runtime
+ * overrides). `undefined` `baseUrlApis` keeps the historical provider-wide
+ * override; an explicit scope applies only to models whose API it covers.
+ * `transport: "pi-native"` is provider-wide by documented contract
+ * (docs/models.md): every model under the provider rides the auth-gateway,
+ * so the gateway `baseUrl` follows the transport regardless of the model's
+ * own API — a model must never end up pi-native on a catalog upstream host
+ * (#2555).
+ */
+export function resolveProviderBaseUrl<TApi extends Api>(
+	modelApi: TApi,
+	modelBaseUrl: string | undefined,
+	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
+): string | undefined {
+	if (override?.baseUrl === undefined) return modelBaseUrl;
+	if (override.transport === "pi-native") return override.baseUrl;
+	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+	return override.baseUrl;
 }
 
 /**
@@ -62,14 +88,14 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	existing: Model<Api> | undefined,
 	providerOverride?: Pick<
 		ProviderOverride,
-		"baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+		"baseUrl" | "baseUrlApis" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
 	>,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
 			// providerOverride.headers (raw `!command`) must be the last live
 			// source: `model.headers` is a discovery-time resolved snapshot, so
 			// without this a rotated credential (401 → cache invalidation) would
@@ -90,7 +116,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	if (providerOverride) {
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
 			headers: createLiveConfigHeaders([model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
 				apiKeyConfig: providerOverride.apiKey,

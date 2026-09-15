@@ -7,10 +7,11 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
+import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
 
 /**
@@ -93,6 +94,26 @@ export function printableEvent(event: AgentSessionEvent): unknown {
  * returns the process exit code for the completed turn.
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<number> {
+	// A signal (SIGINT/SIGTERM/SIGHUP) landing mid-turn drives the exit code
+	// through postmortem (130/143/129). Record the reason so the aborted-response
+	// branch below never races that with its own ordinary failure status.
+	let signalReason: postmortem.Reason | undefined;
+	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
+		signalReason = reason;
+		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	});
+	try {
+		return await runPrintModeCore(session, options, () => signalReason !== undefined);
+	} finally {
+		cancelSignalTeardown();
+	}
+}
+
+async function runPrintModeCore(
+	session: AgentSession,
+	options: PrintModeOptions,
+	signalTeardownActive: () => boolean,
+): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
@@ -161,6 +182,41 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 	});
 
+	// process.stderr.write is fire-and-forget as well: a diagnostic buffered
+	// behind a backpressured pipe would still be undelivered when runPrintMode
+	// returns, and the caller drains stdout only. Serialize the persistence
+	// diagnostics and await the tail before returning.
+	let stderrTail: Promise<void> = Promise.resolve();
+	const writeStderrLine = (line: string): void => {
+		stderrTail = stderrTail
+			.then(async () => {
+				if (process.stderr.write(`${line}\n`)) return;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				// A closed stream never emits `drain`; resolve on error/close too so
+				// an undeliverable diagnostic cannot strand the tail.
+				const settle = (): void => {
+					process.stderr.off("drain", settle);
+					process.stderr.off("error", settle);
+					process.stderr.off("close", settle);
+					resolve();
+				};
+				process.stderr.on("drain", settle);
+				process.stderr.on("error", settle);
+				process.stderr.on("close", settle);
+				await promise;
+			})
+			// A stderr that throws (EPIPE) must not poison the tail: it would skip
+			// every later diagnostic and reject the awaited tail below.
+			.catch(() => {});
+	};
+
+	// Discriminates a store failure from any other dispose rejection below.
+	let persistenceFailure: Error | undefined;
+	session.sessionManager.onPersistenceError(error => {
+		persistenceFailure = error;
+		writeStderrLine(formatPersistenceFailure(error.message));
+	});
+
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {
 		if (mode !== "text" || wroteTextWorkingIndicator) return;
@@ -194,11 +250,13 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
-	// transitions) stay non-fatal in both modes.
+	// transitions) and aborts initiated by signal teardown stay non-fatal here;
+	// postmortem owns the signal-specific exit code (130/143/129).
 	const terminalFailure =
 		assistantMsg !== undefined &&
 		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-		!isSilentAbort(assistantMsg);
+		!isSilentAbort(assistantMsg) &&
+		!signalTeardownActive();
 
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
@@ -239,7 +297,20 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Dispose before returning the status instead of hard-exiting ahead of it:
 	// the awaited `dispose()` runs the browser reaper (releaseTabsForOwner), so
 	// an OMP-owned Chromium cannot survive the exit (issue #5643).
-	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	//
+	// A latched store failure rethrows from `dispose()`; report it as lost
+	// durability rather than letting it escape as a raw fatal dump.
+	let durabilityFailure = false;
+	try {
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	} catch (error) {
+		if (!persistenceFailure || error !== persistenceFailure) throw error;
+		durabilityFailure = true;
+		// The store is still failing at teardown, so this is the moment the
+		// transcript stops being retryable and becomes lost.
+		writeStderrLine(formatPersistenceDurabilityFailure(persistenceFailure.message));
+		await stderrTail;
+	}
 
 	// Text mode reports the terminal failure on stderr exactly as before: same
 	// line, same ordering after dispose, without terminating the process here.
@@ -252,5 +323,6 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 	}
 
-	return terminalFailure ? 1 : 0;
+	await stderrTail;
+	return terminalFailure || durabilityFailure ? 1 : 0;
 }

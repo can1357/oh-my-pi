@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -68,13 +69,14 @@ describe("skillful setting and /skillful session toggle", () => {
 		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
 	});
 
-	async function createSession(overrides: Record<string, unknown> = {}): Promise<AgentSession> {
+	async function createSession(overrides: Record<string, unknown> = {}, skills?: Skill[]): Promise<AgentSession> {
 		const created = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(overrides),
+			skills,
 		});
 		session = created.session;
 		return session;
@@ -149,11 +151,22 @@ describe("skillful setting and /skillful session toggle", () => {
 	});
 
 	it("announces URI syntax without catalog rows for hidden-only skills mid-session", async () => {
+		const skillDir = path.join(tempDir, ".omp", "skills", "test-skill");
+		const skillFile = path.join(skillDir, "SKILL.md");
 		await Bun.write(
-			path.join(tempDir, ".omp", "skills", "test-skill", "SKILL.md"),
+			skillFile,
 			`---\nname: test-skill\ndescription: A hidden test skill.\ndisable-model-invocation: true\n---\n# Test Skill\n`,
 		);
-		const s = await createSession({ skillful: false });
+		const s = await createSession({ skillful: false }, [
+			{
+				name: "test-skill",
+				description: "A hidden test skill.",
+				filePath: skillFile,
+				baseDir: skillDir,
+				source: "test",
+				hide: true,
+			},
+		]);
 		expect(s.skills.map(skill => skill.name)).toEqual(["test-skill"]);
 		s.agent.appendMessage(createUserMessage("earlier work"));
 

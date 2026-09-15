@@ -19,7 +19,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -34,6 +34,7 @@ import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model
 import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
+import { extractProviderRetryHint } from "../utils/retry-after";
 import {
 	captureRequestHeaders,
 	corsHeaders,
@@ -44,6 +45,7 @@ import {
 	resolvePeer,
 	withCors,
 } from "./http";
+import { AuthGatewaySessionStateStore } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
 	AuthGatewayServerOptions,
@@ -128,6 +130,18 @@ function deriveSessionId(modelId: string, context: Context): string {
 	return deterministicUuid(seed);
 }
 
+/**
+ * Resolve the logical session identity for one request. A client-supplied key
+ * wins so external session ids line up with the gateway's, but a blank one
+ * counts as absent: honouring it would collapse every caller that sends an
+ * empty key into one shared credential-sticky, prefix-cache and
+ * provider-session bucket.
+ */
+function resolveSessionId(clientKey: string | undefined, modelId: string, context: Context): string {
+	if (clientKey !== undefined && clientKey.trim().length > 0) return clientKey;
+	return deriveSessionId(modelId, context);
+}
+
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
@@ -168,7 +182,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	// Client-supplied `prompt_cache_key` wins; otherwise derive a stable
 	// key from the model + system + tools so prefix caching engages on
 	// Codex-class backends across turns of the same logical conversation.
-	const promptCacheKey = options.promptCacheKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const promptCacheKey = resolveSessionId(options.promptCacheKey, parsed.modelId, parsed.context);
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
@@ -248,7 +262,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
-		const retryAfterMs = extractRetryHint(undefined, message);
+		const retryAfterMs = extractProviderRetryHint(provider, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: retryAfterMs !== undefined,
@@ -379,6 +393,7 @@ async function handleFormatEndpoint(
 	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
+	sessionStates: AuthGatewaySessionStateStore,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -461,8 +476,8 @@ async function handleFormatEndpoint(
 	// supplied (so external session ids align), otherwise derive from
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
-	const sessionId = parsed.options.promptCacheKey ?? deriveSessionId(parsed.modelId, parsed.context);
-	parsed.options.promptCacheKey ??= sessionId;
+	const sessionId = resolveSessionId(parsed.options.promptCacheKey, parsed.modelId, parsed.context);
+	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
 	// expected to resolve the credential and pass it as `options.apiKey`.
@@ -499,6 +514,11 @@ async function handleFormatEndpoint(
 		route.label,
 		peer,
 	);
+	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
+	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
+	// map is non-serializable, so no client can supply it and every turn would
+	// otherwise re-learn each lesson from a fresh upstream rejection.
+	streamOpts.providerSessionState = sessionStates.acquire(sessionId, model);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -600,7 +620,12 @@ async function handleFormatEndpoint(
  * `parseRequest`/`encodeResponse`/`encodeStream` differ from the format-endpoint
  * path.
  */
-async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+async function handlePiNative(
+	bootOpts: AuthGatewayBootOptions,
+	req: Request,
+	peer: string,
+	sessionStates: AuthGatewaySessionStateStore,
+): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
@@ -635,8 +660,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// up with cache-prefix stickiness — same identity used for both means
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
-	const sessionId = parsed.options.sessionId ?? deriveSessionId(parsed.modelId, parsed.context);
-	parsed.options.sessionId ??= sessionId;
+	const sessionId = resolveSessionId(parsed.options.sessionId, parsed.modelId, parsed.context);
+	parsed.options.sessionId = sessionId;
 
 	let apiKey: string | undefined;
 	try {
@@ -668,6 +693,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		apiKey,
 		signal: controller.signal,
 		cursorExternalToolExecutor: true,
+		// Per-session provider learning, owned by this gateway instance. The map
+		// is non-serializable, so `parseRequest` cannot accept one from the wire
+		// and every turn would otherwise re-learn each lesson from a fresh
+		// upstream rejection.
+		providerSessionState: sessionStates.acquire(sessionId, model),
 	};
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts.storage,
@@ -692,7 +722,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// headers — the client's values win when they collide.
 	const captured = captureRequestHeaders(req.headers);
 	streamOpts.headers = { ...captured, ...streamOpts.headers };
-	streamOpts.sessionId ??= sessionId;
+	streamOpts.sessionId = sessionId;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -847,6 +877,9 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
 	const version = opts.version;
+	// Owned by this server instance so two gateways in one process never share
+	// (or tear down) each other's provider state, and so `close()` can drain it.
+	const sessionStates = new AuthGatewaySessionStateStore();
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -887,13 +920,13 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, opts, req, peer), req);
+					return withCors(await handleFormatEndpoint(formatRoute, opts, req, peer, sessionStates), req);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the
 				// foreign-wire routes, just without the wire-format translation.
 				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					return withCors(await handlePiNative(opts, req, peer), req);
+					return withCors(await handlePiNative(opts, req, peer, sessionStates), req);
 				}
 
 				// Model catalog.
@@ -927,6 +960,10 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 		hostname: boundHost,
 		close: async () => {
 			server.stop(true);
+			// Drain after the listener is down: the retained provider states own
+			// sockets and timers (Codex WebSockets, GitLab Duo workflows), so the
+			// process can't settle until each one is closed.
+			sessionStates.close();
 		},
 	};
 }

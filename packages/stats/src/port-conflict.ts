@@ -26,7 +26,7 @@ export const STATS_DASHBOARD_SECURITY_VERSION = "3";
 /** IPv4 loopback address shared by the dashboard server and reuse probe. */
 export const STATS_DASHBOARD_HOSTNAME = "127.0.0.1";
 
-type StatsDashboardProbe = "reusable" | "occupied" | "unreachable";
+type StatsDashboardProbe = "reusable" | "replaceable" | "occupied" | "unreachable";
 
 async function probeStatsDashboard(port: number, hostname: string): Promise<StatsDashboardProbe> {
 	const probeHostname = hostname === "0.0.0.0" ? STATS_DASHBOARD_HOSTNAME : hostname === "::" ? "::1" : hostname;
@@ -35,13 +35,22 @@ async function probeStatsDashboard(port: number, hostname: string): Promise<Stat
 		const response = await fetch(`http://${urlHostname}:${port}/api/stats/models`, {
 			signal: AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS),
 		});
+		const dashboardVersionHeader = response.headers.get(STATS_DASHBOARD_HEADER);
+		const dashboardVersion = dashboardVersionHeader === null ? Number.NaN : Number(dashboardVersionHeader);
+		// Never replace a newer dashboard: an older CLI must not downgrade it.
+		const replaceable =
+			response.status === 200 &&
+			Number.isSafeInteger(dashboardVersion) &&
+			dashboardVersion > 0 &&
+			dashboardVersion <= Number(STATS_DASHBOARD_SECURITY_VERSION);
 		const reusable =
 			response.status === 200 &&
-			response.headers.get(STATS_DASHBOARD_HEADER) === STATS_DASHBOARD_SECURITY_VERSION &&
+			dashboardVersionHeader === STATS_DASHBOARD_SECURITY_VERSION &&
 			response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER) === hostname &&
 			!response.headers.has("Access-Control-Allow-Origin");
 		await response.body?.cancel();
-		return reusable ? "reusable" : "occupied";
+		if (reusable) return "reusable";
+		return replaceable ? "replaceable" : "occupied";
 	} catch {
 		return "unreachable";
 	}
@@ -218,7 +227,7 @@ async function terminatePortHolder(holder: PortHolder): Promise<void> {
 	await Bun.sleep(PROCESS_EXIT_POLL_MS);
 }
 
-async function reclaimStatsPort(port: number): Promise<"retry"> {
+async function reclaimStatsPort(port: number, hasDashboardIdentity = false): Promise<"retry"> {
 	const holder = await findPortHolder(port);
 	if (!holder) {
 		throw new Error(`Port ${port} is in use, but the listening process could not be identified.`);
@@ -238,7 +247,7 @@ async function reclaimStatsPort(port: number): Promise<"retry"> {
 		/\/packages\/stats\/src\/index\.ts(?:["'\s]|$)/.test(normalizedCommand) ||
 		(normalizedImage === "omp" && /(?:^|\s)stats(?:\s|$)/.test(normalizedCommand)) ||
 		/(?:^|\/)omp(?:\.exe)?["'\s]+stats(?:["'\s]|$)/.test(normalizedCommand);
-	if (!STATS_RUNTIME_IMAGES[normalizedImage] || !hasStatsIdentity) {
+	if (!STATS_RUNTIME_IMAGES[normalizedImage] || (!hasStatsIdentity && !hasDashboardIdentity)) {
 		throw new Error(
 			`Port ${port} is in use by ${holder.image} (PID ${holder.pid}), which is not identifiable as an omp stats dashboard; refusing to stop it.`,
 		);
@@ -257,12 +266,14 @@ export async function prepareStatsPort(port: number, hostname = STATS_DASHBOARD_
 	if (port === 0) return "retry";
 	const probe = await probeStatsDashboard(port, hostname);
 	if (probe === "reusable") return "reuse";
+	if (probe === "replaceable") return reclaimStatsPort(port, true);
 	if (probe === "occupied") return reclaimStatsPort(port);
 	return "retry";
 }
 
 /** Reuse or reclaim a listener found after the server bind reports EADDRINUSE. */
 export async function recoverStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<"retry" | "reuse"> {
-	if ((await probeStatsDashboard(port, hostname)) === "reusable") return "reuse";
-	return reclaimStatsPort(port);
+	const probe = await probeStatsDashboard(port, hostname);
+	if (probe === "reusable") return "reuse";
+	return reclaimStatsPort(port, probe === "replaceable");
 }
