@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseCodexRateLimitHeaders } from "@oh-my-pi/pi-ai";
+import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import {
 	AuthBrokerClient,
 	RemoteAuthCredentialStore,
@@ -57,6 +58,20 @@ function readLegacyCodexSharedBlock(dbPath: string, credentialId: number): numbe
 				"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = 'shared' AND blocked_until_ms > ?",
 			)
 			.get(credentialId, Date.now()) as { blocked_until_ms?: number } | undefined;
+		return row?.blocked_until_ms;
+	} finally {
+		db.close();
+	}
+}
+
+function readCodexBlock(dbPath: string, credentialId: number, blockScope: string): number | undefined {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const row = db
+			.prepare(
+				"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = ? AND blocked_until_ms > ?",
+			)
+			.get(credentialId, blockScope, Date.now()) as { blocked_until_ms?: number } | undefined;
 		return row?.blocked_until_ms;
 	} finally {
 		db.close();
@@ -211,6 +226,43 @@ function createCredential(accountId: string, email: string): OAuthCredentials {
 		email,
 	};
 }
+
+/**
+ * Report parsed from a real `/wham/usage` payload of an account whose weekly
+ * plan window is fully spent. `credits` decides whether the account can still
+ * serve the request out of its credit balance (overage) or is truly finished.
+ */
+async function fetchCodexPlanExhaustedReport(
+	accountId: string,
+	credits: Record<string, unknown>,
+): Promise<UsageReport> {
+	const payload = {
+		plan_type: "pro",
+		rate_limit: {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		},
+		credits,
+		spend_control: { reached: false },
+	};
+	const report = await openaiCodexUsageProvider.fetchUsage(
+		{ provider: "openai-codex", credential: { type: "oauth", accessToken: "access-token", accountId } },
+		{
+			fetch: (async () =>
+				new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				})) as unknown as typeof fetch,
+		},
+	);
+	if (!report) throw new Error(`expected a usage report for ${accountId}`);
+	return report;
+}
+
+const CODEX_CREDIT_BALANCE = { has_credits: true, overage_limit_reached: false, balance: "489.25" };
+const CODEX_NO_BALANCE = { has_credits: false, balance: "0" };
 
 async function countApiKeySelections(
 	authStorage: AuthStorage,
@@ -2856,6 +2908,61 @@ describe("AuthStorage codex oauth ranking", () => {
 		});
 
 		expect(await authStorage.getApiKey("openai-codex", sessionId, { modelId })).toBe(`api-${siblingAccountId}`);
+	});
+
+	// Regression: a Pro account whose weekly plan window is spent keeps serving
+	// requests off its credit balance, but `/wham/usage` reports only the plan
+	// verdict (`allowed:false`/`limit_reached:true`/`used_percent:100`). Reading
+	// that as exhaustion re-blocked a usable account on every ranking pass and
+	// left an existing block unhealable until the weekly reset, so requests kept
+	// landing on a drained sibling and coming back `usage_limit_reached` while
+	// `codex` on the same login worked.
+	test("keeps serving a credit-funded account whose plan window is spent", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+		const creditRow = store
+			.listAuthCredentials("openai-codex")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-credits");
+		const dryRow = store
+			.listAuthCredentials("openai-codex")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-dry");
+		if (!creditRow || !dryRow) throw new Error("expected both credential rows");
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-overage");
+		expectExclusivePreference(counts, "api-acct-credits", "api-acct-dry");
+		expect(readCodexBlock(dbPath, creditRow.id, "chat")).toBeUndefined();
+		// The genuinely drained sibling still gets blocked until its plan resets.
+		expect(readCodexBlock(dbPath, dryRow.id, "chat")).toBe(2_000_500_000_000);
+	});
+
+	test("heals a stale block on a credit-funded account whose plan window is spent", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+		const creditRow = store
+			.listAuthCredentials("openai-codex")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-credits");
+		if (!creditRow) throw new Error("expected the credit-funded credential row");
+		// Written straight into SQLite: a block persisted by the process that hit
+		// the plan limit carries no in-memory probe deadline here, and ageing the
+		// row past the usage-report TTL clears the persisted probe guard.
+		insertLegacyCodexSharedBlock(dbPath, creditRow.id, Date.now() + WEEK_MS);
+		ageCredentialBlockRows(dbPath);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-overage-heal");
+		expectExclusivePreference(counts, "api-acct-credits", "api-acct-dry");
+		expect(readCodexBlock(dbPath, creditRow.id, "chat")).toBeUndefined();
 	});
 });
 
