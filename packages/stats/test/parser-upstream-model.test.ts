@@ -101,7 +101,7 @@ describe("parser upstreamModel attribution", () => {
 		expect(getStatsByModel()).toMatchObject([{ model: "anthropic/claude-sonnet-4.5", provider: "Anthropic" }]);
 	});
 
-	it("falls back to configured model and provider when upstreamModel is absent", async () => {
+	it("falls back when persisted upstream attribution is malformed", async () => {
 		const dir = path.join(getSessionsDir(), "--tmp--standard-model");
 		await fs.mkdir(dir, { recursive: true });
 		const file = path.join(dir, "session.jsonl");
@@ -113,10 +113,12 @@ describe("parser upstreamModel attribution", () => {
 			timestamp: "2026-09-03T10:00:01.000Z",
 			message: {
 				role: "assistant",
-				content: [{ type: "text", text: "Hello" }],
+				content: [{ type: "toolCall", id: "call-2", name: "read", arguments: { path: "src/index.ts" } }],
 				api: "openai-completions",
 				provider: "openrouter",
 				model: "openrouter/auto",
+				upstreamModel: { malformed: true },
+				upstreamProvider: "",
 				stopReason: "stop",
 				usage: {
 					input: 5,
@@ -134,7 +136,12 @@ describe("parser upstreamModel attribution", () => {
 
 		const result = await parseSessionFile(file);
 		expect(result.stats).toHaveLength(1);
-		expect(result.stats[0].model).toBe("openrouter/auto");
-		expect(result.stats[0].provider).toBe("openrouter");
+		expect(result.stats[0]).toMatchObject({ model: "openrouter/auto", provider: "openrouter" });
+		expect(result.toolCalls).toMatchObject([{ model: "openrouter/auto", provider: "openrouter" }]);
+		expect(result.userLinks).toMatchObject([{ model: "openrouter/auto", provider: "openrouter" }]);
+
+		await initDb();
+		expect(insertMessageStats(result.stats)).toBe(1);
+		expect(insertToolCalls(result.toolCalls)).toBe(1);
 	});
 });
