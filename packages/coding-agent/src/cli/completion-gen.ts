@@ -374,6 +374,11 @@ function generateZsh(spec: CompletionSpec): string {
 
 	// Dynamic helpers (single source: `<bin> __complete <kind>` → value<TAB>desc).
 	parts.push(`_omp_call() {
+	# _arguments invokes action functions with the compadd options it computed
+	# (e.g. "-J -default-") prepended; skip those pairs before reading the kind.
+	while [[ $1 == -* && $# -gt 1 ]]; do
+		shift 2
+	done
 	local kind=$1
 	local -a items
 	local line

@@ -10,6 +10,10 @@
 
 - Codex Spark, all MiniMax models, and GLM-5.3-Flash now default to replace edits instead of hashline; explicit edit-mode overrides remain honored.
 
+### Fixed
+
+- zsh dynamic completions (`--resume`, `--model`, …) no longer silently return nothing: the generated `_omp_call` helper now skips the compadd options `_arguments` prepends to action functions ([#12110](https://github.com/can1357/oh-my-pi/issues/12110)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes

@@ -99,6 +99,15 @@ describe("generateCompletion — zsh", () => {
 		expect(out).toContain("_omp_tools() { _values -s , 'tools' read bash }");
 	});
 
+	it("makes _omp_call skip the compadd options _arguments prepends to actions", () => {
+		// _arguments invokes action functions with the computed compadd options
+		// prepended (zshcompsys(1), e.g. "-J -default-"); without skipping them,
+		// `kind` becomes "-J" and every dynamic completion silently returns nothing.
+		const call = out.slice(out.indexOf("_omp_call() {"), out.indexOf("_omp_models_list() {"));
+		expect(call).toContain("while [[ $1 == -* && $# -gt 1 ]]; do");
+		expect(call.indexOf("shift 2")).toBeLessThan(call.indexOf("local kind=$1"));
+	});
+
 	it("dispatches aliased subcommands and completes positional enums", () => {
 		expect(out).toContain("worktree|wt) _omp_cmd_worktree ;;");
 		expect(out).toContain("':action:(list clear)'");
