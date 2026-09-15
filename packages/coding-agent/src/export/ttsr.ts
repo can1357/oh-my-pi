@@ -62,6 +62,15 @@ const DEFAULT_SETTINGS: Required<TtsrSettings> = {
 	disabledRules: [],
 };
 
+/** Manager-level settings keys; builtinRules/disabledRules are bucketing-only. */
+const MANAGER_SETTING_KEYS: readonly Exclude<keyof Required<TtsrSettings>, "builtinRules" | "disabledRules">[] = [
+	"enabled",
+	"contextMode",
+	"interruptMode",
+	"repeatMode",
+	"repeatGap",
+];
+
 const DEFAULT_SCOPE: TtsrScope = {
 	allowText: true,
 	allowThinking: false,
@@ -70,7 +79,7 @@ const DEFAULT_SCOPE: TtsrScope = {
 };
 
 export class TtsrManager {
-	readonly #settings: Required<TtsrSettings>;
+	#settings: Required<TtsrSettings>;
 	readonly #rules = new Map<string, TtsrEntry>();
 	readonly #injectionRecords = new Map<string, InjectionRecord>();
 	readonly #buffers = new Map<string, string>();
@@ -82,6 +91,28 @@ export class TtsrManager {
 
 	constructor(settings?: TtsrSettings) {
 		this.#settings = { ...DEFAULT_SETTINGS, ...settings };
+	}
+
+	/**
+	 * Re-applies a reloaded `ttsr` settings group without rebuilding rule
+	 * state: defaults are re-merged exactly like the constructor, and the
+	 * manager-level values (everything except the bucketing-only
+	 * builtinRules/disabledRules) are diffed so callers can skip follow-up
+	 * work when nothing they consume changed.
+	 */
+	updateSettings(settings?: TtsrSettings): boolean {
+		const next = { ...DEFAULT_SETTINGS, ...settings };
+		let changed = false;
+		for (const key of MANAGER_SETTING_KEYS) {
+			if (this.#settings[key] !== next[key]) {
+				changed = true;
+				break;
+			}
+		}
+		if (changed) {
+			this.#settings = next;
+		}
+		return changed;
 	}
 
 	/** Check if a rule can be triggered based on repeat settings. */
@@ -343,6 +374,17 @@ export class TtsrManager {
 		});
 
 		return true;
+	}
+
+	/**
+	 * Drops every registered rule and resets the match flags so a re-bucket
+	 * pass can repopulate from fresh settings. Injection records are kept:
+	 * repeat gating survives a reload just as it survives a session resume.
+	 */
+	clearRules(): void {
+		this.#rules.clear();
+		this.#canMatchText = false;
+		this.#canMatchThinking = false;
 	}
 
 	/**

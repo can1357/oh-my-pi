@@ -335,6 +335,15 @@ export class EventController {
 		this.#scheduleIdleCompaction();
 	}
 
+	/** Rearm the idle recap after a live recap setting changes. */
+	refreshIdleRecapTimer(): void {
+		if (this.ctx.viewSession.isStreaming) {
+			this.#cancelIdleRecap();
+			return;
+		}
+		this.#scheduleIdleRecap();
+	}
+
 	dispose(): void {
 		this.#detachToolApprovalPreviewWaiter?.();
 		this.#detachToolApprovalPreviewWaiter = undefined;

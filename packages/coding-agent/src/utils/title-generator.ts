@@ -729,6 +729,11 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	emitTerminalTitle();
 }
 
+/** Current run-state separator gate; mirrors the `tui.titleState` setting's applied value. */
+export function getTerminalTitleStateEnabled(): boolean {
+	return terminalTitleRuntime.enabled;
+}
+
 /**
  * Take ownership of the terminal title: the counterpart to
  * {@link disposeTerminalTitleState}, called once when the UI claims the terminal.

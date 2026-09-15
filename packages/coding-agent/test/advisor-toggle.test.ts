@@ -1224,4 +1224,22 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined)).toBe(1);
 		await exerciseBudget("settings", 2);
 	});
+	it("rebuilds the running advisor when tier.advisor changes on reload", () => {
+		// The advisor's service-tier resolver captures tier.advisor per runtime
+		// build; /reload-settings calls reapplyModelRoles(), so the runtime
+		// signature must treat a tier.advisor change as a rebuild trigger.
+		const advisor = enableAdvisor();
+		expect(advisor).toBeDefined();
+
+		// Unrelated tier changes must not churn the running advisor.
+		session.settings.set("tier.openai", "priority");
+		session.reapplyModelRoles();
+		expect(session.getAdvisorAgent()).toBe(advisor);
+
+		session.settings.set("tier.advisor", "priority");
+		session.reapplyModelRoles();
+		const rebuilt = session.getAdvisorAgent();
+		expect(rebuilt).toBeDefined();
+		expect(rebuilt).not.toBe(advisor);
+	});
 });

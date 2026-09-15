@@ -41,7 +41,7 @@ export interface SessionHandoffHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sideStreamFn: StreamFn;
-	obfuscator: SecretObfuscator | undefined;
+	obfuscator(): SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
@@ -169,7 +169,7 @@ export class SessionHandoff {
 				model.provider,
 			);
 			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator, handoffContext),
+				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
 				{
 					streamOptions: handoffStreamOptions,

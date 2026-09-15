@@ -154,3 +154,61 @@ describe("read tool raw range exactness", () => {
 		expect(notice).not.toContain("0B limit");
 	});
 });
+
+describe("read tool default-limit reconfigure", () => {
+	function makeReconfigureSession(cwd: string): ToolSession {
+		// Initial values go through `set` (not `isolated` overrides) so later
+		// `set` calls stay visible: overrides outrank the global layer `set`
+		// writes, which would pin the values and mask the reload.
+		const settings = Settings.isolated();
+		settings.set("read.defaultLimit", 20);
+		settings.set("images.autoResize", false);
+		return {
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings,
+		};
+	}
+
+	it("truncates at the reloaded default limit after reconfigure()", async () => {
+		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-reconfigure-"));
+		try {
+			const filePath = path.join(testDir, "data.txt");
+			await Bun.write(
+				filePath,
+				Array.from({ length: 60 }, (_, index) => `L${String(index + 1).padStart(2, "0")}`).join("\n"),
+			);
+			const session = makeReconfigureSession(testDir);
+			const tool = new ReadTool(session);
+
+			const before = await tool.execute("call-reconfigure-before", { path: filePath });
+			const beforeLines = new Set(getTextOutput(before).match(/\bL\d{2}\b/g) ?? []);
+			expect(beforeLines.size).toBe(20);
+
+			// No setting moved: the re-read reports a no-op.
+			expect(tool.reconfigure()).toBe(false);
+
+			session.settings.set("read.defaultLimit", 5);
+			expect(tool.reconfigure()).toBe(true);
+
+			const after = await tool.execute("call-reconfigure-after", { path: filePath });
+			const afterLines = new Set(getTextOutput(after).match(/\bL\d{2}\b/g) ?? []);
+			expect(afterLines.size).toBe(5);
+		} finally {
+			await fs.rm(testDir, { recursive: true, force: true });
+		}
+	});
+
+	it("picks up an images.autoResize flip through reconfigure()", () => {
+		const session = makeReconfigureSession(process.cwd());
+		const tool = new ReadTool(session);
+		expect(tool.reconfigure()).toBe(false);
+
+		session.settings.set("images.autoResize", true);
+		expect(tool.reconfigure()).toBe(true);
+		// Re-running after the values settled reports a no-op again.
+		expect(tool.reconfigure()).toBe(false);
+	});
+});
