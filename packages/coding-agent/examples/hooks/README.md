@@ -31,7 +31,7 @@ cp permission-gate.ts ~/.omp/agent/hooks/
 
 ## Writing Hooks
 
-See [docs/hooks.md](../../docs/hooks.md) for full documentation.
+See [docs/hooks.md](../../../../docs/hooks.md) for full documentation.
 
 ```typescript
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/hooks";
