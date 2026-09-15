@@ -53,6 +53,8 @@ export interface FlagDescriptor<K extends "string" | "boolean" | "integer" = "st
 	default?: unknown;
 	multiple?: boolean;
 	options?: readonly string[];
+	/** Value assumed when a string flag is passed with no value of its own. */
+	optionalValue?: string;
 	required?: boolean;
 }
 
@@ -70,6 +72,7 @@ interface FlagInput {
 	default?: unknown;
 	multiple?: boolean;
 	options?: readonly string[];
+	optionalValue?: string;
 	required?: boolean;
 }
 
@@ -205,12 +208,29 @@ export abstract class Command {
 			options[name] = opt;
 		}
 
+		// `node:util.parseArgs` insists a string option carries a value, so a flag
+		// that means something sensible on its own (`--prune-empty-sessions`, where
+		// archiving is the safe default) cannot be expressed directly. Rewrite the
+		// bare form to its stated default before parsing; `--flag value` and
+		// `--flag=value` still win because only an exact bare token is rewritten.
+		const argv = this.argv.map((token, index) => {
+			const name = token.startsWith("--") ? token.slice(2) : "";
+			const desc = flagDefs[name];
+			if (!desc?.optionalValue) return token;
+			// Only a following token that is a declared choice counts as this flag's
+			// value. Anything else — a positional, another flag, end of argv — leaves
+			// the flag bare, so a command with positionals cannot have one eaten.
+			const next = this.argv[index + 1];
+			if (next !== undefined && desc.options?.includes(next)) return token;
+			return `--${name}=${desc.optionalValue}`;
+		});
+
 		// strict=false when command declares args (positionals must pass through)
 		// or when the command itself opts out
 		const { values: rawValues, positionals } = (() => {
 			try {
 				return nodeParseArgs({
-					args: this.argv,
+					args: argv,
 					options,
 					allowPositionals: true,
 					strict,
