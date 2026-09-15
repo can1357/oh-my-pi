@@ -9,7 +9,6 @@ import {
 	isExcludedModel,
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
-	pricingPeerFor,
 } from "../compat/behavior";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { resolveModelPolicy } from "../compat/resolve";
@@ -1340,35 +1339,6 @@ export interface XaiModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
-}
-
-// SuperGrok surfaces a few models under IDs that differ from their public
-// `xai` catalog equivalent, so the exact-ID price fallback misses them. Map
-// the OAuth ID to the paid ID it mirrors.
-// The alias map lives in the `pricing-peer` behavior rule.
-function hasTokenPrice(cost: ModelSpec["cost"]): boolean {
-	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
-}
-
-/**
- * Mirrors exact public-model prices onto matching SuperGrok catalog rows.
- * The >200K long-context tier itself is rule-owned (`classes/xai.kdl`
- * `long-context-cost` multiplier axis) and derives at build time.
- */
-export function applyXaiCatalogPricing(models: readonly ModelSpec[]): ModelSpec[] {
-	const publicCosts = new Map(
-		models
-			.filter(model => model.provider === "xai" && hasTokenPrice(model.cost))
-			.map(model => [model.id, model.cost]),
-	);
-
-	return models.map(model => {
-		if (model.provider !== "xai-oauth" || hasTokenPrice(model.cost)) return model;
-		const peer = pricingPeerFor("xai-oauth", model.id);
-		const publicCost =
-			publicCosts.get(model.id) ?? (peer && peer.peerId !== model.id ? publicCosts.get(peer.peerId) : undefined);
-		return publicCost ? { ...model, cost: { ...publicCost } } : model;
-	});
 }
 
 export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelManagerOptions<"openai-responses"> {

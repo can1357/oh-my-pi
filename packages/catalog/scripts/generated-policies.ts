@@ -31,17 +31,18 @@ export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
 }
 
 /**
- * Price `google-antigravity` models at their first-party equivalents via the
- * `pricing-peer` behavior rule: Gemini ids at Google API list prices, Claude
- * ids at Google Vertex list prices (falling back to Anthropic). Models
- * without a priced peer (gpt-oss, internal tab models) keep zero cost.
+ * Price models at their first-party equivalents via `pricing-peer` behavior
+ * rules: `google-antigravity` Gemini ids at Google API list prices, Claude
+ * ids at Google Vertex list prices (falling back to Anthropic); `kimi-code`
+ * ids at Moonshot list prices; `xai-oauth` aliases at xai list prices.
+ * Models without a priced peer (gpt-oss, internal tab models) keep zero cost.
  */
-export function applyAntigravityPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
+export function applyPricingPeerFallbacks(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
-		if (model.provider !== "google-antigravity" || hasBillableCost(model.cost)) {
+		if (hasBillableCost(model.cost)) {
 			return model;
 		}
-		const peer = pricingPeerFor("google-antigravity", model.id);
+		const peer = pricingPeerFor(model.provider, model.id);
 		if (!peer) {
 			return model;
 		}

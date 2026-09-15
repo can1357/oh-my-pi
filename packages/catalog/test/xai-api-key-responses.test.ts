@@ -7,7 +7,8 @@ import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { applyXaiCatalogPricing, xaiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { xaiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { applyPricingPeerFallbacks } from "../scripts/generated-policies";
 import type { ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
 
 const XAI_RESPONSES_SPEC: ModelSpec<"openai-responses"> = {
@@ -73,7 +74,7 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 			id: "grok-composer-2.5-fast",
 			name: "Grok Composer 2.5 Fast",
 		};
-		const priced = applyXaiCatalogPricing([XAI_RESPONSES_SPEC, oauthSpec, composerSpec]);
+		const priced = applyPricingPeerFallbacks([XAI_RESPONSES_SPEC, oauthSpec, composerSpec]);
 		const paid = priced[0];
 		const oauth = priced[1];
 		const composer = priced[2];
@@ -126,7 +127,7 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 			provider: "xai-oauth",
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		};
-		const [paid, oauth] = applyXaiCatalogPricing([paidSpec, oauthSpec]);
+		const [paid, oauth] = applyPricingPeerFallbacks([paidSpec, oauthSpec]);
 		if (!paid || !oauth) throw new Error("xAI pricing policy dropped a model");
 
 		expect(oauth.cost).toEqual(paid.cost);

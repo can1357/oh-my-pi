@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
-	applyAntigravityPricingFallback,
+	applyPricingPeerFallbacks,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
@@ -842,7 +842,7 @@ describe("applyOllamaCloudOutputCap", () => {
 	});
 });
 
-describe("applyAntigravityPricingFallback", () => {
+describe("applyPricingPeerFallbacks", () => {
 	it("prices Gemini ids at Google API peers and Claude ids at Vertex, falling back to Anthropic", () => {
 		const googleCost = { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 };
 		const previewCost = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
@@ -870,7 +870,7 @@ describe("applyAntigravityPricingFallback", () => {
 			createSpec({ id: "claude-sonnet-4-6", api: "google-gemini-cli", provider: "google-antigravity" }),
 		];
 
-		const result = applyAntigravityPricingFallback(models);
+		const result = applyPricingPeerFallbacks(models);
 
 		expect(result[5]?.cost).toEqual(googleCost);
 		expect(result[6]?.cost).toEqual(previewCost);
@@ -901,7 +901,7 @@ describe("applyAntigravityPricingFallback", () => {
 			}),
 		];
 
-		const result = applyAntigravityPricingFallback(models);
+		const result = applyPricingPeerFallbacks(models);
 
 		// No billable google peer (zero-cost peer is not a pricing source).
 		expect(result[1]?.cost).toEqual(zeroCost);

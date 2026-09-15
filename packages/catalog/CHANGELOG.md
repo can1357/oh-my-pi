@@ -43,6 +43,10 @@
 - Model-aware delegation prompts reuse policy decisions until the model's identity or capabilities change.
 - Provider catalog entries (default model, env keys, discovery wiring) and the bundled fallback rows for providers that cannot be discovered at generation time (Anthropic, OpenAI Daybreak, xAI OAuth, Meta, Muse Code, Bedrock Mantle, Devin, Z.AI, Sakana, ai&, Abliteration, Yolo-Auto, GMI Cloud, Fire Pass, QwenCloud Token Plan, Cloudflare AI Gateway, GitLab Duo Workflow) now live in `src/compat/rules/providers/<id>.kdl` and compile into `rules.json`; `KnownProvider` is generated from them, and the generator bundles seed rows by each entry's declared `bundle` policy instead of per-provider code.
 
+### Fixed
+
+- Devin (SWE-2, SWE-1.7, GLM-5.2 High) and Kimi Code models now report API-equivalent token pricing when upstream discovery omits cost dimensions; SWE-2 reflects the promotional rate through 2026-12-31 and switches to list price from 2027-01-01
+
 ## [18.1.22] - 2026-09-14
 
 ### Added

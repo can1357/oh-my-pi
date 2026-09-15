@@ -139,6 +139,32 @@ export function applyCatalogCorrections(
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
 	}
+	const fallback = objectPayload(catalog.costFallback);
+	if (fallback !== undefined) {
+		const base = model.cost;
+		const hasTokenPrice = base.input !== 0 || base.output !== 0 || base.cacheRead !== 0 || base.cacheWrite !== 0;
+		if (!hasTokenPrice) {
+			// Upstream reported no token price (plan-included or promo-free
+			// rows): seed the reviewed list price instead of overwriting real
+			// discovery data the way `cost-patch` would.
+			model.cost = { ...model.cost };
+			const input = numberField(fallback, "input");
+			if (input !== undefined) model.cost.input = input;
+			const output = numberField(fallback, "output");
+			if (output !== undefined) model.cost.output = output;
+			const cacheRead = numberField(fallback, "cacheRead");
+			if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
+			const cacheWrite = numberField(fallback, "cacheWrite");
+			if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+			const effectiveRates = Reflect.get(fallback, "effectiveRates");
+			if (effectiveRates !== undefined && model.cost.timeBased === undefined) {
+				model.cost = {
+					...model.cost,
+					timeBased: materializeTimeBasedCost({ offPeakMultiplier: 1, peakWindows: {}, effectiveRates }),
+				};
+			}
+		}
+	}
 	if (catalog.timeBased !== undefined) {
 		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
 	}

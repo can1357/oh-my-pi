@@ -272,6 +272,15 @@ behavior {
 	pricing-peer provider="xai-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
 	}
+	// Kimi Code's /coding/v1/models envelope carries no pricing; mirror the
+	// public Moonshot list price for each discovered id.
+	pricing-peer provider="kimi-code" peers="moonshot" {
+		alias "k3" peer-id="kimi-k3"
+		alias "k3-256k" peer-id="kimi-k3"
+		alias "kimi-for-coding" peer-id="kimi-k2.7-code"
+		alias "kimi-for-coding-highspeed" peer-id="kimi-k2.7-code-highspeed"
+		alias "kimi-k2" peer-id="kimi-k2.6"
+	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"
 }
