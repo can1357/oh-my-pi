@@ -13,6 +13,7 @@ import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
 	type AuthCredentialStore,
+	type ConditionalAuthCredentialInsertResult,
 	type DisabledCredentialSummary,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
@@ -781,6 +782,15 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		);
 	}
 
+	insertAuthCredentialIfProviderAbsent(
+		_provider: string,
+		_credential: AuthCredential,
+	): ConditionalAuthCredentialInsertResult {
+		throw new AIError.AuthBrokerError(
+			"RemoteAuthCredentialStore is read-only on the client. Conditional writes must go through the broker.",
+		);
+	}
+
 	deleteAuthCredentialsForProvider(_provider: string, _disabledCause: string): void {
 		throw new AIError.AuthBrokerError(
 			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker logout <provider>` to mutate credentials.",
@@ -800,6 +810,22 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#applyProviderEntries(provider, entries);
 		this.#maybeRefreshSnapshot("upload");
 		return this.listAuthCredentials(provider);
+	}
+
+	async insertAuthCredentialIfProviderAbsentRemote(
+		provider: string,
+		credential: AuthCredential,
+		signal?: AbortSignal,
+	): Promise<ConditionalAuthCredentialInsertResult> {
+		const { entries, inserted } = await this.#client.uploadCredential(provider, credential, signal, {
+			ifProviderAbsent: true,
+		});
+		if (inserted === undefined) {
+			throw new AIError.AuthBrokerError("Auth broker did not return a conditional credential-write result");
+		}
+		this.#applyProviderEntries(provider, entries);
+		this.#maybeRefreshSnapshot("conditional upload");
+		return { inserted, credentials: this.listAuthCredentials(provider) };
 	}
 
 	/**

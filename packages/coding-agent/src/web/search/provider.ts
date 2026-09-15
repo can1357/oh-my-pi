@@ -24,6 +24,11 @@ interface ProviderMeta {
 
 /** Lazy factories. Each `load()` dynamic-imports its provider module on first call. */
 const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
+	anysearch: {
+		id: "anysearch",
+		label: SEARCH_PROVIDER_LABELS.anysearch,
+		load: async () => new (await import("./providers/anysearch")).AnySearchProvider(),
+	},
 	perplexity: {
 		id: "perplexity",
 		label: SEARCH_PROVIDER_LABELS.perplexity,
