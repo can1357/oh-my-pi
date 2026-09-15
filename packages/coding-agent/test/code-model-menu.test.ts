@@ -112,6 +112,37 @@ describe("code-model menu configuration", () => {
 		}
 	});
 
+	it("preserves routing when the current model is reselected in the menu", async () => {
+		const coding = {
+			...model("openrouter", "glm-4.7"),
+			api: "openai-completions",
+			baseUrl: "https://openrouter.ai/api/v1",
+		} as Model;
+		const original = "openrouter/glm-4.7@cerebras:high";
+		const state = settingsStub(original);
+		const choices: Array<string | undefined> = ["Model", "openrouter/glm-4.7", "Save and Apply"];
+		const previousLanguage = process.env.CODE_MODEL_LANG;
+		process.env.CODE_MODEL_LANG = "en";
+		try {
+			const ctx = {
+				hasUI: true,
+				models: { list: () => [coding] },
+				ui: {
+					async select() {
+						return choices.shift();
+					},
+					notify() {},
+				},
+			} as unknown as ExtensionCommandContext;
+			await runCodeModelMenu("", ctx, state.settings);
+		} finally {
+			if (previousLanguage === undefined) delete process.env.CODE_MODEL_LANG;
+			else process.env.CODE_MODEL_LANG = previousLanguage;
+		}
+		expect(choices).toEqual([]);
+		expect(state.writes).toEqual([{ scope: "global", value: original }]);
+	});
+
 	it("detects a same-role concurrent edit before saving", async () => {
 		const coding = model("provider", "coder");
 		const state = settingsStub("provider/old:low");

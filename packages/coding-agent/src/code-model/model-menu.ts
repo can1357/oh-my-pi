@@ -202,6 +202,7 @@ async function pickModel(
 	if (selected === undefined) return undefined;
 	const picked = models[labels.indexOf(selected)];
 	if (!picked) throw new Error(t.errSelectModel);
+	if (picked.provider === current?.model.provider && picked.id === current.model.id) return current.model;
 	return picked;
 }
 

@@ -653,7 +653,6 @@ export class SessionManager {
 	#sessionDir: string;
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
-	readonly #preparedSessionLoads = new Map<string, SessionLoadResult>();
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
@@ -1744,9 +1743,9 @@ export class SessionManager {
 		await this.rollbackToSnapshot(snapshot);
 	}
 	/**
-	 * Load a target session once and report the cwd that committing it will adopt.
-	 * The returned commit closes over the exact loaded snapshot so navigation can
-	 * finish cancellable preparation before mutating the active session.
+	 * Load a target session for cancellable navigation and report the cwd that
+	 * committing it will adopt. The commit reloads the target so entries appended
+	 * while navigation awaits approval or phase restoration are included.
 	 */
 	async prepareSessionFile(sessionFile: string): Promise<{
 		cwd: string;
@@ -1775,12 +1774,13 @@ export class SessionManager {
 			cwd,
 			recordedCwd,
 			commit: async () => {
-				this.#preparedSessionLoads.set(resolvedSessionFile, loaded);
-				try {
-					await this.setSessionFile(resolvedSessionFile);
-				} finally {
-					this.#preparedSessionLoads.delete(resolvedSessionFile);
+				const refreshed = await loadSessionFile(resolvedSessionFile, this.#storage);
+				if (refreshed.invalidHeader) {
+					throw new Error(
+						`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+					);
 				}
+				await this.#setSessionFile(resolvedSessionFile, refreshed);
 			},
 		};
 	}
@@ -1800,10 +1800,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded =
-			loadedSession ??
-			this.#preparedSessionLoads.get(resolvedSessionFile) ??
-			(await loadSessionFile(resolvedSessionFile, this.#storage));
+		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
 		const sourceSize =
 			loaded.sourceSize !== undefined
 				? loaded.sourceSize

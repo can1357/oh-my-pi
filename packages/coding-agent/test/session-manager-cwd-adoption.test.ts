@@ -48,6 +48,34 @@ describe("SessionManager cwd adoption on resume", () => {
 		expect(manager.getHeader()?.cwd).toBe(path.resolve(projectB));
 	});
 
+	it("reloads a prepared session when the target grows before commit", async () => {
+		const projectA = makeTempDir("@pi-cwd-a-");
+		const projectB = makeTempDir("@pi-cwd-b-");
+		const sessionsB = path.join(projectB, "sessions");
+		const fileB = await writeSession(projectB, sessionsB);
+		const manager = SessionManager.create(projectA, path.join(projectA, "sessions"));
+		const prepared = await manager.prepareSessionFile(fileB);
+
+		const concurrent = await SessionManager.open(fileB);
+		concurrent.appendMessage({ role: "user", content: "concurrent append", timestamp: Date.now() });
+		await concurrent.flush();
+		await concurrent.close();
+
+		await prepared.commit();
+
+		expect(
+			manager
+				.getEntries()
+				.some(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						entry.message.content === "concurrent append",
+				),
+		).toBe(true);
+		await manager.close();
+	});
+
 	it("leaves cwd untouched when the resumed session has no recorded cwd", async () => {
 		const projectA = makeTempDir("@pi-cwd-a-");
 		const projectB = makeTempDir("@pi-cwd-b-");
