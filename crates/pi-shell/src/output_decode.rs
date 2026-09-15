@@ -45,7 +45,8 @@ impl Default for OutputDecoder {
 
 impl OutputDecoder {
 	/// Decode with the host ANSI code page as the Windows fallback.
-	pub const fn new() -> Self {
+	#[allow(clippy::missing_const_for_fn)]
+	pub fn new() -> Self {
 		Self {
 			pending: Vec::new(),
 			mode: Mode::Utf8,

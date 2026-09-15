@@ -125,8 +125,14 @@ export async function waitForCdp(cdpUrl: string, timeoutMs: number, signal?: Abo
  * Pull a `--remote-debugging-port=<n>` value out of an argv array (Chromium
  * accepts both `--flag=value` and `--flag value`). Returns null if absent or
  * malformed.
+ *
+ * Chromium rewrites its own /proc cmdline into one space-joined blob, so
+ * positional matching misses every flag on a live browser; the substring pass
+ * recovers digit-only ports from those blobs.
+ *
+ * @internal Exported so tests can pin blob-tolerant flag parsing.
  */
-function findCdpPortInArgs(args: string[]): number | null {
+export function findCdpPortInArgs(args: string[]): number | null {
 	for (const arg of args) {
 		const m = /^--remote-debugging-port=(\d+)$/.exec(arg);
 		if (m) {
@@ -140,10 +146,22 @@ function findCdpPortInArgs(args: string[]): number | null {
 			if (Number.isFinite(port) && port > 0) return port;
 		}
 	}
+	for (const arg of args) {
+		const m = /(?:^|\s)--remote-debugging-port[= ](\d+)/.exec(arg);
+		if (!m) continue;
+		const port = Number.parseInt(m[1]!, 10);
+		if (Number.isFinite(port) && port > 0) return port;
+	}
 	return null;
 }
 
-function findUserDataDirInArgs(args: string[] | undefined): string | null {
+/**
+ * Pull a `--user-data-dir` value out of an argv array (both spellings).
+ * Returns null if absent or malformed.
+ *
+ * @internal Exported so tests can pin blob-tolerant flag parsing.
+ */
+export function findUserDataDirInArgs(args: string[] | undefined): string | null {
 	if (!args) return null;
 	let result: string | null = null;
 	const inlinePrefix = "--user-data-dir=";
@@ -157,6 +175,16 @@ function findUserDataDirInArgs(args: string[] | undefined): string | null {
 		const value = args[index + 1];
 		result = value !== undefined && value.length > 0 && !value.startsWith("--") ? value : null;
 		if (result !== null) index++;
+	}
+	if (result !== null) return result;
+	// Blob pass (see findCdpPortInArgs): capture up to the next flag token so
+	// profile paths containing spaces (but not " --") survive the join. Last
+	// match wins, mirroring the strict pass.
+	for (const arg of args) {
+		for (const m of arg.matchAll(/(?:^|\s)--user-data-dir(?:=|\s+)([^]*?)(?=\s+--|\s*$)/g)) {
+			const value = m[1]!;
+			result = value.length > 0 && !value.startsWith("--") ? value : null;
+		}
 	}
 	return result;
 }

@@ -10,6 +10,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { astGrepToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
 import { ReadTool, readToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { hashlineIsReadTruncationNotice } from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { grepToolRenderer } from "../../src/tools/grep";
 
@@ -86,28 +87,33 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 		}
 	});
 
-	it("links the write header to the absolute path it wrote", async () => {
-		settings.override("tui.hyperlinks", "always");
-		const theme = (await getThemeByName("dark"))!;
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-link-write-"));
-		try {
-			const filePath = path.join(dir, "out.ts");
-			const tool = new WriteTool(createTestToolSession(dir));
-			const res = await tool.execute("w", { path: filePath, content: "export const x = 1;\n" });
-			const rendered = writeToolRenderer
-				.renderResult(
-					{ content: res.content, details: res.details, isError: res.isError },
-					{ expanded: false, isPartial: false },
-					theme,
-					{ path: filePath },
-				)
-				.render(200)
-				.join("\n");
-			expect(extractLinkUris(rendered)).toContain(url.pathToFileURL(path.resolve(filePath)).href);
-		} finally {
-			removeSyncWithRetries(dir);
-		}
-	});
+	// PR lanes run the last release's native addons, which may predate the
+	// hashline export the write renderer needs; re-enables on fresh addons.
+	it.skipIf(typeof hashlineIsReadTruncationNotice !== "function")(
+		"links the write header to the absolute path it wrote",
+		async () => {
+			settings.override("tui.hyperlinks", "always");
+			const theme = (await getThemeByName("dark"))!;
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-link-write-"));
+			try {
+				const filePath = path.join(dir, "out.ts");
+				const tool = new WriteTool(createTestToolSession(dir));
+				const res = await tool.execute("w", { path: filePath, content: "export const x = 1;\n" });
+				const rendered = writeToolRenderer
+					.renderResult(
+						{ content: res.content, details: res.details, isError: res.isError },
+						{ expanded: false, isPartial: false },
+						theme,
+						{ path: filePath },
+					)
+					.render(200)
+					.join("\n");
+				expect(extractLinkUris(rendered)).toContain(url.pathToFileURL(path.resolve(filePath)).href);
+			} finally {
+				removeSyncWithRetries(dir);
+			}
+		},
+	);
 
 	it("resolves scoped search links against cwd, not the (sub)scope path", async () => {
 		settings.override("tui.hyperlinks", "always");

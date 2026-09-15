@@ -78,6 +78,8 @@
 
 ### Fixed
 - Late non-blocking advisor notes arriving while a terminal primary turn unwinds now stay visible as advisor cards instead of starting an extra primary request ([#12154](https://github.com/can1357/oh-my-pi/pull/12154) by [@korri123](https://github.com/korri123)).
+- Attaching to an already-running Chromium no longer times out: browser reuse matching now recovers profile and debugging-port flags from Chromium's space-joined process command lines instead of argv arrays only.
+- Transcript retirement no longer renders stale blocks after the live child list is reordered or replaced externally.
 
 - Fixed Perplexity sign-in for SSO-only accounts in `/login` and the setup wizard with isolated browser sign-in and automatic session capture, supporting both secure-prefixed and unprefixed session cookies without manual cookie copying. ([#12064](https://github.com/can1357/oh-my-pi/pull/12064) by [@lance0](https://github.com/lance0))
 - Mid-run compaction no longer sends the pre-compaction history to the next provider call when the live message array is rewritten in place.

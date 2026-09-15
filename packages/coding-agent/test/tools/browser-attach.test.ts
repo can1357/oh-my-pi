@@ -6,8 +6,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
+	findCdpPortInArgs,
 	findFreeCdpPort,
 	findReusableCdp,
+	findUserDataDirInArgs,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
@@ -508,5 +510,33 @@ describe("probeCdpStatus", () => {
 		} finally {
 			await server.stop(true);
 		}
+	});
+});
+
+describe("attach flag parsing", () => {
+	// Chromium rewrites its own /proc cmdline into one space-joined blob;
+	// reuse matching must recover flags from that blob, not just argv arrays.
+	const BLOB =
+		"/home/u/chrome-linux64/chrome --type=renderer --user-data-dir=/tmp/omp-profile --remote-debugging-port=45671 --lang=en-US";
+	test("reads the CDP port from a space-joined cmdline blob", () => {
+		expect(findCdpPortInArgs([BLOB])).toBe(45671);
+		expect(findCdpPortInArgs(["/exe/chrome --remote-debugging-port 45671 --x"])).toBe(45671);
+	});
+	test("reads the profile dir from a space-joined cmdline blob", () => {
+		expect(findUserDataDirInArgs([BLOB])).toBe("/tmp/omp-profile");
+		expect(findUserDataDirInArgs(["/exe/chrome --user-data-dir /tmp/p --x"])).toBe("/tmp/p");
+		expect(findUserDataDirInArgs(["/exe/chrome --user-data-dir=/tmp/my profile --x"])).toBe("/tmp/my profile");
+	});
+	test("rejects port 0 and absent flags in blobs", () => {
+		expect(findCdpPortInArgs(["/exe/chrome --remote-debugging-port=0"])).toBeNull();
+		expect(findCdpPortInArgs(["/exe/chrome --headless"])).toBeNull();
+		expect(findUserDataDirInArgs(["/exe/chrome --headless"])).toBeNull();
+		expect(findUserDataDirInArgs(undefined)).toBeNull();
+	});
+	test("keeps argv-array parsing unchanged", () => {
+		expect(findCdpPortInArgs(["chrome", "--remote-debugging-port=1234"])).toBe(1234);
+		expect(findCdpPortInArgs(["chrome", "--remote-debugging-port", "1234"])).toBe(1234);
+		expect(findUserDataDirInArgs(["chrome", "--user-data-dir=/tmp/p"])).toBe("/tmp/p");
+		expect(findUserDataDirInArgs(["chrome", "--user-data-dir", "/tmp/p"])).toBe("/tmp/p");
 	});
 });

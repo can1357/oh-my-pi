@@ -19,6 +19,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { hashlineIsReadTruncationNotice } from "@oh-my-pi/pi-natives";
 import type { Text } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { grepToolRenderer } from "../../src/tools/grep";
@@ -495,25 +496,30 @@ describe("tool path arrays", () => {
 		expect(details?.scopePath).toBe("apps");
 	});
 
-	it("write reports absolute in-cwd targets relative to cwd", async () => {
-		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
-		const tools = await createTools(createTestSession(tmp));
-		const tool = tools.find(entry => entry.name === "write");
-		expect(tool).toBeDefined();
-		if (!tool) throw new Error("Missing write tool");
+	// PR lanes run the last release's native addons, which may predate the
+	// hashline export the write tool needs; re-enables on fresh addons.
+	it.skipIf(typeof hashlineIsReadTruncationNotice !== "function")(
+		"write reports absolute in-cwd targets relative to cwd",
+		async () => {
+			const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
+			const tools = await createTools(createTestSession(tmp));
+			const tool = tools.find(entry => entry.name === "write");
+			expect(tool).toBeDefined();
+			if (!tool) throw new Error("Missing write tool");
 
-		const absoluteTarget = path.join(tmp, "written.txt");
-		const result = await tool.execute("write-absolute-in-cwd", {
-			path: absoluteTarget,
-			content: "written\n",
-		});
-		const text = getText(result);
+			const absoluteTarget = path.join(tmp, "written.txt");
+			const result = await tool.execute("write-absolute-in-cwd", {
+				path: absoluteTarget,
+				content: "written\n",
+			});
+			const text = getText(result);
 
-		expect(text).toContain("Successfully wrote 8 bytes to written.txt");
-		expect(text).not.toContain(tmp);
-		expect(await Bun.file(absoluteTarget).text()).toBe("written\n");
-		await removeWithRetries(tmp);
-	});
+			expect(text).toContain("Successfully wrote 8 bytes to written.txt");
+			expect(text).not.toContain(tmp);
+			expect(await Bun.file(absoluteTarget).text()).toBe("written\n");
+			await removeWithRetries(tmp);
+		},
+	);
 
 	it("read expands comma-delimited paths", async () => {
 		const tools = await createTools(createTestSession(tempDir));

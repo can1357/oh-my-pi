@@ -84,12 +84,13 @@ sleep 30
 			const cleanupProcesses: Process[] = [];
 
 			try {
-				const pidFileHandle = Bun.file(pidFile);
+				// NOTE: a fresh handle per poll — Bun.file().exists() caches the
+				// stat from handle creation, so a reused handle never observes the file.
 				const setupDeadline = Date.now() + 2_000;
-				while (!(await pidFileHandle.exists()) && Date.now() < setupDeadline) await Bun.sleep(10);
-				expect(await pidFileHandle.exists(), "the launcher must create its worker").toBe(true);
+				while (!(await Bun.file(pidFile).exists()) && Date.now() < setupDeadline) await Bun.sleep(10);
+				expect(await Bun.file(pidFile).exists(), "the launcher must create its worker").toBe(true);
 
-				const workerPid = Number.parseInt((await pidFileHandle.text()).trim(), 10);
+				const workerPid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 				const subreaper = Process.fromPid(child.pid);
 				const command = subreaper?.children()[0];
 				const worker = Process.fromPid(workerPid);
