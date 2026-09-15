@@ -280,6 +280,50 @@ describe("tool output details", () => {
 		expect(plain(rows)).toContain("1.1K");
 	});
 
+	it("strips control bytes from a folded read target", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/safe.ts\u0007\nsecond\u001b[2J" }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "line 1" }] }, false, "read-0");
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(120);
+		const row = rows.join("");
+
+		expect(rows).toHaveLength(1);
+		expect(row).not.toContain("\u0007");
+		expect(row).not.toContain("\u001b[2J");
+		expect(Bun.stripANSI(row)).toContain("/tmp/safe.ts second");
+	});
+
+	it("keeps the usage suffix on a folded read row whose target fills the width", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: `/${"segment-".repeat(12)}file.ts` }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "line 1" }] }, false, "read-0");
+		group.attachUsage(
+			["read-0"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(60);
+		const row = rows.join("");
+
+		expect(rows).toHaveLength(1);
+		expect(Bun.stringWidth(Bun.stripANSI(row))).toBeLessThanOrEqual(60);
+		expect(Bun.stripANSI(row)).toContain("1.1K");
+	});
+
 	it("keeps an interrupted call neutral while folded", () => {
 		// Steering interrupts a pending call and reports `isError`; the full card
 		// renders the placeholder neutrally, so the folded row must not claim failure.

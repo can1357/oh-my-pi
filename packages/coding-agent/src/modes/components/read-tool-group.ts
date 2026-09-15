@@ -1,8 +1,9 @@
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Container, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { Container, Text, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
 import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
@@ -342,6 +343,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#usageBatchByToolCallId = new Map<string, string>();
 	#text: WidthAwareText;
 	#summaryLines: readonly string[] = [];
+	/** Folded rows keep their usage suffix out of the truncatable target text. */
+	#summaryUsage: readonly (string | undefined)[] = [];
 	#expanded = false;
 	#toolActivityVisible = true;
 	#toolOutputDetailsHidden = false;
@@ -372,15 +375,23 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/**
 	 * The summary rows, cut to the terminal width while tool output details are
 	 * folded: the setting promises one row per read call, and the `Text` inside
-	 * would otherwise wrap a long target into several physical rows.
+	 * would otherwise wrap a long target into several physical rows. A row that
+	 * carries a usage suffix keeps that suffix whole and gives the target the
+	 * remaining width, so a long path cannot push the numbers off the row.
 	 */
 	#createSummaryText(): WidthAwareText {
 		return new WidthAwareText(
-			contentWidth =>
-				(this.#toolOutputDetailsHidden
-					? this.#summaryLines.map(line => truncateToWidth(line, contentWidth))
-					: this.#summaryLines
-				).join("\n"),
+			contentWidth => {
+				if (!this.#toolOutputDetailsHidden) return this.#summaryLines.join("\n");
+				return this.#summaryLines
+					.map((line, index) => {
+						const usage = this.#summaryUsage[index];
+						if (!usage) return truncateToWidth(line, contentWidth);
+						const room = Math.max(1, contentWidth - visibleWidth(usage));
+						return `${truncateToWidth(line, room)}${usage}`;
+					})
+					.join("\n");
+			},
 			0,
 			0,
 		);
@@ -582,6 +593,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
 		this.#summaryLines = [];
+		this.#summaryUsage = [];
 		this.#text = this.#createSummaryText();
 
 		if (displayRows.length === 0) {
@@ -757,9 +769,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			);
 			if (this.#toolOutputDetailsHidden) {
 				// Folded keeps one row per read call, so the usage rides the call row
-				// the caller just pushed instead of claiming a line of its own.
+				// the caller just pushed instead of claiming a line of its own. It is
+				// held aside so the row's target is what gets truncated, not the usage.
 				const index = lines.length - 1;
-				lines[index] = `${lines[index] ?? ""}${theme.fg("dim", theme.sep.dot)}${theme.fg("dim", usage)}`;
+				const suffix = `${theme.fg("dim", theme.sep.dot)}${theme.fg("dim", usage)}`;
+				const suffixes = [...this.#summaryUsage];
+				suffixes[index] = `${suffixes[index] ?? ""}${suffix}`;
+				this.#summaryUsage = suffixes;
 				continue;
 			}
 			lines.push(theme.fg("dim", `${prefix}${usage}`));
@@ -827,9 +843,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		value: string,
 		options: { correctedFrom?: string; conflictCount?: number; line?: number; linkPath?: string } = {},
 	): string {
-		const split = splitPathAndSel(value);
+		// The path is model-supplied and lands in a one-row summary, so a tab,
+		// newline, or escape sequence here would add rows or corrupt the terminal.
+		const safeValue = sanitizeText(value).replace(/\s+/g, " ");
+		const split = splitPathAndSel(safeValue);
 		const selectorSuffix = split.sel ? `:${split.sel}` : "";
-		const baseValue = split.sel ? split.path : value;
+		const baseValue = split.sel ? split.path : safeValue;
 		const filePath = shortenPath(baseValue);
 		let pathDisplay = filePath ? theme.fg("accent", filePath) : theme.fg("toolOutput", "…");
 		if (filePath && options.linkPath) {
@@ -840,7 +859,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			pathDisplay += theme.fg("accent", selectorSuffix);
 		}
 		if (options.correctedFrom) {
-			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
+			const corrected = sanitizeText(options.correctedFrom).replace(/\s+/g, " ");
+			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(corrected)})`);
 		}
 		pathDisplay += this.#formatConflictBadge(options.conflictCount);
 		return pathDisplay;
