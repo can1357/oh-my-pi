@@ -609,6 +609,15 @@ export class RpcClient {
 	}
 
 	/**
+	 * Move the first matching queued follow-up into steering.
+	 * A missing target returns false; retrying may promote another occurrence.
+	 */
+	async promoteQueuedMessage(message: string): Promise<{ promoted: boolean }> {
+		const response = await this.#send({ type: "promote_queued_message", message });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Abort current operation.
 	 */
 	async abort(): Promise<void> {
