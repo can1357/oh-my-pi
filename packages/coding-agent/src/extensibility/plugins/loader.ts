@@ -11,6 +11,7 @@ import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
+import { installLegacyPiShimLoopGuard } from "./legacy-pi-shim-loop-guard";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
 import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
 
@@ -19,6 +20,10 @@ export interface ScopedInstalledPlugin extends InstalledPlugin {
 	scope: "user" | "project";
 }
 
+// Guard first: Bun runs onResolve hooks in registration order, and the loop
+// guard must see shim-originated resolutions before the compat resolver's
+// override map does (issue #8900).
+installLegacyPiShimLoopGuard();
 installLegacyPiSpecifierShim();
 
 const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
