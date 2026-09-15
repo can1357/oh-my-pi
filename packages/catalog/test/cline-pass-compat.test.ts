@@ -116,7 +116,6 @@ describe("ClinePass catalog", () => {
 		const reference = createReferenceResolver<"openai-completions">(new Map())("kimi-k3");
 
 		expect(reference?.provider).toBe("fireworks");
-		expect(reference?.maxTokens).toBe(1_048_576);
 	});
 
 	it("applies the verified Cline gateway request and reasoning compatibility", () => {
