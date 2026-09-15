@@ -7,6 +7,7 @@ import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import { startSharpshooterLeg } from "../memory-backend/with-sharpshooter";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 
@@ -189,6 +190,59 @@ export class SessionMemory {
 			() => undefined,
 		);
 		await transition;
+	}
+
+	/**
+	 * Rebind only the paired decision backend after the session's cwd moved.
+	 *
+	 * `applyMemoryBackend` already rebinds everything, and every caller that can
+	 * reach it should keep using it. This exists for the one path that cannot:
+	 * `rebindMemoryBackendForCwd` deliberately skips the full apply while a
+	 * Hindsight transition owns the backend, so that it does not retry a
+	 * partially torn-down store outside its own task. Sharpshooter is not that
+	 * store. It keys its decision bank and its per-bank scheduler on cwd, so
+	 * skipping leaves it consolidating the project the session just left and
+	 * ignoring the destination project's own `sharpshooter.enabled`.
+	 *
+	 * The destination project decides, both ways. It can turn pairing off, and
+	 * then the source project's subscription and scheduler have to go: left
+	 * installed they would keep extracting from this session's messages and keep
+	 * consolidating a project the session has left.
+	 *
+	 * Sharpshooter selected as the backend is left alone either way, because it
+	 * rebinds through the normal apply.
+	 *
+	 * Either branch ends with a prompt rebuild. Sharpshooter's decision files are
+	 * injected as developer instructions, and the Hindsight rebuild this runs
+	 * beside refreshes the base prompt only when its own bank scope changed, which
+	 * a `global` scope or an unchanged bank never does. Without this the session
+	 * would go on being told the source project's decisions, including after a
+	 * destination that turned pairing off.
+	 */
+	async rebindPairedMemoryForCwd(): Promise<void> {
+		if (this.#host.isDisposed()) return;
+		if (!this.#memoryAgentDir || this.#memoryTaskDepth !== 0) return;
+		const settings = this.#host.settings;
+		const backend = settings.get("memory.backend");
+		if (backend === "sharpshooter") return;
+		const session = this.#host.memoryBackendSession();
+		if (settings.get("sharpshooter.enabled")) {
+			startSharpshooterLeg(
+				{
+					session,
+					settings,
+					modelRegistry: this.#host.modelRegistry,
+					agentDir: this.#memoryAgentDir,
+					taskDepth: this.#memoryTaskDepth,
+				},
+				backend ?? "off",
+				"rebind",
+			);
+		} else {
+			releaseSharpshooterSession(session);
+		}
+		if (this.#host.isDisposed()) return;
+		await this.#host.refreshBaseSystemPrompt();
 	}
 
 	async #applyMemoryBackend(retainMnemopi = true): Promise<void> {

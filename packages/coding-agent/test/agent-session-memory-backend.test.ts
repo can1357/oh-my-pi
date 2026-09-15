@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -12,6 +12,8 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-back
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import * as sharpshooterModule from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
+import { sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -37,9 +39,12 @@ describe("AgentSession memory backend lifecycle", () => {
 	let session: AgentSession | undefined;
 	let settings: Settings;
 	let tempDir: TempDir;
+	/** Counts base-prompt rebuilds; the memory host routes them away from the session object. */
+	let promptRebuilds = 0;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
+		promptRebuilds = 0;
 		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settings = Settings.isolated({
@@ -51,6 +56,9 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	afterEach(async () => {
+		// Restored here rather than at the end of each test, so a failing assertion
+		// cannot leave a mock installed and hand its call history to the next test.
+		mock.restore();
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
@@ -88,9 +96,10 @@ describe("AgentSession memory backend lifecycle", () => {
 			createMemoryTools,
 			toolRegistry,
 			builtInToolNames: [read.name],
-			rebuildSystemPrompt: async toolNames => ({
-				systemPrompt: [`backend:${settings.get("memory.backend")};tools:${toolNames.sort().join(",")}`],
-			}),
+			rebuildSystemPrompt: async toolNames => {
+				promptRebuilds += 1;
+				return { systemPrompt: [`backend:${settings.get("memory.backend")};tools:${toolNames.sort().join(",")}`] };
+			},
 		});
 		return session;
 	}
@@ -127,6 +136,96 @@ describe("AgentSession memory backend lifecycle", () => {
 		await rebindMemoryBackendForCwd(current);
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
+	});
+
+	/**
+	 * Record the cwd Sharpshooter is installed against, through either entry point:
+	 * `start` on a real startup, `rebindSharpshooterSession` on a cwd move. Tracking
+	 * only one would make a regression in the other look like silence. `afterEach`
+	 * restores the mocks.
+	 */
+	function trackSharpshooterStarts(): string[] {
+		const startedAt: string[] = [];
+		spyOn(sharpshooterBackend, "start").mockImplementation(options => {
+			startedAt.push(options.settings.getCwd());
+		});
+		spyOn(sharpshooterModule, "rebindSharpshooterSession").mockImplementation(options => {
+			startedAt.push(options.settings.getCwd());
+		});
+		return startedAt;
+	}
+
+	it("rebinds a paired Sharpshooter to the destination project when Hindsight owns the backend", async () => {
+		// The rebind path skips the full apply while Hindsight state exists, so that
+		// it does not retry a partially torn-down store. Sharpshooter keys its bank
+		// and its per-bank scheduler on cwd, so without a rebind of its own it keeps
+		// consolidating the project the session just left.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+		expect(startedAt).toEqual([source]);
+
+		await settings.reloadForCwd(destination);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([source, destination]);
+	});
+
+	it("releases Sharpshooter when the destination project turns pairing off", async () => {
+		// The destination decides both ways. Left installed, the source project's
+		// subscription would keep extracting from this session's messages and its
+		// scheduler would keep consolidating a project the session has left.
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const startedAt = trackSharpshooterStarts();
+		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toHaveLength(1);
+		releaseSpy.mockClear();
+
+		// Sharpshooter's decisions are injected as developer instructions, so the
+		// prompt has to be rebuilt or the session keeps being told the source
+		// project's rules after pairing was turned off. The Hindsight rebuild does
+		// not do it when its own bank scope is unchanged.
+		const rebuildsBefore = promptRebuilds;
+
+		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
+		settings.override("sharpshooter.enabled", false);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(releaseSpy).toHaveBeenCalledTimes(1);
+		expect(startedAt).toHaveLength(1);
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
+	});
+
+	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", false);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([]);
 	});
 
 	it("switches runtime state, memory tools, and prompt in one apply", async () => {

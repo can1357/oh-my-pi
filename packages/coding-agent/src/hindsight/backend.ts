@@ -216,13 +216,18 @@ function schedulePrimaryStateRebuild(session: AgentSession): PrimaryRebuildTask 
  */
 export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<void> {
 	if (!session.memoryEnabled) return;
-	// Other backends have no Hindsight scope subscription. Reapply them on an
-	// explicit cwd move, but let an in-flight Hindsight transition finish (or
-	// fail) rather than retrying a partially torn-down backend outside its task.
-	if (!session.getHindsightSessionState() && !primaryRebuildTasks.has(session)) {
-		// The manager already has the new cwd, and this may also be rollback
-		// from a destination that never committed. Drain existing writes without
-		// capturing the transcript under either transient scope.
+	if (session.getHindsightSessionState() || primaryRebuildTasks.has(session)) {
+		// A Hindsight transition owns the backend, so let it finish (or fail) rather
+		// than retrying a partially torn-down store outside its own task. A backend
+		// paired alongside the store still has to follow the move though, and the
+		// rebuild below reinstalls Hindsight's state alone. Rebinding that leg on its
+		// own leaves the in-flight transition untouched.
+		await session.rebindPairedMemoryForCwd();
+	} else {
+		// Other backends have no Hindsight scope subscription, so reapply them on an
+		// explicit cwd move. The manager already has the new cwd, and this may also be
+		// rollback from a destination that never committed. Drain existing writes
+		// without capturing the transcript under either transient scope.
 		await session.applyMemoryBackend({ retainMnemopi: false });
 	}
 

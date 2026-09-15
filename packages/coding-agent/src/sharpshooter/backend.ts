@@ -1,6 +1,11 @@
 import { rm } from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { MemoryBackend, MemoryBackendSearchItem, MemoryBackendStatus } from "../memory-backend/types";
+import type {
+	MemoryBackend,
+	MemoryBackendSearchItem,
+	MemoryBackendStartOptions,
+	MemoryBackendStatus,
+} from "../memory-backend/types";
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
 import { runSharpshooterConsolidation } from "./consolidate";
@@ -72,46 +77,72 @@ function formatTimestamp(timestamp: number | undefined): string {
 	return timestamp ? new Date(timestamp).toISOString() : "never";
 }
 
+/**
+ * Install this session's Sharpshooter resources, replacing any it already has.
+ *
+ * `catchUpOnLatestPrompt` separates the two reasons to call this. At startup the
+ * backend can race the first turn's events (print mode submits while
+ * `resolveMemoryBackend` is still importing us), so a transcript already ending
+ * in a user prompt has to be caught up or that prompt is never extracted.
+ *
+ * A cwd rebind is the other reason, and there the catch-up is wrong: after
+ * `/move` the newest transcript entry is still the source project's prompt, so
+ * catching up would extract it against the destination and file a decision the
+ * destination never earned. An interrupted or failed turn is enough to leave the
+ * transcript in exactly that shape.
+ */
+function installSharpshooterSession(
+	options: MemoryBackendStartOptions,
+	{ catchUpOnLatestPrompt }: { catchUpOnLatestPrompt: boolean },
+): void {
+	if (options.taskDepth > 0) return;
+	const { session, settings, modelRegistry, agentDir } = options;
+	try {
+		releaseSharpshooterSession(session);
+		const disposeScheduler = startSharpshooterScheduler({
+			agentDir,
+			cwd: settings.getCwd(),
+			settings,
+			modelRegistry,
+			sessionId: session.sessionId,
+		});
+		try {
+			const unsubscribe = session.subscribe(event => {
+				// message_start is the only event that carries the committed user
+				// prompt itself (agent_start fires before the transcript appends),
+				// and it also covers mid-turn steering prompts.
+				if (event.type !== "message_start" || event.message.role !== "user") return;
+				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: event.message });
+			});
+			if (catchUpOnLatestPrompt && session.messages.at(-1)?.role === "user") {
+				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir });
+			}
+			(session as SharpshooterAgentSession)[kSharpshooterSessionResources] = {
+				unsubscribe,
+				disposeScheduler,
+			};
+		} catch (error) {
+			disposeScheduler();
+			throw error;
+		}
+	} catch (error) {
+		logger.warn("Sharpshooter: backend startup failed; memory backend inert.", { error: String(error) });
+	}
+}
+
+/**
+ * Re-point this session's Sharpshooter resources at the project it moved to,
+ * without re-extracting the prompt it left behind. See `installSharpshooterSession`.
+ */
+export function rebindSharpshooterSession(options: MemoryBackendStartOptions): void {
+	installSharpshooterSession(options, { catchUpOnLatestPrompt: false });
+}
+
 export const sharpshooterBackend: MemoryBackend = {
 	id: "sharpshooter",
 
 	start(options): void {
-		if (options.taskDepth > 0) return;
-		const { session, settings, modelRegistry, agentDir } = options;
-		try {
-			releaseSharpshooterSession(session);
-			const disposeScheduler = startSharpshooterScheduler({
-				agentDir,
-				cwd: settings.getCwd(),
-				settings,
-				modelRegistry,
-				sessionId: session.sessionId,
-			});
-			try {
-				const unsubscribe = session.subscribe(event => {
-					// message_start is the only event that carries the committed user
-					// prompt itself (agent_start fires before the transcript appends),
-					// and it also covers mid-turn steering prompts.
-					if (event.type !== "message_start" || event.message.role !== "user") return;
-					maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: event.message });
-				});
-				// Backend startup can race the first turn's events (print mode
-				// submits while resolveMemoryBackend is still importing us).
-				// Catch up when the newest transcript message is already a user prompt.
-				if (session.messages.at(-1)?.role === "user") {
-					maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir });
-				}
-				(session as SharpshooterAgentSession)[kSharpshooterSessionResources] = {
-					unsubscribe,
-					disposeScheduler,
-				};
-			} catch (error) {
-				disposeScheduler();
-				throw error;
-			}
-		} catch (error) {
-			logger.warn("Sharpshooter: backend startup failed; memory backend inert.", { error: String(error) });
-		}
+		installSharpshooterSession(options, { catchUpOnLatestPrompt: true });
 	},
 
 	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {

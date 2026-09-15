@@ -14,6 +14,7 @@ import {
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function message(role: "user" | "assistant", content: unknown): AgentMessage {
 	return { role, content, timestamp: Date.now() } as unknown as AgentMessage;
@@ -211,6 +212,60 @@ describe("maybeStartSharpshooterExtraction", () => {
 			});
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("queues a delta to the project whose prompt produced it, even if /move lands mid-extraction", async () => {
+		using temp = TempDir.createSync("@sharpshooter-extract-move-");
+		{
+			const root = temp.path();
+			const source = path.join(root, "source");
+			const destination = path.join(root, "destination");
+			const agentDir = path.join(root, "agent");
+			const currentPrompt = "Keep the cyan status indicator and never replace it with magenta.";
+			const deps = extractionDependencies(source, [message("user", [{ type: "text", text: currentPrompt }])]);
+			// The session's directory is live, so a `/move` while the model call is
+			// outstanding changes it under the extraction that is already running.
+			let live = source;
+			(deps.session as unknown as { sessionManager: { getCwd: () => string } }).sessionManager = {
+				getCwd: () => live,
+			};
+			vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+				live = destination;
+				return assistantResponse([
+					{
+						type: "toolCall",
+						id: "call-record",
+						name: "record_deltas",
+						arguments: {
+							deltas: [
+								{
+									kind: "style_decision",
+									statement: "Status indicator uses cyan rather than magenta.",
+									source: "explicit_user",
+									evidence: "cyan status indicator",
+									friction: { corrective: true, regression: false, subtle: true },
+								},
+							],
+						},
+					},
+				]);
+			});
+
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+			await waitFor(
+				async () => (await listSharpshooterDeltas(agentDir, source)).length === 1,
+				"delta was not queued to the source project",
+			);
+
+			// The decision was earned in the source project and is not a decision
+			// about the destination.
+			expect(await listSharpshooterDeltas(agentDir, destination)).toHaveLength(0);
 		}
 	});
 
