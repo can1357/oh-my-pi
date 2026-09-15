@@ -466,7 +466,7 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 	assert!(
 		error
 			.to_string()
-			.contains("input is not Hashline syntax; detected unified diff")
+			.contains("Possible non-Hashline syntax: unified diff")
 	);
 
 	let aborted = Patch::parse(

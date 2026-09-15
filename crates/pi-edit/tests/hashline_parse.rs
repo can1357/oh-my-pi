@@ -614,13 +614,13 @@ fn input_rejects_malformed_tags_and_missing_headers() {
 	assert!(
 		error.contains("input must begin with `[PATH#HASH]`") && error.contains("[src/foo.ts#1A2B]")
 	);
-	assert!(!error.contains("input is not Hashline syntax"), "{error}");
+	assert!(!error.contains("Possible non-Hashline syntax"), "{error}");
 
 	let error = Patch::parse("*** Begin Patch\nCUT 38.=40\n*** End Patch", &options())
 		.unwrap_err()
 		.to_string();
 	assert!(error.contains("input must begin with `[PATH#HASH]`"), "{error}");
-	assert!(!error.contains("input is not Hashline syntax"), "{error}");
+	assert!(!error.contains("Possible non-Hashline syntax"), "{error}");
 }
 
 #[test]
@@ -632,14 +632,13 @@ fn input_reports_all_detected_foreign_syntax_on_first_failure() {
 	)
 	.unwrap_err()
 	.to_string();
+	assert!(error.contains("Missing Hashline header"), "{error}");
 	assert!(
-		error.contains(
-			"input is not Hashline syntax; detected apply_patch, unified diff, SEARCH/REPLACE"
-		),
+		error.contains("Possible non-Hashline syntax: apply_patch, unified diff, SEARCH/REPLACE"),
 		"{error}"
 	);
-	assert!(error.contains("A `[PATH#HASH]` header will not make this body valid"), "{error}");
-	assert!(error.contains("Rewrite the whole edit in Hashline syntax"), "{error}");
+	assert!(error.contains("This is a best-effort hint"), "{error}");
+	assert!(error.contains("review the edit tool instructions before retrying"), "{error}");
 }
 
 #[test]
@@ -647,8 +646,8 @@ fn input_reports_contextual_unified_hunks_on_first_failure() {
 	let error = Patch::parse("@@ -1,3 +1,3 @@ fn main\n-old\n+new", &options())
 		.unwrap_err()
 		.to_string();
-	assert!(error.contains("input is not Hashline syntax; detected unified diff"), "{error}");
-	assert!(error.contains("Rewrite the whole edit in Hashline syntax"), "{error}");
+	assert!(error.contains("Missing Hashline header"), "{error}");
+	assert!(error.contains("Possible non-Hashline syntax: unified diff"), "{error}");
 }
 
 #[test]
