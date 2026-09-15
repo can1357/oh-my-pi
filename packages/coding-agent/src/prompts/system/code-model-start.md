@@ -1,0 +1,1 @@
+Entered coding phase in the same conversation: {{modelState}}. Existing history, tools, and permissions remain active. Implement and run targeted checks, then call code-model finish alone for original-model review.

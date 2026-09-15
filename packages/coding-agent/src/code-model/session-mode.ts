@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { formatModelStringWithRouting, parseModelString, parsePersistedModelSelector } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type {
@@ -10,11 +11,13 @@ import type {
 import type { CodeModelNavigationPreparation } from "../session/agent-session-types";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
+import codeModelStartPrompt from "../prompts/system/code-model-start.md" with { type: "text" };
 import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
 import { availableCodeModels, resolveCodeModelSelection } from "./model-menu";
 
 export const CODE_MODEL_STATE_TYPE = "code-model-phase-v1";
 export const CODE_MODEL_REVIEW_PROMPT = codeModelReviewPrompt.trim();
+export const CODE_MODEL_START_PROMPT = codeModelStartPrompt.trim();
 
 interface ModelState {
 	provider: string;
@@ -324,7 +327,7 @@ export function installCodeModelSession(
 		return {
 			changed: true,
 			phase: "coding",
-			message: `Entered coding phase in the same conversation: ${describeModelState(coding)}. Existing history, tools, and permissions remain active. Implement and run targeted checks, then call code-model finish alone for original-model review.`,
+			message: prompt.render(CODE_MODEL_START_PROMPT, { modelState: describeModelState(coding) }),
 		};
 	}
 
