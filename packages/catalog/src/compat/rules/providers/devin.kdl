@@ -54,14 +54,14 @@ provider "devin" {
 			input 0.75
 			output 3.75
 			cache-read 0.075
-			cache-write 0
+			cache-write 0.75
 			effective-rates {
 				list-price {
 					effective-from "2027-01-01T00:00:00Z"
 					input 3
 					output 15
 					cache-read 0.3
-					cache-write 0
+					cache-write 3
 				}
 			}
 		}
@@ -74,7 +74,7 @@ provider "devin" {
 			input 0.5
 			output 2.5
 			cache-read 0.2
-			cache-write 0
+			cache-write 0.5
 		}
 	}
 	models "glm-5-2" {
@@ -82,7 +82,7 @@ provider "devin" {
 			input 1.4
 			output 4.4
 			cache-read 0.26
-			cache-write 0
+			cache-write 1.4
 		}
 	}
 }

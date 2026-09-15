@@ -10,6 +10,7 @@ import { resolveModelPolicy } from "../src/compat/resolve";
 import { compareRevision, parseRevision } from "../src/compat/revision";
 import { seedModels } from "../src/compat/providers";
 import { classifyModel } from "../src/compat/taxonomy";
+import { CODEX_REMOTE_COMPACTION } from "../src/discovery/codex";
 import { resolveCursorInput } from "../src/discovery/cursor";
 import { bareModelId, getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
@@ -240,6 +241,19 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 		if (model.provider !== "ollama-cloud" || model.contextWindow === null) continue;
 		if (!isOllamaCloudOutputCapped(model.id)) continue;
 		model.maxTokens = Math.min(model.contextWindow, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS);
+	}
+}
+
+/**
+ * Backfill Codex-native compaction metadata onto rows that bypass discovery
+ * (authored seeds): discovery stamps every row with CODEX_REMOTE_COMPACTION
+ * and the compaction router requires v2StreamingEnabled to be exactly true.
+ * Never overwrites a row that already carries the metadata.
+ */
+export function applyCodexRemoteCompactionFallback(models: ModelSpec<Api>[]): void {
+	for (const model of models) {
+		if (model.provider !== "openai-codex" || model.remoteCompaction !== undefined) continue;
+		model.remoteCompaction = { ...CODEX_REMOTE_COMPACTION };
 	}
 }
 

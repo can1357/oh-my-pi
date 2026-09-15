@@ -17,7 +17,7 @@ import { getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
-import { isRetiredProvider } from "../src/compat/behavior";
+import { isRetiredProvider, pricingPeerSourceProviders } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
@@ -48,12 +48,13 @@ import {
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
-import type { Api, Model, ModelSpec } from "../src/types";
+import type { Api, Model, ModelCost, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
 import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
 import {
 	applyPricingPeerFallbacks,
 	applyCanonicalLimitFallback,
+	applyCodexRemoteCompactionFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	hasBillableCost,
@@ -672,6 +673,7 @@ async function generateModels() {
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
+	applyCodexRemoteCompactionFallback(allModels);
 	allModels = applyPricingPeerFallbacks(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
@@ -739,6 +741,18 @@ async function generateModels() {
 	// Generate JSON file
 	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS));
 	console.log("Generated src/models.json");
+
+	// Compact peer-cost index for buildModel's runtime pricing-peer fallback:
+	// id→cost for peer-source providers only, so the build subpath doesn't
+	// load the full catalog bundle into lightweight consumers.
+	const peerProviders = new Set(pricingPeerSourceProviders());
+	const peerCosts: Record<string, Record<string, ModelCost>> = {};
+	for (const [provider, models] of Object.entries(MODELS)) {
+		if (!peerProviders.has(provider)) continue;
+		peerCosts[provider] = Object.fromEntries(Object.entries(models).map(([id, model]) => [id, model.cost]));
+	}
+	await Bun.write(path.join(packageRoot, "src/pricing-peer-costs.json"), JSON.stringify(peerCosts));
+	console.log("Generated src/pricing-peer-costs.json");
 
 	// Print statistics
 	const totalModels = allModels.length;

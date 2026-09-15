@@ -11,9 +11,9 @@ import { pricingPeerFor } from "./compat/behavior";
 import { resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
-import { type GeneratedProvider, getBundledModels } from "./models";
+import PEER_COSTS from "./pricing-peer-costs.json" with { type: "json" };
 import { materializeTimeBasedCost } from "./pricing";
-import type { Api, Model, ModelSpec } from "./types";
+import type { Api, Model, ModelCost, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -206,16 +206,12 @@ function applyPricingPeerFallback(model: Model<Api>): void {
 	}
 	for (const candidateId of peer.peerId !== model.id ? [peer.peerId, model.id] : [model.id]) {
 		for (const provider of peer.peers) {
-			const match = getBundledModels(provider as GeneratedProvider).find(
-				candidate =>
-					candidate.id === candidateId &&
-					(candidate.cost.input !== 0 ||
-						candidate.cost.output !== 0 ||
-						candidate.cost.cacheRead !== 0 ||
-						candidate.cost.cacheWrite !== 0),
-			);
-			if (match) {
-				model.cost = { ...match.cost };
+			// Mirror models.ts: the JSON import carries a literal type; index
+			// through keyof and narrow the row to its cost shape.
+			const providerCosts = PEER_COSTS[provider as keyof typeof PEER_COSTS] as Record<string, ModelCost> | undefined;
+			const cost = providerCosts?.[candidateId];
+			if (cost && (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0)) {
+				model.cost = { ...cost };
 				return;
 			}
 		}

@@ -3,11 +3,13 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyPricingPeerFallbacks,
+	applyCodexRemoteCompactionFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
+import { CODEX_REMOTE_COMPACTION } from "../src/discovery/codex";
 import { resolveProviderModels } from "../src/model-manager";
 import { getBundledModel } from "../src/models";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
@@ -908,5 +910,35 @@ describe("applyPricingPeerFallbacks", () => {
 		expect(result[2]?.cost).toEqual(zeroCost);
 		// Already-billable antigravity rows keep their own pricing.
 		expect(result[3]?.cost).toEqual(pricedCost);
+	});
+});
+
+describe("applyCodexRemoteCompactionFallback", () => {
+	it("stamps seed rows missing compaction metadata with the discovery const", () => {
+		const models: ModelSpec<Api>[] = [
+			createSpec({ id: "gpt-5.3-codex-spark", api: "openai-codex-responses", provider: "openai-codex" }),
+		];
+
+		applyCodexRemoteCompactionFallback(models);
+
+		expect(models[0]?.remoteCompaction).toEqual(CODEX_REMOTE_COMPACTION);
+	});
+
+	it("leaves carried metadata and other providers untouched", () => {
+		const existing = { ...CODEX_REMOTE_COMPACTION, v2StreamingEnabled: false };
+		const codex: ModelSpec<Api> = {
+			...createSpec({ id: "gpt-5.5", api: "openai-codex-responses", provider: "openai-codex" }),
+			remoteCompaction: existing,
+		};
+		const other: ModelSpec<Api> = createSpec({
+			id: "deepseek-v4-flash",
+			api: "openai-completions",
+			provider: "deepseek",
+		});
+
+		applyCodexRemoteCompactionFallback([codex, other]);
+
+		expect(codex.remoteCompaction).toBe(existing);
+		expect(other.remoteCompaction).toBeUndefined();
 	});
 });

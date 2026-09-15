@@ -225,3 +225,18 @@ export function pricingPeerFor(
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
 }
+
+/**
+ * Union of peer-source providers across `pricing-peer` rules. Drives the
+ * compact peer-cost index the generator writes for `buildModel`'s runtime
+ * fallback, so the build subpath doesn't load the full catalog bundle.
+ */
+export function pricingPeerSourceProviders(): readonly string[] {
+	const out: string[] = [];
+	for (const rule of behavior.pricingPeers) {
+		for (const peer of rule.peers) {
+			if (!out.includes(peer)) out.push(peer);
+		}
+	}
+	return out;
+}

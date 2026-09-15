@@ -451,3 +451,22 @@ describe("deepseek provider metadata corrections", () => {
 		expect(resolved.compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
 	});
 });
+
+describe("neutral tariff schedules", () => {
+	it("reports no tariff period for effective-date-only schedules", () => {
+		const cost: ModelCost = {
+			...spec().cost,
+			timeBased: {
+				offPeakMultiplier: 1,
+				peakWindows: [],
+				effectiveRates: [{ effectiveFrom: 2000, input: 5, output: 6, cacheRead: 0.5, cacheWrite: 6.25 }],
+			},
+		};
+
+		expect(getTimeBasedPricingPeriod(cost, 1000)).toBeUndefined();
+		expect(getTimeBasedPricingPeriod(cost, 3000)).toBeUndefined();
+		expect(getNextTimeBasedPricingTransition(cost, 1000)).toBeUndefined();
+		// Scheduled rates still resolve; only the recurring-tariff label is suppressed.
+		expect(resolveEffectiveTokenCost(cost, 3000)).toMatchObject({ input: 5, output: 6 });
+	});
+});

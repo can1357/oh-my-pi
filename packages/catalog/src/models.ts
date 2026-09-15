@@ -106,6 +106,9 @@ function timeBasedMultiplier(schedule: TimeBasedCost | undefined, timestamp: num
 export function getTimeBasedPricingPeriod(cost: ModelCost, timestamp?: number): "peak" | "off-peak" | undefined {
 	const schedule = cost.timeBased;
 	if (!schedule) return undefined;
+	// Effective-date-only schedules (no peak windows, neutral multiplier)
+	// carry no recurring tariff: they must not read as off-peak.
+	if (schedule.peakWindows.length === 0 && schedule.offPeakMultiplier === 1) return undefined;
 	return isPeakPricingPeriod(schedule, timestamp ?? Date.now()) ? "peak" : "off-peak";
 }
 
