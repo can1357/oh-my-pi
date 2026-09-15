@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getRecentRequests, getStatsByModel, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
+import {
+	getRecentRequests,
+	getStatsByModel,
+	getToolStatsByModel,
+	initDb,
+	insertMessageStats,
+	insertToolCalls,
+} from "@oh-my-pi/omp-stats/db";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -34,7 +41,10 @@ describe("parser upstreamModel attribution", () => {
 			timestamp: "2026-09-03T10:00:01.000Z",
 			message: {
 				role: "assistant",
-				content: [{ type: "text", text: "Fixed." }],
+				content: [
+					{ type: "text", text: "Fixed." },
+					{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/index.ts" } },
+				],
 				api: "openai-completions",
 				provider: "openrouter",
 				model: "openrouter/auto",
@@ -66,10 +76,17 @@ describe("parser upstreamModel attribution", () => {
 			model: "anthropic/claude-sonnet-4.5",
 			provider: "Anthropic",
 		});
+		expect(result.toolCalls).toMatchObject([
+			{ toolCallId: "call-1", model: "anthropic/claude-sonnet-4.5", provider: "Anthropic" },
+		]);
 
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(1);
 		const catalogCost = getBundledModel("openrouter", "anthropic/claude-sonnet-4.5").cost;
+		expect(insertToolCalls(result.toolCalls)).toBe(1);
+		expect(getToolStatsByModel()).toMatchObject([
+			{ tool: "read", model: "anthropic/claude-sonnet-4.5", provider: "Anthropic" },
+		]);
 		const request = getRecentRequests()[0];
 		if (!request) throw new Error("Expected the routed request to be stored");
 		expect(request).toMatchObject({
