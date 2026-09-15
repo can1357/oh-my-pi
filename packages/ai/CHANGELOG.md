@@ -75,6 +75,10 @@
 - Fixed Devin-hosted Gemini models rejecting turns that include nullable tool parameters by normalizing tool schemas to Gemini's supported JSON Schema dialect ([#8647](https://github.com/can1357/oh-my-pi/issues/8647), [#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed Devin gateway failures leaking raw proxy HTML into turn errors; HTTP status and retry metadata remain available for recovery ([#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
 
+### Fixed
+
+- Fixed google-antigravity agent requests failing with a synthetic 429 RESOURCE_EXHAUSTED by adding a channel-level fallback to fold system instructions into user turns and session-scoped nonce tagging to avoid server-side prompt fingerprinting without busting prompt caches ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Added
