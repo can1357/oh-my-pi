@@ -4,6 +4,20 @@ provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
 
+	// Spark is a pro-plan-gated SKU: account snapshots without the
+	// entitlement omit it, and Codex discovery is authoritative, so a regen
+	// without a pro account drops the bundled row that fresh installs and
+	// priority selection resolve before live discovery. This seed keeps the
+	// row present; same-id live discovery rows win dedup when entitled.
+	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
+		model "gpt-5.3-codex-spark" name="GPT-5.3 Codex Spark" {
+			reasoning #true
+			input "text"
+			cost input=1.75 output=14 cache-read=0.175 cache-write=0
+			limits context=128000 max-tokens=128000
+		}
+	}
+
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	service-tier-cost {
 		flex 0.5

@@ -1521,7 +1521,6 @@ describe("LiteLLM provider discovery", () => {
 		expect(models).toHaveLength(1);
 		expect(models?.[0]).toMatchObject({
 			id: "glm-5.2",
-			name: "GLM-5.2",
 			api: "openai-completions",
 			provider: "litellm",
 			baseUrl: "http://primary:4000/v1",

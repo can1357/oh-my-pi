@@ -14,6 +14,7 @@
 - Runtime-discovered models on peer-priced providers (Kimi Code, xAI OAuth) now resolve their first-party list price when upstream discovery reports no token cost, instead of recording $0 in usage stats.
 - Devin Fusion composites now record their own headline rate instead of the last dispatched component's rate when upstream flattens multiple rate cards into one config.
 - Devin harness-backed composites (Fusion lanes) now chat directly instead of failing through the `AssignModel` router path; only harness-less routing slots (`adaptive`) keep router behavior.
+- Devin (SWE-2, SWE-1.7, GLM-5.2 High) and Kimi Code models now report API-equivalent token pricing when upstream discovery omits cost dimensions; SWE-2 reflects the promotional rate through 2026-12-31 and switches to list price from 2027-01-01 ([#12153](https://github.com/can1357/oh-my-pi/pull/12153) by [@eggpeat](https://github.com/eggpeat))
 - Gemini 2.5 Flash Lite on Vertex AI no longer requests `maxOutputTokens=65536`, which the endpoint rejects with a 400; the output cap is clamped to 65535 ([#10595](https://github.com/can1357/oh-my-pi/pull/10595) by [@WeMingT](https://github.com/WeMingT)).
 - Fixed Meta muse-spark models on OpenRouter wedging every turn with `400 Referenced reasoning item ... was not found or has expired`: replayed Responses reasoning history is now filtered for the muse-spark family, matching the existing Anthropic-on-OpenRouter treatment ([#10675](https://github.com/can1357/oh-my-pi/pull/10675) by [@Giardi77](https://github.com/Giardi77)).
 - Fixed Ollama Cloud model discovery synthesizing a generic `minimal`/`low`/`medium`/`high` effort ladder for every thinking-capable model, which shadowed the per-model compat rules and made `max` unreachable on the DeepSeek V4 line (including the served `deepseek-v4.1-flash`, `deepseek-v4-flash:0731`, and `deepseek-v4-pro:0813` ids): discovery now leaves the ladder to the rule tree, so those models advertise the wire-exact `low`/`high`/`max` and GLM-5.3 exposes `low`/`high`/`max` ([#8334](https://github.com/can1357/oh-my-pi/issues/8334)).
@@ -45,10 +46,6 @@
 - Model policy resolution reuses indexed rule matches and cached target results.
 - Model-aware delegation prompts reuse policy decisions until the model's identity or capabilities change.
 - Provider catalog entries (default model, env keys, discovery wiring) and the bundled fallback rows for providers that cannot be discovered at generation time (Anthropic, OpenAI Daybreak, xAI OAuth, Meta, Muse Code, Bedrock Mantle, Devin, Z.AI, Sakana, ai&, Abliteration, Yolo-Auto, GMI Cloud, Fire Pass, QwenCloud Token Plan, Cloudflare AI Gateway, GitLab Duo Workflow) now live in `src/compat/rules/providers/<id>.kdl` and compile into `rules.json`; `KnownProvider` is generated from them, and the generator bundles seed rows by each entry's declared `bundle` policy instead of per-provider code.
-
-### Fixed
-
-- Devin (SWE-2, SWE-1.7, GLM-5.2 High) and Kimi Code models now report API-equivalent token pricing when upstream discovery omits cost dimensions; SWE-2 reflects the promotional rate through 2026-12-31 and switches to list price from 2027-01-01 ([#12153](https://github.com/can1357/oh-my-pi/pull/12153) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.1.22] - 2026-09-14
 
