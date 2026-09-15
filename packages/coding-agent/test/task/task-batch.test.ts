@@ -184,14 +184,20 @@ describe("task.batch schema gating", () => {
 		expect(batch.description).toContain("`effort`");
 	});
 
-	it("keeps isolation boolean-only in the batch item schema", async () => {
+	it("keeps isolation boolean-only in the batch item schema and rejects a top-level key", async () => {
 		mockDiscovery();
 
 		const tool = await TaskTool.create(
 			createSession({ settings: { "task.batch": true, "task.isolation.enabled": true } }),
 		);
-		const properties = getSchemaProperties(tool);
-		expect(properties.isolated).toBeUndefined();
+		// The with-isolation batch wrapper rejects a stray flat-form top-level
+		// `isolated` (const:false) instead of stripping it — the batch would
+		// otherwise run quietly non-isolated.
+		const topSchema = getSchemaProperties(tool).isolated;
+		if (!topSchema || typeof topSchema !== "object" || !("const" in topSchema)) {
+			throw new Error("Expected top-level isolated to be a const:false rejection schema");
+		}
+		expect(topSchema.const).toBe(false);
 		const itemProperties = getBatchItemProperties(tool);
 		const isolatedSchema = itemProperties.isolated;
 		if (!isolatedSchema || typeof isolatedSchema !== "object" || !("type" in isolatedSchema)) {
@@ -201,7 +207,7 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.apply).toBeUndefined();
 	});
 
-	it("hides isolation from the dynamic batch schema in plan mode", async () => {
+	it("rejects `isolated` in the dynamic batch schema in plan mode", async () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(
 			createSession({
@@ -209,8 +215,16 @@ describe("task.batch schema gating", () => {
 				settings: { "task.batch": true, "task.isolation.enabled": true },
 			}),
 		);
+		// The no-isolation schema rejects an explicit `isolated` (`const: false`)
+		// instead of silently stripping it, so the plan-mode preflight error
+		// surfaces through the lenient raw-args fallthrough. The field is still
+		// absent from the rendered description.
 		const itemProperties = getBatchItemProperties(tool);
-		expect(itemProperties.isolated).toBeUndefined();
+		const isolatedSchema = itemProperties.isolated;
+		if (!isolatedSchema || typeof isolatedSchema !== "object" || !("const" in isolatedSchema)) {
+			throw new Error("Expected isolated to be a const:false rejection schema");
+		}
+		expect(isolatedSchema.const).toBe(false);
 		expect(tool.description).not.toContain("`isolated`");
 	});
 

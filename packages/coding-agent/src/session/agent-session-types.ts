@@ -272,6 +272,8 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/** Whether this session runs inside an isolation worktree (nested isolation gate). */
+	isIsolated?: boolean;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
