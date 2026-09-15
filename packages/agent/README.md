@@ -109,7 +109,7 @@ prompt("Read config.json")
 await agent.continue();
 ```
 
-The last message in context must be `user` or `toolResult` (not `assistant`).
+The last message in context must be `user` or `toolResult`. A trailing assistant message with `stopReason: "aborted"` (an interrupted partial turn) is also accepted: it is replayed as assistant prefill. Any other assistant tail needs a queued message to continue from, and a queued steer/follow-up is delivered first regardless of the tail.
 
 ### Event Types
 

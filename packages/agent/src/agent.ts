@@ -36,6 +36,7 @@ import {
 	resolveOwnedDialectFromEnv,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import { decideContinuation, REFUSAL_TEXT } from "./continuation";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import type {
@@ -1227,52 +1228,37 @@ export class Agent {
 		this.#state.error = undefined;
 
 		try {
-			const dequeueSignal = this.#continuationDequeueSignal(signal);
-			const messages = this.#state.messages;
-			if (messages.length === 0) {
-				// An empty transcript has nothing to resume, but a queued steer/follow-up
-				// must still be delivered as the opening turn — mirroring the assistant-tail
-				// branch below. Throwing here leaves the message undeliverable, and idle-drain
-				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
-				// microtask because hasQueuedMessages() never clears, spinning an unbounded
-				// allocation loop until OOM (issue #6344).
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
-				if (queuedSteering.length > 0) {
-					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
-					return;
-				}
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
-				if (queuedFollowUp.length > 0) {
-					await this.#runLoop(queuedFollowUp, undefined, signal, true);
-					return;
-				}
-				throw new Error("No messages to continue from");
+			// Continuation policy is a table shared with `agentLoopContinue`
+			// (`decideContinuation`): tail shape × queue snapshot → run | dequeue | refuse.
+			const decision = decideContinuation(this.#state.messages, {
+				steering: this.peekSteeringQueue().length > 0,
+				followUp: this.peekFollowUpQueue().length > 0,
+			});
+			const plan = decision.plan;
+			if (plan.step === "refuse") {
+				throw new Error(REFUSAL_TEXT[plan.reason].session);
 			}
-			const lastMessage = messages[messages.length - 1] as AssistantMessage | undefined;
-			if (lastMessage?.role === "assistant" && !this.hasQueuedMessages() && lastMessage.stopReason === "aborted") {
-				// An aborted (user-interrupted) partial assistant turn is the one
-				// resumable assistant tail: runLoop replays it as prefill so the
-				// model continues where the stream was cut off. Any other assistant
-				// tail still requires queued messages or throws below.
-				await this.#runLoop(undefined, undefined, signal, true);
-				return;
-			}
-			if (lastMessage?.role === "assistant") {
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
-				if (queuedSteering.length > 0) {
-					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
+			if (plan.step === "dequeue") {
+				const dequeueSignal = this.#continuationDequeueSignal(signal);
+				for (const buffer of plan.buffers) {
+					const queued =
+						buffer === "steering"
+							? await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal)
+							: await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+					if (queued.length === 0) continue;
+					await this.#runLoop(
+						queued,
+						buffer === "steering" ? { skipInitialSteeringPoll: true } : undefined,
+						signal,
+						true,
+					);
 					return;
 				}
-
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
-				if (queuedFollowUp.length > 0) {
-					await this.#runLoop(queuedFollowUp, undefined, signal, true);
-					return;
-				}
-
-				throw new Error("Cannot continue from message role: assistant");
+				// Every buffer drained empty: the queue emptied between the snapshot and
+				// the dequeue, or the signal was already aborted (the hooks leave the
+				// queue owned and return nothing). Same refusal either way.
+				throw new Error(REFUSAL_TEXT[plan.otherwise].session);
 			}
-
 			await this.#runLoop(undefined, undefined, signal, true);
 		} finally {
 			resolve();

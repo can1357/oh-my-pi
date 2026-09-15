@@ -6,6 +6,8 @@ export * from "./agent-loop";
 export * from "./append-only-context";
 // Compaction
 export * from "./compaction";
+// Continuation policy (tail shape → plan) shared by `agentLoopContinue` and `Agent.continue()`
+export * from "./continuation";
 // Process-global pause gate
 export * from "./pause";
 // Proxy utilities
@@ -20,6 +22,8 @@ export * from "./telemetry";
 export * from "./thinking";
 // Tokenizer choice
 export * from "./tokenizer";
+// Per-turn decision (execute | placeholders | end) for the agent loop
+export * from "./turn-outcome";
 // Types
 export * from "./types";
 // Yield utilities for Bun event-loop busy-wait prevention
