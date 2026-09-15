@@ -2640,6 +2640,14 @@ providers:
 									},
 								},
 							},
+							{
+								id: "overflow-model",
+								rates: {
+									in: "1.8e302",
+									out: "1.8e302",
+									cache: { read: "1.8e302", write: "1.8e302" },
+								},
+							},
 						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -2679,6 +2687,14 @@ providers:
 		// negative, non-numeric, or absent numbers become 0 independently
 		const sanitized = registry.find("custom-pricing-proxy", "sanitized-model");
 		expect(sanitized?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		// Finite per-token inputs whose scaling overflows remain safe zero rates.
+		expect(registry.find("custom-pricing-proxy", "overflow-model")?.cost).toEqual({
 			input: 0,
 			output: 0,
 			cacheRead: 0,

@@ -819,7 +819,8 @@ function sanitizePricingValue(value: unknown, unit: "per-1m" | "per-token"): num
 	if (typeof value !== "number" && typeof value !== "string") return 0;
 	const parsed = Number(value);
 	if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-	return unit === "per-token" ? parsed * 1_000_000 : parsed;
+	const perMillion = unit === "per-token" ? parsed * 1_000_000 : parsed;
+	return Number.isFinite(perMillion) ? perMillion : 0;
 }
 
 function resolveOpenAIModelsListCost(
