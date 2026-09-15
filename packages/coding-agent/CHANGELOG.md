@@ -5,6 +5,7 @@
 ### Added
 
 - `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
+- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply` and placed last in the built-in auto chain, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ### Fixed
 
@@ -38,9 +39,6 @@
 - Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
 
 ## [18.1.21] - 2026-09-14
-### Added
-
-- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply`, and placed last in the built-in auto chain so no existing provider's priority changes. Serply proxies Google directly, so quoted phrases, `OR` groups, `-exclusions`, `site:`, `inurl:`, `intitle:`, `intext:`, `filetype:`, and `after:`/`before:` bounds are forwarded verbatim in the query instead of being translated onto vendor-specific filters; `recency` maps to `tbs=qdr:d|w|m|y` and is dropped when the query already carries absolute date bounds ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ### Fixed
 
