@@ -360,7 +360,8 @@ fn split_raw_sections(
 			message.push_str("\nPossible non-Hashline syntax: ");
 			message.push_str(&foreign_syntax);
 			message.push_str(
-				". This is a best-effort hint; review the edit tool instructions before retrying.",
+				". Do not reuse this body with a Hashline header; review the edit tool instructions \
+				 before retrying.",
 			);
 		}
 		return Err(EditError::parse(message));
