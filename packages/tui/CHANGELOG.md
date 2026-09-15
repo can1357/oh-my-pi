@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
 ### Added
 
 - `Editor.deleteCharForward()` exposes the `tui.editor.deleteCharForward` operation to hosts that resolve the chord themselves, applying the same transient-state teardown the key dispatch does (pending character jump, spelling-assist popup) and routing through Vim's `x` in Normal and Visual modes.

@@ -1103,12 +1103,12 @@ export class CommandController {
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
-	async handleDropCommand(): Promise<void> {
+	async handleDeleteCommand(): Promise<void> {
 		if (!this.ctx.sessionManager.getSessionFile()) {
-			this.ctx.showError("Nothing to drop (in-memory session)");
+			this.ctx.showError("Nothing to delete (in-memory session)");
 			return;
 		}
-		await this.#runNewSessionFlow({ drop: true }, "Session dropped");
+		await this.#runNewSessionFlow({ drop: true }, "Session deleted");
 	}
 
 	async handleForkCommand(): Promise<void> {

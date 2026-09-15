@@ -23,9 +23,6 @@ export class SkillContainmentError extends ToolError {
 	}
 }
 
-/** Regex to find skill:// tokens in command text. */
-const SKILL_URL_PATTERN = /'skill:\/\/[^'\s")`\\]+'|"skill:\/\/[^"\s')`\\]+"|skill:\/\/[^\s'")`\\;&|<>($]+/g;
-
 // Unquoted URLs stop before shell syntax so expansion cannot quote an adjacent
 // operator or substitution into the resolved path.
 const INTERNAL_URL_PATTERN_INCLUDING_NORMALIZED_LOCAL =

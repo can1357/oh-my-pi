@@ -57,22 +57,21 @@ function sanitizeMentionPath(rawPath: string): string | null {
 	return cleaned.length > 0 ? cleaned : null;
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-	try {
-		await Bun.file(filePath).stat();
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function resolveMentionPath(filePath: string, cwd: string): Promise<string | null> {
+async function resolveMentionPath(
+	filePath: string,
+	cwd: string,
+): Promise<{ resolvedPath: string; absolutePath: string } | null> {
 	// Exact resolution only. The TUI @-selector inserts the real, complete path, so a
 	// mention that does not resolve to an existing file or directory is prose, not a file
 	// reference. Fuzzy/prefix guessing here previously dragged in unrelated same-named
 	// files; that disambiguation belongs to the selector's display, not post-send.
 	const absolutePath = resolveReadPath(filePath, cwd);
-	return (await pathExists(absolutePath)) ? filePath : null;
+	try {
+		await Bun.file(absolutePath).stat();
+		return { resolvedPath: filePath, absolutePath };
+	} catch {
+		return null;
+	}
 }
 
 function buildTextOutput(textContent: string): { output: string; lineCount: number } {
@@ -205,11 +204,11 @@ export async function generateFileMentionMessages(
 	const files: FileMentionMessage["files"] = [];
 
 	for (const filePath of filePaths) {
-		const resolvedPath = await resolveMentionPath(filePath, cwd);
-		if (!resolvedPath) {
+		const resolved = await resolveMentionPath(filePath, cwd);
+		if (!resolved) {
 			continue;
 		}
-		const absolutePath = resolveReadPath(resolvedPath, cwd);
+		const { resolvedPath, absolutePath } = resolved;
 		try {
 			const stat = await Bun.file(absolutePath).stat();
 			if (stat.isDirectory()) {

@@ -120,7 +120,7 @@ describe("embedding commit invalidates the recall cache", () => {
 		try {
 			remember(beam, "a memory whose embedding batch returns nothing", { source: "conversation" });
 			counts.invalidations = 0;
-			await Promise.all([...(beam.pendingExtractions ?? [])]);
+			await Promise.all(beam.pendingExtractions ?? []);
 			const stored = beam.db.prepare("SELECT COUNT(*) AS count FROM memory_embeddings").get() as {
 				count: number;
 			};

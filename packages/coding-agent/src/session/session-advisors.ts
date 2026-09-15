@@ -1019,14 +1019,9 @@ export class SessionAdvisors {
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
-			const availableAdvisorToolNames = new Set<string>();
 			for (const tool of advisorLoopTools) {
-				availableAdvisorToolNames.add(tool.name);
 				advisorToolMap.set(tool.name, tool);
-				if (tool.customWireName !== undefined) {
-					availableAdvisorToolNames.add(tool.customWireName);
-					advisorToolMap.set(tool.customWireName, tool);
-				}
+				if (tool.customWireName !== undefined) advisorToolMap.set(tool.customWireName, tool);
 			}
 			let quarantinedAdvisorOutput: string | undefined;
 			let currentAdvisorInput = "";
@@ -1076,7 +1071,6 @@ export class SessionAdvisors {
 			// tool. A default read-only advisor (advise/read/grep/glob) never gets
 			// to delete workspace files it was never granted (issue #5680 review).
 			const advisorCanMutateFiles = advisorToolMap.has("write") || advisorToolMap.has("edit");
-			if (advisorCanMutateFiles) availableAdvisorToolNames.add("delete");
 			// `pi_edit` speaks `replace`'s `old_string`/`new_string` schema, which the
 			// advisor's ordinary `EditTool` (built at the session's configured
 			// `edit.mode`, `hashline` by default) does not accept. The bridge map
@@ -1146,7 +1140,6 @@ export class SessionAdvisors {
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(
 						message,
-						availableAdvisorToolNames,
 						buildAdvisorQuarantineSourceText(currentAdvisorInput, advisorAgent.state.messages),
 					);
 				},
@@ -1243,8 +1236,6 @@ export class SessionAdvisors {
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
-				getQuarantineBasis: () =>
-					[formatModelString(advisorRef.agent.state.model), ...availableAdvisorToolNames].sort().join("\u001f"),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
 					// Flushes the deferred backlog on the in-progress→completed
@@ -1352,13 +1343,14 @@ export class SessionAdvisors {
 	 * Route one accepted advice note from `advisor` to the primary. Concern and
 	 * blocker interrupt the running agent through the steering channel; once the
 	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, a concern is preserved as a visible advisor card, while a
-	 * blocker wakes the primary to acknowledge work it handed off incorrectly.
-	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
-	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
-	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
-	 * aside. The emission guard has already accepted the note; rejected calls never
-	 * enter this route and receive their specific policy outcome from `AdviseTool`.
+	 * no queued work, late non-blocker advice (a nit or concern) is preserved as a
+	 * visible advisor card, while a blocker wakes the primary to acknowledge work
+	 * it handed off incorrectly. After a deliberate user interrupt auto-resume is
+	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
+	 * on resume); a live-streaming turn is steered in directly. A plain nit rides
+	 * the non-interrupting YieldQueue aside during streaming. The emission guard
+	 * has already accepted the note; rejected calls never enter this route and
+	 * receive their specific policy outcome from `AdviseTool`.
 	 */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
@@ -1466,7 +1458,7 @@ export class SessionAdvisors {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.dispose();
-			// Capture each close so dispose()/`/drop` can await the queued open+append+close —
+			// Capture each close so dispose()/`/delete` can await the queued open+append+close —
 			// the last advisor turn would otherwise be lost on a fast process exit.
 			a.recorderClosed = a.recorder.close();
 			closes.push(a.recorderClosed);
