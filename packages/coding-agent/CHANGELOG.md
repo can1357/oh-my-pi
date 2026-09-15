@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Added `--new` (alias `--new-session`) to start a fresh session even when the `autoResume` setting is enabled ([#11762](https://github.com/can1357/oh-my-pi/pull/11762) by [@labi-le](https://github.com/labi-le)).
 
 ## [18.2.1] - 2026-09-15
 
@@ -426,7 +427,6 @@
 
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
-- Added `--new` (alias `--new-session`) to start a fresh session even when the `autoResume` setting is enabled ([#11762](https://github.com/can1357/oh-my-pi/pull/11762) by [@labi-le](https://github.com/labi-le)).
 
 ### Changed
 
