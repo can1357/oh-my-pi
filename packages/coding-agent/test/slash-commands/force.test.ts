@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { buildNamedToolChoice } from "@oh-my-pi/pi-coding-agent/utils/tool-choice";
@@ -113,5 +114,14 @@ describe("/force slash command", () => {
 		}) satisfies Model<"ollama-chat">;
 
 		expect(buildNamedToolChoice("write", model)).toEqual({ type: "function", name: "write" });
+	});
+
+	it("reports forcing as unsupported on hosts that only accept auto tool_choice", () => {
+		// api.meta.ai rejects every tool_choice except "auto", so the provider rules omit
+		// the field; a named force would be dropped on the wire instead of honored.
+		for (const provider of ["meta", "muse-code"]) {
+			const model = buildModel(seedModels<"openai-responses">(provider)[0]!);
+			expect(buildNamedToolChoice("write", model)).toBeUndefined();
+		}
 	});
 });

@@ -18,6 +18,11 @@ export function buildNamedToolChoice(toolName: string, model?: Model<Api>): Tool
 		model.api === "openai-completions" ||
 		model.api === "azure-openai-responses"
 	) {
+		// Hosts whose compat omits `tool_choice` (e.g. api.meta.ai accepts only "auto")
+		// would silently drop a named choice; report forcing as unsupported instead.
+		if (model.compat && "supportsToolChoice" in model.compat && model.compat.supportsToolChoice === false) {
+			return undefined;
+		}
 		return { type: "function", name: toolName };
 	}
 
