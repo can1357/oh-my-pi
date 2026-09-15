@@ -4330,10 +4330,12 @@ export class RelayBridge {
 			this.#pendingRpc.delete(id);
 			const error = new ExtensionRpcTimeoutError(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`);
 			reject(error);
-			// Chrome may have applied this RPC even though its result missed the
-			// deadline. Replace the transport so the next hello reconciles every
-			// mutation that treats this typed timeout as an ambiguous interruption.
-			if (this.#ext === ext) {
+			// Only bridge-managed root mutations need a transport reset after an
+			// ambiguous timeout. Ordinary forwarded commands (notably a long-running
+			// Runtime.evaluate with awaitPromise) may legitimately exceed this local
+			// deadline; recycling the shared extension socket for those commands would
+			// interrupt unrelated tabs without making the timed-out operation safer.
+			if (this.#rpcTimeoutNeedsRecovery(req) && this.#ext === ext) {
 				ext.close();
 				this.extClosed(ext);
 			}
@@ -4341,5 +4343,14 @@ export class RelayBridge {
 		this.#pendingRpc.set(id, { resolve, reject, timer });
 		ext.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
 		return promise;
+	}
+
+	#rpcTimeoutNeedsRecovery(req: RelayRpcRequest): boolean {
+		if (req.op === "attach" || req.op === "detach" || req.op === "forgetRecovery") return true;
+		if (req.op !== "send") return false;
+		if (req.method === "Page.addScriptToEvaluateOnNewDocument") return true;
+		if (req.method === "Page.removeScriptToEvaluateOnNewDocument") return true;
+		if (req.method === "Runtime.enable" || req.method === "Runtime.disable") return true;
+		return this.#subscriptionTrackingKey({ id: 0, method: req.method, params: req.params }) !== undefined;
 	}
 }

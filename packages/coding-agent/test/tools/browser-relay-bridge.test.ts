@@ -12292,4 +12292,67 @@ describe("RelayBridge attachment release", () => {
 		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
 	});
+
+	it("does not recycle the shared extension socket when an ordinary CDP command times out", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const firstSession = await attachPage(bridge, ext, cdp, connId, 1);
+		const secondSession = await attachPage(bridge, ext, cdp, connId, 2);
+
+		vi.useFakeTimers();
+		try {
+			const slowId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: slowId,
+					sessionId: firstSession,
+					method: "Runtime.evaluate",
+					params: { expression: "await new Promise(() => {})", awaitPromise: true },
+				}),
+			);
+			await flush();
+			vi.advanceTimersByTime(20_000);
+			await flush();
+
+			expect(cdp.messages.some(message => message.id === slowId && "error" in message)).toBe(true);
+			expect(ext.closeCount).toBe(0);
+
+			const otherId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({ id: otherId, sessionId: secondSession, method: "Runtime.evaluate" }),
+			);
+			await flush();
+			ack(bridge, ext, "send", { result: { value: 42 } });
+			await flush();
+
+			expect(cdp.messages.some(message => message.id === otherId && "result" in message)).toBe(true);
+			expect(ext.closeCount).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not recycle the shared extension socket when a slow tab-grouping RPC times out", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "blue" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		await claimTab(bridge, ext, cdp, connId, 1);
+		await waitFor(() => ext.pending("group").length === 1, "group RPC before timeout");
+		vi.useFakeTimers();
+		try {
+			vi.advanceTimersByTime(20_000);
+			await flush();
+			expect(ext.closeCount).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
