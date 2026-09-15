@@ -313,11 +313,7 @@ function buildUsageStatus(args: { usedFraction?: number; explicitlyAllowed: bool
  * Whether Codex will still serve this meter: an explicit positive verdict, or
  * credits covering overage once the plan window reports `limit_reached`.
  */
-function isCodexRequestAllowed(args: {
-	allowed?: boolean;
-	limitReached?: boolean;
-	creditOverage?: boolean;
-}): boolean {
+function isCodexRequestAllowed(args: { allowed?: boolean; limitReached?: boolean; creditOverage?: boolean }): boolean {
 	if (args.creditOverage === true) return true;
 	return args.allowed === true && args.limitReached === false;
 }
