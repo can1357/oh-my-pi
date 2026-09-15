@@ -5955,6 +5955,95 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it.each(["healthy", "closed", "idle", "token-refresh"] as const)(
+		"uses connection-local append history after %s websocket reuse",
+		async mode => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const sockets: MockWebSocket[] = [];
+			const sentRequests: Array<Record<string, unknown>> = [];
+			const fetchMock = vi.fn(async () => {
+				throw new Error("SSE fallback should not be called");
+			});
+			class ReconnectWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					sockets.push(this);
+					this.scheduleOpen();
+				}
+
+				override send(data: string): void {
+					sentRequests.push(JSON.parse(data) as Record<string, unknown>);
+					const index = sentRequests.length;
+					this.emitCodexResponse({
+						messageId: `msg_${index}`,
+						responseId: `resp_${index}`,
+						text: `Answer ${index}`,
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+				}
+			}
+			global.WebSocket = ReconnectWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel("https://chatgpt.com/backend-api");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const options = {
+				fetch: fetchMock as FetchImpl,
+				apiKey: createCodexTestToken(),
+				sessionId: `ws-reconnect-${mode}`,
+				providerSessionState,
+			};
+			const context: Context = {
+				messages: [{ role: "user", content: "Remember the original question", timestamp: Date.now() }],
+			};
+			try {
+				const first = await streamOpenAICodexResponses(model, context, options).result();
+				expect(first.stopReason).toBe("stop");
+				context.messages.push(first, { role: "user", content: "Continue", timestamp: Date.now() });
+				if (mode === "closed") {
+					sockets[0]!.close();
+				} else if (mode === "idle") {
+					vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+				} else if (mode === "token-refresh") {
+					options.apiKey = options.apiKey.replace("aaa.", "refreshed.");
+				}
+				const observedPayloads: Array<Record<string, unknown>> = [];
+				const second = await streamOpenAICodexResponses(model, context, {
+					...options,
+					onPayload: payload => {
+						observedPayloads.push(structuredClone(payload) as Record<string, unknown>);
+					},
+				}).result();
+				expect(second.stopReason).toBe("stop");
+				expect(sockets).toHaveLength(mode === "healthy" ? 1 : 2);
+				expect(sentRequests).toHaveLength(2);
+				expect(observedPayloads).toHaveLength(1);
+				for (const request of [sentRequests[1]!, observedPayloads[0]!]) {
+					expect(request.previous_response_id).toBe(mode === "healthy" ? "resp_1" : undefined);
+					const input = JSON.stringify(request.input);
+					expect(input).toContain("Continue");
+					if (mode === "healthy") {
+						expect(input).not.toContain("Remember the original question");
+					} else {
+						expect(input).toContain("Remember the original question");
+						expect(input).toContain("Answer 1");
+					}
+				}
+				context.messages.push(second, { role: "user", content: "Next question", timestamp: Date.now() });
+				const third = await streamOpenAICodexResponses(model, context, options).result();
+				expect(third.stopReason).toBe("stop");
+				expect(sentRequests).toHaveLength(3);
+				expect(sentRequests[2]?.previous_response_id).toBe("resp_2");
+				expect(sentRequests[2]?.input).toEqual([
+					{ role: "user", content: [{ type: "input_text", text: "Next question" }] },
+				]);
+				expect(fetchMock).not.toHaveBeenCalled();
+			} finally {
+				for (const state of providerSessionState.values()) state.close();
+			}
+		},
+	);
+
 	it("does not throw when closing a stale socket", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
