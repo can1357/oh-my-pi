@@ -283,10 +283,7 @@ export async function findReusableCdp(
 	// /usr/bin/google-chrome would otherwise never match its own processes and
 	// every borrowed-profile attach would relaunch onto the locked profile.
 	const resolvedExe = await fs.realpath(exe).catch(() => exe);
-	// TEMP-DEBUG: tracing CI-only reuse failure (remove before merge).
-	console.log(`[dbg-reuse] exe=${exe} resolved=${resolvedExe} requested=${requestedUserDataDir}`);
 	const candidates = Process.fromPath(resolvedExe).filter(process => process.status() === ProcessStatus.Running);
-	console.log(`[dbg-reuse] candidates=${candidates.length}`);
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
 	for (const process of candidates) {
@@ -299,12 +296,6 @@ export async function findReusableCdp(
 		}
 		candidateArgs.push(args);
 		const candidateProfile = findUserDataDirInArgs(args);
-		const candidatePort = findCdpPortInArgs(args);
-		if (candidateArgs.length <= 4) {
-			console.log(
-				`[dbg-reuse] pid=${process.pid} argc=${args.length} arg0len=${args[0]?.length ?? -1} profile=${candidateProfile} port=${candidatePort}`,
-			);
-		}
 		if (
 			requestedUserDataDir !== null &&
 			(normalizedRequestedUserDataDir === null ||
@@ -316,10 +307,7 @@ export async function findReusableCdp(
 		}
 		const port = findCdpPortInArgs(args);
 		if (port === null) continue;
-		const probed = await probeCdpAt(port, options.signal);
-		console.log(`[dbg-reuse] probe port=${port} pid=${process.pid} -> ${probed}`);
-		if (probed) {
-			console.log(`[dbg-reuse] REUSE cdp=http://127.0.0.1:${port} pid=${process.pid}`);
+		if (await probeCdpAt(port, options.signal)) {
 			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
 		}
 	}
@@ -334,9 +322,6 @@ export async function findReusableCdp(
 					normalizeUserDataDir(existingUserDataDir) !== normalizedRequestedUserDataDir)
 			);
 		});
-	console.log(
-		`[dbg-reuse] MISS canLaunch=${canLaunchIsolatedProfile} unreadable=${hasUnreadableCandidate} n=${candidates.length}`,
-	);
 	if (!canLaunchIsolatedProfile && candidates.length > 0) {
 		const name = path.basename(exe);
 		throw new ToolError(

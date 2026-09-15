@@ -573,3 +573,46 @@ describe("findReusableCdp executable matching", () => {
 		}
 	});
 });
+
+describe("TEMP-DEBUG reuse state", () => {
+	test("dumps reuse lookup state", async () => {
+		const exe = await ensureChromiumExecutable();
+		if (!exe) throw new Error("DBG: no chromium executable");
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dbg-reuse-"));
+		const profile = path.join(root, "borrowed");
+		const port = await findFreeCdpPort();
+		const child = Bun.spawn(
+			[exe, "--headless=new", "--no-sandbox", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`],
+			{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+		);
+		try {
+			await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+			const resolved = await fs.realpath(exe).catch(() => exe);
+			const cands = Process.fromPath(resolved).filter(candidate => {
+				try {
+					return candidate.status() === ProcessStatus.Running;
+				} catch {
+					return false;
+				}
+			});
+			const self = cands.find(candidate => candidate.pid === child.pid);
+			let argInfo = "self-not-found";
+			if (self) {
+				try {
+					const a = self.args();
+					argInfo = `argc=${a.length} arg0len=${a[0]?.length} head=${JSON.stringify((a[0] ?? "").slice(0, 90))}`;
+				} catch (err) {
+					argInfo = `ARGS-THREW:${String(err).slice(0, 80)}`;
+				}
+			}
+			const reused = await findReusableCdp(exe, { appArgs: ["--user-data-dir", profile] });
+			throw new Error(
+				`DBG exe=${exe} resolved=${resolved} same=${exe === resolved} cands=${cands.length} childInCands=${self !== undefined} ${argInfo} reused=${JSON.stringify(reused)}`,
+			);
+		} finally {
+			child.kill();
+			await child.exited;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	}, 60_000);
+});
