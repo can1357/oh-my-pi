@@ -969,7 +969,15 @@ async function attachTabOperation(tabId, socket, operation) {
       guardDetachments.delete(tabId);
       const targets = await chrome.debugger.getTargets().catch(() => null);
       if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
-        attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+        const isCurrent = () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch;
+        try {
+          await trackAttachments([tabId], isCurrent);
+        } catch {
+          if (!isCurrent())
+            return;
+        }
+        if (isCurrent())
+          attachmentGuard.retry(tabId, isCurrent);
       }
     });
     throw error;
