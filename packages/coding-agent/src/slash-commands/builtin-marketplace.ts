@@ -1,3 +1,4 @@
+import { clearSubmittedText } from "./helpers/draft";
 import { reset as resetCapabilities } from "../capability";
 import {
 	clearPluginRootsAndCaches,
@@ -233,7 +234,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			}
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const args = command.args.trim().split(/\s+/);
 			const sub = args[0] || "install";
 			const rest = args.slice(1).join(" ").trim();
@@ -480,7 +481,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			}
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const args = command.args.trim().split(/\s+/);
 			const sub = args[0] || "list";
 			const rest = args.slice(1).join(" ").trim();
@@ -564,7 +565,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 		handleTui: async (_command, runtime) => {
 			await reloadTuiPluginState(runtime.ctx);
 			runtime.ctx.showStatus("Plugins reloaded.");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 ];
