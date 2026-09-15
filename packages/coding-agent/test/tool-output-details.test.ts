@@ -175,6 +175,28 @@ describe("tool output details", () => {
 		}
 	});
 
+	it("collapses whitespace in a multi-line tool label", () => {
+		// Extension and MCP tools supply their own label, and `sanitizeText` keeps
+		// tabs and newlines, so a folded row would otherwise carry extra lines.
+		const card = new ToolExecutionComponent(
+			"custom-thing",
+			{ command: "ls" },
+			{},
+			{ label: "Grep\tFiles\nNow" } as never,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const rows = card.render(120);
+
+			expect(rows).toHaveLength(1);
+			expect(plain(rows)).toContain("Grep Files Now");
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
 	it("keeps an interrupted call neutral while folded", () => {
 		// Steering interrupts a pending call and reports `isError`; the full card
 		// renders the placeholder neutrally, so the folded row must not claim failure.

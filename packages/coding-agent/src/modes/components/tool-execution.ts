@@ -888,10 +888,12 @@ export class ToolExecutionComponent extends Container {
 	#renderCompact(width: number, singleRow: boolean = this.#allocation === 1): readonly string[] {
 		const summary = this.#activitySummary();
 		// Any summary can carry model text — `hub` targets, xdev inner arguments, a
-		// bare command — and this row is the whole card under
-		// `display.hideToolOutputDetails`, so terminal control bytes come out before
-		// styling. `sanitizeText` keeps tabs and newlines and returns the input
-		// untouched when there is nothing to strip.
+		// bare command, an extension-supplied label — and this row is the whole card
+		// under `display.hideToolOutputDetails`, so terminal control bytes come out
+		// before styling. `sanitizeText` returns the input untouched when there is
+		// nothing to strip, but keeps tabs and newlines, which would break the
+		// one-line row; both halves collapse their whitespace afterwards.
+		const label = sanitizeText(summary.label).replace(/\s+/g, " ");
 		const detail = summary.detail ? theme.fg("muted", ` · ${sanitizeText(summary.detail).replace(/\s+/g, " ")}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
@@ -903,7 +905,7 @@ export class ToolExecutionComponent extends Container {
 					)
 				: "";
 		const text = truncateToWidth(
-			`${theme.fg("toolTitle", theme.bold(sanitizeText(summary.label)))}${detail}${elapsed}`,
+			`${theme.fg("toolTitle", theme.bold(label))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
 		if (singleRow) {
