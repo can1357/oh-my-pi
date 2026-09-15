@@ -1151,8 +1151,8 @@ impl UInputDevice {
 
 	fn emit(&mut self, type_: u16, code: u16, value: i32) -> CoreResult<()> {
 		let event = InputEvent { time: libc::timeval { tv_sec: 0, tv_usec: 0 }, type_, code, value };
-		// SAFETY: InputEvent is a C-compatible plain-data kernel ABI struct and the
-		// slice is bounded to its exact size.
+		// SAFETY: InputEvent is a C-compatible plain-data kernel ABI struct and
+		// the slice is bounded to its exact size.
 		let bytes = unsafe {
 			std::slice::from_raw_parts(
 				(&event as *const InputEvent).cast::<u8>(),

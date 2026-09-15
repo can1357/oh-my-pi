@@ -229,7 +229,8 @@ impl PtySession {
 		let ct = task::CancelToken::new(timeout_ms, signal);
 		let core = Arc::clone(&self.core);
 
-		// Register control channel synchronously so write()/kill() work immediately.
+		// Register control channel synchronously so write()/kill() work
+		// immediately.
 		let (control_tx, control_rx) = flume::unbounded::<ControlMessage>();
 		{
 			let mut guard = core.lock();
@@ -429,7 +430,8 @@ fn run_pty_sync(
 							Err(err) => {
 								let valid_up_to = err.valid_up_to();
 								if valid_up_to > 0 {
-									// SAFETY: [..valid_up_to] is guaranteed valid UTF-8 by valid_up_to().
+									// SAFETY: [..valid_up_to] is guaranteed valid UTF-8
+									// by valid_up_to().
 									let text = unsafe { str::from_utf8_unchecked(&pending[..valid_up_to]) };
 									if reader_tx
 										.send(ReaderEvent::Chunk(text.to_string()))
@@ -595,8 +597,8 @@ fn run_pty_sync(
 		}
 	}
 	if exit_code.is_none() {
-		// `std::process::Child` (what `portable-pty` wraps on Unix) never waits on
-		// `Drop`, so a child left unwaited here leaks as a permanent zombie.
+		// `std::process::Child` (what `portable-pty` wraps on Unix) never waits
+		// on `Drop`, so a child left unwaited here leaks as a permanent zombie.
 		//
 		// On Windows, child.wait() can hang indefinitely in ConPTY.
 		// Poll try_wait() with a short timeout instead.
@@ -650,9 +652,10 @@ fn run_pty_sync(
 	// --- Teardown ---
 
 	// Step 1: Close the ConPTY input pipe first.
-	// Per Microsoft docs, close the input handle before calling ClosePseudoConsole.
-	// This signals to ConPTY that no more input will arrive, allowing its internal
-	// I/O threads to finish processing and eventually close the output pipe.
+	// Per Microsoft docs, close the input handle before calling
+	// ClosePseudoConsole. This signals to ConPTY that no more input will
+	// arrive, allowing its internal I/O threads to finish processing and
+	// eventually close the output pipe.
 	drop(writer);
 
 	// Step 2: Drop master so the reader sees EOF if the slave is gone, then
@@ -1089,7 +1092,8 @@ mod zombie_repro_tests {
 				continue;
 			};
 			// `/proc/[pid]/stat` is `pid (comm) state ppid ...`; comm can itself
-			// contain spaces and parens, so bound it by the first `(` and last `)`.
+			// contain spaces and parens, so bound it by the first `(` and last
+			// `)`.
 			let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
 				continue;
 			};

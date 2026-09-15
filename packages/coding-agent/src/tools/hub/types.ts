@@ -142,7 +142,6 @@ export type HubRenderArgs = {
 	replyTo?: string;
 	await?: boolean;
 	from?: string;
-	timeoutMs?: number;
 	peek?: boolean;
 	ids?: string[];
 } & Partial<Omit<LaunchParams, "op">>;

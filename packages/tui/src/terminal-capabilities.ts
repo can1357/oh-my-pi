@@ -1,5 +1,5 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
-import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
 import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -126,30 +126,10 @@ function sendHerdrNotification(message: string | TerminalNotification, env: Node
 	return true;
 }
 
-function hasNeedleBefore(line: string, needle: string, limit: number): boolean {
-	const index = line.indexOf(needle);
-	return index !== -1 && index + needle.length <= limit;
-}
-
-function hasSixelDcsStart(line: string): boolean {
-	const limit = Math.min(line.length, 128);
-	let from = 0;
-	for (;;) {
-		const start = line.indexOf("\x1bP", from);
-		if (start === -1 || start + 3 > limit) return false;
-		let i = start + 2;
-		while (i < limit) {
-			const code = line.charCodeAt(i);
-			if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
-				i++;
-				continue;
-			}
-			break;
-		}
-		if (i < limit && line.charCodeAt(i) === 0x71) return true;
-		from = start + 2;
-	}
-}
+const IMAGE_MARKER_SCAN_LIMIT = 512;
+const SIXEL_MARKER_SCAN_LIMIT = 128;
+const KITTY_PLACEHOLDER_HIGH_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(0);
+const KITTY_PLACEHOLDER_LOW_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(1);
 
 /** Terminal capability details used for rendering and protocol selection. */
 export class TerminalInfo {
@@ -181,18 +161,56 @@ export class TerminalInfo {
 		return Object.assign(Object.create(TerminalInfo.prototype), this) as RuntimeTerminal;
 	}
 
+	/**
+	 * Whether an image marker begins at `start`. Kept as the shared primitive
+	 * for both standalone image checks and the renderer's combined ANSI/width
+	 * scan, so their protocol windows and sixel grammar cannot drift.
+	 */
+	hasImageMarkerAt(line: string, start: number): boolean {
+		const protocol = this.imageProtocol;
+		if (!protocol) return false;
+		if (protocol === ImageProtocol.Sixel) {
+			const limit = Math.min(line.length, SIXEL_MARKER_SCAN_LIMIT);
+			if (start + 3 > limit || line.charCodeAt(start) !== 0x1b || line.charCodeAt(start + 1) !== 0x50) {
+				return false;
+			}
+			let i = start + 2;
+			while (i < limit) {
+				const code = line.charCodeAt(i);
+				if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
+					i++;
+					continue;
+				}
+				break;
+			}
+			return i < limit && line.charCodeAt(i) === 0x71;
+		}
+
+		const limit = Math.min(line.length, IMAGE_MARKER_SCAN_LIMIT);
+		let protocolMatches = start + protocol.length <= limit;
+		for (let offset = 0; protocolMatches && offset < protocol.length; offset++) {
+			protocolMatches = line.charCodeAt(start + offset) === protocol.charCodeAt(offset);
+		}
+		return (
+			protocolMatches ||
+			(start + 2 <= limit &&
+				line.charCodeAt(start) === KITTY_PLACEHOLDER_HIGH_SURROGATE &&
+				line.charCodeAt(start + 1) === KITTY_PLACEHOLDER_LOW_SURROGATE)
+		);
+	}
+
 	isImageLine(line: string): boolean {
 		if (!this.imageProtocol) return false;
-		if (this.imageProtocol === ImageProtocol.Sixel) {
-			return hasSixelDcsStart(line);
+		const limit = Math.min(
+			line.length,
+			this.imageProtocol === ImageProtocol.Sixel ? SIXEL_MARKER_SCAN_LIMIT : IMAGE_MARKER_SCAN_LIMIT,
+		);
+		for (let i = 0; i < limit; i++) {
+			const code = line.charCodeAt(i);
+			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE) continue;
+			if (this.hasImageMarkerAt(line, i)) return true;
 		}
-		// 512-unit window: placeholder cells can sit deep in a composed row —
-		// the composer attachment band prefixes each thumbnail row with border
-		// SGRs and stacks cards side by side, so the first placeholder of a
-		// later card starts hundreds of units in. Rows past the window would
-		// silently lose the verbatim image-line path (no truncation, no SGR
-		// coalescing) that placeholder grids and placement APCs rely on.
-		return hasNeedleBefore(line, this.imageProtocol, 512) || hasNeedleBefore(line, KITTY_PLACEHOLDER, 512);
+		return false;
 	}
 
 	formatNotification(message: string | TerminalNotification): string {

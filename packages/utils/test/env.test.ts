@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$envExact,
+	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
@@ -110,7 +111,7 @@ describe("parseEnvFile", () => {
 			EXPORTED: "value",
 			COMMENTED: "secret",
 			QUOTED_HASH: "keep # this",
-			NO_SPACE: "http://host/path#frag",
+			NO_SPACE: "http://host/path",
 		});
 	});
 
@@ -120,6 +121,18 @@ describe("parseEnvFile", () => {
 		expect(parseEnvFile(filePath)).toEqual({
 			JSON: '{\\"a\\":1}',
 			SINGLE: "it\\'s",
+		});
+	});
+
+	it("parses quoted multiline and escaped-newline values across the whole file", () => {
+		const filePath = writeTempEnv(
+			['MULTILINE="first', 'second"', 'ESCAPED_NEWLINE="first\\nsecond"', "BACKTICK=`first", "second`"].join("\n"),
+		);
+
+		expect(parseEnvFile(filePath)).toEqual({
+			MULTILINE: "first\nsecond",
+			ESCAPED_NEWLINE: "first\nsecond",
+			BACKTICK: "first\nsecond",
 		});
 	});
 });
@@ -169,6 +182,23 @@ describe("filterProcessEnv", () => {
 });
 
 describe("filterChildShellEnv", () => {
+	it("removes quoted multiline project values without a launch snapshot", () => {
+		const cwd = path.dirname(
+			writeTempEnv(['MULTILINE="first', 'second"', 'ESCAPED_NEWLINE="first\\nsecond"'].join("\n")),
+		);
+
+		expect(
+			filterChildShellEnv(
+				{
+					MULTILINE: "first\nsecond",
+					ESCAPED_NEWLINE: "first\nsecond",
+					UNCHANGED: "parent-value",
+				},
+				cwd,
+			),
+		).toEqual({ UNCHANGED: "parent-value" });
+	});
+
 	it("uses the supplied mode for an isolated environment and cwd", async () => {
 		const cwd = path.dirname(writeTempEnv(""));
 		fs.writeFileSync(

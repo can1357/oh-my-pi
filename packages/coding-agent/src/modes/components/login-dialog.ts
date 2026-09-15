@@ -141,14 +141,20 @@ export class LoginDialogComponent extends OverlayPanel {
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
 	showPrompt(message: string, placeholder?: string): Promise<string> {
+		// Multi-step flows (email → OTP) prompt repeatedly; the single input
+		// must follow the latest prompt, leaving the submitted answer in place.
+		const mounted = this.#contentContainer.children.indexOf(this.#input);
+		if (mounted !== -1) {
+			const answer = new Text(theme.fg("dim", `${this.#input.prompt}${this.#input.getValue()}`), 0, 0);
+			this.#contentContainer.removeChild(this.#input);
+			this.#contentContainer.children.splice(mounted, 0, answer);
+		}
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", message), 0, 0));
 		if (placeholder) {
 			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 0, 0));
 		}
-		if (!this.#contentContainer.children.includes(this.#input)) {
-			this.#contentContainer.addChild(this.#input);
-		}
+		this.#contentContainer.addChild(this.#input);
 		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 0, 0));
 
 		this.#input.setValue("");

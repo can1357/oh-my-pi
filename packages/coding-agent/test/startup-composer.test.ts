@@ -797,23 +797,31 @@ describe("Composer prepaint", () => {
 			.join("\n");
 		expect(output).toContain("rust-analyzer");
 	});
-	it("transfers the in-flight recent-session load across composer ownership", async () => {
+	it("starts recent-session I/O only after the prepaint turn and transfers it across ownership", async () => {
 		const terminal = new CountingTerminal(80, 32);
 		const load = Promise.withResolvers<Array<{ name: string; timeAgo: string }>>();
+		let calls = 0;
 		beginStartupComposer({
 			preferences: config,
 			terminal,
 			version: "9.9.9",
 			cache: false,
-			recentSessions: () => load.promise,
+			recentSessions: () => {
+				calls++;
+				return load.promise;
+			},
 		});
 
+		expect(calls).toBe(0);
 		const lease = takeStartupComposerLease();
 		expect(lease).toBeDefined();
+		const updateWelcome = vi.spyOn(lease!.composer, "updateWelcome");
+		lease?.dispose();
 		const rows = [{ name: "already loading", timeAgo: "just now" }];
 		load.resolve(rows);
 		expect(await lease?.recentSessions).toEqual(rows);
-		lease?.dispose();
+		expect(calls).toBe(1);
+		expect(updateWelcome).not.toHaveBeenCalled();
 	});
 	it("defers raw input until resolved settings arrive, adoption as fallback", async () => {
 		// Regression contract: losing the deferral re-blinds typing during the
@@ -821,6 +829,9 @@ describe("Composer prepaint", () => {
 		// for the whole session.
 		const terminal = new InputTrackingTerminal(80, 32);
 		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		// The prepaint must be physically written before any async runtime import
+		// can monopolize the event loop; a merely queued render is still a blind gap.
+		expect(terminal.getViewport().some(row => Bun.stripANSI(row).includes("9.9.9"))).toBeTrue();
 		expect(terminal.startOptions?.deferInput).toBeTrue();
 		expect(terminal.inputEnables).toBe(0);
 

@@ -3,6 +3,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { buildModel } from "../src/build";
+import { seedModels } from "../src/compat/providers";
 import { fetchDevinModels } from "../src/discovery/devin";
 import {
 	type ClientModelConfig,
@@ -22,8 +23,8 @@ import {
 } from "../src/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { Effort } from "../src/effort";
-import { CATALOG_PROVIDERS } from "../src/provider-models/descriptors";
-import { DEVIN_STATIC_MODELS, devinModelManagerOptions } from "../src/provider-models/special";
+import { providerEntry } from "../src/compat/providers";
+import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { ModelSpec, ThinkingConfig } from "../src/types";
 
 /** `DISPLAY_OPTION_INTERNAL_DEFAULT`, absent from the vendored descriptor's enum. */
@@ -588,12 +589,12 @@ describe("devin server-declared family collapsing", () => {
 
 describe("devin catalog seed", () => {
 	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
-		const descriptor = CATALOG_PROVIDERS.find(entry => entry.id === "devin");
+		const descriptor = providerEntry("devin");
 		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(DEVIN_STATIC_MODELS.map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-		expect(DEVIN_STATIC_MODELS.some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
+		expect(seedModels("devin").some(model => model.id === descriptor?.defaultModel)).toBe(true);
 
-		const fast = buildModel(DEVIN_STATIC_MODELS[0] as ModelSpec<"devin-agent">);
+		const fast = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
 		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
 		expect(fast.contextWindow).toBe(200_000);
 		expect(fast.maxTokens).toBe(128_000);
@@ -607,7 +608,7 @@ describe("devin catalog seed", () => {
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
-		expect(devinModelManagerOptions().staticModels).toBe(DEVIN_STATIC_MODELS);
+		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
 		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
 			"https://cascade.internal",

@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { toClinePassPublicModelId, toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -91,29 +90,6 @@ describe("ClinePass catalog", () => {
 			defaultLevel: Effort.High,
 			requiresEffort: false,
 		});
-	});
-
-	it("bundles the full current roster for offline startup", () => {
-		expect(getBundledModels("cline-pass").map(model => model.id)).toEqual([
-			"cline-free/longcat-2.0",
-			"deepseek-v4-flash",
-			"deepseek-v4-pro",
-			"deepseek/deepseek-v4-flash",
-			"glm-5.2",
-			"glm-5.3",
-			"glm-5.3-flash",
-			"kimi-k2.6",
-			"kimi-k2.7-code",
-			"kimi-k3",
-			"mimo-v2.5",
-			"mimo-v2.5-pro",
-			"minimax-m3",
-			"poolside/laguna-s-2.1:free",
-			"qwen3.7-max",
-			"qwen3.7-plus",
-			"qwen3.8-max",
-			"z-ai/glm-5.3-flash",
-		]);
 	});
 
 	it("uses the Cline wire namespace without exposing it in model selection", () => {

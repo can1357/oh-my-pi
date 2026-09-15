@@ -21,7 +21,14 @@ import {
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
-import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { titleTextFromSkillPrompt } from "./skill-title-input";
+import {
+	type CompactionEntry,
+	type CustomMessageEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type SessionEntry,
+	type SessionMessageEntry,
+} from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -181,36 +188,74 @@ export function getOpenAiRemoteCompactionPayload(
 	};
 }
 
+/** Session entries that replay as transcript messages: persisted messages and custom messages. */
+export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
+
+export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
+	return entry.type === "message" || entry.type === "custom_message";
+}
+
+/** The message a `custom_message` entry replays as; `undefined` when its persisted content is unsendable. */
+export function customMessageEntryMessage(entry: CustomMessageEntry): CustomMessage | undefined {
+	if (!isCustomMessageContent(entry.content)) return undefined;
+	const normalized = normalizeCustomMessagePayload(entry);
+	const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
+	return createCustomMessage(
+		normalized.customType,
+		normalized.content,
+		normalized.display,
+		normalized.details,
+		entry.timestamp,
+		attribution,
+	);
+}
+
+/** The message a transcript entry replays as (see {@link customMessageEntryMessage} for the custom case). */
+export function transcriptEntryMessage(entry: TranscriptEntry): AgentMessage | undefined {
+	return entry.type === "message" ? entry.message : customMessageEntryMessage(entry);
+}
+
 /**
  * True for entries that represent a user-attributed request: an ordinary user
  * message, or a custom message that initiates a user turn per the shared
  * `isUserTurnInitiator` semantics (directly invoked `/skill:` prompts and
- * writable-collab prompts). Notes-backed rollover retention uses this so a
- * custom request crossing a boundary is retained exactly like an ordinary
- * one, instead of being skipped in favor of an older plain user message.
+ * writable-collab prompts). Drives rewind/copy turn selection and notes-backed
+ * rollover retention, so a custom request is treated exactly like an ordinary
+ * one everywhere a "user turn" matters.
  */
-function isUserRequestEntry(entry: SessionEntry): boolean {
+export function isUserRequestEntry(entry: SessionEntry): boolean {
 	if (entry.type === "message") {
 		if (entry.message.role === "user") return true;
 		if (entry.message.role === "custom") return isUserTurnInitiator(entry.message as CustomMessage);
 		return false;
 	}
 	if (entry.type === "custom_message") {
-		if (!isCustomMessageContent(entry.content)) return false;
-		const normalized = normalizeCustomMessagePayload(entry);
-		const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-		return isUserTurnInitiator(
-			createCustomMessage(
-				normalized.customType,
-				normalized.content,
-				normalized.display,
-				normalized.details,
-				entry.timestamp,
-				attribution,
-			),
-		);
+		const message = customMessageEntryMessage(entry);
+		return message !== undefined && isUserTurnInitiator(message);
 	}
 	return false;
+}
+
+/**
+ * Editor draft that re-creates a user request when rewinding past it: the
+ * prompt's text (attachments ride separately), or for a user-initiated custom
+ * message the text the user actually typed — a skill prompt restores its
+ * `/skill:<name>` draft, never the expanded SKILL.md body (issue #5374).
+ * `undefined` for anything that is not a user request.
+ */
+export function userTurnDraft(entry: TranscriptEntry): string | undefined {
+	const message = transcriptEntryMessage(entry);
+	if (!message) return undefined;
+	if (message.role === "user") return textContent(message.content);
+	if (message.role !== "custom" || !isUserTurnInitiator(message)) return undefined;
+	return titleTextFromSkillPrompt(message) ?? textContent(message.content);
+}
+
+function textContent(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	if (typeof content === "string") return content;
+	let text = "";
+	for (const block of content) if (block.type === "text" && block.text !== undefined) text += block.text;
+	return text;
 }
 
 export function buildSessionContext(
@@ -391,19 +436,8 @@ export function buildSessionContext(
 			) {
 				return;
 			}
-			if (!isCustomMessageContent(entry.content)) return;
-			const normalized = normalizeCustomMessagePayload(entry);
-			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-			pushMessage(
-				createCustomMessage(
-					normalized.customType,
-					normalized.content,
-					normalized.display,
-					normalized.details,
-					entry.timestamp,
-					attribution,
-				),
-			);
+			const message = customMessageEntryMessage(entry);
+			if (message) pushMessage(message);
 		} else if (entry.type === "branch_summary" && entry.summary) {
 			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}

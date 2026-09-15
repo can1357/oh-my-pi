@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.2.0] - 2026-09-15
+
+### Added
+
+- Assistant turns from Anthropic-compatible hosts (direct, or via OpenRouter's `reasoning_details`) carry `upstreamModel`, the serving model id recovered from the signed thinking block, so callers can detect a router substituting a different model than requested.
+
+### Fixed
+
+- Fixed OpenCode Go window-limit 429s (`5-hour`/`Weekly`/`Monthly usage limit reached. Resets in …`) not pinning the exhausted credential to the server-stated reset; the window phrasing is now covered by a regression test over the rotation classifier. ([#12091](https://github.com/can1357/oh-my-pi/pull/12091) by [@H4vC](https://github.com/H4vC))
+
+## [18.1.22] - 2026-09-14
+
 ### Fixed
 
 - Fixed google-antigravity agent requests failing with a synthetic 429 RESOURCE_EXHAUSTED by adding a channel-level fallback to fold system instructions into user turns and session-scoped nonce tagging to avoid server-side prompt fingerprinting without busting prompt caches ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).

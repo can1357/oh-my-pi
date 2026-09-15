@@ -1,6 +1,9 @@
 // Provider-wire compat for "xai"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xai" {
+	default-model "grok-4.6"
+	env "XAI_API_KEY"
+
 	// Replaces the provider-keyed prompt-cache session-header baseline.
 	prompt-cache-session-header "x-grok-conv-id"
 	// xAI's function-calling validator 400s on leftover root anyOf/oneOf tool

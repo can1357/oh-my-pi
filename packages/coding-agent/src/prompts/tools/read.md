@@ -19,7 +19,7 @@ Read files, directories, archives, SQLite, images, documents, internal resources
 
 - Parseable code, no selector → structural summary (declarations only, body elided). Footer names recovery selector — re-issue ONLY those ranges.
 - {{#if IS_HL_MODE}}File + selector → `[foo.ts#1A2B]` snapshot header + numbered lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag.{{/if}}
-- Directory → depth-limited dirent listing.
+- Directory → depth-limited dirent listing. Root is complete; page long listings with `:N-M`/`:-N`. Child dirs cap at 12 entries (`… N more` marker) — read the sub-path to expand.
 - SQLite (`.sqlite`, `.sqlite3`, `.db`, `.db3`): `file.db` (tables), `file.db:table` (schema+rows), `file.db:table:key` (by PK), `?limit=`/`?where=`/`?q=SELECT`.
 - Archives (`.zip` family incl. `.jar`/`.apk`/`.whl`, `.tar` incl. `.tar.{gz,bz2,xz,zst}`, `.rar`, `.7z`, `.iso`, `.cab`, `.deb`/`.rpm`/`.cpio`/`.ar`/`.a`, `.lzh`/`.arj`, `.asar`; single-stream `.gz`/`.bz2`/`.xz`/`.zst`): `archive.ext:path/inside/archive` reads a member.
 - Documents → extracted text. Notebooks → editable cells. Images → decoded inline for vision-capable models (prefer bare image path); `img.png?q=<question>` asks a vision model and returns text (spares context; works on any model). Videos → preview grid plus metadata. SVGs read as text unless `:img` is specified; `:raw` bypasses converters.

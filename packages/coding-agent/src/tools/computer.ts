@@ -6,15 +6,9 @@ import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import computerDescription from "../prompts/tools/computer.md" with { type: "text" };
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
-// @ts-expect-error Bun imports this declaration source as text instead of a TypeScript module.
-import computerCodeModeDeclarations from "./computer/declarations.d.ts" with { type: "text" };
-// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
-import computerJavascript from "./computer/prelude.js" with { type: "text" };
-import computerPython from "./computer/prelude.py" with { type: "text" };
 import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
 import type { ToolSession } from "./index";
 import { renderFunctionRun } from "./run-code";
@@ -121,6 +115,9 @@ export function createComputerPrelude(
 ): EvalPreludeDefinition {
 	const controller = createController(session);
 	const unregisterOwner = registerComputerController(session.getEvalKernelOwnerId?.() ?? undefined, controller);
+	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+	// JavaScript or Python kernel actually asks for its enabled preludes.
+	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
@@ -134,11 +131,11 @@ export function createComputerPrelude(
 
 	return {
 		name: "computer",
-		documentation: computerDescription,
-		javascript: computerJavascript,
-		python: computerPython,
+		documentation: computerPreludeAssets.documentation,
+		javascript: computerPreludeAssets.javascript,
+		python: computerPreludeAssets.python,
 		exports: ["computer"],
-		codeModeDeclarations: computerCodeModeDeclarations,
+		codeModeDeclarations: computerPreludeAssets.codeModeDeclarations,
 		approval: computerApproval,
 		enabled: () => session.settings.get("computer.enabled") === true,
 		invoke: async (parameters, context) => {

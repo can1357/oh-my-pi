@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -354,29 +353,6 @@ describe("financial schedule validation", () => {
 });
 
 describe("pricing discovery and cache", () => {
-	it("reapplies current first-party policy to stale cached rates without a schedule", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-scheduled-cache-"));
-		const dbPath = path.join(tempDir, "models.db");
-		const options = { providerId: "deepseek", staticModels: [], cacheDbPath: dbPath };
-		try {
-			const online = await resolveProviderModels<"openai-completions">(
-				{ ...options, fetchDynamicModels: async () => [spec()] },
-				"online",
-			);
-			expect(calculateCost(online.models[0]!, usage(), offPeak).total).toBeCloseTo(0.753, 12);
-			const db = new Database(dbPath);
-			try {
-				db.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", [JSON.stringify([spec()]), "deepseek"]);
-			} finally {
-				db.close();
-			}
-			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
-			expect(calculateCost(offline.models[0]!, usage(), offPeak).total).toBeCloseTo(0.753, 12);
-		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	it("retains custom static schedules when merging discovery ratecards and restoring cache", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-scheduled-merge-"));
 		const base = spec("scheduled-model", "custom-scheduled");

@@ -1,6 +1,9 @@
 // Provider-wire compat for "azure"; regenerated from the frozen census using deployment contract selectors.
 
 provider "azure" {
+	default-model "gpt-5.5"
+	env "AZURE_OPENAI_API_KEY"
+
 	class "openai" {
 		thinking-mode "effort"
 	}

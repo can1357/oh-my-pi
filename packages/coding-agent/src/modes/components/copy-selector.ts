@@ -25,8 +25,13 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import {
+	isUserRequestEntry,
+	type TranscriptEntry,
+	transcriptEntryMessage,
+	userTurnDraft,
+} from "../../session/session-context";
 import type { SessionMessageEntry } from "../../session/session-entries";
-import { isUserTurnInitiator } from "../../session/messages";
 import { replaceTabs } from "../../tools/render-utils";
 import { highlightCode, type ThemeColor, theme } from "../theme/theme";
 import { commandFromToolCall, extractBlocks, extractLinks } from "../utils/copy-targets";
@@ -120,12 +125,12 @@ export class CopySelectorComponent implements Component {
 	#rowCache = new OutlineRowCache();
 
 	/** Whole branch; the picker may currently replay only its tail. */
-	#entries: SessionMessageEntry[];
+	#entries: TranscriptEntry[];
 	/** True while older history is still unreplayed. */
 	#truncated = false;
 
 	constructor(
-		entries: SessionMessageEntry[],
+		entries: TranscriptEntry[],
 		private readonly deps: CopySelectorDeps,
 	) {
 		this.#entries = entries;
@@ -141,7 +146,7 @@ export class CopySelectorComponent implements Component {
 	}
 
 	/** Build a transcript for `entries` and adopt its targets. */
-	#replay(entries: SessionMessageEntry[]): ChatTranscriptBuilder {
+	#replay(entries: TranscriptEntry[]): ChatTranscriptBuilder {
 		const builder = new ChatTranscriptBuilder({
 			ui: this.deps.ui,
 			getTool: this.deps.getTool,
@@ -488,17 +493,12 @@ export class CopySelectorComponent implements Component {
  * final turn instead, and a branch whose last turn is itself longer than
  * `limit` replays in full.
  */
-function recentEntries(entries: SessionMessageEntry[], limit: number): SessionMessageEntry[] {
+function recentEntries(entries: TranscriptEntry[], limit: number): TranscriptEntry[] {
 	if (entries.length <= limit) return entries;
 	for (let index = entries.length - limit; index > 0; index--) {
-		if (startsTurn(entries[index]!)) return entries.slice(index);
+		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
 	}
 	return entries;
-}
-
-function startsTurn(entry: SessionMessageEntry): boolean {
-	const message = entry.message;
-	return message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 }
 
 /** Raw multi-line text of a user message (string or text blocks). */
@@ -552,10 +552,11 @@ function pushMarkdownBlocks(blocks: CopyBlock[], text: string): void {
 }
 
 /** Inner blocks of one turn: markdown code/quotes, commands, and tool output. */
-function collectBlocks(entries: readonly SessionMessageEntry[]): CopyBlock[] {
+function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 	const blocks: CopyBlock[] = [];
 	for (const entry of entries) {
-		const message = entry.message;
+		const message = transcriptEntryMessage(entry);
+		if (!message) continue;
 		switch (message.role) {
 			case "user":
 				pushMarkdownBlocks(blocks, rawUserText(message));
@@ -597,8 +598,9 @@ function collectBlocks(entries: readonly SessionMessageEntry[]): CopyBlock[] {
 
 /** Clipboard payload for a whole turn, falling back to its blocks when the turn has no prose. */
 function targetCopy(target: OutlineTarget, blocks: readonly CopyBlock[]): { content: string; label: string } {
-	const message = target.entries[0]!.message;
-	switch (message.role) {
+	const entry = target.entries[0]!;
+	const message = transcriptEntryMessage(entry);
+	switch (message?.role) {
 		case "user":
 			return { content: rawUserText(message), label: "user message" };
 		case "assistant": {
@@ -626,6 +628,9 @@ function targetCopy(target: OutlineTarget, blocks: readonly CopyBlock[]): { cont
 			return { content: message.summary, label: "summary" };
 		case "custom":
 		case "hookMessage": {
+			// A user-invoked skill/collab prompt copies as what the user typed, not the expanded body.
+			const draft = message.role === "custom" ? userTurnDraft(entry) : undefined;
+			if (draft?.trim()) return { content: draft, label: "user message" };
 			const content =
 				typeof message.content === "string"
 					? message.content

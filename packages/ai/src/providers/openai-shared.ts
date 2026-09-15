@@ -97,6 +97,7 @@ import {
 	hasCopilotVisionInput,
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
+import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
 import type { InputItem } from "./openai-codex/request-transformer";
 import type {
@@ -3250,6 +3251,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (reasoningBlock) {
 					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
 					reasoningBlock.thinkingSignature = JSON.stringify(item);
+					if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(item);
 					stream.push({
 						type: "thinking_end",
 						contentIndex: contentIndexOf(reasoningBlock),

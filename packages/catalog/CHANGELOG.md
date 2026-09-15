@@ -5,6 +5,29 @@
 ### Changed
 
 - Updated DEFAULT_ANTIGRAVITY_VERSION fallback to 2.13.0 matching current Cloud Code Assist releases ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
+## [18.2.0] - 2026-09-15
+
+### Breaking Changes
+
+- Removed `getCatalogProviderEntry` and the `CATALOG_PROVIDERS` constant in favor of `providerEntry` and `providerEntries`
+
+### Added
+
+- Added support for DeepInfra, LiteLLM, Qwen Portal, SiliconFlow, and SiliconFlow-CN providers
+- Added support for Gemini 3.8 Flash models
+
+### Changed
+
+- Cached provider catalogs restore policy-versioned materialized models instead of rebuilding each row on launch.
+- Model policy resolution reuses indexed rule matches and cached target results.
+- Model-aware delegation prompts reuse policy decisions until the model's identity or capabilities change.
+- Provider catalog entries (default model, env keys, discovery wiring) and the bundled fallback rows for providers that cannot be discovered at generation time (Anthropic, OpenAI Daybreak, xAI OAuth, Meta, Muse Code, Bedrock Mantle, Devin, Z.AI, Sakana, ai&, Abliteration, Yolo-Auto, GMI Cloud, Fire Pass, QwenCloud Token Plan, Cloudflare AI Gateway, GitLab Duo Workflow) now live in `src/compat/rules/providers/<id>.kdl` and compile into `rules.json`; `KnownProvider` is generated from them, and the generator bundles seed rows by each entry's declared `bundle` policy instead of per-provider code.
+
+## [18.1.22] - 2026-09-14
+
+### Added
+
+- Enabled assistant prefill support for Ollama models
 
 ### Fixed
 

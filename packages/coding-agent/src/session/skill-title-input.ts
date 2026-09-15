@@ -1,7 +1,14 @@
-/** Compact title-model input for a user-invoked `/skill:<name>` prompt. */
-export function skillPromptTitleInput(input: { name?: string; args?: string; queueChipText?: string }): string {
+/** Compact title-model input for a user-invoked `/skill:<name>` prompt — also the draft a rewind restores. */
+export function skillPromptTitleInput(input: {
+	name?: string;
+	args?: string;
+	prompt?: string;
+	queueChipText?: string;
+}): string {
 	const chip = input.queueChipText?.trim();
 	if (chip) return chip;
+	const prompt = input.prompt?.trim();
+	if (prompt) return prompt;
 	const name = input.name?.trim();
 	const args = input.args?.trim();
 	if (name && args) return `/skill:${name} ${args}`;
@@ -21,12 +28,14 @@ export function titleTextFromSkillPrompt(message: {
 	}
 	let name: string | undefined;
 	let args: string | undefined;
+	let prompt: string | undefined;
 	let queueChipText: string | undefined;
 	if (message.details && typeof message.details === "object") {
 		const details = message.details as Record<string, unknown>;
 		if (typeof details.name === "string") name = details.name;
 		if (typeof details.args === "string") args = details.args;
+		if (typeof details.prompt === "string") prompt = details.prompt;
 		if (typeof details.__queueChipText === "string") queueChipText = details.__queueChipText;
 	}
-	return skillPromptTitleInput({ name, args, queueChipText }) || undefined;
+	return skillPromptTitleInput({ name, args, prompt, queueChipText }) || undefined;
 }
