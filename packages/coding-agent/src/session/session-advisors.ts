@@ -1352,13 +1352,14 @@ export class SessionAdvisors {
 	 * Route one accepted advice note from `advisor` to the primary. Concern and
 	 * blocker interrupt the running agent through the steering channel; once the
 	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, a concern is preserved as a visible advisor card, while a
-	 * blocker wakes the primary to acknowledge work it handed off incorrectly.
-	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
-	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
-	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
-	 * aside. The emission guard has already accepted the note; rejected calls never
-	 * enter this route and receive their specific policy outcome from `AdviseTool`.
+	 * no queued work, late non-blocker advice (a nit or concern) is preserved as a
+	 * visible advisor card, while a blocker wakes the primary to acknowledge work
+	 * it handed off incorrectly. After a deliberate user interrupt auto-resume is
+	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
+	 * on resume); a live-streaming turn is steered in directly. A plain nit rides
+	 * the non-interrupting YieldQueue aside during streaming. The emission guard
+	 * has already accepted the note; rejected calls never enter this route and
+	 * receive their specific policy outcome from `AdviseTool`.
 	 */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
