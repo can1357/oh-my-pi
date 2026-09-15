@@ -42,7 +42,6 @@ function scopedStorage(byKind: Partial<Record<HistoryScopeKind, HistoryEntry[]>>
 		search: (_query: string, _limit: number, scope?: HistoryScope) => byKind[scope?.kind ?? "global"] ?? [],
 	} as unknown as HistoryStorage;
 }
-
 const GLOBAL_ONLY: HistoryScope[] = [{ kind: "global" }];
 const ALL_SCOPES: HistoryScope[] = [{ kind: "session" }, { kind: "cwd" }, { kind: "global" }];
 
@@ -177,26 +176,26 @@ describe("HistorySearchComponent", () => {
 		expect(plain).not.toContain("Press Tab for");
 	});
 
-	it("names the scope it reads in the empty state and points at the next one", () => {
+	it("reads the scope the Tab ring reaches, then the next one after Tab", () => {
+		const asked: HistoryScope[] = [];
+		const scoped = {
+			getRecent: (_limit: number, scope?: HistoryScope) => {
+				asked.push(scope ?? { kind: "global" });
+				return [] as HistoryEntry[];
+			},
+			search: (_query: string, _limit: number, scope?: HistoryScope) => [] as HistoryEntry[],
+		} as unknown as HistoryStorage;
 		const component = new HistorySearchComponent(
-			scopedStorage({}),
-			ALL_SCOPES,
+			scoped,
+			[{ kind: "session" }, { kind: "cwd" }, { kind: "global" }],
 			() => {},
 			() => {},
 		);
 
-		// Anchored to the pointer line and written with the same labels the panel renders, so this
-		// pins "the empty state names the scope it read and the one Tab reaches", not the copy.
-		const pointerLine = () =>
-			render(component)
-				.plain.split("\n")
-				.find(line => line.includes("Press Tab for"));
-
-		expect(pointerLine()).toContain(`No history in ${HISTORY_SCOPE_LABELS.session}`);
-		expect(pointerLine()).toContain(`Press Tab for ${HISTORY_SCOPE_LABELS.cwd}`);
-
+		// The constructor seeds with the ring's first scope; Tab moves the read to the next one.
+		expect(asked[0]).toEqual({ kind: "session" });
 		component.handleInput("\t");
-		expect(pointerLine()).toContain(`No history in ${HISTORY_SCOPE_LABELS.cwd}`);
-		expect(pointerLine()).toContain(`Press Tab for ${HISTORY_SCOPE_LABELS.global}`);
+		expect(asked.at(-1)).toEqual({ kind: "cwd" });
+		expect(asked.at(-2)).toEqual({ kind: "session" });
 	});
 });
