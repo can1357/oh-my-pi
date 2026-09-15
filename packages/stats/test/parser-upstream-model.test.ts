@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getRecentRequests, getStatsByModel, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-upstream-model-");
@@ -42,10 +44,9 @@ describe("parser upstreamModel attribution", () => {
 				usage: {
 					input: 10,
 					output: 5,
-					cacheRead: 0,
+					cacheRead: 10,
 					cacheWrite: 0,
-					totalTokens: 15,
-					cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+					totalTokens: 25,
 				},
 				timestamp: 1788412801000,
 			},
@@ -55,12 +56,9 @@ describe("parser upstreamModel attribution", () => {
 
 		const result = await parseSessionFile(file);
 
-		// 1. Assistant message stats should record upstreamModel and upstreamProvider
 		expect(result.stats).toHaveLength(1);
 		expect(result.stats[0].model).toBe("anthropic/claude-sonnet-4.5");
 		expect(result.stats[0].provider).toBe("Anthropic");
-
-		// 2. User link should link parent user message to the concrete upstream model
 		expect(result.userLinks).toHaveLength(1);
 		expect(result.userLinks[0]).toMatchObject({
 			sessionFile: file,
@@ -68,6 +66,22 @@ describe("parser upstreamModel attribution", () => {
 			model: "anthropic/claude-sonnet-4.5",
 			provider: "Anthropic",
 		});
+
+		await initDb();
+		expect(insertMessageStats(result.stats)).toBe(1);
+		const catalogCost = getBundledModel("openrouter", "anthropic/claude-sonnet-4.5").cost;
+		const request = getRecentRequests()[0];
+		if (!request) throw new Error("Expected the routed request to be stored");
+		expect(request).toMatchObject({
+			model: "anthropic/claude-sonnet-4.5",
+			provider: "Anthropic",
+		});
+		expect(request.usage.cost.cacheRead).toBeCloseTo((catalogCost.cacheRead * 10) / 1_000_000, 12);
+		expect(request.usage.cost.total).toBeCloseTo(
+			(catalogCost.input * 10 + catalogCost.output * 5 + catalogCost.cacheRead * 10) / 1_000_000,
+			12,
+		);
+		expect(getStatsByModel()).toMatchObject([{ model: "anthropic/claude-sonnet-4.5", provider: "Anthropic" }]);
 	});
 
 	it("falls back to configured model and provider when upstreamModel is absent", async () => {
