@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Customize the system prompt with Handlebars using live settings and tool data via `SYSTEM_TEMPLATE.md`, `--system-prompt-template`, or the SDK.
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
