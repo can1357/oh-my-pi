@@ -2349,8 +2349,13 @@ export class InputController {
 	 * would only leave a transcript row that can never be dismissed.
 	 */
 	toggleDetailVisibility(): void {
-		if (!this.#thinkingBlocksUntoggleable()) this.#applyThinkingBlockVisibility(!this.ctx.hideThinkingBlock);
-		this.#applyToolOutputDetailsHidden(!this.ctx.hideToolOutputDetails);
+		const thinkingToggleable = !this.#thinkingBlocksUntoggleable();
+		// One target state for both axes: a half-folded transcript (thinking hidden
+		// by its own toggle, tool details still visible, or the reverse) folds fully
+		// on the next press instead of swapping which half is visible.
+		const hidden = !(this.ctx.hideToolOutputDetails && (!thinkingToggleable || this.ctx.hideThinkingBlock));
+		if (thinkingToggleable) this.#applyThinkingBlockVisibility(hidden);
+		this.#applyToolOutputDetailsHidden(hidden);
 		this.#resetTranscriptRendering();
 	}
 

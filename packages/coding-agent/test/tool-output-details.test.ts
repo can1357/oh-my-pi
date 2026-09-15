@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
@@ -82,5 +83,27 @@ describe("tool output details", () => {
 		const folded = plain(group.render(120));
 		expect(folded).toContain("example.ts");
 		expect(folded).not.toContain("line 1");
+	});
+
+	it("shortens a home-directory path in the folded summary", () => {
+		const home = os.homedir();
+		// No built-in renderer for this name, so the generic summary supplies the row.
+		const card = new ToolExecutionComponent(
+			"custom-thing",
+			{ path: `${home}/projects/notes.md` },
+			{},
+			undefined,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const folded = plain(card.render(120));
+
+			expect(folded).toContain("~/projects/notes.md");
+			expect(folded).not.toContain(home);
+		} finally {
+			card.stopAnimation();
+		}
 	});
 });

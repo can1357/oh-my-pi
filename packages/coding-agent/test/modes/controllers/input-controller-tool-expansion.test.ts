@@ -195,6 +195,22 @@ describe("InputController assistant detail toggle", () => {
 		expect(showStatus).not.toHaveBeenCalled();
 	});
 
+	it("folds both axes from a half-folded transcript, then restores both", () => {
+		const { ctx, resetDisplay } = createContext({ hideThinkingBlock: true });
+		const controller = new InputController(ctx);
+
+		controller.toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(true);
+		expect(ctx.hideToolOutputDetails).toBe(true);
+
+		controller.toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(resetDisplay).toHaveBeenCalledTimes(2);
+	});
+
 	it("refuses ctrl+o while tool output details are hidden", () => {
 		const { ctx, showStatus } = createContext({ hideToolOutputDetails: true });
 

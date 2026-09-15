@@ -22,7 +22,7 @@ import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
-import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../../tools/render-utils";
+import { formatStatusIcon, replaceTabs, resolveImageOptions, shortenPath } from "../../tools/render-utils";
 import {
 	type FirstResultViewportRepaint,
 	type ToolActivitySummary,
@@ -928,7 +928,11 @@ export class ToolExecutionComponent extends Container {
 			for (const key of ["command", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
-					return { label: this.#toolLabel, detail: value.split("\n", 1)[0] };
+					const line = value.split("\n", 1)[0] ?? "";
+					// The compact row is the entire card under
+					// `display.hideToolOutputDetails`, so a path argument must not put
+					// the home directory into the transcript there.
+					return { label: this.#toolLabel, detail: key === "path" ? shortenPath(line) : line };
 				}
 			}
 		}

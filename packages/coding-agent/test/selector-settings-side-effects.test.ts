@@ -210,6 +210,30 @@ describe("selector setting side effects", () => {
 		});
 	}
 
+	for (const hidden of [true, false]) {
+		it(`rebuilds retired history when display.hideToolOutputDetails=${hidden} changes in /settings`, () => {
+			const setToolOutputDetailsHidden = vi.fn();
+			const resetStableEmission = vi.fn();
+			const resetDisplay = vi.fn();
+			const ctx = {
+				hideToolOutputDetails: !hidden,
+				chatContainer: { setToolOutputDetailsHidden, resetStableEmission },
+				ui: { resetDisplay },
+			};
+			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+			controller.handleSettingChange("display.hideToolOutputDetails", hidden);
+
+			expect(ctx.hideToolOutputDetails).toBe(hidden);
+			expect(setToolOutputDetailsHidden).toHaveBeenCalledWith(hidden);
+			// Rows already retired to terminal history only re-render once the
+			// emission ledger is dropped, and the clear has to follow it.
+			expect(resetStableEmission).toHaveBeenCalledTimes(1);
+			expect(resetDisplay).toHaveBeenCalledTimes(1);
+			expect(resetStableEmission.mock.invocationCallOrder[0]).toBeLessThan(resetDisplay.mock.invocationCallOrder[0]);
+		});
+	}
+
 	for (const enabled of [false, true]) {
 		it(`rebuilds the transcript when display.showTokenUsage=${enabled} changes in /settings`, () => {
 			const rebuildChatFromMessages = vi.fn();

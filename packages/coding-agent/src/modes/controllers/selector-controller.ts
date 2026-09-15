@@ -672,7 +672,11 @@ export class SelectorController {
 			case "display.hideToolOutputDetails": {
 				this.ctx.hideToolOutputDetails = value as boolean;
 				this.ctx.chatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
-				this.ctx.ui.requestRender(true);
+				// Match the shortcut path: rows already retired to terminal history
+				// re-render only after the emission ledger is dropped and the
+				// scrollback is cleared, not on a viewport repaint.
+				this.ctx.chatContainer.resetStableEmission();
+				this.ctx.ui.resetDisplay();
 				break;
 			}
 			case "terminal.showImages":
