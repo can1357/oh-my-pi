@@ -788,7 +788,12 @@ export class RelayBridge {
 				}
 				this.#scheduleLivePreloadScriptCleanup(tab);
 				if (holders.length === 0 && (!hasRecoveryMetadata || recoverableNow.has(tab.tabId))) {
-					this.#detachIfUnheld(tab.tabId, true);
+					// Only current extensions can prove that an attached tab belongs to
+					// this relay via their recovery metadata. A legacy hello reports all
+					// debugger attachments, including ones owned by DevTools or another
+					// extension. Keep its cleanup best-effort: if Chrome rejects detach,
+					// do not recycle the transport into the same failing hello loop.
+					this.#detachIfUnheld(tab.tabId, hasRecoveryMetadata);
 					continue;
 				}
 				if (needsRecoveryReplay) {

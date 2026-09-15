@@ -535,6 +535,34 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
+	it("does not reconnect when legacy inherited attachment cleanup is rejected", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+
+		// Legacy hellos cannot distinguish this relay's inherited attachments from
+		// a tab owned by DevTools or another debugger. Try cleanup, but a rejection
+		// must leave the transport connected instead of repeating forever on hello.
+		bridge.extConnected(ext);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/120.0.0.0",
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [1],
+				// no recoverableTabIds field
+			}),
+		);
+		await flush();
+
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
+		nack(bridge, ext, "detach", "Cannot detach from a foreign debugger");
+		await flush();
+
+		expect(ext.closeCount).toBe(0);
+	});
+
 	it("releases an unattached recovery marker with no downstream holders", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
