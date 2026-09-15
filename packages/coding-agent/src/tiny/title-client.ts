@@ -57,7 +57,7 @@ const TITLE_CLOSE = "</title>";
 const TITLE_MAX_NEW_TOKENS = 20;
 const MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
-const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: false });
+const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const MLX_IDLE_SECONDS = 15 * 60;
 
 const CONNECT_TIMEOUT_MS = 3_000;

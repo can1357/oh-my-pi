@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
+import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "../config/keybindings";
@@ -36,6 +37,7 @@ import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "./components/hook-selector";
+import type { ServedModelTracker } from "./components/served-model-marker";
 import type { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
@@ -93,6 +95,8 @@ export type TodoPhase = {
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
+	/** Opt into hosting when the caller owns outer startup readiness and shutdown. */
+	autoStartCollab?: boolean;
 	/** Recent-session rows loaded by the prepaint composer while runtime modules initialized. */
 	recentSessions?: Promise<RecentSession[] | undefined>;
 }
@@ -151,6 +155,16 @@ export interface InteractiveModeContext {
 	focusParentSession(): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
+	/** Drop pending focus requests without changing the view (delegates to SessionFocusController.invalidatePendingFocus). */
+	invalidatePendingFocus(): void;
+	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
+	resolveViewportClickCandidates(index: number): string[];
+	/** Flip the pinned jump list between its collapsed few and the full list. */
+	togglePinnedHudExpanded(): void;
+	/** Rebuild the pinned jump list for a `display.pinnedAgents` change. */
+	applyPinnedAgentsSetting(): void;
+	/** Point the inline hover band at a click-candidate id (or clear it). */
+	setClickHoverId(id: string | undefined): void;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
 	clearTransientSessionUi(): void;
 	settings: Settings;
@@ -159,6 +173,9 @@ export interface InteractiveModeContext {
 	historyStorage?: HistoryStorage;
 	mcpManager?: MCPManager;
 	lspServers?: LspStartupServerInfo[];
+	/** Owns hosting: manual `/collab`, `collab.autoStart`, and room rotation on session switch. */
+	collabController: CollabController;
+	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
 	eventController: EventController;
@@ -222,6 +239,12 @@ export interface InteractiveModeContext {
 	 * Reseeded by `renderSessionContext` on every rebuild/session switch.
 	 */
 	lastAssistantUsage: Usage | undefined;
+	/**
+	 * Remembers which (requested → served) model substitutions this transcript
+	 * has already flagged, so the served-model divider appears once per pair.
+	 * Replaced by `renderSessionContext` on every rebuild/session switch.
+	 */
+	servedModelTracker: ServedModelTracker;
 	loadingAnimation: Loader | undefined;
 	autoCompactionLoader: Loader | undefined;
 	retryLoader: Loader | undefined;
@@ -254,6 +277,8 @@ export interface InteractiveModeContext {
 	shutdown(): Promise<void>;
 	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
 	restart(): Promise<void>;
+	/** Request graceful shutdown at the next fully settled boundary, including background turns. */
+	requestShutdown(): void;
 	checkShutdownRequested(): Promise<void>;
 
 	// Extension UI integration
@@ -388,7 +413,7 @@ export interface InteractiveModeContext {
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(source?: AgentSession): Promise<void>;
 	toggleTodoExpansion(): void;
-
+	setTodoExpanded(expanded: boolean): void;
 	// Command handling
 	handleExportCommand(text: string): Promise<void>;
 	handleTraceCommand(): Promise<void>;
@@ -424,6 +449,7 @@ export interface InteractiveModeContext {
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	/** `/wt`: fork the checkout into a new worktree (keeping changes) and move there. */
 	handleWorktreeCommand(branch?: string): Promise<void>;
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
 	handleSTTToggle(): Promise<void>;
@@ -457,6 +483,8 @@ export interface InteractiveModeContext {
 	showCopySelector(): void;
 	showTreeSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;
+	/** Settle side requests before replacing the session or deleting its artifacts. */
+	prepareSessionSwitch(): Promise<void>;
 	handleResumeSession(sessionPath: string): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
@@ -487,6 +515,8 @@ export interface InteractiveModeContext {
 	handlesBtwBranchKey(): boolean;
 	canCopyBtw(): boolean;
 	handleBtwCopyKey(): Promise<boolean>;
+	canFollowUpBtw(): boolean;
+	handleBtwFollowUpKey(): boolean;
 	handleBtwBranch(
 		question: string,
 		assistantMessage: AssistantMessage,
@@ -516,6 +546,7 @@ export interface InteractiveModeContext {
 	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;
 	setLoopPrompt(prompt: string): void;
+	armLoopAutoSubmit(): void;
 	disableLoopMode(message?: string): void;
 	cancelGoalContinuation(): void;
 	disableGoalMode(message?: string): void;

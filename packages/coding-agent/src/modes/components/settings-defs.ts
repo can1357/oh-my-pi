@@ -154,6 +154,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	planAutosaveEnabled: () => {
+		try {
+			return Settings.instance.get("plan.enabled") && Settings.instance.get("plan.autosave");
+		} catch {
+			return false;
+		}
+	},
 	unexpectedStopSmart: () => {
 		try {
 			return Settings.instance.get("features.unexpectedStopDetection") === "smart";

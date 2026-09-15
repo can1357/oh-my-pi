@@ -1,6 +1,9 @@
 // Provider-wire compat for "google"; regenerated from the frozen census using deployment contract selectors.
 
 provider "google" {
+	default-model "gemini-3.1-pro-preview"
+	env "GEMINI_API_KEY"
+
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"

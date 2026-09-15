@@ -26,7 +26,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { formatBytes } from "../tools/render-utils";
 import { openPath } from "../utils/open";
 import { DebugLogViewerComponent } from "./log-viewer";
-import { generateHeapSnapshotData, type ProfilerSession, startCpuProfile } from "./profiler";
+import { collectMemoryStats, type ProfilerSession, startCpuProfile } from "./profiler";
 import { buildSampleImage, ProtocolProbeComponent } from "./protocol-probe";
 import { RawSseViewerComponent } from "./raw-sse";
 import { resolveRawSseDebugBuffer } from "./raw-sse-buffer";
@@ -41,7 +41,7 @@ const DEBUG_MENU_ITEMS: SelectItem[] = [
 	{ value: "performance", label: "Report: performance issue", description: "Profile CPU, reproduce, then bundle" },
 	{ value: "work", label: "Profile: work scheduling", description: "Open flamegraph of last 30s" },
 	{ value: "dump", label: "Report: dump session", description: "Create report bundle immediately" },
-	{ value: "memory", label: "Report: memory issue", description: "Heap snapshot + bundle" },
+	{ value: "memory", label: "Report: memory issue", description: "Memory statistics + bundle" },
 	{ value: "logs", label: "View: recent logs", description: "Show last 50 log entries" },
 	{ value: "system", label: "View: system info", description: "Show environment details" },
 	{ value: "terminal", label: "View: terminal state", description: "Subprotocols, geometry, scrollback strategy" },
@@ -283,21 +283,21 @@ export class DebugSelectorComponent extends OverlayPanel {
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
-			"Generating heap snapshot...",
+			"Collecting memory statistics...",
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(loader);
 		this.ctx.ui.requestRender();
 
 		try {
-			const heapSnapshot = generateHeapSnapshotData();
+			const memoryStats = collectMemoryStats();
 			loader.setText("Creating report bundle...");
 
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
-				heapSnapshot,
+				memoryStats,
 			});
 
 			loader.stop();
@@ -307,6 +307,16 @@ export class DebugSelectorComponent extends OverlayPanel {
 			block.addChild(new Text(theme.fg("success", `+ Memory report saved`), 1, 0));
 			block.addChild(new Text(theme.fg("dim", formatFileHyperlink(result.path)), 1, 0));
 			block.addChild(new Text(theme.fg("dim", `Files: ${result.files.length}`), 1, 0));
+			block.addChild(
+				new Text(
+					theme.fg(
+						"warning",
+						"Review before sharing: session data, artifacts, logs and settings may contain secrets.",
+					),
+					1,
+					0,
+				),
+			);
 			this.ctx.present(block);
 		} catch (err) {
 			loader.stop();

@@ -294,6 +294,19 @@ function readyPendingSummary(daemon: DaemonSnapshot, ready?: LaunchParams["ready
 	return parts;
 }
 
+/**
+ * What a timed-out `wait` was actually blocked on: the output `pattern`, the
+ * process exiting (`for: "exit"`, the default), or the unmet readiness
+ * conditions (`for: "ready"`). Never reports readiness for an exit/pattern
+ * wait — the process may well be ready and simply still running.
+ */
+function waitPendingSummary(daemon: DaemonSnapshot, params: Pick<LaunchParams, "for" | "pattern">): string[] {
+	if (params.pattern) return [`output pattern /${params.pattern}/ never matched`];
+	if ((params.for ?? "exit") === "exit") return [`process exit (still ${daemon.state})`];
+	const pending = readyPendingSummary(daemon);
+	return pending.length > 0 ? pending : [`readiness (still ${daemon.state})`];
+}
+
 function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 	switch (result.op) {
 		case "ping":
@@ -327,8 +340,7 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 			const lines = [daemonLabel(result.daemon)];
 			if (result.matched) lines.push(`Matched: ${result.matched}`);
 			if (result.timedOut) {
-				const pending = readyPendingSummary(result.daemon);
-				lines.push(`Wait timed out${pending.length > 0 ? ` (still waiting on: ${pending.join("; ")})` : ""}.`);
+				lines.push(`Wait timed out (still waiting on: ${waitPendingSummary(result.daemon, params).join("; ")}).`);
 			}
 			return lines.join("\n");
 		}
@@ -584,12 +596,11 @@ export function launchRenderResult(
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
 				if (details?.matched) body.push(theme.fg("dim", `matched: ${replaceTabs(details.matched)}`));
 				if (details?.timedOut) {
-					const pending = daemon ? readyPendingSummary(daemon) : [];
 					body.push(
 						theme.fg(
 							"warning",
-							pending.length > 0
-								? `Wait timed out — still waiting on ${pending.join("; ")}.`
+							daemon
+								? `Wait timed out — still waiting on ${waitPendingSummary(daemon, params).join("; ")}.`
 								: "Wait timed out.",
 						),
 					);

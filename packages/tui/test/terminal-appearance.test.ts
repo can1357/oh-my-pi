@@ -675,6 +675,22 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("routes resize by the injected ConPTY override, not the ambient platform", () => {
+		// The override must gate every ConPTY-dependent path uniformly. Reading
+		// isConPTYHosted() here instead made a { conpty: false } terminal report
+		// non-ConPTY writes and kitty flags but ConPTY resize routing on Windows
+		// and WSL, so no test could model the opposite host.
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const posix = setupTerminal({ conpty: false });
+		expect(posix.terminal.hostOwnsGridOnResize).toBe(false);
+		posix.terminal.stop();
+
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		const conpty = setupTerminal({ conpty: true });
+		expect(conpty.terminal.hostOwnsGridOnResize).toBe(true);
+		conpty.terminal.stop();
+	});
+
 	it("shutdown balances the single kitty push performed on detection", () => {
 		const { terminal, writes } = setupTerminal();
 

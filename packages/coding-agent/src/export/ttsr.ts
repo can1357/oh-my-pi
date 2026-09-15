@@ -554,7 +554,11 @@ export class TtsrManager {
 		}
 	}
 
-	/** Reset stream buffers (called on new turn). */
+	/**
+	 * Reset stream buffers. Called at every stream boundary: a new turn, a new
+	 * assistant message within a turn, and a restarted response. Buffers never
+	 * span two assistant messages; repeat-after-gap counters are untouched.
+	 */
 	resetBuffer(): void {
 		this.#buffers.clear();
 		this.#lastAstSnapshots.clear();
@@ -566,6 +570,34 @@ export class TtsrManager {
 			return false;
 		}
 		return this.#rules.size > 0;
+	}
+
+	/**
+	 * Atomically replace monitored rules while retaining injection state for names
+	 * that remain registered.
+	 *
+	 * Returns the names accepted for TTSR monitoring so the caller can bucket
+	 * rejected conditional rules through its normal fallback path.
+	 */
+	replaceRules(rules: readonly Rule[]): Set<string> {
+		const replacement = new TtsrManager(this.#settings);
+		for (const rule of rules) {
+			replacement.addRule(rule);
+		}
+
+		const registered = new Set(replacement.#rules.keys());
+		this.#rules.clear();
+		for (const [name, entry] of replacement.#rules) {
+			this.#rules.set(name, entry);
+		}
+		this.#canMatchText = replacement.#canMatchText;
+		this.#canMatchThinking = replacement.#canMatchThinking;
+		this.resetBuffer();
+
+		for (const name of this.#injectionRecords.keys()) {
+			if (!registered.has(name)) this.#injectionRecords.delete(name);
+		}
+		return registered;
 	}
 
 	/** All rules currently registered for TTSR monitoring, in registration order. */

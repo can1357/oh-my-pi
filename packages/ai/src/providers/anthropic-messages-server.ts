@@ -354,6 +354,23 @@ const REASONING_EFFORT_BY_WIRE: Partial<Record<string, Effort>> = {
 	max: Effort.Max,
 };
 
+/**
+ * Recover the id of the model this request will actually reach, for labelling
+ * replayed assistant turns.
+ *
+ * `/v1/models` advertises `<provider>/<id>` and nothing else, so that is what
+ * clients send, but `resolveModel` resolves a catalog model whose id is the
+ * bare half. Labelling a replayed turn with the full id the client sent leaves
+ * `transform-messages` reading it as written by some other model.
+ *
+ * A prefix naming another provider is left intact: it describes a different
+ * route, so removing it would invent history rather than recover it.
+ */
+function stampedAssistantModelId(wireModelId: string, provider: string): string {
+	const prefix = `${provider}/`;
+	return wireModelId.startsWith(prefix) ? wireModelId.slice(prefix.length) : wireModelId;
+}
+
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	const data = anthropicMessagesRequestSchema(body);
 	if (data instanceof type.errors) {
@@ -368,14 +385,18 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 		} else if (message.role === "system") {
 			messages.push(walkSystemMessage(message, now));
 		} else {
+			const content = walkAssistantContent(message.content);
 			const assistant: AssistantMessage = {
 				role: "assistant",
-				content: walkAssistantContent(message.content),
+				content,
 				api: "anthropic-messages",
 				provider: "anthropic",
-				model: data.model,
+				model: stampedAssistantModelId(data.model, "anthropic"),
 				usage: emptyUsage(),
-				stopReason: "stop",
+				// The wire carries no stop reason, but tool calls answered by their
+				// `tool_result` blocks did request execution. A constant "stop" reads
+				// as an abandoned tool-use turn and strips the turn's signatures.
+				stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
 				timestamp: now,
 			};
 			messages.push(assistant);

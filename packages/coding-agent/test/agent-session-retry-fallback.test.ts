@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type Api,
 	type AssistantMessage,
@@ -15,13 +16,14 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -104,6 +106,25 @@ function emptyUsage(): AssistantMessage["usage"] {
 		cacheWrite: 0,
 		totalTokens: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function advisorNativeSummary(provider: string) {
+	const compactionItem = { type: "compaction", encrypted_content: "native-advisor-transition-state" };
+	const replacementHistory = [
+		{
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "retained-advisor-transition-decision" }],
+		},
+		compactionItem,
+	];
+	return {
+		...createCompactionSummaryMessage("Native advisor history", 100_000, new Date().toISOString(), {
+			providerPayload: { type: "openaiResponsesHistory", provider, items: replacementHistory },
+		}),
+		preserveData: { openaiRemoteCompaction: { provider, replacementHistory, compactionItem } },
+		advisorUsageAnchorStartIndex: 1,
 	};
 }
 
@@ -364,6 +385,77 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+	});
+
+	it("re-syncs the edit-mode system prompt after a retry-fallback model swap", async () => {
+		// A session that starts on a default-hashline model and auto-falls-back to a
+		// variant-pinned model must rebuild its base prompt so the edit-mode policy
+		// tracks the model actually serving the turn (issue #11983).
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
+					mock.push({ content: ["Recovered on the pinned-variant fallback"] });
+				} else {
+					throw new Error(
+						`Unexpected model requested during edit-variant fallback test: ${model.provider}/${model.id}`,
+					);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+			"edit.modelVariants": { [fallbackModel.id]: "replace" },
+		} as Partial<Record<SettingPath, unknown>>);
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		const renderEditMode = (): string => {
+			const active = session?.model;
+			const selector = active ? `${active.provider}/${active.id}` : "";
+			return settings.getEditVariantForModel(selector) ?? "hashline";
+		};
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: [`edit:${renderEditMode()}`] }),
+		});
+
+		// Baseline: the non-variant primary resolves to the default hashline mode.
+		await session.refreshBaseSystemPrompt();
+		expect(session.agent.state.systemPrompt).toEqual(["edit:hashline"]);
+
+		await session.prompt("Force a fallback onto the pinned-variant model");
+		await session.waitForIdle();
+
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		// Without the post-swap re-sync the base prompt stays `edit:hashline`.
+		expect(session.agent.state.systemPrompt).toEqual(["edit:replace"]);
 	});
 
 	it("hops to the chain owned by a fallback that is the last entry of the chain it came from", async () => {
@@ -1734,6 +1826,327 @@ describe("AgentSession retry fallback", () => {
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
 		});
+	});
+
+	it.each(["enabled", "remote-disabled", "model-disabled"])(
+		"skips incompatible advisor retries and replays compatible history with %s compaction",
+		async policy => {
+			const primary = getBundledModel("openai", "gpt-5")!;
+			const compatibleBase = getBundledModel("openai", "gpt-5-mini")!;
+			const compatible =
+				policy === "model-disabled"
+					? { ...compatibleBase, remoteCompaction: { ...compatibleBase.remoteCompaction, enabled: false } }
+					: compatibleBase;
+			const foreign = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const wrongApi: Model = { ...getBundledModel("openai", "gpt-4o")!, api: "openai-completions" };
+			const wrongAnthropicApi: Model = {
+				...getBundledModel("openai", "gpt-4o-mini")!,
+				api: "anthropic-messages",
+				remoteCompaction: { enabled: true, api: "openai-responses" },
+			};
+			const selector = (model: Model) => `${model.provider}/${model.id}`;
+			const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+			const advisorMock = createMockModel();
+			const requestedModels: Model[] = [];
+			const recovered = Promise.withResolvers<void>();
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"compaction.methodOrder": policy === "remote-disabled" ? ["soft"] : ["remote", "soft"],
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": {
+					advisor: [selector(foreign), selector(wrongApi), selector(wrongAnthropicApi), selector(compatible)],
+				},
+				"advisor.syncBacklog": "1",
+			});
+			settings.setModelRole("advisor", selector(primary));
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+				primary,
+				foreign,
+				wrongApi,
+				wrongAnthropicApi,
+				compatible,
+			]);
+			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: primary, systemPrompt: [], tools: [] },
+					streamFn: mainMock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: (model, context, options) => {
+					requestedModels.push(model);
+					advisorMock.push(
+						model.id === primary.id
+							? { throw: "rate limit exceeded retry-after-ms=60000" }
+							: { content: ["Advisor recovered"] },
+					);
+					return advisorMock.stream(model, context, options);
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded") recovered.resolve();
+			});
+			session.setAdvisorEnabled(true);
+			const advisor = session.getAdvisorAgent()!;
+			advisor.replaceMessages([advisorNativeSummary(primary.provider)]);
+
+			await session.prompt("review with native history through a provider outage");
+			await recovered.promise;
+
+			expect(requestedModels.map(selector)).toEqual([selector(primary), selector(compatible)]);
+			expect(advisor.state.model.api).toBe(compatible.api);
+			const wire = JSON.stringify(
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls.at(-1)!.context,
+					undefined,
+					undefined,
+				).params.input,
+			);
+			expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
+			expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);
+		},
+	);
+
+	it.each(["foreign", "enabled", "remote-disabled", "model-disabled"])(
+		"restores an advisor primary without losing native replay with %s compaction",
+		async policy => {
+			const compatible = policy !== "foreign";
+			const primaryBase = compatible
+				? getBundledModel("openai", "gpt-5-mini")!
+				: getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const primary =
+				policy === "model-disabled"
+					? { ...primaryBase, remoteCompaction: { ...primaryBase.remoteCompaction, enabled: false } }
+					: primaryBase;
+			const fallback = getBundledModel("openai", "gpt-5")!;
+			const primarySelector = `${primary.provider}/${primary.id}`;
+			const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+			const mainMock = createMockModel({
+				responses: [{ content: ["Primary complete"] }, { content: ["Primary complete again"] }],
+			});
+			const advisorMock = createMockModel();
+			const requestedModels: string[] = [];
+			const recovered = Promise.withResolvers<void>();
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"compaction.methodOrder": policy === "remote-disabled" ? ["soft"] : ["remote", "soft"],
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { advisor: [fallbackSelector] },
+				"advisor.syncBacklog": "1",
+			});
+			settings.setModelRole("advisor", primarySelector);
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary, fallback]);
+			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: primary, systemPrompt: [], tools: [] },
+					streamFn: mainMock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					advisorMock.push(
+						requestedModels.length === 1
+							? { throw: "rate limit exceeded retry-after-ms=1000" }
+							: { content: ["Advisor reviewed"] },
+					);
+					return advisorMock.stream(model, context, options);
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded") recovered.resolve();
+			});
+			session.setAdvisorEnabled(true);
+
+			await session.prompt("cross providers while history is still portable");
+			await recovered.promise;
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+			const advisor = session.getAdvisorAgent()!;
+			advisor.replaceMessages([advisorNativeSummary(fallback.provider)]);
+			vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
+
+			await session.prompt("review after primary cooldown expires");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				primarySelector,
+				fallbackSelector,
+				compatible ? primarySelector : fallbackSelector,
+			]);
+			expect(advisor.state.model.id).toBe(compatible ? primary.id : fallback.id);
+			const wire = JSON.stringify(
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls.at(-1)!.context,
+					undefined,
+					undefined,
+				).params.input,
+			);
+			expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
+			expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);
+		},
+	);
+
+	it("restores a quarantine-latched advisor fallback after cooldown without re-reviewing the maintenance turn", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled main, advisor primary, and fallback test models to exist");
+		}
+
+		const mainMock = createMockModel({
+			responses: [
+				{ content: ["Primary complete"] },
+				{ content: ["Primary complete again"] },
+				{ content: ["Cooldown maintenance turn"] },
+				{ content: ["Primary complete after restoration"] },
+			],
+		});
+		const advisorMock = createMockModel();
+		const requestedAdvisorModels: string[] = [];
+		const quarantineLatched = Promise.withResolvers<void>();
+		let advisorYieldedEvents = 0;
+		let advisorPrimaryAttempts = 0;
+		let fallbackQuarantineAttempts = 0;
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: mainModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.maxRetries": 0,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { advisor: [advisorFallbackSelector] },
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("advisor", advisorPrimarySelector);
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "quarantine-latch", model: advisorPrimarySelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
+					advisorMock.push({
+						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
+					});
+				} else if (selector === advisorFallbackSelector && fallbackQuarantineAttempts++ < 2) {
+					advisorMock.push({
+						content: [
+							{
+								type: "toolCall",
+								id: `unavailable-${fallbackQuarantineAttempts}`,
+								name: "bash",
+								arguments: { command: "true" },
+							},
+						],
+					});
+				} else if (selector === advisorPrimarySelector) {
+					advisorMock.push({ content: ["Advisor resumed after the cooldown"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "advisor_yielded") advisorYieldedEvents++;
+			if (
+				event.type === "notice" &&
+				event.source === "advisor" &&
+				event.message.includes("requested unavailable tool")
+			) {
+				quarantineLatched.resolve();
+			}
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("Complete one primary turn");
+		await session.prompt("Complete a second primary turn");
+		await quarantineLatched.promise;
+
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
+		expect(session.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+
+		// The current update must only restore the expired fallback: it cannot buy
+		// another advisor review while the unchanged-basis quarantine latch is set.
+		const restorationStarted = Promise.withResolvers<void>();
+		const releaseRestoration = Promise.withResolvers<void>();
+		const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (...args) => {
+			const [model] = args;
+			if (model.provider !== advisorPrimary.provider || model.id !== advisorPrimary.id)
+				return originalGetApiKey(...args);
+			restorationStarted.resolve();
+			await releaseRestoration.promise;
+			return originalGetApiKey(...args);
+		});
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
+		await session.prompt("Advance the primary after the advisor cooldown");
+		await restorationStarted.promise;
+		const yieldedBeforeRestoration = advisorYieldedEvents;
+		releaseRestoration.resolve();
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const model = session.getAdvisorAgent()?.state.model;
+			if (
+				model?.provider === advisorPrimary.provider &&
+				model.id === advisorPrimary.id &&
+				advisorYieldedEvents > yieldedBeforeRestoration
+			)
+				break;
+			await Promise.resolve();
+		}
+
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
+			provider: advisorPrimary.provider,
+			id: advisorPrimary.id,
+		});
+		expect(advisorYieldedEvents).toBe(yieldedBeforeRestoration + 1);
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
+
+		await session.prompt("Resume advisor review after fallback restoration");
+		for (let attempt = 0; attempt < 20 && requestedAdvisorModels.length < 4; attempt++) {
+			await Promise.resolve();
+		}
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+			advisorPrimarySelector,
+		]);
 	});
 
 	it("switches an advisor off a dual-classified media-budget 413 with no token excess", async () => {

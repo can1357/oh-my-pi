@@ -542,7 +542,7 @@ describe("xAI web search provider", () => {
 					content: [
 						{
 							type: "output_text",
-							text: "Ignored because output_text wins",
+							text: "Message-level xAI answer",
 							annotations: [
 								{
 									type: "url_citation",
@@ -567,7 +567,7 @@ describe("xAI web search provider", () => {
 
 		expect(response).toMatchObject({
 			provider: "xai",
-			answer: "Top-level xAI answer",
+			answer: "Message-level xAI answer",
 			requestId: "resp_xai_123",
 			model: "grok-4.3",
 			authMode: "api_key",

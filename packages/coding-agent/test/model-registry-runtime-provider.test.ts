@@ -953,6 +953,94 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(getProviderModels(registry, "projecting-provider")).toEqual([]);
 	});
 
+	test("oauth.modifyModels output is materialized through buildModel", async () => {
+		await authStorage.set("materializing-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		// Extensions author specs, so a hook that builds its own catalog (rather
+		// than deriving it from the models it was handed) returns records with no
+		// resolved surface at all. The registry must still hand out built models:
+		// consumers read `identity` unconditionally.
+		const config: ProviderConfigInput = {
+			api: "custom-materialize-api",
+			baseUrl: "https://example.invalid/",
+			streamSimple,
+			models: [baseModel],
+			oauth: {
+				name: "Materializing OAuth",
+				login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+				refreshToken: async credentials => credentials,
+				getApiKey: credentials => credentials.access,
+				modifyModels: models => [
+					...models.filter(model => model.provider !== "materializing-provider"),
+					{
+						...baseModel,
+						id: "claude-sonnet-4-5",
+						name: "Synthesized Model",
+						provider: "materializing-provider",
+						api: "custom-materialize-api",
+						baseUrl: "https://example.invalid/",
+					} as unknown as Model<Api>,
+				],
+			},
+		};
+
+		registry.registerProvider("materializing-provider", config, "ext://oauth");
+
+		const [projected, ...rest] = getProviderModels(registry, "materializing-provider");
+		expect(rest).toEqual([]);
+		expect(projected?.id).toBe("claude-sonnet-4-5");
+		expect(projected?.identity).toEqual({ class: "anthropic", family: "sonnet", revision: "4.5.0" });
+		expect(projected?.tokenizer).toBe("claude-v3");
+	});
+
+	test("a spec-shaped projected model keeps its sparse compat override", async () => {
+		await authStorage.set("compat-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		// On a spec the sparse override lives in `compat`, not `compatConfig`, so
+		// the row cannot be projected back to spec stage before it is built —
+		// that reads the absent `compatConfig` and drops the override, and the
+		// request handler stops sending the cache header the extension asked for.
+		const config: ProviderConfigInput = {
+			api: "openai-completions",
+			baseUrl: "https://example.invalid/",
+			models: [baseModel],
+			oauth: {
+				name: "Compat OAuth",
+				login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+				refreshToken: async credentials => credentials,
+				getApiKey: credentials => credentials.access,
+				modifyModels: models => [
+					...models.filter(model => model.provider !== "compat-provider"),
+					{
+						...baseModel,
+						id: "synthesized-model",
+						provider: "compat-provider",
+						api: "openai-completions",
+						baseUrl: "https://example.invalid/",
+						compat: { promptCacheSessionHeader: "x-grok-conv-id" },
+					} as unknown as Model<Api>,
+				],
+			},
+		};
+
+		registry.registerProvider("compat-provider", config, "ext://oauth");
+
+		const [projected] = getProviderModels(registry, "compat-provider") as Model<"openai-completions">[];
+		expect(projected?.id).toBe("synthesized-model");
+		expect(projected?.compat?.promptCacheSessionHeader).toBe("x-grok-conv-id");
+		expect(projected?.compatConfig).toEqual({ promptCacheSessionHeader: "x-grok-conv-id" });
+	});
+
 	test("a throwing modifyModels degrades to the unprojected catalog", async () => {
 		await authStorage.set("throwing-provider", {
 			type: "oauth",
@@ -1378,5 +1466,51 @@ describe("ModelRegistry runtime provider registration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	test("resolves a configured provider base URL before any model is discovered", () => {
+		// `omp usage` constructs a registry and probes credentials immediately, so
+		// a discovery-only provider (no bundled rows) has no model to read a URL
+		// from yet. Deriving solely from discovered models returned `undefined`
+		// here, and the usage probe then sent a proxy-scoped key to the
+		// provider's canonical host.
+		const providerName = "charm-hyper";
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({ providers: { [providerName]: { baseUrl: "https://gateway.internal" } } }),
+		);
+		const configured = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+
+		// Cache-cold by construction: this provider bundles no rows.
+		expect(configured.getAll().some(model => model.provider === providerName)).toBe(false);
+		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
+	});
+
+	test("prefers a configured provider base URL over a model-level one", () => {
+		// The other half of the precedence contract, and the half a green suite
+		// cannot prove: every other `getProviderBaseUrl` caller in these tests
+		// stubs the method. `getProviderHeaders` is documented as provider-level
+		// "without including per-model overrides", so a provider-scoped accessor
+		// must not answer with some model's own baseUrl.
+		const providerName = "charm-hyper";
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					[providerName]: {
+						baseUrl: "https://gateway.internal",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ ...baseModel, id: "glm-5.3", baseUrl: "https://model-level.example/v1" }],
+					},
+				},
+			}),
+		);
+		const configured = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+
+		// The model really does carry a different baseUrl, so this is a genuine
+		// conflict rather than a vacuous assertion.
+		expect(configured.find(providerName, "glm-5.3")?.baseUrl).toBe("https://model-level.example/v1");
+		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
 	});
 });

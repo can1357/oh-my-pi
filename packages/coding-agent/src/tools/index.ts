@@ -175,6 +175,8 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
+	/** Current session whose stored credential affinities should seed a child session. */
+	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */
@@ -383,8 +385,20 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Record todo phases on the session branch. Direct `todo` calls persist via
+	 * their toolResult entry; callers that produce none (the eval bridge) use this
+	 * so branch rehydration agrees with the in-memory list.
+	 */
+	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
+	/**
+	 * Trimmed text of the most recent assistant message, or `undefined` when the
+	 * turn carries no text (e.g. thinking-only). The yield tool uses it to reject
+	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
+	 */
+	getLastAssistantText?: () => string | undefined;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
 	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */

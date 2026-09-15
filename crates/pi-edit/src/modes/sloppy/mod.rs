@@ -1,5 +1,6 @@
-//! `sloppy` mode: `<SM:EDIT>`/`<SM:FIND>`/`<SM:PUT>` anchored edits with
-//! tolerant matching. Port of `packages/coding-agent/src/edit/sloppy.ts`.
+//! `sloppy` mode: `<SM:FIND>` anchors with `<SM:PUT>` replacements or
+//! `<SM:AFTER>` insertions inside `<SM:EDIT>` file sections, with tolerant
+//! matching.
 
 pub mod apply;
 pub mod parse;

@@ -95,4 +95,74 @@ describe("renderUsageReports content", () => {
 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
 	});
+
+	it("shows one prepaid balance for a provider whose keys share an account pool", () => {
+		// Production shape: `fetchCharmHyperUsage` emits no accountId and marks
+		// the limit shared, because Hyper's balance is account-wide — spending
+		// through one key moves every key's reported balance. AuthStorage still
+		// probes once per stored key, so two keys yield two identical rows.
+		// Summing them would claim 200 credits the account never had.
+		const now = Date.now();
+		const keyReport = (remaining: number): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: { provider: "charm-hyper", windowId: "balance", shared: true },
+					amount: { remaining, unit: "credits" },
+				},
+			],
+		});
+
+		const output = stripVTControlCharacters(renderUsageReports([keyReport(100), keyReport(100)], theme, now, 98));
+		expect(output).toContain("100 credits left");
+		expect(output).not.toContain("200 credits left");
+		// The balance must reach the user at all: a remaining-only limit used
+		// to fall through to a bare account count.
+		expect(output).not.toContain("accts");
+	});
+
+	it("renders each marked Antigravity shared quota once in expanded details", () => {
+		const quota = (
+			counter: "google" | "anthropic" | "openai",
+			windowId: "5h" | "weekly",
+		): UsageReport["limits"][number] => {
+			const sharedGroup = counter === "google" ? undefined : `3p-${windowId}`;
+			return {
+				id: `google-antigravity:${counter}:default:${counter === "google" ? "gemini" : "3p"}-${windowId}`,
+				label: counter === "google" ? "Gemini" : "Claude & GPT (shared)",
+				scope: {
+					provider: "google-antigravity",
+					accountId: "account",
+					windowId,
+					...(sharedGroup !== undefined ? { shared: true, sharedGroup } : {}),
+				},
+				window: { id: windowId, label: windowId === "5h" ? "5 Hour" : "Weekly" },
+				amount: { unit: "percent", usedFraction: 0.25 },
+				status: "ok",
+			};
+		};
+		const reports: UsageReport[] = [
+			{
+				provider: "google-antigravity",
+				fetchedAt: Date.now(),
+				limits: [
+					quota("google", "5h"),
+					quota("google", "weekly"),
+					quota("anthropic", "5h"),
+					quota("openai", "5h"),
+					quota("anthropic", "weekly"),
+					quota("openai", "weekly"),
+				],
+				metadata: { email: "user@example.test" },
+			},
+		];
+
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(output.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
+		expect(output.match(/Gemini/g)).toHaveLength(2);
+	});
 });

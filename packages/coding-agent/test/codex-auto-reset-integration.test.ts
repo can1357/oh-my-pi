@@ -149,8 +149,8 @@ describe("codex saved-reset trigger integration", () => {
 	}
 
 	function buildSession(opts: HarnessOpts): Harness {
-		const model = getBundledModel("openai-codex", "gpt-5.4");
-		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.4 to exist");
+		const model = getBundledModel("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.5 to exist");
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
 		vi.spyOn(authStorage, "getOAuthAccountIdentity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
 		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => [opts.report]);

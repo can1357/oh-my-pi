@@ -16,6 +16,7 @@ import {
 	SUBAGENT_WARNING_MISSING_YIELD,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -241,10 +242,18 @@ describe("runSubprocess yield reminders", () => {
 		expect(systemPrompt?.[3]).toBe("now");
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
-	it("does not let an intervening wake yield satisfy the batch after a lost prompt race", async () => {
+	it("resets yield state after an intervening wake wins the follow-up prompt race", async () => {
 		let prompts = 0;
 		let wakeEmitted = false;
 		let emitWake: ((event: AgentSessionEvent) => void) | undefined;
+		const yieldTool = new YieldTool({
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			getLastAssistantText: () => undefined,
+		});
 		const session = createMockSession(({ emit }) => {
 			emitWake ??= emit;
 			prompts++;
@@ -261,29 +270,29 @@ describe("runSubprocess yield reminders", () => {
 				isError: false,
 			});
 		});
-		const mutable = session as unknown as {
-			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
-			waitForIdle: () => Promise<void>;
-		};
-		mutable.setWorkPoolYieldItems = async () => {};
-		mutable.waitForIdle = async () => {
-			// The wake turn yields while the batch backs off. The batch monitor
-			// must be detached, so this yield neither marks the batch yielded
-			// nor leaks wake output into the batch result.
-			if (!wakeEmitted) {
-				wakeEmitted = true;
-				emitWake?.({
-					type: "tool_execution_end",
-					toolCallId: "tool-wake",
-					toolName: "yield",
-					result: {
-						content: [{ type: "text", text: "Wake done." }],
-						details: { status: "success", data: { intruder: true } },
-					},
-					isError: false,
-				});
-			}
-		};
+		Object.assign(session, {
+			getToolByName: (name: string) => (name === "yield" ? yieldTool : undefined),
+			setWorkPoolYieldItems: async () => {},
+			waitForIdle: async () => {
+				// The wake turn yields while the batch backs off. The batch monitor
+				// must be detached, so this yield neither marks the batch yielded
+				// nor leaks wake output into the batch result.
+				if (!wakeEmitted) {
+					wakeEmitted = true;
+					emitWake?.({
+						type: "tool_execution_end",
+						toolCallId: "tool-wake",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Wake done." }],
+							details: { status: "success", data: { intruder: true } },
+						},
+						isError: false,
+					});
+					await yieldTool.execute("wake-section", { type: ["findings"], data: "wake section" });
+				}
+			},
+		});
 		AgentRegistry.global().register({
 			id: "subagent-race",
 			displayName: "subagent-race",
@@ -297,6 +306,9 @@ describe("runSubprocess yield reminders", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain('"batch": true');
 			expect(result.output).not.toContain("intruder");
+			await expect(yieldTool.execute("empty-after-race", { type: "result" })).rejects.toThrow(
+				/no text \(thinking only\)/,
+			);
 		} finally {
 			AgentRegistry.global().unregister("subagent-race");
 		}
@@ -499,10 +511,7 @@ describe("runSubprocess yield reminders", () => {
 		// Parking swaps the worker mid-install while an IRC delivery revives the
 		// replacement straight into an ordinary wake: the follow-up must wait out
 		// that wake before installing the keyed contract, not reject its yield.
-		const ensureLive = vi
-			.spyOn(AgentLifecycleManager.global(), "ensureLive")
-			.mockResolvedValueOnce(stale)
-			.mockResolvedValue(revived);
+		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockResolvedValueOnce(stale).mockResolvedValue(revived);
 		try {
 			const result = await runSubagentFollowUpTurn({
 				...baseOptions,
@@ -575,6 +584,149 @@ describe("runSubprocess yield reminders", () => {
 
 		const result = await runSubprocess({ ...baseOptions, id: "subagent-2" });
 		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
+	});
+
+	it("finalizes from the reporting turn when the data-less yield lands in its own turn", async () => {
+		// The idle reminder instructs a complete subagent to finalize with
+		// `type: string` "from last assistant turn". Models comply across two
+		// turns: prose report first, then a text-less turn carrying only the bare
+		// `yield`. Sampling the salvage text once at end-of-run saw that empty
+		// finalize turn, so `useLastTurn` resolved to nothing and the parent got
+		// "null data" stapled onto accumulated narration instead of the report
+		// (muse-spark-1.3 on the `lumbridge-fixups` subagent).
+		const report = "All four tasks done on content/lumbridge-pass; PR #139 updated in place.";
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex === 1) {
+				const assistant = createAssistantStopMessage(report);
+				state.messages.push(assistant);
+				emit({ type: "message_end", message: assistant });
+				return;
+			}
+			const finalize: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [{ type: "toolCall", id: "tool-finalize", name: "yield", arguments: { type: "result" } }],
+				stopReason: "toolUse",
+			};
+			state.messages.push(finalize);
+			emit({ type: "message_end", message: finalize });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-finalize",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", type: "result", useLastTurn: true },
+				},
+				isError: false,
+			});
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-last-turn-finalize" });
+		expect(result.output).toBe(report);
+		expect(result.output).not.toContain("SYSTEM WARNING");
+	});
+
+	it("never harvests mid-work narration as the final result", async () => {
+		// Counterpart to the test above: the report turn is the one that started
+		// no further work. A turn that narrated and then called a tool is mid-run
+		// chatter, so a later data-less finalize must NOT harvest it — handing the
+		// parent a stale fragment as the subagent's answer is worse than saying
+		// the report is missing.
+		const narration = "Checking the failing test first.";
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex === 1) {
+				const working: AssistantMessage = {
+					...createAssistantStopMessage(""),
+					content: [
+						{ type: "text", text: narration },
+						{ type: "toolCall", id: "tool-bash", name: "bash", arguments: { command: "bun test" } },
+					],
+					stopReason: "toolUse",
+				};
+				state.messages.push(working);
+				emit({ type: "message_end", message: working });
+				return;
+			}
+			const finalize: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [{ type: "toolCall", id: "tool-bare", name: "yield", arguments: { type: "result" } }],
+				stopReason: "toolUse",
+			};
+			state.messages.push(finalize);
+			emit({ type: "message_end", message: finalize });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-bare",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", type: "result", useLastTurn: true },
+				},
+				isError: false,
+			});
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-no-stale-harvest" });
+		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
+		expect(result.output).not.toBe(narration);
+	});
+
+	it("invalidates an earlier report turn once the subagent resumes work", async () => {
+		// The reminder's option 1 is "resume work", so a prose-only idle turn is
+		// routinely followed by more tool calls. Skipping the capture on those
+		// turns is not enough — the earlier prose must be invalidated, or a
+		// text-less finalize many turns later harvests a report written before
+		// all that work and passes it off as the completed result (PR #11746
+		// review).
+		const staleReport = "Everything is done; nothing left to change.";
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex === 1) {
+				const reporting = createAssistantStopMessage(staleReport);
+				state.messages.push(reporting);
+				emit({ type: "message_end", message: reporting });
+				return;
+			}
+			if (promptIndex === 2) {
+				const resumed: AssistantMessage = {
+					...createAssistantStopMessage(""),
+					content: [
+						{ type: "text", text: "Actually one more fix." },
+						{ type: "toolCall", id: "tool-resume", name: "bash", arguments: { command: "bun test" } },
+					],
+					stopReason: "toolUse",
+				};
+				state.messages.push(resumed);
+				emit({ type: "message_end", message: resumed });
+				return;
+			}
+			const finalize: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [{ type: "toolCall", id: "tool-late", name: "yield", arguments: { type: "result" } }],
+				stopReason: "toolUse",
+			};
+			state.messages.push(finalize);
+			emit({ type: "message_end", message: finalize });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-late",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", type: "result", useLastTurn: true },
+				},
+				isError: false,
+			});
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-resumed-work" });
+		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
+		expect(result.output).not.toBe(staleReport);
 	});
 
 	it("retries when yield tool returns an error before succeeding", async () => {

@@ -4,13 +4,15 @@
  */
 import { Database } from "bun:sqlite";
 import { renameSync } from "node:fs";
-import { getModelDbPath, isEnoent, isSqliteCorruptionError, logger } from "@oh-my-pi/pi-utils";
-import type { Api, Model, ModelSpec } from "./types";
+import { getModelDbPath, isEnoent, isSqliteCorruptionError, logger, VERSION } from "@oh-my-pi/pi-utils";
+import RULES from "./compat/rules.json" with { type: "json" };
+import type { Api, Model } from "./types";
 
-// Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
-// the model manager rebuilds via `buildModel` on load. Request headers are
-// intentionally omitted: arbitrary provider-defined header names can carry
-// credentials. v12 invalidates Kimi Code rows carrying the blanket
+// Rows persist fully materialized Models so compatible warm-cache reads do not
+// rerun the compat cascade. Request headers are intentionally omitted:
+// arbitrary provider-defined header names can carry credentials. v13 replaces
+// sparse ModelSpec rows with materialized rows and records the exact app/rules/
+// builder policy that produced them. v12 invalidated Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
 // kimi-for-coding[-highspeed] -> 32768, #6711); v11 invalidates rows that may
 // persist derived computer-use
@@ -23,12 +25,23 @@ import type { Api, Model, ModelSpec } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 12;
+const CACHE_SCHEMA_VERSION = 13;
 const HEADER_RESTORE_VERSION = 1;
+/**
+ * Explicit compatibility gate for materialized rows. Bump whenever buildModel
+ * semantics change without an app-version change. The compiled-rules content
+ * hash catches every KDL policy edit even when the package version is unchanged;
+ * it is computed once per process rather than once per provider or model.
+ */
+const MODEL_MATERIALIZATION_VERSION = 1;
+const MATERIALIZATION_POLICY =
+	`app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${RULES.version}-` +
+	Bun.hash(JSON.stringify(RULES)).toString(36);
 
 interface CacheRow {
 	provider_id: string;
 	version: number;
+	materialization_policy: string;
 	updated_at: number;
 	authoritative: number;
 	static_fingerprint: string;
@@ -42,8 +55,18 @@ interface TableInfoRow {
 	name: string;
 }
 
-interface CacheEntry<TApi extends Api = Api> {
-	models: ModelSpec<TApi>[];
+/**
+ * On-disk materialized row. `null` preserves the distinction between an
+ * inferred computer-use value and an explicitly authored boolean through JSON.
+ */
+type PersistedModel<TApi extends Api = Api> = Omit<Model<TApi>, "supportsComputerUseConfig"> & {
+	supportsComputerUseConfig: boolean | null;
+};
+
+/** Materialized provider snapshot with freshness and header-restoration provenance. */
+export interface CacheEntry<TApi extends Api = Api> {
+	/** Trusted, fully materialized rows; request headers remain omitted. */
+	models: Model<TApi>[];
 	fresh: boolean;
 	authoritative: boolean;
 	updatedAt: number;
@@ -79,6 +102,7 @@ function openDb(resolvedPath: string): Database {
 		CREATE TABLE IF NOT EXISTS model_cache (
 			provider_id TEXT PRIMARY KEY,
 			version INTEGER NOT NULL,
+			materialization_policy TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL,
 			authoritative INTEGER NOT NULL DEFAULT 0,
 			static_fingerprint TEXT NOT NULL DEFAULT '',
@@ -180,6 +204,9 @@ function migrateCacheSchema(db: Database): void {
 	const stmt = db.prepare("PRAGMA table_info(model_cache)");
 	try {
 		const columns = stmt.all() as TableInfoRow[];
+		if (!columns.some(column => column.name === "materialization_policy")) {
+			db.run("ALTER TABLE model_cache ADD COLUMN materialization_policy TEXT NOT NULL DEFAULT ''");
+		}
 		if (!columns.some(column => column.name === "static_fingerprint")) {
 			db.run("ALTER TABLE model_cache ADD COLUMN static_fingerprint TEXT NOT NULL DEFAULT ''");
 		}
@@ -203,7 +230,88 @@ function migrateCacheSchema(db: Database): void {
 	// first cache version to whatever the current one is, defeating every
 	// subsequent invalidation (see #4146: pre-V2 Codex rows kept the legacy
 	// compaction path even after CACHE_SCHEMA_VERSION was bumped).
-	db.run("DELETE FROM model_cache WHERE version <> ?", [CACHE_SCHEMA_VERSION]);
+	db.run("DELETE FROM model_cache WHERE version <> ? OR materialization_policy <> ?", [
+		CACHE_SCHEMA_VERSION,
+		MATERIALIZATION_POLICY,
+	]);
+}
+
+function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const model = value as Partial<PersistedModel<Api>>;
+	if (
+		typeof model.id !== "string" ||
+		model.id.length === 0 ||
+		typeof model.name !== "string" ||
+		model.name.length === 0 ||
+		typeof model.api !== "string" ||
+		model.api.length === 0 ||
+		typeof model.provider !== "string" ||
+		model.provider.length === 0 ||
+		typeof model.baseUrl !== "string" ||
+		model.baseUrl.length === 0 ||
+		typeof model.reasoning !== "boolean" ||
+		!Array.isArray(model.input) ||
+		model.input.length === 0 ||
+		model.input.some(input => input !== "text" && input !== "image") ||
+		model.headers !== undefined ||
+		!Object.hasOwn(model, "supportsComputerUseConfig") ||
+		(model.supportsComputerUseConfig !== null && typeof model.supportsComputerUseConfig !== "boolean")
+	) {
+		return false;
+	}
+	const contextWindow = model.contextWindow;
+	const maxTokens = model.maxTokens;
+	if (
+		(contextWindow !== null &&
+			(typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0)) ||
+		(maxTokens !== null && (typeof maxTokens !== "number" || !Number.isFinite(maxTokens) || maxTokens <= 0))
+	) {
+		return false;
+	}
+	if (
+		model.identity === null ||
+		typeof model.identity !== "object" ||
+		typeof model.identity.class !== "string" ||
+		(model.compat !== undefined &&
+			(model.compat === null || typeof model.compat !== "object" || Array.isArray(model.compat)))
+	) {
+		return false;
+	}
+	if (model.cost === null || typeof model.cost !== "object") return false;
+	const cost = model.cost as Partial<Model<Api>["cost"]>;
+	return (
+		typeof cost.input === "number" &&
+		Number.isFinite(cost.input) &&
+		typeof cost.output === "number" &&
+		Number.isFinite(cost.output) &&
+		typeof cost.cacheRead === "number" &&
+		Number.isFinite(cost.cacheRead) &&
+		typeof cost.cacheWrite === "number" &&
+		Number.isFinite(cost.cacheWrite)
+	);
+}
+
+function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TApi>[] | null {
+	try {
+		const parsed: unknown = JSON.parse(serialized);
+		if (!Array.isArray(parsed) || !parsed.every(isMaterializedModel)) return null;
+		return parsed.map(model => ({
+			...model,
+			supportsComputerUseConfig: model.supportsComputerUseConfig ?? undefined,
+		})) as Model<TApi>[];
+	} catch {
+		return null;
+	}
+}
+
+function parseModelIds(serialized: string): string[] | null {
+	try {
+		const parsed: unknown = JSON.parse(serialized);
+		return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === "string") ? parsed : null;
+	} catch {
+		return null;
+	}
 }
 
 export function readModelCache<TApi extends Api>(
@@ -217,18 +325,19 @@ export function readModelCache<TApi extends Api>(
 			const stmt = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
 			try {
 				const row = stmt.get(providerId);
-				if (!row || row.version !== CACHE_SCHEMA_VERSION) {
+				if (!row || row.version !== CACHE_SCHEMA_VERSION || row.materialization_policy !== MATERIALIZATION_POLICY) {
 					return null;
 				}
-				const models = JSON.parse(row.models) as ModelSpec<TApi>[];
-				const parsedHeaderModelIds: unknown = JSON.parse(row.header_omitted_model_ids);
-				const headerOmittedModelIds = Array.isArray(parsedHeaderModelIds)
-					? parsedHeaderModelIds.filter((id): id is string => typeof id === "string")
-					: [];
-				const parsedUnrestorableModelIds: unknown = JSON.parse(row.unrestorable_header_model_ids);
-				const unrestorableHeaderModelIds = Array.isArray(parsedUnrestorableModelIds)
-					? parsedUnrestorableModelIds.filter((id): id is string => typeof id === "string")
-					: [];
+				const models = parseMaterializedModels<TApi>(row.models);
+				const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
+				const unrestorableHeaderModelIds = parseModelIds(row.unrestorable_header_model_ids);
+				if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
+					// Fail closed on corrupt header provenance: treating malformed
+					// markers as empty could return a model with required credentials
+					// silently absent. secure_delete scrubs the rejected payload.
+					db.run("DELETE FROM model_cache WHERE provider_id = ?", [providerId]);
+					return null;
+				}
 				const ageMs = now() - row.updated_at;
 				const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= ttlMs;
 				return {
@@ -259,16 +368,19 @@ function hasModelHeaders(model: Model<Api>): boolean {
 }
 
 /**
- * Project a live model to cache-safe metadata.
+ * Project a materialized model to cache-safe metadata.
  *
  * Headers are never persisted: custom/runtime providers may use arbitrary
- * credential header names, so no name-based filter can be complete. The
- * separately persisted model-id list lets the manager restore matching static
- * headers and reject/refetch dynamic-only cached models that need live headers.
+ * credential header names, so no name-based filter can be complete. All other
+ * resolved fields are retained verbatim, including sparse provenance fields,
+ * so a compatible cache can be consumed without running `buildModel`.
  */
-function toCachedModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { headers: _headers, compatConfig, supportsComputerUseConfig, ...rest } = model;
-	return { ...rest, supportsComputerUse: supportsComputerUseConfig, compat: compatConfig };
+function toCachedModel<TApi extends Api>(model: Model<TApi>): PersistedModel<TApi> {
+	const { headers: _headers, ...rest } = model;
+	return {
+		...rest,
+		supportsComputerUseConfig: model.supportsComputerUseConfig ?? null,
+	};
 }
 
 /** Whether two in-memory header records are byte-for-byte equivalent. */
@@ -297,7 +409,7 @@ export function writeModelCache<TApi extends Api>(
 		withModelCacheDb(dbPath, db => {
 			const headerOmittedModelIds: string[] = [];
 			const unrestorableHeaderModelIds: string[] = [];
-			const cachedModels: ModelSpec<TApi>[] = [];
+			const cachedModels: PersistedModel<TApi>[] = [];
 			const staticById = new Map(staticHeaderSources.map(model => [model.id, model]));
 			for (const model of models) {
 				if (hasModelHeaders(model)) {
@@ -319,17 +431,18 @@ export function writeModelCache<TApi extends Api>(
 						unrestorableHeaderModelIds.push(model.id);
 					}
 				}
-				cachedModels.push(toCachedModelSpec(model));
+				cachedModels.push(toCachedModel(model));
 			}
 			db.run(
 				`INSERT OR REPLACE INTO model_cache (
-					provider_id, version, updated_at, authoritative, static_fingerprint,
+					provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
 					header_omitted_model_ids, unrestorable_header_model_ids,
 					header_restore_version, models
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				[
 					providerId,
 					CACHE_SCHEMA_VERSION,
+					MATERIALIZATION_POLICY,
 					updatedAt,
 					authoritative ? 1 : 0,
 					staticFingerprint,

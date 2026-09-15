@@ -1,6 +1,5 @@
-import type { Component, HistoryBatch } from "@oh-my-pi/pi-tui";
-import { Container } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { type Component, Container, type HistoryBatch } from "@oh-my-pi/pi-tui/tui";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -133,6 +132,13 @@ export function trimBlankEdges(rows: readonly string[]): readonly string[] {
 	return start === 0 && end === rows.length ? rows : rows.slice(start, end);
 }
 
+/** One live block's row span in the last `renderViewport` output (half-open `[start, end)`). */
+export interface TranscriptViewportSpan {
+	component: Component;
+	start: number;
+	end: number;
+}
+
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
@@ -149,6 +155,8 @@ export class TranscriptContainer extends Container {
 	// retirement: everything behind it stays live and degrades to one-line
 	// allocations. Logs once per pinned episode after a grace period.
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
+	/** Block spans of the last `renderViewport` output, for click hit-testing. */
+	#lastViewportSpans: TranscriptViewportSpan[] = [];
 
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
@@ -181,6 +189,7 @@ export class TranscriptContainer extends Container {
 		this.#pinnedFrontier = undefined;
 		this.#replayPending = false;
 		this.#replayRequested = false;
+		this.#lastViewportSpans = [];
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -287,6 +296,29 @@ export class TranscriptContainer extends Container {
 		return total;
 	}
 
+	/** Block spans of the last `renderViewport` output, in output coordinates. Empty when the tail is empty. */
+	getLastViewportSpans(): readonly TranscriptViewportSpan[] {
+		return this.#lastViewportSpans;
+	}
+
+	/** Collapse a per-line owner list into run-length block spans, clamped to `length`. */
+	#commitViewportSpans(owners: readonly (Component | undefined)[], length: number = owners.length): void {
+		const spans: TranscriptViewportSpan[] = [];
+		let index = 0;
+		while (index < length) {
+			const component = owners[index];
+			if (component === undefined) {
+				index++;
+				continue;
+			}
+			let end = index + 1;
+			while (end < length && owners[end] === component) end++;
+			spans.push({ component, start: index, end });
+			index = end;
+		}
+		this.#lastViewportSpans = spans;
+	}
+
 	/** Render the live tail, constrained to the supplied transcript height. */
 	renderViewport(width: number, rows: number, frame: AnimationFrame): readonly string[] {
 		this.#lastFrame = frame;
@@ -294,7 +326,10 @@ export class TranscriptContainer extends Container {
 		this.#settleFinalized();
 		const live = this.#liveEntries();
 		const capacity = Math.max(0, Math.trunc(rows));
-		if (live.length === 0 || capacity === 0) return EMPTY_ROWS;
+		if (live.length === 0 || capacity === 0) {
+			this.#lastViewportSpans = [];
+			return EMPTY_ROWS;
+		}
 
 		const shown: Array<{ entry: TranscriptEntry; index: number }> = [];
 		const blocks: (readonly string[])[] = [];
@@ -308,14 +343,26 @@ export class TranscriptContainer extends Container {
 			shown.push(candidate);
 			blocks.push(block);
 		}
-		if (shown.length === 0) return EMPTY_ROWS;
+		if (shown.length === 0) {
+			this.#lastViewportSpans = [];
+			return EMPTY_ROWS;
+		}
 		if (shown.length > capacity) return this.#renderEmergency(shown, width, capacity, frame);
 		if (total <= capacity) {
 			const output: string[] = [];
-			for (const rendered of blocks) {
-				if (output.length > 0) output.push("");
-				output.push(...rendered);
+			const owners: (Component | undefined)[] = [];
+			for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+				if (output.length > 0) {
+					output.push("");
+					owners.push(undefined);
+				}
+				const component = shown[blockIndex]!.entry.component;
+				for (const line of blocks[blockIndex]!) {
+					output.push(line);
+					owners.push(component);
+				}
 			}
+			this.#commitViewportSpans(owners, output.length);
 			return output;
 		}
 
@@ -339,6 +386,7 @@ export class TranscriptContainer extends Container {
 			surplus -= extra;
 		}
 		const output: string[] = [];
+		const owners: (Component | undefined)[] = [];
 		for (let index = 0; index < shown.length; index++) {
 			const candidate = shown[index]!;
 			const allocated = allocation[index]!;
@@ -346,10 +394,15 @@ export class TranscriptContainer extends Container {
 			const rendered = this.#renderEntry(candidate.entry, width).slice(
 				this.#projectedEmitted(candidate.entry, candidate.index, width),
 			);
-			if (rendered.length <= allocated) output.push(...rendered);
-			else output.push(...rendered.slice(rendered.length - allocated));
+			const visible = rendered.length <= allocated ? rendered : rendered.slice(rendered.length - allocated);
+			for (const line of visible) {
+				output.push(line);
+				owners.push(candidate.entry.component);
+			}
 		}
-		return output.length > capacity ? output.slice(output.length - capacity) : output;
+		const drop = Math.max(0, output.length - capacity);
+		this.#commitViewportSpans(owners.slice(drop), output.length - drop);
+		return drop > 0 ? output.slice(drop) : output;
 	}
 
 	/** Offers stable-head emission or the shortest finalized prefix needed under pressure. */
@@ -361,6 +414,10 @@ export class TranscriptContainer extends Container {
 	peekReplayBatch(width: number): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
+		return this.#peekReplayBatch(width);
+	}
+
+	#peekReplayBatch(width: number): HistoryBatch | undefined {
 		if (this.#offered !== undefined) {
 			return this.#offered.kind === "replay" ? this.#offered.batch : undefined;
 		}
@@ -402,7 +459,7 @@ export class TranscriptContainer extends Container {
 		this.#syncEntries();
 		this.#settleFinalized();
 		if (this.#offered !== undefined) return this.#offered.batch;
-		const replay = this.peekReplayBatch(width);
+		const replay = this.#peekReplayBatch(width);
 		if (replay !== undefined) return replay;
 
 		this.#completeFullyEmittedHeads(width);
@@ -441,21 +498,35 @@ export class TranscriptContainer extends Container {
 			head.state !== "committed" &&
 			head.emitted < head.stableRows.length
 		) {
-			const emittedEnd = head.emitted + 1;
+			// Emit as many finished rows as the overflow needs, in one batch. A
+			// fast stream adds finished rows quicker than one per pressure cycle,
+			// and the live region has to fall back under `room` to stay readable:
+			// rows left behind here are rows dropped from the top of the viewport.
+			const overflow = total - room;
 			const before = this.#renderStablePrefix(head, head.emitted, width);
-			const after = this.#renderStablePrefix(head, emittedEnd, width);
-			if (!isRowPrefix(before, after) || after.length === before.length) {
-				this.#freezeStableRows(head, EMPTY_ROWS, "semantic row render added no suffix");
-				return undefined;
+			let emittedEnd = head.emitted;
+			let rows: readonly string[] = EMPTY_ROWS;
+			while (emittedEnd < head.stableRows.length && rows.length < overflow) {
+				const after = this.#renderStablePrefix(head, emittedEnd + 1, width);
+				if (!isRowPrefix(before, after) || after.length === before.length) {
+					if (emittedEnd === head.emitted) {
+						this.#freezeStableRows(head, EMPTY_ROWS, "semantic row render added no suffix");
+					}
+					break;
+				}
+				rows = after.slice(before.length);
+				emittedEnd += 1;
 			}
-			const batch: HistoryBatch = {
-				id: this.#nextBatchId++,
-				rows: after.slice(before.length),
-				kind: "append",
-			};
-			this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
-			this.#pinnedFrontier = undefined;
-			return batch;
+			if (emittedEnd > head.emitted) {
+				const batch: HistoryBatch = {
+					id: this.#nextBatchId++,
+					rows,
+					kind: "append",
+				};
+				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
+				this.#pinnedFrontier = undefined;
+				return batch;
+			}
 		}
 
 		let end = this.#frontier;
@@ -492,8 +563,10 @@ export class TranscriptContainer extends Container {
 		if (offered === undefined || offered.batch.id !== id) return;
 		if (offered.kind === "append") {
 			const entry = this.#entries[offered.entry];
-			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd !== entry.emitted + 1)
-				return;
+			// The offered end must still extend this entry's emitted prefix: a
+			// stale offer (already-advanced entry) or a retraction (entry reset to
+			// zero with the offer still live) must not move it backwards.
+			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd <= entry.emitted) return;
 			entry.emitted = offered.emittedEnd;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {
@@ -719,9 +792,11 @@ export class TranscriptContainer extends Container {
 		}
 
 		const output = hiddenActive > 0 ? [`${hiddenActive} more transcript blocks active`] : [];
+		const owners: (Component | undefined)[] = hiddenActive > 0 ? [undefined] : [];
 		for (const candidate of visible) {
 			if (candidate === emergencyCandidate) {
 				output.push(emergencyRow ?? "");
+				owners.push(candidate.entry.component);
 				continue;
 			}
 			this.#setAllocation(candidate.entry.component, 1, frame);
@@ -729,8 +804,11 @@ export class TranscriptContainer extends Container {
 				this.#projectedEmitted(candidate.entry, candidate.index, width),
 			);
 			output.push(rendered[0] ?? "");
+			owners.push(candidate.entry.component);
 		}
-		return output.slice(0, rows);
+		const visibleOutput = output.slice(0, rows);
+		this.#commitViewportSpans(owners, visibleOutput.length);
+		return visibleOutput;
 	}
 
 	#projectedEmitted(entry: TranscriptEntry, index: number, width: number): number {
@@ -744,7 +822,8 @@ export class TranscriptContainer extends Container {
 	}
 
 	#settleFinalized(): void {
-		for (const entry of this.#entries) {
+		for (let index = this.#frontier; index < this.#entries.length; index++) {
+			const entry = this.#entries[index]!;
 			if (entry.state === "active" && isFinalized(entry.component)) entry.state = "settled";
 		}
 	}

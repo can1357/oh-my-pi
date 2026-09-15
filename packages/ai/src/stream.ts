@@ -13,7 +13,7 @@ import {
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catalog/provider-models";
+import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
@@ -193,6 +193,8 @@ let providerInFlightHeartbeatWriterOverride:
 	| undefined;
 let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>) | undefined;
 let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
+let providerInFlightLockCreatedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockIdentifiedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -365,12 +367,21 @@ async function acquireProviderInFlightLock(provider: string, signal?: AbortSigna
 		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 		try {
 			await fs.mkdir(lockDir);
-			const lockIdentity = await readProviderInFlightLockIdentity(lockDir);
+			await providerInFlightLockCreatedObserverOverride?.(lockDir);
+			let lockIdentity: ProviderInFlightLockIdentity;
+			try {
+				lockIdentity = await readProviderInFlightLockIdentity(lockDir);
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				throw error;
+			}
 			const token = crypto.randomUUID();
 			try {
+				await providerInFlightLockIdentifiedObserverOverride?.(lockDir);
 				await writeProviderInFlightInfo(lockDir, token);
 			} catch (error) {
 				await releaseProviderInFlightLockDirIfSame(lockDir, lockIdentity);
+				if (isEnoent(error)) continue;
 				throw error;
 			}
 			return async () => {
@@ -623,6 +634,12 @@ export const __providerInFlightForTesting = {
 	setWaitObserver(observer: ((provider: string) => void) | undefined): void {
 		providerInFlightWaitObserverOverride = observer;
 	},
+	setLockCreatedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockCreatedObserverOverride = observer;
+	},
+	setLockIdentifiedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockIdentifiedObserverOverride = observer;
+	},
 	providerDir(provider: string): string {
 		return providerInFlightDir(provider);
 	},
@@ -815,11 +832,12 @@ const LEGACY_ENV_KEYS: Record<string, KeyResolver> = {
 };
 
 /**
- * Env fallbacks derived from the catalog table — the single source for plain
- * provider env-var names. Registry defs override with computed resolvers
- * (Foundry/ADC/Bedrock probes); legacy non-provider keys merge last.
+ * Env fallbacks derived from the catalog provider entries (`env` in
+ * `providers/<id>.kdl`) — the single source for plain provider env-var names.
+ * Registry defs override with computed resolvers (Foundry/ADC/Bedrock
+ * probes); legacy non-provider keys merge last.
  */
-const CATALOG_ENTRY_ENV_KEYS = (CATALOG_PROVIDERS as readonly ProviderCatalogEntry[]).flatMap(provider => {
+const CATALOG_ENTRY_ENV_KEYS = Object.values(providerEntries()).flatMap(provider => {
 	const envVars = provider.envVars;
 	if (!envVars || envVars.length === 0) return [];
 	const resolver: KeyResolver = envVars.length === 1 ? envVars[0] : () => $pickenv(...envVars);
@@ -1060,7 +1078,11 @@ async function resolveWithThinkingLoopRetries(
 	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
-		const message = await dispatch().result();
+		const response = dispatch();
+		for await (const _event of response) {
+			// Completion callers do not consume deltas; drain them as they arrive to avoid retaining the response history.
+		}
+		const message = await response.result();
 		onAttempt?.(message);
 		return message;
 	};
@@ -2014,6 +2036,7 @@ function mapOptionsForApi<TApi extends Api>(
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		anthropicCompaction: options?.anthropicCompaction,
 		...simpleProviderOptions,
 	};
 

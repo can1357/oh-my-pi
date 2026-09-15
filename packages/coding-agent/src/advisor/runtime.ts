@@ -4,7 +4,11 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger } from "@oh-my-pi/pi-utils";
-import { obfuscateToolArguments } from "../secrets/message-transform";
+import {
+	collectNativeReplayRegexSecretValues,
+	obfuscateNativeReplay,
+	obfuscateToolArguments,
+} from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
@@ -36,8 +40,6 @@ export interface AdvisorAgent {
 export interface AdvisorRuntimeHost {
 	/** Live primary transcript (use `agent.state.messages`). */
 	snapshotMessages(): AgentMessage[];
-	/** Surface one advice note to the primary (enqueues into the session YieldQueue). */
-	enqueueAdvice(note: string, severity?: "nit" | "concern" | "blocker"): void;
 	/** Redact primary transcript bytes before they reach the advisor model. */
 	obfuscator?: SecretObfuscator;
 	/**
@@ -86,6 +88,13 @@ export interface AdvisorRuntimeHost {
 	notifyQuotaExhausted?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
+	/**
+	 * Stable identity of the advisor's current model and granted toolset. A
+	 * changed value is a new capability basis, so a quarantine latch caused by
+	 * the old basis may review again. Other configuration changes rebuild the
+	 * runtime and therefore begin a new explicit review epoch.
+	 */
+	getQuarantineBasis?(): string;
 	/** Called once the runtime finishes draining its review backlog (or
 	 *  hard-stops), so the host can repaint UI that reflects whether the
 	 *  advisor is still going to comment on the current yield. */
@@ -148,6 +157,11 @@ export function quarantineAdvisorUnsafeOutput(
 	const reasons: string[] = [];
 	const unavailableToolNames = new Set<string>();
 	const generatedParts: string[] = [];
+	// Whether this turn carries an `advise` call that will actually dispatch.
+	// Quarantine rewrites `message.content` before the agent loop dispatches
+	// tools, so discarding the turn also destroys that call — and the advice it
+	// would have enqueued is lost, not merely delayed.
+	let deliversAdvice = false;
 	for (const block of message.content) {
 		// Cursor exec-channel native blocks (bash/read/grep/...) are stamped
 		// kCursorExecResolved: they already ran server-side through the
@@ -165,10 +179,16 @@ export function quarantineAdvisorUnsafeOutput(
 		}
 		if (block.type === "toolCall" && block.name === "advise" && typeof block.arguments.note === "string") {
 			generatedParts.push(block.arguments.note);
+			if (availableToolNames.has("advise")) deliversAdvice = true;
 		}
 		if (block.type === "text") generatedParts.push(block.text);
 	}
-	if (unavailableToolNames.size > 0) {
+	// Same trade the `kCursorExecResolved` exemption above makes (issue #5900):
+	// when the turn produced real advice, throwing it away costs more than the
+	// hallucinated sibling call does. That call is not executed either way — it
+	// misses the advisor's scoped tool set and fails at dispatch on its own — so
+	// the only thing quarantining adds here is the loss of the good note.
+	if (unavailableToolNames.size > 0 && !deliversAdvice) {
 		const names = [...unavailableToolNames].sort();
 		const toolLabel = names.length === 1 ? "tool" : "tools";
 		reasons.push(`requested unavailable ${toolLabel} ${names.join(", ")}`);
@@ -233,11 +253,10 @@ export function buildAdvisorQuarantineSourceText(currentInput: string, messages:
 const MAX_COALESCE_ROUNDS = 3;
 
 /**
- * Consecutive quarantined advisor turns tolerated before the failure is surfaced
- * to the host UI. A quarantine discards the advisor's whole turn before dispatch,
- * so its advice never reaches the primary; one silent re-prime is allowed to
- * recover a one-off hallucination, but a persistent quarantine loop is a real
- * supervision gap the user must see (issue #6661). Reset on any successful turn.
+ * Equivalent quarantined advisor turns tolerated before the review latches.
+ * A quarantine discards the whole turn before dispatch. One recovery remains
+ * available; a second equivalent unavailable-tool quarantine ends that optional
+ * review until reset, rebuild, or a changed model/toolset basis.
  */
 const MAX_QUARANTINE_RETRIES = 2;
 
@@ -293,11 +312,17 @@ export class AdvisorRuntime {
 	#sessionTransitionPaused = false;
 	#promptInFlight: Promise<void> | undefined;
 	#iterationAbort: AbortController | undefined;
+	/** Cancels the non-review maintenance that can restore a quarantine-halted fallback. */
+	#haltedMaintenanceAbort: AbortController | undefined;
 	#backlog = 0;
 	#consecutiveFailures = 0;
 	#failureNotified = false;
 	/** Consecutive quarantined turns since the last success/reset (issue #6661). */
 	#consecutiveQuarantines = 0;
+	/** Model/tool basis that produced the current unavailable-tool quarantine. */
+	#quarantineBasis: string | undefined;
+	/** A repeated equivalent quarantine paused this optional review. */
+	#quarantineHalted = false;
 	/**
 	 * Model identities this refusal cascade has already tried. The cascade walks
 	 * the fallback chain to exhaustion — that is what the chain is for — but
@@ -393,7 +418,15 @@ export class AdvisorRuntime {
 	 *   the delta and forwarded to the reprime path so it is never silently dropped.
 	 */
 	onTurnEnd(messages?: AgentMessage[], opts?: { willContinue?: boolean }): void {
-		if (this.disposed || this.#quotaExhausted || this.#halted) return;
+		if (this.disposed || this.#quotaExhausted) return;
+		this.#syncModelIdentity();
+		this.#resumeQuarantineAfterBasisChange();
+		if (this.#halted) {
+			if (this.#quarantineHalted) {
+				this.#maintainQuarantineHaltedFallback(messages ?? this.host.snapshotMessages());
+			}
+			return;
+		}
 		const all = messages ?? this.host.snapshotMessages();
 		this.#latestMessages = all;
 		const wip = opts?.willContinue ?? false;
@@ -470,6 +503,7 @@ export class AdvisorRuntime {
 
 	dispose(): void {
 		this.#iterationAbort?.abort("advisor disposed");
+		this.#haltedMaintenanceAbort?.abort("advisor disposed");
 		this.disposed = true;
 		this.#epoch++;
 		this.#pending = [];
@@ -547,6 +581,7 @@ export class AdvisorRuntime {
 			this.#sessionTransitionPaused = true;
 			this.#wakeAllWaiters();
 			this.#iterationAbort?.abort("advisor session transition");
+			this.#haltedMaintenanceAbort?.abort("advisor session transition");
 			try {
 				this.agent.abort("advisor session transition");
 			} catch {}
@@ -579,6 +614,7 @@ export class AdvisorRuntime {
 		// pinned at the instructions/tools boundary) to a concrete path instead of
 		// inferring it from payload markers after the fact.
 		this.#iterationAbort?.abort("advisor reset");
+		this.#haltedMaintenanceAbort?.abort("advisor reset");
 		this.#epoch++;
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
@@ -590,6 +626,8 @@ export class AdvisorRuntime {
 		this.#failing = false;
 		this.#droppedBacklogs = 0;
 		this.#consecutiveQuarantines = 0;
+		this.#quarantineBasis = undefined;
+		this.#quarantineHalted = false;
 		this.#refusalModelsTried.clear();
 		this.#failureNotified = false;
 		this.#resetAdvisorContext(true, true, reason);
@@ -624,6 +662,66 @@ export class AdvisorRuntime {
 		this.#includeThinking = true;
 	}
 
+	#notifyIdle(): void {
+		try {
+			this.host.notifyIdle?.();
+		} catch (err) {
+			logger.debug("advisor idle notification failed", { err: String(err) });
+		}
+	}
+
+	#resumeQuarantineAfterBasisChange(): boolean {
+		if (!this.#quarantineHalted) return false;
+		const basis = this.host.getQuarantineBasis?.() ?? this.host.getModelIdentity?.() ?? "";
+		if (basis === this.#quarantineBasis) return false;
+		this.#quarantineHalted = false;
+		this.#quarantineBasis = undefined;
+		this.#consecutiveQuarantines = 0;
+		this.#failureNotified = false;
+		this.#failing = false;
+		this.#halted = false;
+		this.#clearSeenContext();
+		logger.info("advisor quarantine latch cleared after capability basis changed");
+		return true;
+	}
+
+	/**
+	 * A quarantine latch blocks review dispatch, but a retry fallback still needs
+	 * its regular maintenance hook to notice an expired cooldown and restore the
+	 * primary. Deliberately never enqueue this update: a basis change resumes
+	 * review only on a later primary update.
+	 */
+	#maintainQuarantineHaltedFallback(messages: AgentMessage[]): void {
+		const incoming = messages.at(-1);
+		if (
+			!this.#quarantineHalted ||
+			this.#haltedMaintenanceAbort ||
+			this.#sessionTransitionPaused ||
+			!this.host.maintainContext ||
+			incoming === undefined
+		)
+			return;
+
+		const controller = new AbortController();
+		const epoch = this.#epoch;
+		this.#haltedMaintenanceAbort = controller;
+		void (async () => {
+			try {
+				await this.host.maintainContext?.(incoming, controller.signal);
+				if (this.disposed || this.#sessionTransitionPaused || this.#epoch !== epoch || !this.#quarantineHalted)
+					return;
+				this.#syncModelIdentity();
+				if (this.#resumeQuarantineAfterBasisChange()) this.#notifyIdle();
+			} catch (err) {
+				if (!controller.signal.aborted) {
+					logger.debug("advisor quarantine-halted fallback maintenance failed", { err: String(err) });
+				}
+			} finally {
+				if (this.#haltedMaintenanceAbort === controller) this.#haltedMaintenanceAbort = undefined;
+			}
+		})();
+	}
+
 	// Candidate 4 (multi-message split): render the Session update as MULTIPLE
 	// user messages — one per source message — instead of one ever-growing user
 	// message. Provider prompt caches are prefix-based: a single user message
@@ -637,9 +735,9 @@ export class AdvisorRuntime {
 	 * Shared obfuscation side effects for BOTH render paths (single-block
 	 * {@link #renderPreparedDelta} and multi-message
 	 * {@link #formatRawDeltaMessageChunks}): collect regex secret values from
-	 * primary-context custom messages and the rendered markdown, scrub the
-	 * advisor's own history, and refresh pending placeholder prefixes when new
-	 * secrets appear. Returns whether new secret values were discovered.
+	 * primary-context custom messages, rendered markdown and native advisor history
+	 * before scrubbing that history, then refresh pending placeholder prefixes.
+	 * Returns whether new secret values were discovered.
 	 * Idempotent across the two calls one drain makes for the same prepared
 	 * list: the second call discovers nothing new and skips the strip.
 	 */
@@ -672,14 +770,20 @@ export class AdvisorRuntime {
 			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
 		}
 		addRegexValues(renderedMd);
-		scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
+		discoveredNewRegexSecretValue =
+			scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues) ||
+			discoveredNewRegexSecretValue;
 		if (discoveredNewRegexSecretValue) {
-			this.#pending = this.#pending.map(delta => ({
-				...delta,
-				text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
-			}));
+			this.#refreshPendingSecretPrefixes(obfuscator);
 		}
 		return discoveredNewRegexSecretValue;
+	}
+
+	#refreshPendingSecretPrefixes(obfuscator: SecretObfuscator): void {
+		this.#pending = this.#pending.map(delta => ({
+			...delta,
+			text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
+		}));
 	}
 
 	/**
@@ -980,6 +1084,16 @@ export class AdvisorRuntime {
 				// Epoch guard — a reset/dispose during the maintainContext await
 				// invalidates this batch.
 				if (this.#epoch !== epoch) return null;
+				// Maintenance can commit unseen native plaintext or a snapshot predating
+				// concurrent collisions. Collect before scrubbing and refresh both queues
+				// before another round can send history or the popped batch to compaction.
+				const obfuscator = this.host.obfuscator;
+				if (obfuscator?.hasSecrets()) {
+					if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
+						this.#refreshPendingSecretPrefixes(obfuscator);
+					}
+					batchText = obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batchText, this.#advisorRegexSecretValues);
+				}
 
 				if (shouldResetContext) {
 					// Once coalescing has begun (round > 0), deltas that arrived during
@@ -1207,6 +1321,8 @@ export class AdvisorRuntime {
 					this.#failureNotified = false;
 					this.#droppedBacklogs = 0;
 					this.#consecutiveQuarantines = 0;
+					this.#quarantineBasis = undefined;
+					this.#quarantineHalted = false;
 					this.#refusalModelsTried.clear();
 					if (this.host.onTurnSuccess) {
 						try {
@@ -1334,23 +1450,33 @@ export class AdvisorRuntime {
 					} catch (hookErr) {
 						logger.debug("advisor onTurnError hook failed", { err: String(hookErr) });
 					}
+					if (this.#epoch !== epoch) continue;
 					if (this.#sessionTransitionPaused) {
 						this.#pending.unshift(...popped);
 						continue;
 					}
 					if (err instanceof AdvisorOutputQuarantinedError) {
 						// A quarantine discards the advisor's whole turn before dispatch, so
-						// its advice never reaches the primary. One re-prime is allowed to
-						// recover a one-off hallucination silently; a persistent quarantine
-						// loop is a supervision gap the user must see in the main UI — not an
-						// unbounded silent retry. Surface it (deduped by #notifyFailureOnce)
-						// and drop the batch to break the loop (issue #6661).
+						// its advice never reaches the primary. One re-prime remains available
+						// for a one-off hallucination. A second quarantine on the same
+						// model/toolset basis halts this optional review until reset, config
+						// rebuild, session restart, or a changed model/toolset basis.
+						const quarantineBasis = this.host.getQuarantineBasis?.() ?? this.host.getModelIdentity?.() ?? "";
+						if (this.#quarantineBasis !== quarantineBasis) {
+							this.#quarantineBasis = quarantineBasis;
+							this.#consecutiveQuarantines = 0;
+						}
 						this.#consecutiveQuarantines++;
 						if (this.#consecutiveQuarantines >= MAX_QUARANTINE_RETRIES) {
+							this.#quarantineHalted = true;
+							this.#halted = true;
 							this.#notifyFailureOnce(err);
-							this.#consecutiveQuarantines = 0;
 							this.#notifyTurnAbandoned();
-							this.#resetAdvisorContext(true, true, "quarantine-retry-exhausted");
+							this.#resetAdvisorContext(true, true, "quarantine-latched");
+							logger.warn("advisor quarantine latch entered; waiting for reset or capability basis change", {
+								basis: quarantineBasis,
+								error: err.message,
+							});
 							continue;
 						}
 						const rePrime = this.#pending.length > 0 ? this.#latestMessages : undefined;
@@ -1360,8 +1486,6 @@ export class AdvisorRuntime {
 						if (rePrime) this.onTurnEnd(rePrime);
 						continue;
 					}
-					// Epoch guard after the async error hook.
-					if (this.#epoch !== epoch) continue;
 					if (recovered) {
 						this.#consecutiveFailures = 0;
 						this.#failureNotified = false;
@@ -1485,13 +1609,7 @@ export class AdvisorRuntime {
 			// batch (backlog/pending stay non-empty) yet `yielded` is true via
 			// the quota latch, and the eye must close without waiting for an
 			// unrelated repaint. Same for halt.
-			if (!this.disposed && this.yielded) {
-				try {
-					this.host.notifyIdle?.();
-				} catch (err) {
-					logger.debug("advisor idle notification failed", { err: String(err) });
-				}
-			}
+			if (!this.disposed && this.yielded) this.#notifyIdle();
 		}
 	}
 }
@@ -1667,11 +1785,32 @@ function obfuscateAdvisorMessage(
 function scrubAdvisorHistory(
 	obfuscator: SecretObfuscator,
 	messages: AgentMessage[],
-	sharedRegexSecretValues: ReadonlySet<string>,
-): void {
+	sharedRegexSecretValues: Set<string>,
+): boolean {
+	const previousSize = sharedRegexSecretValues.size;
+	// Collect across the entire history first: redacting a search-only regex
+	// value would otherwise erase the evidence needed to scrub an earlier prefix.
+	for (const message of messages) {
+		if (
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+		) {
+			collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+		}
+	}
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		const next = obfuscateAdvisorMessage(obfuscator, message, sharedRegexSecretValues);
+		const replay =
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+				? obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues)
+				: message;
+		const next = obfuscateAdvisorMessage(obfuscator, replay, sharedRegexSecretValues);
 		if (next !== message) messages[index] = next;
 	}
+	return sharedRegexSecretValues.size !== previousSize;
 }
