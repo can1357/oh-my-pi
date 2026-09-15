@@ -140,6 +140,111 @@ describe("hub launch rendering", () => {
 		expect(rendered.some(line => line.includes("svc-10"))).toBe(false);
 		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);
 	});
+	it("collapses list by daemon count when diagnostic rows are present", async () => {
+		const uiTheme = await theme();
+		const daemons = Array.from({ length: 11 }, (_, i) =>
+			daemon({
+				name: `svc-${i}`,
+				id: `d-${i}`,
+				state: "failed",
+				exitCode: 58,
+				exitReason: "process exited without a reported termination reason",
+			}),
+		);
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: { op: "list", daemons } satisfies LaunchToolDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+		expect(rendered.some(line => line.includes("svc-7"))).toBe(true);
+		expect(rendered.some(line => line.includes("svc-8"))).toBe(false);
+		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);
+	});
+
+	it("bounds watcher rows in a collapsed list and reports omitted watchers", async () => {
+		const uiTheme = await theme();
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						op: "list",
+						daemons: [daemon({ name: "web" })],
+						monitors: Array.from({ length: 20 }, (_, i) => ({
+							name: "web",
+							id: `monitor-${i}`,
+							owner: `session-${i}`,
+							delivery: "wake" as const,
+							connected: true,
+						})),
+					} satisfies LaunchToolDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+		const watcherLines = rendered.filter(line => line.includes("watched by"));
+
+		expect(watcherLines).toHaveLength(3);
+		expect(rendered.some(line => line.includes("17 more watchers"))).toBe(true);
+	});
+
+	it("caps watcher detail rows across the collapsed daemon list", async () => {
+		const uiTheme = await theme();
+		const daemons = Array.from({ length: 8 }, (_, i) => daemon({ name: `svc-${i}`, id: `d-${i}` }));
+		const monitors = daemons.flatMap(item =>
+			Array.from({ length: 4 }, (_, i) => ({
+				name: item.name,
+				id: `${item.id}-monitor-${i}`,
+				owner: `${item.name}-session-${i}`,
+				delivery: "wake" as const,
+				connected: true,
+			})),
+		);
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: { op: "list", daemons, monitors } satisfies LaunchToolDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+
+		const watcherLines = rendered.filter(line => line.includes("watched by"));
+		expect(rendered.length).toBeLessThanOrEqual(18);
+		expect(watcherLines).toHaveLength(9);
+		expect(rendered.some(line => line.includes("svc-2"))).toBe(true);
+		expect(rendered.some(line => line.includes("svc-3"))).toBe(false);
+		expect(rendered.some(line => line.includes("5 more processes"))).toBe(true);
+	});
+
+	it("preserves list error details in collapsed output", async () => {
+		const uiTheme = await theme();
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "broker unavailable" }],
+					details: { op: "list" } satisfies LaunchToolDetails,
+					isError: true,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+
+		expect(rendered.some(line => line.includes("broker unavailable"))).toBe(true);
+	});
 
 	it("marks a failed start with the daemon's exit reason even though the result is not an error", async () => {
 		const uiTheme = await theme();

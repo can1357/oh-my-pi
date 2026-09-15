@@ -50,6 +50,7 @@ packages/ai/test/.temp-images/
 .opencode/
 .worktrees/
 .worktree/
+.playwright-cli/
 compaction-results/
 changes/
 __pycache__/

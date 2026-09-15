@@ -6,7 +6,7 @@
  * Op families:
  * - messaging: `send` (with `to`), `inbox`, `list`, `wait` (with `from`);
  * - jobs: `wait` (bare or with `ids`), `cancel`, `jobs`;
- * - processes: `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus
+ * - processes: `start`, `monitor`, `ps`, `logs`, `stop`, `restart`, `describe`, plus
  *   `send`/`wait` when they carry a process `name`.
  *
  * The unified `wait` blocks until the FIRST of: a matching peer message, a
@@ -78,7 +78,7 @@ export * from "./types";
 
 const hubSchema = type({
 	op: type(
-		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
+		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'monitor' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
 	"to?": type("string").describe('send: recipient agent id or "all"'),
 	"message?": type("string").describe("send: message body"),
@@ -107,6 +107,9 @@ const hubSchema = type({
 	"persist?": type("boolean").describe("start: survive the last omp client exiting; default false"),
 	"detached?": type("boolean").describe(
 		"start: survive every omp and broker exit; implies persist and disables PTY input",
+	),
+	"progress?": type("'wake' | 'ambient' | 'off'").describe(
+		"start: wake/ambient pushes live output; off explicitly starts without monitoring. monitor: attach with wake/ambient or detach with off. wake spends model turns from the shared session wake budget; ambient is free",
 	),
 	"lines?": type("number > 0").describe("logs: output lines; default 100, max 1000"),
 	"head?": type("boolean").describe("logs: read from the beginning instead of the tail"),
@@ -149,6 +152,7 @@ function hubApproval(params: unknown): ToolApprovalDecision {
 		case "ps":
 		case "logs":
 		case "describe":
+		case "monitor":
 			return "read";
 		case "send": {
 			// Peer DMs are read-tier; writing to a process stdin is exec-tier.
@@ -226,7 +230,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				application: "bun",
 				args: ["run", "dev"],
 				ready: { log: "Local:.*http", port: 5173, timeout: 30 },
+				progress: "wake",
 			},
+		},
+		{
+			caption: "Attach push notifications to a running process",
+			call: { op: "monitor", name: "web", progress: "wake" },
 		},
 		{
 			caption: "Follow process output after a cursor",
@@ -270,6 +279,9 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		onUpdate?: AgentToolUpdateCallback<HubDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<HubDetails>> {
+		if (params.progress !== undefined && params.op !== "start" && params.op !== "monitor") {
+			return hubErrorResult("`progress` is only valid with `start` or `monitor`.", { op: params.op });
+		}
 		switch (params.op) {
 			case "list": {
 				const messaging = this.#messaging();
@@ -319,6 +331,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				return executeJobsSnapshot(this.session, manager, this.#ownerId());
 			}
 			case "start":
+			case "monitor":
 			case "ps":
 			case "logs":
 			case "stop":
@@ -522,6 +535,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 const LAUNCH_OPS: Record<string, true> = {
 	start: true,
+	monitor: true,
 	ps: true,
 	logs: true,
 	stop: true,
