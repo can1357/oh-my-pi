@@ -1330,10 +1330,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
 	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	// A failure before the session exists must not leave a credential_disabled
+	// listener attached. `AuthStorage`'s no-listener buffer is what preserves an
+	// automatic sign-out for the next session, and an orphan listener consumes it
+	// instead — the operator then never learns why the account went away.
+	const startupCleanup: { releaseCredentialDisabled?: () => void } = {};
+	try {
+		return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, startupCleanup));
+	} catch (error) {
+		startupCleanup.releaseCredentialDisabled?.();
+		throw error;
+	}
 }
 
-async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
+async function createAgentSessionScoped(
+	options: CreateAgentSessionOptions,
+	startupCleanup: { releaseCredentialDisabled?: () => void } = {},
+): Promise<CreateAgentSessionResult> {
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
@@ -1383,6 +1396,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	// The session replays undelivered sign-outs to the operator, so it needs its
+	// own buffer: the runner drains the list above, and the two become available
+	// at different points in startup.
+	const startupCredentialDisabledNotices: CredentialDisabledEvent[] = [];
+	let credentialDisabledNoticeTarget: AgentSession | undefined;
+	// Flipped at the single successful return below. Until then every notice must
+	// stay retained, because the session holding it can still be torn down.
+	let startupComplete = false;
 	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
 		if (credentialDisabledTarget) {
 			// Discard return: any handler error is routed through runner.onError listeners.
@@ -1390,7 +1411,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			startupCredentialDisabledEvents.push(event);
 		}
+		// Recorded whether or not a target exists yet: until startup returns, the
+		// session holding this notice may still be torn down, and this array is
+		// what the failure path hands back to `AuthStorage`. Once startup returns
+		// the array is dead — the session owns delivery — so stop retaining raw
+		// events with their causes for the life of a long-running session.
+		if (!startupComplete) startupCredentialDisabledNotices.push(event);
+		credentialDisabledNoticeTarget?.announceCredentialDisabled(event);
 	});
+	startupCleanup.releaseCredentialDisabled = () => {
+		unsubscribeCredentialDisabled?.();
+		// Subscribing above drained `AuthStorage`'s pending buffer into these two
+		// arrays. If this session never comes up they are the only copy, so hand
+		// the undelivered ones back rather than letting the sign-out disappear.
+		// Both arrays receive the same event objects, so dedupe by identity.
+		const undelivered = [...new Set([...startupCredentialDisabledEvents, ...startupCredentialDisabledNotices])];
+		if (undelivered.length > 0) authStorage.retainUndeliveredCredentialDisabled(undelivered);
+	};
 	await modelRegistry.hydrateCredentialScopedModelCaches();
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
@@ -3970,6 +4007,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// The session is live: deliver every sign-out observed during startup, then
+		// route subsequent ones straight to it.
+		credentialDisabledNoticeTarget = session;
+		// Deliberately still armed, and the buffer deliberately not drained: startup
+		// can fail after this point (an agent-registration conflict, for one) and
+		// that path disposes the session, so until startup returns these arrays
+		// remain the only durable record of a sign-out nobody has seen yet.
+		for (const event of startupCredentialDisabledNotices) {
+			session.announceCredentialDisabled(event);
+		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).
@@ -4145,6 +4192,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
+					// A sign-out this session was told about but never showed anyone
+					// dies with it otherwise: `announceCredentialDisabled` holds the
+					// only replayable copy when no listener was ever attached, and a
+					// store without tombstone history has nowhere else to read it.
+					const unseen = session.unseenCredentialDisabledEvents();
+					if (unseen.length > 0) authStorage.retainUndeliveredCredentialDisabled(unseen);
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
 					for (const callback of disposeCallbacks) callback();
@@ -4438,6 +4491,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
 
+		// Startup completed: the session owns teardown from here, its dispose
+		// releases the subscription, and every buffered notice has been delivered
+		// to it. Only now is it safe to drop the requeue set.
+		startupCleanup.releaseCredentialDisabled = undefined;
+		startupComplete = true;
+		startupCredentialDisabledNotices.length = 0;
 		return {
 			session,
 			extensionsResult,

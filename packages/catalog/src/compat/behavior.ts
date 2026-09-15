@@ -2,12 +2,12 @@
  * Typed accessors over the compiled runtime-behavior vocabulary
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
  * or outside exact bundled-model lookup — responses routing, API routing,
- * quota tiers, plan requirements, model limits, roster and discovery-mode
- * exclusions, hosted defaults, and pricing peers.
+ * quota tiers, plan requirements, credential retirement, model limits, roster
+ * and discovery-mode exclusions, hosted defaults, and pricing peers.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
-import type { CompiledMatchList } from "./types";
+import type { CompiledCredentialRetirement, CompiledMatchList } from "./types";
 
 const behavior = rules.behavior;
 
@@ -213,6 +213,11 @@ export function planRequirementFor(provider: string, model: string): string | un
 		if (matchesList(tier.match, model, lower)) return tier.tier;
 	}
 	return undefined;
+}
+
+/** Provider credential retirement outside model lookup; absent rules do not opt in. */
+export function credentialRetirementFor(provider: string): Readonly<CompiledCredentialRetirement> | undefined {
+	return behavior.credentialRetirements.find(rule => rule.provider === provider);
 }
 
 /** Cross-provider pricing-peer resolution for one provider model id. */
