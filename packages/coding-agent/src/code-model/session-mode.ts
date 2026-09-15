@@ -12,12 +12,14 @@ import type { CodeModelNavigationPreparation } from "../session/agent-session-ty
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type ModelChangeEntry } from "../session/session-entries";
 import codeModelReviewPrompt from "../prompts/system/code-model-review.md" with { type: "text" };
 import codeModelStartPrompt from "../prompts/system/code-model-start.md" with { type: "text" };
+import codeModelStatusPrompt from "../prompts/system/code-model-status.md" with { type: "text" };
 import { parseConfiguredThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
 import { availableCodeModels, resolveCodeModelSelection } from "./model-menu";
 
 export const CODE_MODEL_STATE_TYPE = "code-model-phase-v1";
 export const CODE_MODEL_REVIEW_PROMPT = codeModelReviewPrompt.trim();
 export const CODE_MODEL_START_PROMPT = codeModelStartPrompt.trim();
+const CODE_MODEL_STATUS_PROMPT = codeModelStatusPrompt.trim();
 
 interface ModelState {
 	provider: string;
@@ -362,11 +364,12 @@ export function installCodeModelSession(
 			return {
 				changed: false,
 				phase: state?.phase,
-				message: `Coding model setting: ${configured}. ${
-					state
-						? `Current phase: ${state.phase}; restore target: ${describeModelState(state.original)}.`
-						: "Main conversation phase is active."
-				}`,
+				message: prompt.render(CODE_MODEL_STATUS_PROMPT, {
+					configured,
+					active: state !== undefined,
+					phase: state?.phase,
+					restoreTarget: state ? describeModelState(state.original) : undefined,
+				}),
 			};
 		}
 		return guarded(async () => {

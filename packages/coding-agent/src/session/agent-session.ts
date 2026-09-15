@@ -9849,12 +9849,17 @@ export class AgentSession {
 				sessionContext.models,
 				this.sessionManager.getLastModelChangeRole(),
 			);
+			let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 			if (targetModelStrings.length > 0) {
 				const availableModels = this.#modelRegistry.getAvailable();
 				let match: Model | undefined;
 				for (const targetModelStr of targetModelStrings) {
-					match = parsePersistedModelSelector(targetModelStr, availableModels).model;
-					if (match) break;
+					const parsedModel = parsePersistedModelSelector(targetModelStr, availableModels);
+					match = parsedModel.model;
+					if (match) {
+						restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+						break;
+					}
 				}
 				if (match) {
 					const currentModel = this.model;
@@ -9901,15 +9906,18 @@ export class AgentSession {
 			// resumes in auto mode (reclassifying the next turn) instead of freezing at
 			// the last resolved level. Entries written before the `configured` field
 			// existed fall back to the concrete level (legacy pin-on-resume behavior).
-			// With no thinking entry, fall back to the global default so fresh sessions
-			// still classify their first turn.
+			// Without a thinking entry, an explicit restored model suffix wins before
+			// the global default; auto defaults still reuse compatible session context.
 			const restoredConfigured = sessionContext.configuredThinkingLevel;
 			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
+				hasThinkingEntry ||
+				(restoredSessionThinkingLevel === undefined &&
+					defaultThinkingLevel === AUTO_THINKING &&
+					sessionContext.thinkingLevel !== "off")
 					? restoredConfigured === AUTO_THINKING
 						? AUTO_THINKING
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+					: (restoredSessionThinkingLevel ?? defaultThinkingLevel);
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,

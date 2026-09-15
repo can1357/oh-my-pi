@@ -6,7 +6,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { installCodeModelSession, type CodeModelSessionController } from "../src/code-model/session-mode";
 import { runExtensionSetModel } from "../src/extensibility/extensions/compact-handler";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	parseModelPattern,
+	parsePersistedModelSelector,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
@@ -21,7 +25,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING, resolveThinkingLevelForModel } from "@oh-my-pi/pi-coding-agent/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -1042,6 +1046,32 @@ describe("AgentSession model persistence", () => {
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(created.session.model?.id).toBe(smolModel.id);
 	});
+
+	it.each([Effort.High, Effort.Max, AUTO_THINKING] as const)(
+		"restores the parsed effort from an explicit %s selector when switching sessions",
+		async effort => {
+			const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const defaultRoleValue = modelValue(defaultModel);
+			const smolRoleValue = modelValue(smolModel);
+			const selector = `${smolRoleValue}:${effort}`;
+			const parsedEffort = parsePersistedModelSelector(selector, [smolModel]).thinkingLevel;
+			if (parsedEffort === undefined) throw new Error(`Expected ${selector} to contain an effort`);
+			const expectedEffort =
+				parsedEffort === AUTO_THINKING ? AUTO_THINKING : resolveThinkingLevelForModel(smolModel, parsedEffort);
+			const targetSessionFile = await writeRoleModelSession(defaultRoleValue, selector);
+			const created = await createSession({
+				initialModel: defaultModel,
+				modelRoles: { default: defaultRoleValue, smol: smolRoleValue },
+				persist: true,
+			});
+			created.settings.set("defaultThinkingLevel", Effort.Low);
+
+			await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+			expect(created.session.model?.id).toBe(smolModel.id);
+			expect(created.session.configuredThinkingLevel()).toBe(expectedEffort);
+		},
+	);
 
 	it("restores a routed temporary model before publishing session switch", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
