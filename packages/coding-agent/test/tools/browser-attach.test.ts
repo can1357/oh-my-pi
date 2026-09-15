@@ -10,6 +10,7 @@ import {
 	findReusableCdp,
 	pickElectronTarget,
 	probeCdpStatus,
+	resolveAttachTarget,
 	resolveSpawnArgs,
 	shouldPreserveConnectedBrowserFocus,
 	waitForCdp,
@@ -165,6 +166,56 @@ describe("pickElectronTarget", () => {
 		} as unknown as Browser;
 
 		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(first);
+	});
+
+	test("resolveAttachTarget forces a brand-new tab when no target is requested", async () => {
+		const existing = fakePage({ url: "https://example.com/", title: "Example", visible: true });
+		const created = fakePage({ url: "about:blank", title: "" });
+		let newPageCalled = false;
+		const browser = {
+			targets: () => [fakeTarget("page", existing)],
+			pages: async () => [existing],
+			newPage: async () => {
+				newPageCalled = true;
+				return created;
+			},
+		} as unknown as Browser;
+
+		const result = await resolveAttachTarget(browser, { forceFresh: true, preferVisible: true });
+		expect(result.page).toBe(created);
+		expect(result.ownsTarget).toBe(true);
+		expect(newPageCalled).toBe(true);
+	});
+
+	test("resolveAttachTarget still adopts a specific tab when an explicit target is given", async () => {
+		const wanted = fakePage({ url: "https://example.com/dashboard", title: "Dashboard" });
+		const other = fakePage({ url: "https://example.org/", title: "Other" });
+		let newPageCalled = false;
+		const browser = {
+			targets: () => [fakeTarget("page", other), fakeTarget("page", wanted)],
+			pages: async () => [],
+			newPage: async () => {
+				newPageCalled = true;
+				throw new Error("must not create a fresh tab when a target is explicitly requested");
+			},
+		} as unknown as Browser;
+
+		const result = await resolveAttachTarget(browser, { forceFresh: true, matcher: "dashboard" });
+		expect(result.page).toBe(wanted);
+		expect(result.ownsTarget).toBe(false);
+		expect(newPageCalled).toBe(false);
+	});
+
+	test("resolveAttachTarget adopts the visible tab when not forcing a fresh one", async () => {
+		const page = fakePage({ url: "https://example.com/", title: "Example", visible: true });
+		const browser = {
+			targets: () => [fakeTarget("page", page)],
+			pages: async () => [],
+		} as unknown as Browser;
+
+		const result = await resolveAttachTarget(browser, { preferVisible: true });
+		expect(result.page).toBe(page);
+		expect(result.ownsTarget).toBe(false);
 	});
 
 	test("preserves connected-browser focus only for automatic target selection", () => {
