@@ -437,6 +437,10 @@ export interface SkillPromptDetails {
 	name: string;
 	path: string;
 	args?: string;
+	/** The draft as submitted with its `/skill:<name>` token in place. A leading
+	 *  token renders as a skill callout, a mid-prompt token as an inline chip in
+	 *  a plain user bubble. Absent on sessions recorded before chips existed. */
+	prompt?: string;
 	lineCount: number;
 	/** Internal: compact label shown for a queued custom message. Optional —
 	 *  non-streaming skill prompts never set it. Stripped from persisted

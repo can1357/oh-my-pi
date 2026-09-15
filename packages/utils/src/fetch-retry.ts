@@ -11,7 +11,12 @@ const RETRY_DELAY_FIELD_PATTERN = /"retryDelay":\s*"([0-9.]+)(ms|s)"/i;
 // "try again in 90 minutes" / "try again in 1 hour"
 const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
 // "Your limit will reset in 13 minutes" / "reset in 13 minutes" / "will reset in 2h"
-const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
+// OpenCode Go quota errors use "Resets in …" with day units and compound
+// remainders ("Resets in 3 days", "Resets in 2hr 15min", "Resets in 45min").
+const WILL_RESET_IN_PATTERN =
+	/(?:will\s+)?resets?\s+in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i;
+// OpenCode Go compound remainder: "Resets in 2hr 15min".
+const RESET_IN_HR_MIN_PATTERN = /resets?\s+in\s+~?\s*(\d+(?:\.\d+)?)\s*hr\s*(\d+(?:\.\d+)?)\s*min\b/i;
 // "Your limit will reset at 2026-09-01 09:44:51" / "reset at 2026-09-01T09:44:51Z"
 const WILL_RESET_AT_PATTERN =
 	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
@@ -158,6 +163,16 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			}
 		}
 	}
+	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic
+	// pattern only captures the leading "2hr", so add the trailing minutes.
+	const compoundResetMatch = RESET_IN_HR_MIN_PATTERN.exec(body);
+	if (compoundResetMatch?.[1] && compoundResetMatch[2]) {
+		const hours = Number.parseFloat(compoundResetMatch[1]);
+		const minutes = Number.parseFloat(compoundResetMatch[2]);
+		if (Number.isFinite(hours) && Number.isFinite(minutes) && hours >= 0 && minutes > 0) {
+			consider(hours * 60 * 60_000 + minutes * 60_000);
+		}
+	}
 	const accountResetMatch = WILL_RESET_IN_PATTERN.exec(body);
 	if (accountResetMatch?.[1]) {
 		const value = Number.parseFloat(accountResetMatch[1]);
@@ -241,6 +256,10 @@ function unitToMs(unit: string): number | undefined {
 		case "hour":
 		case "hours":
 			return 60 * 60_000;
+		case "d":
+		case "day":
+		case "days":
+			return 24 * 60 * 60_000;
 		default:
 			return undefined;
 	}
