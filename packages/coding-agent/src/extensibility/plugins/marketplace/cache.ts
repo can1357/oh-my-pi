@@ -24,25 +24,31 @@ async function gitCopyPaths(sourcePath: string): Promise<Set<string> | null> {
 		const repository = vcs.git(sourcePath);
 		if (!repository) return null;
 
-		const [tracked, untracked] = await Promise.all([
-			repository.lsFiles(false, false),
-			repository.lsFiles(true, true),
-		]);
 		const repoRoot = repository.info().repoRoot;
 		const sourcePrefix = path.relative(repoRoot, path.resolve(sourcePath)).replaceAll(path.sep, "/");
 		const prefix = sourcePrefix === "" ? "" : `${sourcePrefix}/`;
+		const pathspecs = sourcePrefix === "" ? [] : [sourcePrefix];
+		const [tracked, status] = await Promise.all([
+			repository.lsTree("HEAD", pathspecs).catch(() => []),
+			repository.statusPorcelain({ untracked: "all", pathspecs, nulTerminated: true }),
+		]);
 		const paths = new Set<string>();
-		for (const repoPath of [...tracked, ...untracked]) {
-			const normalized = repoPath.replaceAll(path.sep, "/").replace(/^\.\//, "");
-			if (prefix && !normalized.startsWith(prefix)) continue;
+		const addPath = (repoPath: string): void => {
+			const normalized = repoPath.replaceAll(path.sep, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+			if (prefix && !normalized.startsWith(prefix)) return;
 			const relative = prefix ? normalized.slice(prefix.length) : normalized;
-			if (!relative) continue;
+			if (!relative) return;
 			paths.add(relative);
 			let parent = path.posix.dirname(relative);
 			while (parent !== ".") {
 				paths.add(parent);
 				parent = path.posix.dirname(parent);
 			}
+		};
+		for (const repoPath of tracked) addPath(repoPath);
+		for (const entry of status.split("\0")) {
+			if (entry.length < 4 || entry[2] !== " ") continue;
+			addPath(entry.slice(3));
 		}
 		return paths;
 	} catch {
@@ -116,7 +122,13 @@ export async function cachePlugin(
 				? undefined
 				: (source: string): boolean => {
 						const relative = path.relative(sourcePath, source).replaceAll(path.sep, "/");
-						return relative === "" || copyPaths.has(relative);
+						if (relative === "") return true;
+						let candidate = relative;
+						while (candidate !== ".") {
+							if (copyPaths.has(candidate)) return true;
+							candidate = path.posix.dirname(candidate);
+						}
+						return false;
 					};
 		await fs.cp(sourcePath, stagingPath, filter ? { recursive: true, filter } : { recursive: true });
 		await fs.rm(targetPath, { recursive: true, force: true });
