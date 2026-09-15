@@ -1692,9 +1692,9 @@ export class ModelRegistry {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
 		if (providerConfig.discovery.type === "openai-models-list") {
-			// context-v4 invalidates rows cached before pricing extraction
-			// and catalog fallback were added to `/v1/models` discovery; warm
-			// v3 rows pinned discovered models at zero cost.
+			// context-v4 invalidates rows cached before pricing extraction was
+			// added to `/v1/models` discovery; warm v3 rows pinned discovered
+			// models at zero cost.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.

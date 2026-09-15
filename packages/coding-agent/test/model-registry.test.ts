@@ -3057,8 +3057,8 @@ describe("ModelRegistry", () => {
 		});
 
 		test("ignores openai-models-list rows cached under the retired context-v3 namespace", () => {
-			// Context-v4 added pricing extraction and catalog fallback; warm v3 rows
-			// pinned discovered models at zero cost and must not load.
+			// Context-v4 added pricing extraction; warm v3 rows pinned discovered
+			// models at zero cost and must not load.
 			expect(openaiModelsListStaleNamespaceCache.find("stale-openai-proxy", "stale-vlm")).toBeUndefined();
 			expect(getModelsForProvider(openaiModelsListStaleNamespaceCache, "stale-openai-proxy")).toHaveLength(0);
 		});

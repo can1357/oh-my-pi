@@ -2715,6 +2715,8 @@ providers:
 								pricing: {
 									input_per_1m_usd: 1.5,
 									output_per_1m_usd: "4.5",
+									cache_read_per_1m_usd: 0.15,
+									cache_write_5m_per_1m_usd: "1.875",
 								},
 							},
 							{
@@ -2743,12 +2745,12 @@ providers:
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 
-		// input_per_1m_usd / output_per_1m_usd: unscaled, cacheRead/Write 0
+		// AIProxy's per-1M shape is unscaled, including its cache rates.
 		expect(registry.find("auto-pricing-proxy", "per-1m-auto")?.cost).toEqual({
 			input: 1.5,
 			output: 4.5,
-			cacheRead: 0,
-			cacheWrite: 0,
+			cacheRead: 0.15,
+			cacheWrite: 1.875,
 		});
 
 		// OpenRouter pricing is per-token, including advertised cache rates.

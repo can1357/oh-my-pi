@@ -845,8 +845,8 @@ function resolveOpenAIModelsListCost(
 			return {
 				input: sanitizePricingValue(rawPricing.input_per_1m_usd, "per-1m"),
 				output: sanitizePricingValue(rawPricing.output_per_1m_usd, "per-1m"),
-				cacheRead: 0,
-				cacheWrite: 0,
+				cacheRead: sanitizePricingValue(rawPricing.cache_read_per_1m_usd, "per-1m"),
+				cacheWrite: sanitizePricingValue(rawPricing.cache_write_5m_per_1m_usd, "per-1m"),
 			};
 		}
 		if ("prompt" in rawPricing || "completion" in rawPricing) {
