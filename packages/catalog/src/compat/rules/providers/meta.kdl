@@ -42,8 +42,11 @@ provider "meta" {
 			supports-reasoning-effort #true
 			include-encrypted-reasoning #true
 		}
-		// Meta documents the `max` effort tier for Muse Spark 1.3 (standard) only;
-		// contributor tiers and other revisions stay on the 5-tier ladder.
+		// The captured Muse User-Agent enables Contributor `max` in live tests
+		// on the direct Model API wire for Muse Spark 1.3 (standard) and
+		// 1.3-contributor. Vendor documents `max` for standard 1.3 and announces
+		// Contributor `max` for Muse Code subscriptions; PAYG success is observed
+		// wire behavior, not a permission claim. Older revisions stay 5-tier.
 		model "muse-spark-1.3" name="Muse Spark 1.3" {
 			reasoning #true
 			input "text" "image"
@@ -60,7 +63,7 @@ provider "meta" {
 			cost input=0.1 output=0.2 cache-read=0.002 cache-write=0
 			limits context=1048576 max-tokens=131072
 			thinking-mode "effort"
-			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
 			supports-reasoning-effort #true
 			include-encrypted-reasoning #true
 		}

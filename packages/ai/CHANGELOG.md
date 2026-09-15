@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Meta Model API and Muse Code requests now use the Muse User-Agent for direct requests. Contributor `max` works without a header override. Explicit user headers and other endpoints stay unchanged ([#11837](https://github.com/can1357/oh-my-pi/issues/11837)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added
