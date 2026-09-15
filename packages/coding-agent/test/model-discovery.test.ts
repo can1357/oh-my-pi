@@ -2632,11 +2632,11 @@ providers:
 							{
 								id: "sanitized-model",
 								rates: {
-									in: -0.000002,
-									out: "invalid-number",
+									in: true,
+									out: [2],
 									cache: {
-										read: 0,
-										write: Number.NaN,
+										read: { rate: 3 },
+										write: null,
 									},
 								},
 							},
