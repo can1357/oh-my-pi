@@ -159,6 +159,28 @@ describe("ExtensionRunner", () => {
 		expect(runner.createContext().mode).toBe("tui");
 	});
 
+	it("exposes a cloned effective settings snapshot to extensions", () => {
+		const settings = Settings.isolated({
+			"task.agentModelOverrides": { "orc-implementer": ["@broken"] },
+		});
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+			undefined,
+			settings,
+		);
+
+		const overrides = runner.createContext().settings.get("task.agentModelOverrides") as Record<string, string[]>;
+		overrides["orc-implementer"]?.push("@mutated");
+
+		expect(runner.createContext().settings.get("task.agentModelOverrides")).toEqual({
+			"orc-implementer": ["@broken"],
+		});
+	});
+
 	it("uses required context actions when command actions are unavailable", async () => {
 		const result = await loadTestExtensions();
 		const runner = new ExtensionRunner(
