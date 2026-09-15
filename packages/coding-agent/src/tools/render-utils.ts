@@ -821,14 +821,21 @@ export function truncateDiffByHunk(
 let cachedHomeDir: string | undefined;
 
 const homePatternCache = new Map<string, RegExp>();
-function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
-	const key = `${windowsStyle ? 1 : 0} ${homeDir}`;
+/**
+ * Memoized home-prefix matcher. The trailing boundary also accepts ANSI escapes
+ * and HTML entities so home paths embedded in rendered transcripts (progress
+ * output, error strings) are shortened without swallowing the next token.
+ */
+function homePatternFor(homeDir: string, caseInsensitive: boolean): RegExp {
+	const key = `${caseInsensitive ? 1 : 0} ${homeDir}`;
 	let pattern = homePatternCache.get(key);
 	if (pattern === undefined) {
-		const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const leadingBoundary = /^[\\/]/.test(homeDir) ? "" : "(?<![\\p{L}\\p{N}_-])";
+		const trailingBoundary =
+			"(?=$|[\\\\/]|\\s|\\x1b|&(?:quot|apos|gt);|[\"'`)\\]}>]|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
 		pattern = new RegExp(
-			`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
-			windowsStyle ? "gi" : "g",
+			`${leadingBoundary}${RegExp.escape(homeDir)}${trailingBoundary}`,
+			caseInsensitive ? "giu" : "gu",
 		);
 		if (homePatternCache.size >= 16) homePatternCache.clear();
 		homePatternCache.set(key, pattern);
@@ -858,12 +865,28 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
  * punctuation so error strings with embedded paths stay readable. */
 export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 	const resolvedHome = homeDir ?? (cachedHomeDir ??= os.homedir());
-	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
-	const homePattern = homePatternFor(resolvedHome, windowsStyle);
-	const textWithShortenedHome =
-		shortenedHome !== resolvedHome ? text.replace(homePattern, match => shortenPath(match, resolvedHome)) : text;
-	return textWithShortenedHome
+	if (!resolvedHome) return text;
+	let shortened = text;
+	const isWindowsPath = resolvedHome.includes("\\") || /^(?:[A-Za-z]:\/|\/\/)/.test(resolvedHome);
+	const homePaths = isWindowsPath
+		? [...new Set([resolvedHome, resolvedHome.replaceAll("\\", "/"), resolvedHome.replaceAll("/", "\\")])]
+		: [resolvedHome];
+	const caseInsensitive = isWindowsPath;
+	const uriPathContext = /[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s"'`<>()[\]{}]*$/u;
+	for (const homePath of homePaths) {
+		const hasLeadingSeparator = /^[\\/]/.test(homePath);
+		const homePrefix = homePatternFor(homePath, caseInsensitive);
+		shortened = shortened.replace(homePrefix, (matchedHome, offset: number) => {
+			const prefix = shortened.slice(0, offset);
+			const schemeConsumesUncHome = /^[A-Za-z][A-Za-z\d+.-]*:$/u.test(prefix) && /^[\\/]{2}/.test(matchedHome);
+			const uriPath = hasLeadingSeparator && (uriPathContext.test(prefix) || schemeConsumesUncHome);
+			if (!uriPath && /[\p{L}\p{N}_-]$/u.test(prefix)) return matchedHome;
+			if (!uriPath) return "~";
+			if (schemeConsumesUncHome) return `${/^file:$/iu.test(prefix) ? "/" : ""}//~`;
+			return `${matchedHome[0]}~`;
+		});
+	}
+	return shortened
 		.split(" ")
 		.map(segment => {
 			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";

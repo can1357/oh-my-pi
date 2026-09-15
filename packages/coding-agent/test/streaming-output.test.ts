@@ -331,6 +331,187 @@ describe("OutputSink", () => {
 		expect(artifactText).toBe("headabcdefgh");
 	});
 
+	test("settles a sampled mirror delivery when preview delivery throws", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "preview-failure.log");
+		const settled: number[] = [];
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "artifact-preview-failure",
+			artifactWriteMode: "mirror",
+			chunkStamp: () => 7,
+			onChunk: () => {
+				throw new Error("preview unavailable");
+			},
+			onChunkSettled: stamp => settled.push(stamp),
+		});
+
+		sink.push("persisted despite preview failure");
+		await expect(sink.dump()).rejects.toThrow("preview unavailable");
+
+		expect(settled).toEqual([7]);
+		expect(await Bun.file(artifactPath).text()).toBe("persisted despite preview failure");
+	});
+
+	test("continues mirror delivery after a rejected preview callback and surfaces the failure at dump", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "continued-mirror.log");
+		let stamp = 0;
+		let rejectNext = true;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const settled: number[] = [];
+		const firstSettled = Promise.withResolvers<void>();
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "continued-mirror",
+			artifactWriteMode: "mirror",
+			chunkStamp: () => stamp,
+			onChunk: (chunk, chunkStamp) => {
+				deliveries.push({ chunk, stamp: chunkStamp });
+				if (!rejectNext) return;
+				rejectNext = false;
+				throw new Error("preview unavailable");
+			},
+			onChunkSettled: chunkStamp => {
+				settled.push(chunkStamp);
+				if (chunkStamp === 0) firstSettled.resolve();
+			},
+		});
+
+		sink.push("first");
+		await firstSettled.promise;
+		// The command keeps running after the failed delivery: reading the
+		// mirrored artifact turns the event loop over, and an unhandled rejection
+		// left on the delivery tail fails this test under bun (its default
+		// unhandled-rejection handling is fatal outside the runner).
+		expect(await Bun.file(artifactPath).text()).toBe("first");
+		stamp = 1;
+		sink.push("second");
+		stamp = 2;
+		sink.push("third");
+
+		// The first failure wins and surfaces once dump() settles the tail; the
+		// later chunks were still delivered and the artifact finalized.
+		await expect(sink.dump()).rejects.toThrow("preview unavailable");
+		expect(deliveries).toEqual([
+			{ chunk: "first", stamp: 0 },
+			{ chunk: "second", stamp: 1 },
+			{ chunk: "third", stamp: 2 },
+		]);
+		expect(settled).toEqual([0, 1, 2]);
+		expect(await Bun.file(artifactPath).text()).toBe("firstsecondthird");
+		// Surfaced once: the follow-up dispose() from a caller's finally is quiet.
+		await sink.dispose();
+	});
+
+	test("keeps the mirror tail alive when a settlement callback throws", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "settle-failure.log");
+		let stamp = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const settled: number[] = [];
+		const firstSettled = Promise.withResolvers<void>();
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "settle-failure",
+			artifactWriteMode: "mirror",
+			chunkStamp: () => stamp,
+			onChunk: (chunk, chunkStamp) => {
+				deliveries.push({ chunk, stamp: chunkStamp });
+			},
+			onChunkSettled: chunkStamp => {
+				settled.push(chunkStamp);
+				if (chunkStamp !== 0) return;
+				firstSettled.resolve();
+				throw new Error("barrier resolver failed");
+			},
+		});
+
+		sink.push("first");
+		await firstSettled.promise;
+		// The producer keeps running: a rejection escaping the settlement hook
+		// would leave the tail rejected (fatal under bun) and block later chunks.
+		expect(await Bun.file(artifactPath).text()).toBe("first");
+		stamp = 1;
+		sink.push("second");
+
+		await expect(sink.dump()).rejects.toThrow("barrier resolver failed");
+		expect(deliveries).toEqual([
+			{ chunk: "first", stamp: 0 },
+			{ chunk: "second", stamp: 1 },
+		]);
+		expect(settled).toEqual([0, 1]);
+		expect(await Bun.file(artifactPath).text()).toBe("firstsecond");
+		await sink.dispose();
+	});
+
+	test("mirror mode delivers and settles chunks with their entry stamps", async () => {
+		let stamp = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const settled: number[] = [];
+		const sink = new OutputSink({
+			artifactWriteMode: "mirror",
+			chunkStamp: () => stamp,
+			onChunk: (chunk, chunkStamp) => deliveries.push({ chunk, stamp: chunkStamp }),
+			onChunkSettled: chunkStamp => settled.push(chunkStamp),
+		});
+
+		sink.push("before");
+		stamp = 1;
+		sink.push("after");
+		await sink.dump();
+
+		expect(deliveries).toEqual([
+			{ chunk: "before", stamp: 0 },
+			{ chunk: "after", stamp: 1 },
+		]);
+		expect(settled).toEqual([0, 1]);
+	});
+
+	test("a throttle-held chunk keeps the stamp of its first held byte", async () => {
+		let stamp = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const sink = new OutputSink({
+			chunkThrottleMs: 60_000,
+			chunkStamp: () => stamp,
+			onChunk: (chunk, chunkStamp) => deliveries.push({ chunk, stamp: chunkStamp }),
+		});
+
+		sink.push("first");
+		sink.push("held");
+		stamp = 1;
+		await sink.dump();
+
+		expect(deliveries).toEqual([
+			{ chunk: "first", stamp: 0 },
+			{ chunk: "held", stamp: 0 },
+		]);
+	});
+
+	test("mirror mode delivers a queued chunk with the stamp captured at entry", async () => {
+		const dir = await createTempDir();
+		let epoch = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const sink = new OutputSink({
+			artifactPath: path.join(dir, "queued-mirror.log"),
+			artifactId: "queued-mirror",
+			artifactWriteMode: "mirror",
+			chunkStamp: () => epoch,
+			onChunk: (chunk, stamp) => deliveries.push({ chunk, stamp }),
+		});
+
+		sink.push("pre-boundary\n");
+		// The mirror delivery is still queued behind the artifact flush when the
+		// boundary moves; the stamp must reflect entry time, not delivery time.
+		epoch = 1;
+		sink.push("post-boundary\n");
+		await sink.dump();
+
+		expect(deliveries).toEqual([
+			{ chunk: "pre-boundary\n", stamp: 0 },
+			{ chunk: "post-boundary\n", stamp: 1 },
+		]);
+	});
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
@@ -372,6 +553,62 @@ describe("OutputSink", () => {
 		vi.advanceTimersByTime(20);
 
 		expect(chunks).toEqual(["a", "b"]);
+	});
+
+	test("dispose delivers a throttled mirror tail before finalizing its artifact", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "disposed-mirror.log");
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			artifactPath,
+			artifactWriteMode: "mirror",
+			onChunk: chunk => chunks.push(chunk),
+			chunkThrottleMs: 60_000,
+		});
+
+		sink.push("first");
+		sink.push(" second");
+		await sink.dispose();
+
+		expect(chunks).toEqual(["first", " second"]);
+		expect(await Bun.file(artifactPath).text()).toBe("first second");
+	});
+
+	test("a rejected mirror delivery still finalizes the artifact on dispose and dump", async () => {
+		const dir = await createTempDir();
+		const payload = "0123456789ABCDEF".repeat(4); // 64 bytes; cap keeps 16 head + 16 tail
+		const failing = (name: string) => {
+			const artifactPath = path.join(dir, `${name}.log`);
+			const sink = new OutputSink({
+				artifactPath,
+				artifactId: `art-${name}`,
+				artifactWriteMode: "mirror",
+				spillThreshold: 16,
+				artifactMaxBytes: 32,
+				artifactHeadBytes: 16,
+				onChunk: () => {
+					throw new Error("preview unavailable");
+				},
+			});
+			return { sink, artifactPath };
+		};
+
+		// dispose() runs from callers' `finally` blocks: it swallows the delivery
+		// failure but still replays the capped tail, which only happens at finalize.
+		const disposed = failing("disposed");
+		disposed.sink.push(payload);
+		await disposed.sink.dispose();
+		const disposedText = await Bun.file(disposed.artifactPath).text();
+		expect(disposedText).toContain("[ARTIFACT TRUNCATED:");
+		expect(disposedText.endsWith("0123456789ABCDEF")).toBe(true);
+
+		// dump() surfaces the failure to its caller, after finalizing the same way.
+		const dumped = failing("dumped");
+		dumped.sink.push(payload);
+		await expect(dumped.sink.dump()).rejects.toThrow("preview unavailable");
+		const dumpedText = await Bun.file(dumped.artifactPath).text();
+		expect(dumpedText).toContain("[ARTIFACT TRUNCATED:");
+		expect(dumpedText.endsWith("0123456789ABCDEF")).toBe(true);
 	});
 
 	test("replace cancels a throttled tail and discards its pending preview", () => {
