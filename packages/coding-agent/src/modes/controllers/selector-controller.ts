@@ -281,6 +281,7 @@ export class SelectorController {
 					onStatusLinePreview: previewSettings => {
 						// Update status line with preview settings
 						this.ctx.statusLine.updateSettings({
+							gitEnabled: settings.get("git.enabled"),
 							preset: settings.get("statusLine.preset"),
 							leftSegments: settings.get("statusLine.leftSegments"),
 							rightSegments: settings.get("statusLine.rightSegments"),
@@ -288,6 +289,7 @@ export class SelectorController {
 							showHookStatus: settings.get("statusLine.showHookStatus"),
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
+							segmentOptions: settings.get("statusLine.segmentOptions"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 							contextLine: settings.get("statusLine.contextLine"),
 							...previewSettings,
@@ -312,6 +314,7 @@ export class SelectorController {
 						done();
 						// Restore status line to saved settings
 						this.ctx.statusLine.updateSettings({
+							gitEnabled: settings.get("git.enabled"),
 							preset: settings.get("statusLine.preset"),
 							leftSegments: settings.get("statusLine.leftSegments"),
 							rightSegments: settings.get("statusLine.rightSegments"),
@@ -319,6 +322,7 @@ export class SelectorController {
 							showHookStatus: settings.get("statusLine.showHookStatus"),
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
+							segmentOptions: settings.get("statusLine.segmentOptions"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 							contextLine: settings.get("statusLine.contextLine"),
 						});
@@ -848,6 +852,7 @@ export class SelectorController {
 			case "statusLineTimeFormat":
 			case "statusLineTimeShowSeconds": {
 				const statusLineSettings = {
+					gitEnabled: settings.get("git.enabled"),
 					preset: settings.get("statusLine.preset"),
 					leftSegments: settings.get("statusLine.leftSegments"),
 					rightSegments: settings.get("statusLine.rightSegments"),
