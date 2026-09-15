@@ -11,13 +11,19 @@ export interface VisualTruncateResult {
 	skippedCount: number;
 }
 
-const textCache = new Map<number, Text>();
+const textCache = new Map<string, Text>();
+const TRUNCATE_CACHE_MAX = 8;
 
-function getCachedText(paddingX: number): Text {
-	let text = textCache.get(paddingX);
+function cacheKey(text: string, width: number, paddingX: number): string {
+	return `${paddingX} ${width} ${text.length} ${Bun.hash(text).toString(36)}`;
+}
+
+function getCachedText(cacheKeyValue: string, paddingX: number): Text {
+	let text = textCache.get(cacheKeyValue);
 	if (!text) {
 		text = new Text("", paddingX, 0);
-		textCache.set(paddingX, text);
+		if (textCache.size >= TRUNCATE_CACHE_MAX) textCache.clear();
+		textCache.set(cacheKeyValue, text);
 	}
 	return text;
 }
@@ -44,8 +50,9 @@ export function truncateToVisualLines(
 		return { visualLines: [], skippedCount: 0 };
 	}
 
-	// Create a temporary Text component to render and get visual lines
-	const tempText = getCachedText(paddingX);
+	// Keyed by (text, width, padding): Text caches internally, so a shared
+	// single slot thrashes with 2+ live cards at the same padding.
+	const tempText = getCachedText(cacheKey(text, width, paddingX), paddingX);
 	if (tempText.getText() !== text) {
 		tempText.setText(text);
 	}

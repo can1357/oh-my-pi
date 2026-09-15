@@ -5,8 +5,8 @@
  * `discoverModelsByProviderType` with a `DiscoveryContext`; built-in provider
  * discovery lives in pi-catalog's provider-models.
  */
-import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
-import type { Api, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
+import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,

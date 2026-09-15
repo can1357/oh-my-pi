@@ -42,6 +42,13 @@ export interface EvalPreludeDefinition {
 	enabled?: () => boolean;
 	/** Execute a host call outside the language VM. */
 	invoke(parameters: unknown, context: EvalPreludeContext): Promise<AgentToolResult<unknown>>;
+	/**
+	 * One-line description of a successful host call for the eval status tree
+	 * (`main.goto("https://…")`). `undefined` records nothing; omit the hook
+	 * when the call has nothing worth showing. Failures are recorded by the
+	 * bridge regardless.
+	 */
+	status?(parameters: unknown, result: AgentToolResult<unknown>): string | undefined;
 }
 
 /**
