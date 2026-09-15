@@ -4,6 +4,17 @@ const BITS_PER_SAMPLE = 16;
 const INT16_MAX = 32_767;
 const INT16_MIN = -32_768;
 
+/** Concatenate PCM chunks into one contiguous sample buffer. */
+export function concatenatePcm(chunks: readonly Float32Array[], totalLength: number): Float32Array {
+	const samples = new Float32Array(totalLength);
+	let offset = 0;
+	for (const chunk of chunks) {
+		samples.set(chunk, offset);
+		offset += chunk.length;
+	}
+	return samples;
+}
+
 /**
  * Assemble a mono PCM16 WAV byte buffer from Float32 PCM samples (the shape
  * transformers.js `RawAudio` emits: normalized [-1, 1] amplitudes plus a sample

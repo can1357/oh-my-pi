@@ -1,4 +1,4 @@
-import { isRecord, ptree } from "@oh-my-pi/pi-utils";
+import { isRecord, ptree, readBoundedBytes } from "@oh-my-pi/pi-utils";
 
 export { isRecord };
 
@@ -28,38 +28,6 @@ export interface BinaryFetchSuccess {
 
 export type BinaryFetchResult = BinaryFetchSuccess | { ok: false; error?: string };
 
-async function readResponseWithLimit(response: Response, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array> {
-	const reader = response.body?.getReader();
-	if (!reader) return new Uint8Array(0);
-
-	const chunks: Buffer[] = [];
-	let totalBytes = 0;
-
-	try {
-		while (true) {
-			if (signal?.aborted) {
-				await reader.cancel();
-				throw new ToolAbortError();
-			}
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value || value.byteLength === 0) continue;
-
-			totalBytes += value.byteLength;
-			if (totalBytes > maxBytes) {
-				await reader.cancel();
-				throw new Error(`response exceeds ${maxBytes} bytes`);
-			}
-
-			chunks.push(Buffer.from(value));
-		}
-	} finally {
-		reader.releaseLock();
-	}
-
-	return new Uint8Array(Buffer.concat(chunks, totalBytes));
-}
-
 /**
  * Fetch binary content from a URL
  */
@@ -86,7 +54,8 @@ export async function fetchBinary(url: string, timeout: number = 20, signal?: Ab
 				return { ok: false, error: `content-length ${size} exceeds ${MAX_BYTES}` };
 			}
 		}
-		const buffer = await readResponseWithLimit(response, MAX_BYTES, requestSignal);
+		const { value: buffer, truncated } = await readBoundedBytes(response.body, MAX_BYTES, requestSignal);
+		if (truncated) return { ok: false, error: `response exceeds ${MAX_BYTES} bytes` };
 		return { ok: true, buffer, contentDisposition };
 	} catch (err) {
 		if (signal?.aborted) throw new ToolAbortError();

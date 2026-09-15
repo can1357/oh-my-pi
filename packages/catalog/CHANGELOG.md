@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added the Codex speech-transcription wire route for cloud dictation ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
+
+### Added
+
 - DeepSeek V4.1 Flash (`deepseek-flash`) now accepts image inputs and resolves its reasoning metadata, name, and effort ladder from upstream instead of shipping as a text-only row without them.
 
 ### Fixed
