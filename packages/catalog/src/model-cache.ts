@@ -436,19 +436,6 @@ function readRowUncached<TApi extends Api>(
 	}
 }
 
-function readModelCacheUncached<TApi extends Api>(
-	providerId: string,
-	ttlMs: number,
-	now: () => number,
-	dbPath?: string,
-): CacheEntry<TApi> | null {
-	try {
-		return withModelCacheDb(dbPath, db => readRowUncached<TApi>(db, providerId, ttlMs, now));
-	} catch {
-		return null;
-	}
-}
-
 /** Whether a live model carries at least one request header. */
 function hasModelHeaders(model: Model<Api>): boolean {
 	const headers = model.headers;

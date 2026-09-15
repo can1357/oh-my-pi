@@ -6189,10 +6189,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleResetContextCommand();
 	}
 
-	async handleDropCommand(): Promise<void> {
+	async handleDeleteCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.prepareSessionSwitch();
-		await this.#commandController.handleDropCommand();
+		await this.#commandController.handleDeleteCommand();
 	}
 
 	async handleForkCommand(): Promise<void> {

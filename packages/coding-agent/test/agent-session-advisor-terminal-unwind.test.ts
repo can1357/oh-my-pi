@@ -162,7 +162,7 @@ it.each(["concern", "nit", "blocker"] as const)(
 		advise.execute = async (...args) => {
 			const result = await originalExecute(...args);
 			const feedback = contentText(result.content);
-			if (/Recorded\.|Deferred|Accepted|queued|preserved|urgent/i.test(feedback)) {
+			if (/Delivered|Queued|preserved|urgent/i.test(feedback)) {
 				adviceAccepted.resolve({ feedback, streaming: agent.state.isStreaming });
 			}
 			return result;
@@ -197,7 +197,7 @@ it.each(["concern", "nit", "blocker"] as const)(
 			note: "live next-turn concern",
 			severity: "concern",
 		});
-		expect(contentText(liveResult.content)).toMatch(/Accepted|Deferred/);
+		expect(contentText(liveResult.content)).toMatch(/Delivered|Queued/);
 		releaseNextProvider.resolve();
 		await nextRun;
 		await session.waitForIdle();
