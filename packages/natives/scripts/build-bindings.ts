@@ -89,9 +89,10 @@ const PLATFORM_NEUTRAL_BINDING_NAMES: Record<string, true> = {
 	PointerOptions: true,
 	copyToClipboard: true,
 	readImageFromClipboard: true,
+	readTextFromClipboard: true,
 };
 
-const DECLARATION_START_RE = /^export (?:declare (?:class|function|enum)|(?:interface|type))\s+(\w+)/;
+const DECLARATION_START_RE = /^export (?:declare )?(?:class|function|(?:const )?enum|interface|type)\s+(\w+)/;
 
 function declarationBlocks(dts: string): Map<string, string> {
 	const lines = dts.split("\n");
@@ -113,9 +114,22 @@ function declarationBlocks(dts: string): Map<string, string> {
 function preservePlatformNeutralDeclarations(generated: string, existing: string): string {
 	const generatedBlocks = declarationBlocks(generated);
 	const existingBlocks = declarationBlocks(existing);
-	const preserved = [...existingBlocks.entries()]
-		.filter(([name]) => PLATFORM_NEUTRAL_BINDING_NAMES[name] === true && !generatedBlocks.has(name))
-		.map(([, block]) => block);
+	// Keep each optional entry's full referenced-type closure, not only its root signature.
+	const preservedNames = new Set(
+		Object.keys(PLATFORM_NEUTRAL_BINDING_NAMES).filter(name => existingBlocks.has(name) && !generatedBlocks.has(name)),
+	);
+	const pending = [...preservedNames];
+	while (pending.length > 0) {
+		const block = existingBlocks.get(pending.pop()!)!;
+		const source = block.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+		for (const match of source.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
+			const name = match[0]!;
+			if (generatedBlocks.has(name) || preservedNames.has(name) || !existingBlocks.has(name)) continue;
+			preservedNames.add(name);
+			pending.push(name);
+		}
+	}
+	const preserved = [...existingBlocks.entries()].filter(([name]) => preservedNames.has(name)).map(([, block]) => block);
 	if (preserved.length === 0) return generated;
 	return `${generated.trimEnd()}\n\n${preserved.join("\n\n")}\n`;
 }
