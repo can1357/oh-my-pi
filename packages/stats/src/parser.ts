@@ -350,7 +350,8 @@ function extractToolCalls(
 	// `tool_calls` columns are NOT NULL: skip turns that can't be attributed
 	// (malformed persisted entries — see extractStats) and blocks missing ids.
 	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return [];
-
+	const model = msg.upstreamModel ?? msg.model;
+	const provider = msg.upstreamProvider ?? msg.provider;
 	const blocks = msg.content.filter(
 		(block): block is ToolCall =>
 			block !== null &&
@@ -380,8 +381,8 @@ function extractToolCalls(
 			toolCallId: block.id,
 			folder,
 			toolName,
-			model: msg.model,
-			provider: msg.provider,
+			model,
+			provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
