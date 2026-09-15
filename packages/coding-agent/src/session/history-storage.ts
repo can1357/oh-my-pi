@@ -17,6 +17,17 @@ export interface HistoryEntry {
 	sessionId?: string;
 }
 
+/**
+ * Restricts recall to the prompts submitted in a project and/or a session. An
+ * omitted field is unrestricted, so an empty scope is global recall.
+ */
+export interface HistoryScope {
+	/** Project working directory the submission must have come from. */
+	cwd?: string;
+	/** Session ID the submission must have come from. */
+	sessionId?: string;
+}
+
 type HistoryRow = {
 	id: number;
 	prompt: string;
@@ -60,6 +71,41 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC);
 `;
 
+/**
+ * Canonical `history_usage` schema: one row per (prompt, project, session) the
+ * prompt was submitted from. `history` keeps a prompt once with its latest
+ * provenance, which cannot answer "was this prompt used here?" — this index
+ * can, so scoped recall keeps a prompt in every scope it was typed in instead
+ * of only the most recent one.
+ */
+const HISTORY_USAGE_DDL = `
+CREATE TABLE IF NOT EXISTS history_usage (
+	prompt_id INTEGER NOT NULL,
+	cwd TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH}),
+	PRIMARY KEY (prompt_id, cwd, session_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_history_usage_cwd ON history_usage(cwd, used_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_usage_session ON history_usage(session_id, used_at DESC);
+`;
+
+/** Scope-filtered recall reports the latest submission **within the scope** as `created_at`. */
+const SCOPED_COLUMNS = "h.id, h.prompt, MAX(u.used_at) AS created_at, h.cwd, h.session_id";
+
+/** Prompt rows joined to the per-scope submissions that recorded them. */
+const SCOPED_FROM = "FROM history h JOIN history_usage u ON u.prompt_id = h.id";
+
+/** Full-text hits joined to their prompt rows and per-scope submissions. */
+const SCOPED_FTS_FROM =
+	"FROM history_fts f JOIN history h ON h.id = f.rowid JOIN history_usage u ON u.prompt_id = h.id";
+
+/** Collapses the per-scope submission rows back to one row per prompt, newest first. */
+const SCOPED_TAIL = "GROUP BY h.id ORDER BY created_at DESC, h.id DESC LIMIT ?";
+
+/** `WHERE` fragment and its bound values for a scope; an empty fragment means global recall. */
+type ScopeFilter = { where: string; params: string[] };
+
 let cancelExitCleanup: (() => void) | undefined;
 
 /** Stores searchable prompts with only their latest project and session metadata. */
@@ -70,10 +116,11 @@ export class HistoryStorage {
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
+	#usageStmt: Statement;
 	#recentStmt: Statement;
 	#searchStmt: Statement;
-	// Cache substring-fallback prepared statements keyed by token count.
-	#substringStmts = new Map<number, Statement>();
+	// Lazily prepared scope and token-count variants, cached by statement text.
+	#preparedStmts = new Map<string, Statement>();
 
 	private constructor(dbPath: string) {
 		this.#ensureDir(dbPath);
@@ -109,6 +156,7 @@ END;
 				logger.warn("HistoryStorage FTS rebuild failed", { error: String(error) });
 			}
 		}
+		this.#ensureUsage(rebuilt);
 		this.#recentStmt = this.#db.prepare(
 			"SELECT id, prompt, created_at, cwd, session_id FROM history ORDER BY created_at DESC, id DESC LIMIT ?",
 		);
@@ -122,6 +170,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 	created_at = excluded.created_at,
 	cwd = excluded.cwd,
 	session_id = excluded.session_id
+		`);
+		// Resolves the id from the row the upsert just wrote, so the usage index
+		// never needs the prompt's id round-tripped through JS.
+		this.#usageStmt = this.#db.prepare(`
+INSERT INTO history_usage (prompt_id, cwd, session_id, used_at)
+SELECT id, ?, ?, ${SQLITE_NOW_EPOCH} FROM history WHERE prompt = ?
+ON CONFLICT(prompt_id, cwd, session_id) DO UPDATE SET used_at = excluded.used_at
 		`);
 	}
 
@@ -150,9 +205,10 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 	#close(): void {
 		checkpointWal(this.#db);
-		for (const stmt of this.#substringStmts.values()) stmt.finalize();
-		this.#substringStmts.clear();
+		for (const stmt of this.#preparedStmts.values()) stmt.finalize();
+		this.#preparedStmts.clear();
 		this.#upsertRowStmt.finalize();
+		this.#usageStmt.finalize();
 		this.#recentStmt.finalize();
 		this.#searchStmt.finalize();
 		this.#db.close();
@@ -162,6 +218,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
+				this.#usageStmt.run(row.cwd ?? "", row.sessionId ?? "", row.prompt);
 			}
 		})(rows);
 	}
@@ -193,13 +250,21 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
-	/** Returns unique prompts ordered by their most recent submission. */
-	getRecent(limit: number): HistoryEntry[] {
+	/** Returns unique prompts ordered by their most recent submission in `scope`. */
+	getRecent(limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
+		const filter = this.#scopeFilter(scope);
 		try {
-			const rows = this.#recentStmt.all(safeLimit) as HistoryRow[];
+			const rows = (
+				filter.where
+					? this.#prepared(`SELECT ${SCOPED_COLUMNS} ${SCOPED_FROM} WHERE ${filter.where} ${SCOPED_TAIL}`).all(
+							...filter.params,
+							safeLimit,
+						)
+					: this.#recentStmt.all(safeLimit)
+			) as HistoryRow[];
 			return rows.map(row => this.#toEntry(row));
 		} catch (error) {
 			logger.error("HistoryStorage getRecent failed", { error: String(error) });
@@ -207,13 +272,15 @@ ON CONFLICT(prompt) DO UPDATE SET
 		}
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
-	search(query: string, limit: number): HistoryEntry[] {
+	/** Finds unique prompts in `scope` matching every query token, newest first. */
+	search(query: string, limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
 		const tokens = this.#tokenize(query);
 		if (tokens.length === 0) return [];
+
+		const filter = this.#scopeFilter(scope);
 
 		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
 		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
@@ -221,7 +288,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
-			ftsRows = this.#searchStmt.all(ftsQuery, safeLimit) as HistoryRow[];
+			ftsRows = (
+				filter.where
+					? this.#prepared(
+							`SELECT ${SCOPED_COLUMNS} ${SCOPED_FTS_FROM} WHERE history_fts MATCH ? AND ${filter.where} ${SCOPED_TAIL}`,
+						).all(ftsQuery, ...filter.params, safeLimit)
+					: this.#searchStmt.all(ftsQuery, safeLimit)
+			) as HistoryRow[];
 		} catch (error) {
 			// Malformed FTS expression - fall through to substring path.
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
@@ -232,7 +305,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		//    by safeLimit, ordered by recency - no full-table load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit);
+			subRows = this.#searchSubstring(tokens, safeLimit, filter);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -337,6 +410,58 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return true;
 	}
 
+	/**
+	 * Creates the per-scope usage index and backfills it from the prompt rows'
+	 * stored provenance. Legacy rows carry only their latest project/session, so
+	 * an existing database starts with one usage row per prompt and records the
+	 * remaining scopes as those prompts are resubmitted.
+	 */
+	#ensureUsage(rebuilt: boolean): void {
+		const hadUsage = this.#db
+			.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_usage'")
+			.get();
+		this.#db.run(HISTORY_USAGE_DDL);
+		if (hadUsage && !rebuilt) return;
+		try {
+			this.#db.transaction(() => {
+				// A rebuild recreates `history` from scratch; usage rows pointing at
+				// prompts it collapsed would otherwise keep matching nothing.
+				if (rebuilt) this.#db.run("DELETE FROM history_usage WHERE prompt_id NOT IN (SELECT id FROM history)");
+				this.#db.run(`
+INSERT OR IGNORE INTO history_usage (prompt_id, cwd, session_id, used_at)
+SELECT id, COALESCE(cwd, ''), COALESCE(session_id, ''), created_at FROM history
+				`);
+			})();
+		} catch (error) {
+			logger.warn("HistoryStorage usage backfill failed", { error: String(error) });
+		}
+	}
+
+	/** Builds the `history_usage` restriction for `scope`; empty `where` = global recall. */
+	#scopeFilter(scope?: HistoryScope): ScopeFilter {
+		const clauses: string[] = [];
+		const params: string[] = [];
+		if (scope?.cwd !== undefined) {
+			clauses.push("u.cwd = ?");
+			params.push(scope.cwd);
+		}
+		if (scope?.sessionId !== undefined) {
+			clauses.push("u.session_id = ?");
+			params.push(scope.sessionId);
+		}
+		return { where: clauses.join(" AND "), params };
+	}
+
+	/** Prepares `sql` once and caches it by statement text. */
+	#prepared(sql: string): Statement {
+		let stmt = this.#preparedStmts.get(sql);
+		if (!stmt) {
+			stmt = this.#db.prepare(sql);
+			this.#preparedStmts.set(sql, stmt);
+		}
+		return stmt;
+	}
+
 	#normalizeLimit(limit: number): number {
 		if (!Number.isFinite(limit)) return 0;
 		const clamped = Math.max(0, Math.floor(limit));
@@ -355,22 +480,17 @@ ON CONFLICT(prompt) DO UPDATE SET
 			.filter(tok => tok.length > 0);
 	}
 
-	#searchSubstring(tokens: string[], limit: number): HistoryRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: unknown[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
-		params.push(limit);
-		return stmt.all(...(params as [string, ...unknown[]])) as HistoryRow[];
-	}
-
-	#getSubstringStmt(tokenCount: number): Statement {
-		let stmt = this.#substringStmts.get(tokenCount);
-		if (stmt) return stmt;
-		const whereClause = Array(tokenCount).fill("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
-		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
+	#searchSubstring(tokens: string[], limit: number, filter: ScopeFilter): HistoryRow[] {
+		const column = filter.where ? "h.prompt" : "prompt";
+		const matches = Array(tokens.length).fill(`${column} LIKE ? ESCAPE '\\' COLLATE NOCASE`).join(" AND ");
+		const stmt = this.#prepared(
+			filter.where
+				? `SELECT ${SCOPED_COLUMNS} ${SCOPED_FROM} WHERE ${matches} AND ${filter.where} ${SCOPED_TAIL}`
+				: `SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${matches} ORDER BY created_at DESC, id DESC LIMIT ?`,
 		);
-		this.#substringStmts.set(tokenCount, stmt);
-		return stmt;
+		const params: unknown[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+		params.push(...filter.params, limit);
+		return stmt.all(...(params as [string, ...unknown[]])) as HistoryRow[];
 	}
 
 	#toEntry(row: HistoryRow): HistoryEntry {

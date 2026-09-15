@@ -545,6 +545,7 @@ Recent/most-recent scans read only a 4 KiB prefix. Full lists read that prefix p
 - DB: `~/.omp/agent/history.db`
 - Table: `history(id, prompt, created_at, cwd, session_id)`
 - FTS5 index: `history_fts` with trigger-maintained sync
+- Scope index: `history_usage(prompt_id, cwd, session_id, used_at)`, one row per project/session a prompt was submitted from, so `historyScope: project` / `session` recall can filter without dropping a prompt that was reused elsewhere
 - Deduplicates consecutive identical prompts using in-memory last-prompt cache
 - Inserts are batched through an async drain queue (~100 ms delay) so prompt capture does not block turn execution
 

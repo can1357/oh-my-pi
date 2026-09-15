@@ -720,6 +720,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `steeringMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered.                                     |
 | `followUpMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
+| `historyScope`         | enum    | `global`        | `global`, `project`, `session`. Which prompts Up/Down recall and `Ctrl+R` search offer: every project, the current project, or only the current session. |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `none`.                                                                               |
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |

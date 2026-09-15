@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `historyScope` (`global` — default, `project`, `session`): prompt recall and history search can now offer only the prompts submitted in the current project or the current session instead of every project's ([#12122](https://github.com/can1357/oh-my-pi/pull/12122) by [@LEON-gittech](https://github.com/LEON-gittech)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes

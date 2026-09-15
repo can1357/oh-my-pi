@@ -113,7 +113,8 @@ import {
 } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
-import { HistoryStorage } from "../session/history-storage";
+import { resolveHistoryScope } from "../session/history-scope";
+import { type HistoryScope, HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
@@ -1021,6 +1022,35 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.lastAssistantUsage = undefined;
 		this.servedModelTracker = new ServedModelTracker();
 		this.pendingTools.clear();
+		this.#reloadScopedEditorHistory();
+	}
+
+	/** Prompt-recall filter from the `historyScope` setting; `undefined` is global recall. */
+	historyScope(): HistoryScope | undefined {
+		return resolveHistoryScope(settings.get("historyScope"), this.sessionManager.getSessionId());
+	}
+
+	/**
+	 * Editor-facing view of prompt history under the active recall scope. The
+	 * editor snapshots recall when the view is installed, so the scope is
+	 * resolved per call rather than captured here.
+	 */
+	#scopedHistory(storage: HistoryStorage) {
+		return {
+			add: storage.add.bind(storage),
+			getRecent: (limit: number) => storage.getRecent(limit, this.historyScope()),
+		};
+	}
+
+	/**
+	 * Re-snapshots the editor's recall list when the scope's identity may have
+	 * moved. Session scope follows the live session id, so a new, resumed, or
+	 * branched session has to stop offering the previous session's prompts.
+	 */
+	#reloadScopedEditorHistory(): void {
+		const storage = this.historyStorage;
+		if (!storage || this.historyScope()?.sessionId === undefined) return;
+		this.editor.setHistoryStorage(this.#scopedHistory(storage));
 	}
 	readonly #uiHelpers: UiHelpers;
 	#sttController: STTController | undefined;
@@ -1189,8 +1219,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
 			this.historyStorage = HistoryStorage.open();
-			this.editor.setHistoryStorage(this.historyStorage);
 			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
+			this.editor.setHistoryStorage(this.#scopedHistory(this.historyStorage));
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
@@ -5498,7 +5528,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.syncComposerShape();
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
-			nextEditor.setHistoryStorage(this.historyStorage);
+			nextEditor.setHistoryStorage(this.#scopedHistory(this.historyStorage));
 		}
 		nextEditor.setText(previousText);
 

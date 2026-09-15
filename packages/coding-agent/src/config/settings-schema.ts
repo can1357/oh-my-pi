@@ -2052,6 +2052,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	historyScope: {
+		type: "enum",
+		values: ["global", "project", "session"] as const,
+		default: "global",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "History Scope",
+			description:
+				"Which prompts Up/Down recall and history search offer: every project (global), the prompts submitted in the current project, or only the ones submitted in the current session",
+		},
+	},
+
 	"tui.vimMode": {
 		type: "boolean",
 		default: false,

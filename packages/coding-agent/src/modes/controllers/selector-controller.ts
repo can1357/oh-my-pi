@@ -52,6 +52,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import { resolveHistoryScope } from "../../session/history-scope";
 import { isTranscriptEntry, isUserRequestEntry, type TranscriptEntry } from "../../session/session-context";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
@@ -450,6 +451,7 @@ export class SelectorController {
 		const historyStorage = this.ctx.historyStorage;
 		if (!historyStorage) return;
 
+		const scope = resolveHistoryScope(settings.get("historyScope"), this.ctx.sessionManager.getSessionId());
 		this.showSelector(done => {
 			const component = new HistorySearchComponent(
 				historyStorage,
@@ -462,6 +464,7 @@ export class SelectorController {
 					done();
 					this.ctx.ui.requestRender();
 				},
+				scope,
 			);
 			return { component, focus: component };
 		});

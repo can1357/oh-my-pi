@@ -17,7 +17,7 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
-import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
+import type { HistoryEntry, HistoryScope, HistoryStorage } from "../../session/history-storage";
 import { rawKeyHint } from "./keybinding-hints";
 import { OverlayPanel } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
@@ -149,6 +149,7 @@ class HistoryResultsList implements Component {
 
 export class HistorySearchComponent extends OverlayPanel {
 	#historyStorage: HistoryStorage;
+	#scope: HistoryScope | undefined;
 	#searchInput: Input;
 	#results: HistoryEntry[] = [];
 	#selectedIndex = 0;
@@ -157,9 +158,15 @@ export class HistorySearchComponent extends OverlayPanel {
 	#onCancel: () => void;
 	#resultLimit = 100;
 
-	constructor(historyStorage: HistoryStorage, onSelect: (prompt: string) => void, onCancel: () => void) {
+	constructor(
+		historyStorage: HistoryStorage,
+		onSelect: (prompt: string) => void,
+		onCancel: () => void,
+		scope?: HistoryScope,
+	) {
 		super("History");
 		this.#historyStorage = historyStorage;
+		this.#scope = scope;
 		this.#onSelect = onSelect;
 		this.#onCancel = onCancel;
 
@@ -253,8 +260,8 @@ export class HistorySearchComponent extends OverlayPanel {
 	#updateResults(): void {
 		const query = this.#searchInput.getValue().trim();
 		this.#results = query
-			? this.#historyStorage.search(query, this.#resultLimit)
-			: this.#historyStorage.getRecent(this.#resultLimit);
+			? this.#historyStorage.search(query, this.#resultLimit, this.#scope)
+			: this.#historyStorage.getRecent(this.#resultLimit, this.#scope);
 		this.#selectedIndex = 0;
 		this.#resultsList.setResults(this.#results, this.#selectedIndex, query ? queryTokens(query) : []);
 	}
