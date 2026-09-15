@@ -54,7 +54,6 @@ import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
 import {
 	applyPricingPeerFallbacks,
 	applyCanonicalLimitFallback,
-	applyCodexRemoteCompactionFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	hasBillableCost,
@@ -678,7 +677,6 @@ async function generateModels() {
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
-	applyCodexRemoteCompactionFallback(allModels);
 	allModels = applyPricingPeerFallbacks(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);

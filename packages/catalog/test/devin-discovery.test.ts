@@ -284,7 +284,8 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 	}),
 	// Harness-backed composite: router-flagged but a valid chat uid itself, so
 	// `AssignModel` must not be used. Its `modelDimensions` flatten the composite
-	// rate card plus each dispatched component's card — only the first is read.
+	// rate card plus each dispatched component's card, separated by `Sidekick`
+	// markers — only the headline card is priced.
 	config({
 		uid: "fusion",
 		label: "Fusion",
@@ -298,6 +299,23 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 			{ label: "Sidekick", value: 0, kind: ModelDimensionKind.UNSPECIFIED },
 			{ label: "Input", value: 3 },
 			{ label: "Cached input", value: 0.3 },
+			{ label: "Output", value: 15 },
+		],
+	}),
+	// Sparse headline card: no `Cached input` of its own, so a repeated-label
+	// heuristic would consume the component's cache rate as the composite's.
+	config({
+		uid: "fusion-sparse",
+		label: "Fusion Sparse",
+		displayOption: DisplayOption.MODEL_ROUTER,
+		isModelRouter: true,
+		harnessUids: ["fusion"],
+		dimensions: [
+			{ label: "Input", value: 10 },
+			{ label: "Output", value: 50 },
+			{ label: "Sidekick", value: 0, kind: ModelDimensionKind.UNSPECIFIED },
+			{ label: "Cached input", value: 0.3 },
+			{ label: "Input", value: 3 },
 			{ label: "Output", value: 15 },
 		],
 	}),
@@ -459,8 +477,13 @@ describe("devin native display filtering", () => {
 		const fusion = model("fusion");
 		expect(fusion.compat?.modelRouter).toBeUndefined();
 		// Composite dims flatten the composite card plus each component's card;
-		// only the first card is the model's own rate.
+		// only the headline card is the model's own rate.
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
+	});
+
+	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
+		const fusion = model("fusion-sparse");
+		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0, cacheWrite: 0 });
 	});
 });
 

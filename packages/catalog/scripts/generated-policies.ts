@@ -10,7 +10,6 @@ import { resolveModelPolicy } from "../src/compat/resolve";
 import { compareRevision, parseRevision } from "../src/compat/revision";
 import { seedModels } from "../src/compat/providers";
 import { classifyModel } from "../src/compat/taxonomy";
-import { CODEX_REMOTE_COMPACTION } from "../src/discovery/codex";
 import { resolveCursorInput } from "../src/discovery/cursor";
 import { bareModelId, getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
@@ -245,19 +244,6 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 }
 
 /**
- * Backfill Codex-native compaction metadata onto rows that bypass discovery
- * (authored seeds): discovery stamps every row with CODEX_REMOTE_COMPACTION
- * and the compaction router requires v2StreamingEnabled to be exactly true.
- * Never overwrites a row that already carries the metadata.
- */
-export function applyCodexRemoteCompactionFallback(models: ModelSpec<Api>[]): void {
-	for (const model of models) {
-		if (model.provider !== "openai-codex" || model.remoteCompaction !== undefined) continue;
-		model.remoteCompaction = { ...CODEX_REMOTE_COMPACTION };
-	}
-}
-
-/**
  * Complete Codex seed rows from the previous bundle: seeds cannot carry
  * row-specific discovery metadata (priority, websocket preference, max
  * context window), so fill fields the seed leaves absent from the previous
@@ -273,8 +259,12 @@ export function backfillCodexSeedGaps(
 ): void {
 	const prevCodex = previous["openai-codex"];
 	if (!prevCodex) return;
+	// Only the authored fallback seed is completed: live discovery rows omit
+	// these fields deliberately when the backend doesn't report them, and
+	// must not resurrect stale snapshot values.
+	const seedIds = new Set(seedModels("openai-codex").map(candidate => candidate.id));
 	for (const model of models) {
-		if (model.provider !== "openai-codex") continue;
+		if (model.provider !== "openai-codex" || !seedIds.has(model.id)) continue;
 		const prev = prevCodex[model.id];
 		if (!prev) continue;
 		model.priority ??= prev.priority;

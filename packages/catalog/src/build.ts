@@ -37,7 +37,7 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
  * `requires-cursor-tool-schema-projection`, `requires-tool-result-image-hoisting`,
- * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` fills
+ * `supports-assistant-prefill`, `remote-compaction`) is rule-owned; `context-promotion-target` fills
  * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
@@ -48,6 +48,16 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		model.serviceTierCost = {
 			...(flex !== undefined && { flex }),
 			...(priorityTier !== undefined && { priority: priorityTier }),
+		};
+	}
+	const remoteCompaction = objectPayload(catalog.remoteCompaction);
+	if (remoteCompaction !== undefined) {
+		const enabled = Reflect.get(remoteCompaction, "enabled");
+		const v2StreamingEnabled = Reflect.get(remoteCompaction, "v2StreamingEnabled");
+		model.remoteCompaction = {
+			...(enabled === true && { enabled }),
+			api: model.api,
+			...(v2StreamingEnabled === true && { v2StreamingEnabled }),
 		};
 	}
 	const priority = catalog.priority;

@@ -46,7 +46,7 @@ const CODEX_GPT_5_6_1M_SLUGS: ReadonlySet<string> = new Set(["gpt-5.6-luna", "gp
  * resolve.
  */
 const CODEX_WORKER_SUFFIX = "-wm";
-export const CODEX_REMOTE_COMPACTION = {
+const CODEX_REMOTE_COMPACTION = {
 	enabled: true,
 	api: "openai-codex-responses",
 	v2StreamingEnabled: true,

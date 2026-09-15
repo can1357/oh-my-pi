@@ -76,6 +76,8 @@ function supportsDevinThinking(config: ClientModelConfig): boolean {
 const DEVIN_COST_LABEL_INPUT = "input";
 const DEVIN_COST_LABEL_CACHE_READ = "cached input";
 const DEVIN_COST_LABEL_OUTPUT = "output";
+/** Normalized label of the marker dimension separating composite rate cards. */
+const DEVIN_SIDEKICK_LABEL = "sidekick";
 
 /** Leading token count of a cost denominator ("1M tokens", "1K tokens"). */
 const DEVIN_COST_DENOMINATOR_PATTERN = /(\d+(?:\.\d+)?)\s*([kmb])?/i;
@@ -106,22 +108,21 @@ function devinCostDenominatorTokens(denominator: string): number {
  * stays 0.
  *
  * Composite configs (`fusion`) flatten their own rate card plus every
- * dispatched component's card into one `modelDimensions` list, separated by
- * `Sidekick` marker dimensions. The first card is the model's own rate; a
- * repeated cost label marks the next component's card, so reading stops there.
+ * dispatched component's card into one `modelDimensions` list. A `Sidekick`
+ * marker dimension separates the composite's own card from the component
+ * cards, so reading stops there: a headline card may omit dimensions a
+ * component includes, which makes repeated-label detection unreliable.
  */
 function devinModelCost(config: ClientModelConfig): ModelCost {
 	const cost: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-	const seenLabels = new Set<string>();
 	for (const dimension of config.modelDimensions) {
+		const label = dimension.label.trim().toLowerCase();
+		if (label === DEVIN_SIDEKICK_LABEL) {
+			break;
+		}
 		if (dimension.kind !== ModelDimensionKind.COST && dimension.kind !== ModelDimensionKind.COST_FUZZY) {
 			continue;
 		}
-		const label = dimension.label.trim().toLowerCase();
-		if (seenLabels.has(label)) {
-			break;
-		}
-		seenLabels.add(label);
 		// Dimension values arrive as protobuf floats: round off float32 noise
 		// (0.1 decodes as 0.10000000149011612) at sub-cent precision.
 		const perMillion =

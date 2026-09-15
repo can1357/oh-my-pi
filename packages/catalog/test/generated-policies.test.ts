@@ -3,14 +3,12 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyPricingPeerFallbacks,
-	applyCodexRemoteCompactionFallback,
 	backfillCodexSeedGaps,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
-import { CODEX_REMOTE_COMPACTION } from "../src/discovery/codex";
 import { resolveProviderModels } from "../src/model-manager";
 import { getBundledModel } from "../src/models";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
@@ -914,36 +912,6 @@ describe("applyPricingPeerFallbacks", () => {
 	});
 });
 
-describe("applyCodexRemoteCompactionFallback", () => {
-	it("stamps seed rows missing compaction metadata with the discovery const", () => {
-		const models: ModelSpec<Api>[] = [
-			createSpec({ id: "gpt-5.3-codex-spark", api: "openai-codex-responses", provider: "openai-codex" }),
-		];
-
-		applyCodexRemoteCompactionFallback(models);
-
-		expect(models[0]?.remoteCompaction).toEqual(CODEX_REMOTE_COMPACTION);
-	});
-
-	it("leaves carried metadata and other providers untouched", () => {
-		const existing = { ...CODEX_REMOTE_COMPACTION, v2StreamingEnabled: false };
-		const codex: ModelSpec<Api> = {
-			...createSpec({ id: "gpt-5.5", api: "openai-codex-responses", provider: "openai-codex" }),
-			remoteCompaction: existing,
-		};
-		const other: ModelSpec<Api> = createSpec({
-			id: "deepseek-v4-flash",
-			api: "openai-completions",
-			provider: "deepseek",
-		});
-
-		applyCodexRemoteCompactionFallback([codex, other]);
-
-		expect(codex.remoteCompaction).toBe(existing);
-		expect(other.remoteCompaction).toBeUndefined();
-	});
-});
-
 describe("backfillCodexSeedGaps", () => {
 	const previous = {
 		"openai-codex": {
@@ -963,23 +931,36 @@ describe("backfillCodexSeedGaps", () => {
 		expect(models[0]?.maxContextWindow).toBe(128000);
 	});
 
-	it("leaves carried values, unknown ids, and other providers untouched", () => {
+	it("preserves carried values and ignores non-seed rows even with snapshot data", () => {
 		const models: ModelSpec<Api>[] = [
 			{
-				...createSpec({ id: "gpt-5.5", api: "openai-codex-responses", provider: "openai-codex", priority: 12 }),
+				...createSpec({
+					id: "gpt-5.3-codex-spark",
+					api: "openai-codex-responses",
+					provider: "openai-codex",
+				}),
+				priority: 12,
 				preferWebsockets: false,
 				maxContextWindow: 272000,
 			},
 			createSpec({ id: "gpt-5.6-sol", api: "openai-codex-responses", provider: "openai-codex" }),
 			createSpec({ id: "deepseek-v4-flash", api: "openai-completions", provider: "deepseek" }),
 		];
+		const snapshot = {
+			"openai-codex": {
+				"gpt-5.3-codex-spark": { priority: 26, preferWebsockets: true, maxContextWindow: 128000 },
+				"gpt-5.6-sol": { priority: 30, preferWebsockets: true, maxContextWindow: 272000 },
+			},
+		};
 
-		backfillCodexSeedGaps(models, previous);
+		backfillCodexSeedGaps(models, snapshot);
 
 		expect(models[0]?.priority).toBe(12);
 		expect(models[0]?.preferWebsockets).toBe(false);
 		expect(models[0]?.maxContextWindow).toBe(272000);
 		expect(models[1]?.priority).toBeUndefined();
+		expect(models[1]?.preferWebsockets).toBeUndefined();
+		expect(models[1]?.maxContextWindow).toBeUndefined();
 		expect(models[2]?.priority).toBeUndefined();
 	});
 });

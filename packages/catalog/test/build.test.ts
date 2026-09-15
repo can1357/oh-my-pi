@@ -74,6 +74,28 @@ describe("buildModel", () => {
 		expect(model.compatConfig).toBeUndefined();
 	});
 
+	it("projects the rule-owned remote-compaction axis onto Codex rows", () => {
+		const spec: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-5.3-codex-spark",
+			name: "GPT-5.3 Codex Spark",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 128000,
+		};
+
+		expect(buildModel(spec).remoteCompaction).toEqual({
+			enabled: true,
+			api: "openai-codex-responses",
+			v2StreamingEnabled: true,
+		});
+		expect(buildModel(completionsSpec()).remoteCompaction).toBeUndefined();
+	});
+
 	it("built models survive a JSON roundtrip, so generator-materialized rows need no rebuild", () => {
 		// models.ts consumes models.json rows verbatim as complete Models; this
 		// holds only if buildModel output is pure JSON (no functions, no

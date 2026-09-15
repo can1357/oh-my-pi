@@ -23,6 +23,13 @@ provider "openai-codex" {
 		flex 0.5
 		priority 2
 	}
+	// Native V2 compaction support is a deployment contract: every Codex
+	// row (discovered or seeded) carries it. `api` rides the row's own
+	// transport at build time.
+	remote-compaction {
+		enabled #true
+		v2-streaming-enabled #true
+	}
 	// Harmony-protocol leak detection/mitigation applies to every Codex model,
 	// current and future; replaces the provider check in harmony-leak.ts.
 	harmony-leak-mitigation #true
