@@ -129,6 +129,29 @@ describe("tool output details", () => {
 		}
 	});
 
+	it("strips terminal control bytes out of a renderer-provided summary", () => {
+		// `hub` is a renderer-backed tool whose summary detail is a model-supplied
+		// target, so this exercises the path that never reaches the generic branch.
+		const card = new ToolExecutionComponent(
+			"hub",
+			{ op: "send", to: "agent\u0007\u001b[2J", message: "hi" },
+			{},
+			undefined,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const row = card.render(120).join("");
+
+			expect(row).not.toContain("\u0007");
+			expect(row).not.toContain("\u001b[2J");
+			expect(Bun.stripANSI(row)).toContain("send → agent");
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
 	it("keeps a failed call distinguishable from a successful one while folded", () => {
 		const failed = new ToolExecutionComponent("custom-thing", { command: "exit 1" }, {}, undefined, uiStub);
 		failed.updateResult({ content: [{ type: "text", text: "boom" }], isError: true }, false);

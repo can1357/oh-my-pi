@@ -887,7 +887,12 @@ export class ToolExecutionComponent extends Container {
 
 	#renderCompact(width: number, singleRow: boolean = this.#allocation === 1): readonly string[] {
 		const summary = this.#activitySummary();
-		const detail = summary.detail ? theme.fg("muted", ` · ${summary.detail.replace(/\s+/g, " ")}`) : "";
+		// Any summary can carry model text — `hub` targets, xdev inner arguments, a
+		// bare command — and this row is the whole card under
+		// `display.hideToolOutputDetails`, so terminal control bytes come out before
+		// styling. `sanitizeText` keeps tabs and newlines and returns the input
+		// untouched when there is nothing to strip.
+		const detail = summary.detail ? theme.fg("muted", ` · ${sanitizeText(summary.detail).replace(/\s+/g, " ")}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
 		const elapsed =
@@ -898,7 +903,7 @@ export class ToolExecutionComponent extends Container {
 					)
 				: "";
 		const text = truncateToWidth(
-			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
+			`${theme.fg("toolTitle", theme.bold(sanitizeText(summary.label)))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
 		if (singleRow) {
@@ -935,11 +940,10 @@ export class ToolExecutionComponent extends Container {
 			for (const key of ["command", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
-					// These arguments come straight from the model and the compact row
-					// is the entire card under `display.hideToolOutputDetails`, so strip
-					// terminal control bytes and shorten a path before the line reaches
-					// the transcript.
-					const line = sanitizeText(value.split("\n", 1)[0] ?? "");
+					// A path is the one argument worth rewriting before it reaches the
+					// user: the row must not print the home directory. Control bytes
+					// are stripped later, in `#renderCompact`, for every summary.
+					const line = value.split("\n", 1)[0] ?? "";
 					return { label: this.#toolLabel, detail: key === "path" ? shortenPath(line) : line };
 				}
 			}
