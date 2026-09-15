@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed google-antigravity agent requests failing with a synthetic 429 RESOURCE_EXHAUSTED by adding a channel-level fallback to fold system instructions into user turns and session-scoped nonce tagging to avoid server-side prompt fingerprinting without busting prompt caches ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Added
