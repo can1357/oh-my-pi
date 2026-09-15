@@ -6,9 +6,7 @@ description = "Compact systemctl status output — strip blank lines, limit to 2
 match_command = "^systemctl$"
 match_subcommand = "^status$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-]
+strip_lines_matching = ["^\\s*$"]
 max_lines = 20
 
 [[tests.systemctl-status]]

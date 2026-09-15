@@ -39,12 +39,14 @@ const timeout = 5000;
 ```
 
 Content is raw — never entity-escape:
+
 ```text
 WRONG: if (a &lt; b &amp;&amp; c) {
 RIGHT: if (a < b && c) {
 ```
 
 Fix every match:
+
 ```text
 <SM:EDIT path="src/catalog.ts" all>
 <SM:FIND>
@@ -57,6 +59,7 @@ logger.trace(
 ```
 
 Several edits, one file:
+
 ```text
 <SM:EDIT path="src/footer.ts">
 <SM:FIND>
@@ -83,6 +86,7 @@ const label = "percent";
 ```
 
 Insert new lines — keep the anchor, write only the addition:
+
 ```text
 <SM:EDIT path="src/retry.ts">
 <SM:FIND>
@@ -96,6 +100,7 @@ Insert new lines — keep the anchor, write only the addition:
 ```
 
 Large restructure — a gap skips the body you don't restate:
+
 ```text
 <SM:EDIT path="src/render.ts">
 <SM:FIND>
@@ -110,6 +115,7 @@ const renderPipeline = (input: Frame): Frame => commit(stage(input));
 ```
 
 Move a block — delete with an empty `<SM:PUT>`, insert after the destination anchor:
+
 ```text
 <SM:EDIT path="src/util.ts">
 <SM:FIND>
@@ -130,6 +136,7 @@ const helper = () => {
 ```
 
 Sparse gaps carry untyped lines through; `…` in `<SM:PUT>` re-emits them:
+
 ```text
 <SM:EDIT path="src/users.ts">
 <SM:FIND>
@@ -147,6 +154,7 @@ loadUser(…
 </SM:PUT>
 </SM:EDIT>
 ```
+
 </example>
 
 <critical>

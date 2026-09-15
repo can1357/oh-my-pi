@@ -94,11 +94,11 @@ the guest are the QEMU and kernel versions:
 
 ```yaml
 assets:
-  hypervisor:
-    qemu:
-      version: "v10.2.1"
-  kernel:
-    version: "v6.18.28"
+   hypervisor:
+      qemu:
+         version: "v10.2.1"
+   kernel:
+      version: "v6.18.28"
 ```
 
 `kata-runtime check` confirms the host can actually start a microVM (KVM
@@ -218,7 +218,7 @@ drop-in (`kata-qemu`).
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
-  name: kata-qemu
+   name: kata-qemu
 handler: kata-qemu
 ```
 
@@ -330,7 +330,7 @@ This is the most important block to understand for a CI runner.
 - `static_sandbox_resource_mgmt = false` still enables **dynamic** sizing: Kata
   reads the pod's CPU/memory **limits** that the kubelet/CRI hands the shim and
   hotplugs beyond the boot floor as needed. So a runner pod requesting `2 CPU /
-  4Gi` with limits `8 CPU / 12Gi` now boots at 2 vCPU/4 GiB and grows toward
+4Gi` with limits `8 CPU / 12Gi` now boots at 2 vCPU/4 GiB and grows toward
   8 vCPU / 12 GiB. If a pod sets no limits, the VM stays at the defaults.
 
 The practical rule here is simple: align the defaults to the runner pod's
@@ -357,7 +357,7 @@ to fan out across. `--announce-submounts` keeps nested mounts visible to the gue
 `emptyDir` volumes — they are shared into the guest over virtio-fs instead of
 being block devices.
 
-### `block_device_driver = "virtio-scsi"` — for the volumes that *are* blocks
+### `block_device_driver = "virtio-scsi"` — for the volumes that _are_ blocks
 
 Even with `disable_block_device_use = true` for the rootfs, any genuine block
 volume (e.g. a `local-path` PVC presented as a device) is attached over a
@@ -394,12 +394,12 @@ be mutually isolated and reproducible, so each job gets a **pristine VM built
 from scratch** with no memory state inherited from a previous job. The boot cost
 (a second or two) is an acceptable price for clean isolation, and the preloaded
 runner image ([`03-runner-image.md`](./03-runner-image.md)) is what removes the
-*real* per-job cost (dependency installs), not VM templating.
+_real_ per-job cost (dependency installs), not VM templating.
 
 ### Interaction with the overlayfs snapshotter
 
 k3s's containerd uses the default **overlayfs** snapshotter. For a `runc` pod
-that overlay mount *is* the container root. For a Kata pod, containerd still
+that overlay mount _is_ the container root. For a Kata pod, containerd still
 builds the same overlayfs rootfs on the host, but because `shared_fs =
 "virtio-fs"` it is **exported into the guest by virtiofsd** rather than used
 directly. So the two cooperate cleanly: the snapshotter assembles image layers

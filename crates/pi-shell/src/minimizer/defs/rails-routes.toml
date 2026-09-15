@@ -5,10 +5,7 @@ description = "Compact rails routes output"
 match_command = "^(rails|rake)$"
 match_subcommand = "^routes$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^\\s*Prefix\\s+Verb",
-]
+strip_lines_matching = ["^\\s*$", "^\\s*Prefix\\s+Verb"]
 truncate_lines_at = 160
 max_lines = 40
 

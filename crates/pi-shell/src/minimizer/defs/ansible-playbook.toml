@@ -5,11 +5,7 @@
 description = "Compact ansible-playbook output"
 match_command = "^ansible-playbook$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^ok: \\[",
-  "^skipping: \\[",
-]
+strip_lines_matching = ["^\\s*$", "^ok: \\[", "^skipping: \\["]
 max_lines = 60
 
 [[tests.ansible-playbook]]

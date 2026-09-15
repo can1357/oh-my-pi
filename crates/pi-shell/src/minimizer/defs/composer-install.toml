@@ -7,15 +7,13 @@ match_command = "^composer$"
 match_subcommand = "^(install|update|require)$"
 strip_ansi = true
 strip_lines_matching = [
-  "^\\s*$",
-  "^  - Downloading ",
-  "^  - Installing ",
-  "^Loading composer",
-  "^Updating dependencies",
+	"^\\s*$",
+	"^  - Downloading ",
+	"^  - Installing ",
+	"^Loading composer",
+	"^Updating dependencies",
 ]
-match_output = [
-  { pattern = "Nothing to install, update or remove", message = "ok (up to date)" },
-]
+match_output = [{ pattern = "Nothing to install, update or remove", message = "ok (up to date)" }]
 max_lines = 30
 
 [[tests.composer-install]]

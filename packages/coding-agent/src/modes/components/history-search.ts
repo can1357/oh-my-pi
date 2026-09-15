@@ -9,6 +9,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import {
 	matchesAppInterrupt,
@@ -17,7 +18,12 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
-import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
+import {
+	type HistoryEntry,
+	type HistoryScope,
+	type HistoryStorage,
+	HISTORY_SCOPE_LABELS,
+} from "../../session/history-storage";
 import { rawKeyHint } from "./keybinding-hints";
 import { OverlayPanel } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
@@ -80,13 +86,16 @@ function relativeTime(epochSeconds: number): string {
 class HistoryResultsList implements Component {
 	#results: HistoryEntry[] = [];
 	#tokens: string[] = [];
+	// Set by setResults before every render.
+	#emptyMessage!: string;
 	#selectedIndex = 0;
 	#maxVisible = MAX_VISIBLE;
 
-	setResults(results: HistoryEntry[], selectedIndex: number, tokens: string[]): void {
+	setResults(results: HistoryEntry[], selectedIndex: number, tokens: string[], emptyMessage: string): void {
 		this.#results = results;
 		this.#selectedIndex = selectedIndex;
 		this.#tokens = tokens;
+		this.#emptyMessage = emptyMessage;
 	}
 
 	setSelectedIndex(selectedIndex: number): void {
@@ -101,8 +110,7 @@ class HistoryResultsList implements Component {
 		const lines: string[] = [];
 
 		if (this.#results.length === 0) {
-			const message = this.#tokens.length > 0 ? "No matching history" : "No history yet";
-			lines.push(theme.fg("muted", `  ${theme.status.info} ${message}`));
+			lines.push(theme.fg("muted", `  ${theme.status.info} ${this.#emptyMessage}`));
 			return lines;
 		}
 
@@ -149,17 +157,31 @@ class HistoryResultsList implements Component {
 
 export class HistorySearchComponent extends OverlayPanel {
 	#historyStorage: HistoryStorage;
+	#scopes: readonly HistoryScope[];
+	#scopeIndex = 0;
 	#searchInput: Input;
 	#results: HistoryEntry[] = [];
 	#selectedIndex = 0;
 	#resultsList: HistoryResultsList;
+	#hint: Text;
 	#onSelect: (prompt: string) => void;
 	#onCancel: () => void;
 	#resultLimit = 100;
 
-	constructor(historyStorage: HistoryStorage, onSelect: (prompt: string) => void, onCancel: () => void) {
+	/**
+	 * `scopes` is the ring Tab cycles through, narrowest first, the starting scope in
+	 * front — the host resolves it (see `historyScopeRing`) because only it knows the
+	 * conversation and directory the scopes must resolve against.
+	 */
+	constructor(
+		historyStorage: HistoryStorage,
+		scopes: readonly HistoryScope[],
+		onSelect: (prompt: string) => void,
+		onCancel: () => void,
+	) {
 		super("History");
 		this.#historyStorage = historyStorage;
+		this.#scopes = scopes.length > 0 ? scopes : [{ kind: "global" }];
 		this.#onSelect = onSelect;
 		this.#onCancel = onCancel;
 
@@ -175,22 +197,52 @@ export class HistorySearchComponent extends OverlayPanel {
 		};
 
 		this.#resultsList = new HistoryResultsList();
-
-		const dot = theme.fg("dim", theme.sep.dot);
-		const hint = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select"), rawKeyHint("esc", "cancel")].join(dot);
+		this.#hint = new Text("", 0, 0);
 
 		this.addChild(new Spacer(1));
 		this.addChild(this.#searchInput);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#resultsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(hint, 0, 0));
+		this.addChild(this.#hint);
 		this.addChild(new Spacer(1));
 
+		this.#updateChrome();
 		this.#updateResults();
 	}
 
+	#scopeAt(index: number): HistoryScope {
+		const count = this.#scopes.length;
+		return this.#scopes[((index % count) + count) % count] ?? { kind: "global" };
+	}
+
+	#updateChrome(): void {
+		const label = HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex).kind];
+		this.title = `History (${label})`;
+		const dot = theme.fg("dim", theme.sep.dot);
+		const hints = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select")];
+		// A one-scope ring cannot cycle, so advertising Tab would promise a no-op.
+		if (this.#scopes.length > 1)
+			hints.push(rawKeyHint("tab", HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind]));
+		hints.push(rawKeyHint("esc", "cancel"));
+		this.#hint.setText(hints.join(dot));
+	}
+
 	handleInput(keyData: string): void {
+		// Tab and Shift+Tab cycle the scope ring in opposite directions. The ring starts on
+		// the configured scope and wraps, so neither key is strictly "wider" than the other.
+		// Deliberately not `handleTabSwitchKey`: that helper also consumes Left/Right, which
+		// move the cursor inside the query field.
+		const forward = matchesKey(keyData, "tab");
+		if (forward || matchesKey(keyData, "shift+tab")) {
+			const direction = forward ? 1 : -1;
+			this.#scopeIndex =
+				(((this.#scopeIndex + direction) % this.#scopes.length) + this.#scopes.length) % this.#scopes.length;
+			this.#updateChrome();
+			this.#updateResults();
+			return;
+		}
+
 		if (matchesSelectUp(keyData)) {
 			if (this.#results.length === 0) return;
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - 1);
@@ -252,10 +304,25 @@ export class HistorySearchComponent extends OverlayPanel {
 
 	#updateResults(): void {
 		const query = this.#searchInput.getValue().trim();
-		this.#results = query
-			? this.#historyStorage.search(query, this.#resultLimit)
-			: this.#historyStorage.getRecent(this.#resultLimit);
+		const scope = this.#scopeAt(this.#scopeIndex);
+		// A failing read must not surface inside this keystroke handler: the panel shows no results
+		// and the next keystroke tries again. `getRecent` reports its failure by throwing, which the
+		// editor's history seed uses to retry instead of clearing its list.
+		let results: HistoryEntry[] = [];
+		try {
+			results = query
+				? this.#historyStorage.search(query, this.#resultLimit, scope)
+				: this.#historyStorage.getRecent(this.#resultLimit, scope);
+		} catch (error) {
+			logger.warn("History search read failed", { error: String(error) });
+		}
+		this.#results = results;
 		this.#selectedIndex = 0;
-		this.#resultsList.setResults(this.#results, this.#selectedIndex, query ? queryTokens(query) : []);
+		const nextScope = HISTORY_SCOPE_LABELS[this.#scopeAt(this.#scopeIndex + 1).kind];
+		const widen = this.#scopes.length > 1 ? ` Press Tab for ${nextScope}.` : "";
+		const emptyMessage = query
+			? `No matching history in ${HISTORY_SCOPE_LABELS[scope.kind]}.${widen}`
+			: `No history in ${HISTORY_SCOPE_LABELS[scope.kind]}.${widen}`;
+		this.#resultsList.setResults(this.#results, this.#selectedIndex, query ? queryTokens(query) : [], emptyMessage);
 	}
 }

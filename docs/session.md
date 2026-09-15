@@ -70,17 +70,17 @@ Session files are JSONL: one JSON object per line. Current files physically begi
 
 ```json
 {
-  "type": "session",
-  "version": 3,
-  "id": "1f9d2a6b9c0d1234",
-  "timestamp": "2026-02-16T10:20:30.000Z",
-  "cwd": "/work/pi",
-  "title": "optional session title",
-  "titleSource": "auto",
-  "additionalDirectories": ["/work/shared"],
-  "previousSessionFiles": ["/old/location/session.jsonl"],
-  "providerPromptCacheKey": "optional inherited cache identity",
-  "parentSession": "optional lineage marker"
+	"type": "session",
+	"version": 3,
+	"id": "1f9d2a6b9c0d1234",
+	"timestamp": "2026-02-16T10:20:30.000Z",
+	"cwd": "/work/pi",
+	"title": "optional session title",
+	"titleSource": "auto",
+	"additionalDirectories": ["/work/shared"],
+	"previousSessionFiles": ["/old/location/session.jsonl"],
+	"providerPromptCacheKey": "optional inherited cache identity",
+	"parentSession": "optional lineage marker"
 }
 ```
 
@@ -99,10 +99,10 @@ All non-header entries include:
 
 ```json
 {
-  "type": "...",
-  "id": "8-char-id",
-  "parentId": "previous-or-branch-parent",
-  "timestamp": "2026-02-16T10:20:30.000Z"
+	"type": "...",
+	"id": "8-char-id",
+	"parentId": "previous-or-branch-parent",
+	"timestamp": "2026-02-16T10:20:30.000Z"
 }
 ```
 
@@ -134,30 +134,30 @@ Stores an `AgentMessage` directly.
 
 ```json
 {
-  "type": "message",
-  "id": "a1b2c3d4",
-  "parentId": null,
-  "timestamp": "2026-02-16T10:21:00.000Z",
-  "message": {
-    "role": "assistant",
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-5",
-    "content": [{ "type": "text", "text": "Done." }],
-    "usage": {
-      "input": 100,
-      "output": 20,
-      "cacheRead": 0,
-      "cacheWrite": 0,
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "total": 0
-      }
-    },
-    "timestamp": 1760000000000
-  }
+	"type": "message",
+	"id": "a1b2c3d4",
+	"parentId": null,
+	"timestamp": "2026-02-16T10:21:00.000Z",
+	"message": {
+		"role": "assistant",
+		"provider": "anthropic",
+		"model": "claude-sonnet-4-5",
+		"content": [{ "type": "text", "text": "Done." }],
+		"usage": {
+			"input": 100,
+			"output": 20,
+			"cacheRead": 0,
+			"cacheWrite": 0,
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0,
+				"total": 0
+			}
+		},
+		"timestamp": 1760000000000
+	}
 }
 ```
 
@@ -201,12 +201,12 @@ are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.t
 
 ```json
 {
-  "type": "model_change",
-  "id": "b1c2d3e4",
-  "parentId": "a1b2c3d4",
-  "timestamp": "2026-02-16T10:21:30.000Z",
-  "model": "openai/gpt-4o",
-  "role": "default"
+	"type": "model_change",
+	"id": "b1c2d3e4",
+	"parentId": "a1b2c3d4",
+	"timestamp": "2026-02-16T10:21:30.000Z",
+	"model": "openai/gpt-4o",
+	"role": "default"
 }
 ```
 
@@ -216,11 +216,11 @@ are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.t
 
 ```json
 {
-  "type": "service_tier_change",
-  "id": "c1d2e3f4",
-  "parentId": "b1c2d3e4",
-  "timestamp": "2026-02-16T10:21:45.000Z",
-  "serviceTier": { "openai": "priority", "google": "flex" }
+	"type": "service_tier_change",
+	"id": "c1d2e3f4",
+	"parentId": "b1c2d3e4",
+	"timestamp": "2026-02-16T10:21:45.000Z",
+	"serviceTier": { "openai": "priority", "google": "flex" }
 }
 ```
 
@@ -230,11 +230,11 @@ are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.t
 
 ```json
 {
-  "type": "thinking_level_change",
-  "id": "c1d2e3f4",
-  "parentId": "b1c2d3e4",
-  "timestamp": "2026-02-16T10:22:00.000Z",
-  "thinkingLevel": "high"
+	"type": "thinking_level_change",
+	"id": "c1d2e3f4",
+	"parentId": "b1c2d3e4",
+	"timestamp": "2026-02-16T10:22:00.000Z",
+	"thinkingLevel": "high"
 }
 ```
 
@@ -244,17 +244,17 @@ are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.t
 
 ```json
 {
-  "type": "compaction",
-  "id": "d1e2f3a4",
-  "parentId": "c1d2e3f4",
-  "timestamp": "2026-02-16T10:23:00.000Z",
-  "summary": "Conversation summary",
-  "shortSummary": "Short recap",
-  "firstKeptEntryId": "a1b2c3d4",
-  "tokensBefore": 42000,
-  "details": { "readFiles": ["src/a.ts"] },
-  "preserveData": { "hookState": true },
-  "fromExtension": false
+	"type": "compaction",
+	"id": "d1e2f3a4",
+	"parentId": "c1d2e3f4",
+	"timestamp": "2026-02-16T10:23:00.000Z",
+	"summary": "Conversation summary",
+	"shortSummary": "Short recap",
+	"firstKeptEntryId": "a1b2c3d4",
+	"tokensBefore": 42000,
+	"details": { "readFiles": ["src/a.ts"] },
+	"preserveData": { "hookState": true },
+	"fromExtension": false
 }
 ```
 
@@ -262,14 +262,14 @@ are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.t
 
 ```json
 {
-  "type": "branch_summary",
-  "id": "e1f2a3b4",
-  "parentId": "a1b2c3d4",
-  "timestamp": "2026-02-16T10:24:00.000Z",
-  "fromId": "a1b2c3d4",
-  "summary": "Summary of abandoned path",
-  "details": { "note": "optional" },
-  "fromExtension": true
+	"type": "branch_summary",
+	"id": "e1f2a3b4",
+	"parentId": "a1b2c3d4",
+	"timestamp": "2026-02-16T10:24:00.000Z",
+	"fromId": "a1b2c3d4",
+	"summary": "Summary of abandoned path",
+	"details": { "note": "optional" },
+	"fromExtension": true
 }
 ```
 
@@ -285,12 +285,12 @@ Opaque, non-LLM records owned by core subsystems or extensions. `buildSessionCon
 
 ```json
 {
-  "type": "custom",
-  "id": "f1a2b3c4",
-  "parentId": "e1f2a3b4",
-  "timestamp": "2026-02-16T10:25:00.000Z",
-  "customType": "com.example.my-extension.state",
-  "data": { "state": 1 }
+	"type": "custom",
+	"id": "f1a2b3c4",
+	"parentId": "e1f2a3b4",
+	"timestamp": "2026-02-16T10:25:00.000Z",
+	"customType": "com.example.my-extension.state",
+	"data": { "state": 1 }
 }
 ```
 
@@ -314,15 +314,15 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 ```json
 {
-  "type": "custom_message",
-  "id": "a2b3c4d5",
-  "parentId": "f1a2b3c4",
-  "timestamp": "2026-02-16T10:26:00.000Z",
-  "customType": "my-extension",
-  "content": "Injected context",
-  "display": true,
-  "details": { "debug": false },
-  "attribution": "agent"
+	"type": "custom_message",
+	"id": "a2b3c4d5",
+	"parentId": "f1a2b3c4",
+	"timestamp": "2026-02-16T10:26:00.000Z",
+	"customType": "my-extension",
+	"content": "Injected context",
+	"display": true,
+	"details": { "debug": false },
+	"attribution": "agent"
 }
 ```
 
@@ -330,12 +330,12 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 ```json
 {
-  "type": "label",
-  "id": "b2c3d4e5",
-  "parentId": "a2b3c4d5",
-  "timestamp": "2026-02-16T10:27:00.000Z",
-  "targetId": "a1b2c3d4",
-  "label": "checkpoint"
+	"type": "label",
+	"id": "b2c3d4e5",
+	"parentId": "a2b3c4d5",
+	"timestamp": "2026-02-16T10:27:00.000Z",
+	"targetId": "a1b2c3d4",
+	"label": "checkpoint"
 }
 ```
 
@@ -351,11 +351,11 @@ Append-only audit entry for a session rename. It records `title`, `source` (`aut
 
 ```json
 {
-  "type": "ttsr_injection",
-  "id": "c2d3e4f5",
-  "parentId": "b2c3d4e5",
-  "timestamp": "2026-02-16T10:28:00.000Z",
-  "injectedRules": ["ruleA", "ruleB"]
+	"type": "ttsr_injection",
+	"id": "c2d3e4f5",
+	"parentId": "b2c3d4e5",
+	"timestamp": "2026-02-16T10:28:00.000Z",
+	"injectedRules": ["ruleA", "ruleB"]
 }
 ```
 
@@ -367,18 +367,18 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
 
 ```json
 {
-  "type": "session_init",
-  "id": "d2e3f4a5",
-  "parentId": "c2d3e4f5",
-  "timestamp": "2026-02-16T10:29:00.000Z",
-  "systemPrompt": "...",
-  "task": "...",
-  "tools": ["read", "edit"],
-  "outputSchema": { "type": "object" },
-  "outputSchemaMode": "strict",
-  "restrictToolNames": true,
-  "spawns": "*",
-  "readSummarize": false
+	"type": "session_init",
+	"id": "d2e3f4a5",
+	"parentId": "c2d3e4f5",
+	"timestamp": "2026-02-16T10:29:00.000Z",
+	"systemPrompt": "...",
+	"task": "...",
+	"tools": ["read", "edit"],
+	"outputSchema": { "type": "object" },
+	"outputSchemaMode": "strict",
+	"restrictToolNames": true,
+	"spawns": "*",
+	"readSummarize": false
 }
 ```
 
@@ -386,12 +386,12 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
 
 ```json
 {
-  "type": "mode_change",
-  "id": "e2f3a4b5",
-  "parentId": "d2e3f4a5",
-  "timestamp": "2026-02-16T10:30:00.000Z",
-  "mode": "plan",
-  "data": { "planFile": "/tmp/plan.md" }
+	"type": "mode_change",
+	"id": "e2f3a4b5",
+	"parentId": "d2e3f4a5",
+	"timestamp": "2026-02-16T10:30:00.000Z",
+	"mode": "plan",
+	"data": { "planFile": "/tmp/plan.md" }
 }
 ```
 
@@ -553,7 +553,8 @@ Recent/most-recent scans read only a 4 KiB prefix. Full lists read that prefix p
 - DB: `~/.omp/agent/history.db`
 - Table: `history(id, prompt, created_at, cwd, session_id)`
 - FTS5 index: `history_fts` with trigger-maintained sync
-- Deduplicates consecutive identical prompts using in-memory last-prompt cache
-- Inserts are batched through an async drain queue (~100 ms delay) so prompt capture does not block turn execution
+- Reads take an optional scope: `session` (one conversation), `cwd` (one directory), `repo` (every directory sharing a primary repository root, worktrees included), or `global`, and directory scopes compare normalized spellings, so a symlinked checkout reads its history under either path. `matchingSessionIds` stays unscoped on purpose, so resume-picker ranking still crosses projects.
+- Writes are synchronous: a submitted prompt is durable when `add()` returns, so an exit racing a deferred flush cannot lose it.
+- Consecutive-duplicate suppression lives in the editor's local list, not in storage.
 
 Use session files for conversation graph/state replay; use `HistoryStorage` for prompt history UX.

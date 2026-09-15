@@ -11,10 +11,14 @@ Changelog targets (must call propose_changelog for these files):
 {{/if}}
 
 {{#if existing_changelog_entries}}
+
 ## Existing Unreleased Changelog Entries
+
 May include entries from list in propose_changelog `deletions` field for removal.
 {{#each existing_changelog_entries}}
+
 ### {{path}}
+
 {{#each sections}}
 {{name}}:
 {{#list items prefix="- " join="\n"}}{{this}}{{/list}}

@@ -31,7 +31,7 @@ app.history.search: []
 | `app.model.selectTemporary`  | `Alt+P`                                                               | Pick a model temporarily for this session                                                                                                                                            |
 | `app.model.select`           | `Alt+M`                                                               | Open the model selector and set roles                                                                                                                                                |
 | `app.plan.toggle`            | `Alt+Shift+P`                                                         | Toggle plan mode                                                                                                                                                                     |
-| `app.history.search`         | `Ctrl+R`                                                              | Search prompt history                                                                                                                                                                |
+| `app.history.search`         | `Ctrl+R`                                                              | Search prompt history. `Tab`/`Shift+Tab` cycle the search scope while the panel is open (the hint names the next one)                                                                |
 | `app.tools.expand`           | `Ctrl+O`                                                              | Toggle tool-output expansion                                                                                                                                                         |
 | `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                                                           |
 | `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                                                     |
@@ -52,6 +52,8 @@ app.history.search: []
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.
+
+What the `Up` arrow recalls can be scoped: it reads every project by default, exactly as before, and **Prompt History Scope** in `/settings` under Interaction > Input (`history.scope`) narrows it to `session` (the current conversation), `cwd` (the current folder) or `repo` (every worktree of one repository). The scope is re-resolved on every recall, so a new conversation, a moved directory or a changed setting takes effect immediately; canceled drafts (`Ctrl+C`) survive those switches, because they belong to the editor rather than to the scope. `Ctrl+R` searches everything by default; open it with a different **History Search Scope** (`history.searchScope`), or press `Tab`/`Shift+Tab` inside the panel to cycle the scope in either direction — the hint and the empty state name the active scope and the next one in the cycle.
 
 Cleared drafts preserve whitespace, collapsed pastes, and image attachments in the current editor's bounded history (100 entries). They are not written to persistent prompt history and do not appear in `Ctrl+R` search. Closing the process discards these canceled drafts; the separate save-on-exit behavior still applies to text currently in the composer. This is not a per-agent stash: history follows the editor, including when Agent Hub changes focus.
 
@@ -75,43 +77,43 @@ tui.vimMode: true
 
 The prompt then starts in Insert mode and behaves exactly as it always has. `Escape` switches to Normal mode; the prompt border changes color so the current mode is visible at a glance. While Vim mode is on, Insert draws a bar cursor and Normal/Visual a block — the software cursor always, the real terminal cursor via DECSCUSR under `PI_HARDWARE_CURSOR` — overriding the terminal's configured shape until the session restores it on exit. This is a useful subset of Vim, not a full implementation — enough for keyboard-only navigation and selection without adding more `Ctrl` chords that terminals, shells, and tmux already claim.
 
-| Mode        | Enter with              | Leave with                                              |
-| ----------- | ----------------------- | ------------------------------------------------------- |
-| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                                                |
-| Normal      | `Escape` from Insert    | any Insert-mode key                                     |
-| Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`)                  |
-| Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`)                  |
+| Mode        | Enter with              | Leave with                             |
+| ----------- | ----------------------- | -------------------------------------- |
+| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                               |
+| Normal      | `Escape` from Insert    | any Insert-mode key                    |
+| Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`) |
+| Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`) |
 
 ### Normal mode
 
-| Keys                          | Meaning                                                        |
-| ----------------------------- | -------------------------------------------------------------- |
-| `h` `j` `k` `l`               | Move by character and line (arrow keys work too)               |
-| `0` `^` `$`                   | Line start / first non-blank / line end                        |
-| `w` `b` `e`                   | Next word, previous word, end of word                          |
-| `gg` `G`                      | First line, last line (`5gg` and `5G` jump to line 5)          |
-| `1`–`9` prefix                | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`            |
-| `i` `a` `I` `A`               | Insert before / after cursor, at line start / line end         |
-| `o` `O`                       | Open a line below / above and insert                           |
-| `x` `D` `C`                   | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise) |
-| `d` `y` `c` + motion          | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`             |
-| `dd` `yy` `cc`                | Linewise delete / yank / change                                |
-| `d` `y` `c` + text object     | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`    |
-| `p` `P`                       | Put the last yank or delete after / before the cursor          |
-| `u`                           | Undo                                                            |
+| Keys                      | Meaning                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                    |
+| `0` `^` `$`               | Line start / first non-blank / line end                                                             |
+| `w` `b` `e`               | Next word, previous word, end of word                                                               |
+| `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                               |
+| `1`–`9` prefix            | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                 |
+| `i` `a` `I` `A`           | Insert before / after cursor, at line start / line end                                              |
+| `o` `O`                   | Open a line below / above and insert                                                                |
+| `x` `D` `C`               | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise) |
+| `d` `y` `c` + motion      | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`                                                  |
+| `dd` `yy` `cc`            | Linewise delete / yank / change                                                                     |
+| `d` `y` `c` + text object | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`                                         |
+| `p` `P`                   | Put the last yank or delete after / before the cursor                                               |
+| `u`                       | Undo                                                                                                |
 
 ### Text objects
 
 A text object follows an operator (`diw`) or extends a Visual selection (`viw`). `i` takes the inside, `a` takes the surroundings; counts apply, e.g. `d2aw`.
 
-| Object            | Covers                                                                     |
-| ----------------- | -------------------------------------------------------------------------- |
-| `iw` `aw`         | Word; `aw` also takes the adjoining whitespace                             |
-| `iW` `aW`         | Whitespace-delimited WORD                                                  |
-| `i"` `i'` `` i` `` | Inside the quotes on the current line (`a"` takes the quotes too)          |
-| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines         |
-| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`)     |
-| `ip` `ap`         | Paragraph — the run of non-blank (or blank) lines, linewise                |
+| Object              | Covers                                                                 |
+| ------------------- | ---------------------------------------------------------------------- |
+| `iw` `aw`           | Word; `aw` also takes the adjoining whitespace                         |
+| `iW` `aW`           | Whitespace-delimited WORD                                              |
+| `i"` `i'` `` i` ``  | Inside the quotes on the current line (`a"` takes the quotes too)      |
+| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines     |
+| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`) |
+| `ip` `ap`           | Paragraph — the run of non-blank (or blank) lines, linewise            |
 
 ### Visual mode
 

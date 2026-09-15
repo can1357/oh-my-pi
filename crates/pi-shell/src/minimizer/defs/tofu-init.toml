@@ -7,13 +7,13 @@ match_command = "^tofu$"
 match_subcommand = "^init$"
 strip_ansi = true
 strip_lines_matching = [
-  "^- Downloading",
-  "^- Installing",
-  "^- Using previously-installed",
-  "^\\s*$",
-  "^Initializing provider",
-  "^Initializing the backend",
-  "^Initializing modules",
+	"^- Downloading",
+	"^- Installing",
+	"^- Using previously-installed",
+	"^\\s*$",
+	"^Initializing provider",
+	"^Initializing the backend",
+	"^Initializing modules",
 ]
 max_lines = 20
 on_empty = "tofu init: ok"

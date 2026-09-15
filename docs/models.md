@@ -28,8 +28,8 @@ Legacy behavior still present:
 
 ```yaml
 providers:
-  <provider-id>:
-    # provider-level config
+   <provider-id>:
+      # provider-level config
 ```
 
 `provider-id` is the canonical provider key used across selection and auth lookup.
@@ -40,49 +40,49 @@ The root object currently contains only `providers`; unknown root keys fail sche
 
 ```yaml
 providers:
-  my-provider:
-    baseUrl: https://api.example.com/v1
-    apiKey: MY_PROVIDER_API_KEY
-    api: openai-completions
-    headers:
-      X-Team: platform
-    authHeader: true
-    auth: apiKey
-    disableStrictTools: false # set true for Anthropic-compatible endpoints that reject the strict field
-    discovery:
-      type: ollama
-      timeoutMs: 10000 # optional per-provider HTTP probe timeout in milliseconds
-    modelOverrides:
-      some-model-id:
-        name: Renamed model
-    models:
-      - id: some-model-id
-        name: Some Model
-        api: openai-completions
-        reasoning: false
-        input: [text]
-        imageInputDecoder: stb # local STB decoder; OMP converts WebP before dispatch
-        cost:
-          input: 0
-          output: 0
-          cacheRead: 0
-          cacheWrite: 0
-        contextWindow: 128000
-        maxTokens: 16384
-        headers:
-          X-Model: value
-        compat:
-          supportsStore: true
-          supportsDeveloperRole: true
-          supportsReasoningEffort: true
-          maxTokensField: max_completion_tokens
-          openRouterRouting:
-            only: [anthropic]
-          vercelGatewayRouting:
-            order: [anthropic, openai]
-          extraBody:
-            gateway: m1-01
-            controller: mlx
+   my-provider:
+      baseUrl: https://api.example.com/v1
+      apiKey: MY_PROVIDER_API_KEY
+      api: openai-completions
+      headers:
+         X-Team: platform
+      authHeader: true
+      auth: apiKey
+      disableStrictTools: false # set true for Anthropic-compatible endpoints that reject the strict field
+      discovery:
+         type: ollama
+         timeoutMs: 10000 # optional per-provider HTTP probe timeout in milliseconds
+      modelOverrides:
+         some-model-id:
+            name: Renamed model
+      models:
+         - id: some-model-id
+           name: Some Model
+           api: openai-completions
+           reasoning: false
+           input: [text]
+           imageInputDecoder: stb # local STB decoder; OMP converts WebP before dispatch
+           cost:
+              input: 0
+              output: 0
+              cacheRead: 0
+              cacheWrite: 0
+           contextWindow: 128000
+           maxTokens: 16384
+           headers:
+              X-Model: value
+           compat:
+              supportsStore: true
+              supportsDeveloperRole: true
+              supportsReasoningEffort: true
+              maxTokensField: max_completion_tokens
+              openRouterRouting:
+                 only: [anthropic]
+              vercelGatewayRouting:
+                 order: [anthropic, openai]
+              extraBody:
+                 gateway: m1-01
+                 controller: mlx
 ```
 
 ### Compaction options
@@ -157,10 +157,10 @@ Provider `apiKey` values and provider/model `headers` values may start with `!` 
 
 ```yaml
 providers:
-  openai:
-    apiKey: "!op read op://dev/openai/api-key"
-    headers:
-      X-Team-Key: "!bw get password omp-team-key"
+   openai:
+      apiKey: "!op read op://dev/openai/api-key"
+      headers:
+         X-Team-Key: "!bw get password omp-team-key"
 ```
 
 Successful command outputs are cached for the process lifetime so the command is not re-run for every model.
@@ -291,31 +291,31 @@ You can configure discovery yourself:
 
 ```yaml
 providers:
-  ollama:
-    baseUrl: http://127.0.0.1:11434
-    api: openai-responses
-    auth: none
-    discovery:
-      type: ollama
+   ollama:
+      baseUrl: http://127.0.0.1:11434
+      api: openai-responses
+      auth: none
+      discovery:
+         type: ollama
 
-  llama.cpp:
-    baseUrl: http://127.0.0.1:8080
-    api: openai-responses
-    auth: none
-    discovery:
-      type: llama.cpp
+   llama.cpp:
+      baseUrl: http://127.0.0.1:8080
+      api: openai-responses
+      auth: none
+      discovery:
+         type: llama.cpp
 ```
 
 Custom LiteLLM gateways can use the same rich discovery path:
 
 ```yaml
 providers:
-  litellm-gateway:
-    baseUrl: http://gateway.example:4000/v1
-    apiKey: LITELLM_API_KEY
-    api: openai-completions
-    discovery:
-      type: litellm
+   litellm-gateway:
+      baseUrl: http://gateway.example:4000/v1
+      apiKey: LITELLM_API_KEY
+      api: openai-completions
+      discovery:
+         type: litellm
 ```
 
 LiteLLM metadata endpoints use the configured base URL with a trailing `/v1` stripped for discovery only, preserving any preceding proxy path. Runtime model calls keep the configured OpenAI-compatible `/v1` base URL.
@@ -338,13 +338,13 @@ from `baseUrl` before appending `/v1/messages`, so a single discovery `baseUrl`
 
 ```yaml
 providers:
-  newapi-reseller:
-    baseUrl: https://api.example.com/v1
-    apiKey: xxxx
-    authHeader: true # injects Authorization: Bearer for openai models
-    disableStrictTools: true # most anthropic-fronted proxies reject `strict`
-    discovery:
-      type: proxy
+   newapi-reseller:
+      baseUrl: https://api.example.com/v1
+      apiKey: xxxx
+      authHeader: true # injects Authorization: Bearer for openai models
+      disableStrictTools: true # most anthropic-fronted proxies reject `strict`
+      discovery:
+         type: proxy
 ```
 
 ### Extension provider registration
@@ -462,15 +462,15 @@ Global `enabledModels` and `disabledProviders` entries may also be scoped to a p
 
 ```yaml
 enabledModels:
-  - claude-sonnet-4-5
-  - path: ~/work
-    models:
-      - anthropic/claude-opus-4-5
+   - claude-sonnet-4-5
+   - path: ~/work
+     models:
+        - anthropic/claude-opus-4-5
 disabledProviders:
-  - ollama
-  - path: ~/private
-    providers:
-      - anthropic
+   - ollama
+   - path: ~/private
+     providers:
+        - anthropic
 ```
 
 String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels`, `providers` for `disabledProviders`, or `values` for either.
@@ -532,10 +532,10 @@ Example (`models.yml`) for an explicit OpenAI fallback:
 
 ```yaml
 providers:
-  openai-codex:
-    modelOverrides:
-      gpt-5.5:
-        contextPromotionTarget: openai-codex/gpt-5.4
+   openai-codex:
+      modelOverrides:
+         gpt-5.5:
+            contextPromotionTarget: openai-codex/gpt-5.4
 ```
 
 The built-in model policy currently links OpenAI `codex-spark` variants to `gpt-5.5`, and `gpt-5.5` to `gpt-5.4`, when that target exists on the same provider/API.
@@ -638,22 +638,22 @@ Third-party providers that front the Anthropic API (AWS Bedrock, Azure, self-hos
 
 ```yaml
 providers:
-  bedrock-anthropic:
-    baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com/anthropic
-    apiKey: AWS_BEARER_TOKEN
-    api: anthropic-messages
-    disableStrictTools: true
-    models:
-      - id: claude-sonnet-4-20250514
-        name: Claude Sonnet 4 (Bedrock)
-        input: [text, image]
-        contextWindow: 200000
-        maxTokens: 16384
-        cost:
-          input: 3.00
-          output: 15.00
-          cacheRead: 0.30
-          cacheWrite: 3.75
+   bedrock-anthropic:
+      baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com/anthropic
+      apiKey: AWS_BEARER_TOKEN
+      api: anthropic-messages
+      disableStrictTools: true
+      models:
+         - id: claude-sonnet-4-20250514
+           name: Claude Sonnet 4 (Bedrock)
+           input: [text, image]
+           contextWindow: 200000
+           maxTokens: 16384
+           cost:
+              input: 3.00
+              output: 15.00
+              cacheRead: 0.30
+              cacheWrite: 3.75
 ```
 
 `disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly.
@@ -672,85 +672,85 @@ and the per-provider dispatcher mapping.
 
 ```yaml
 providers:
-  local-openai:
-    baseUrl: http://127.0.0.1:8000/v1
-    auth: none
-    api: openai-completions
-    models:
-      - id: Qwen/Qwen2.5-Coder-32B-Instruct
-        name: Qwen 2.5 Coder 32B (local)
+   local-openai:
+      baseUrl: http://127.0.0.1:8000/v1
+      auth: none
+      api: openai-completions
+      models:
+         - id: Qwen/Qwen2.5-Coder-32B-Instruct
+           name: Qwen 2.5 Coder 32B (local)
 ```
 
 For oMLX or another local OpenAI-compatible server with a discoverable `/v1/models` endpoint, prefer discovery instead of listing models by hand. Set `api` to the endpoint family your server actually exposes: `openai-completions` uses `/v1/chat/completions`; servers that expose `/v1/responses` need `openai-responses` instead.
 
 ```yaml
 providers:
-  omlx:
-    baseUrl: http://127.0.0.1:11434/v1
-    auth: none
-    api: openai-completions
-    discovery:
-      type: openai-models-list
+   omlx:
+      baseUrl: http://127.0.0.1:11434/v1
+      auth: none
+      api: openai-completions
+      discovery:
+         type: openai-models-list
 ```
 
 The built-in vLLM provider can be pointed at a non-default endpoint without declaring a custom discovery type. OMP uses vLLM's `/v1/models` metadata and preserves vLLM's `max_model_len` field as the discovered context window.
 
 ```yaml
 providers:
-  vllm:
-    baseUrl: http://192.168.5.3:8085/v1
-    auth: none
+   vllm:
+      baseUrl: http://192.168.5.3:8085/v1
+      auth: none
 ```
 
 For multiple vLLM endpoints, use arbitrary provider IDs with the generic OpenAI-compatible discovery path. Set `auth: none` for local no-auth servers or `apiKey` for authenticated ones. Generic discovery reads `max_model_len` first and then `context_length` as a generic OpenAI-compatible fallback.
 
 ```yaml
 providers:
-  vllm-fast:
-    baseUrl: http://host-a:8000/v1
-    auth: none
-    api: openai-completions
-    discovery:
-      type: openai-models-list
-  vllm-long:
-    baseUrl: http://host-b:8000/v1
-    auth: none
-    api: openai-completions
-    discovery:
-      type: openai-models-list
+   vllm-fast:
+      baseUrl: http://host-a:8000/v1
+      auth: none
+      api: openai-completions
+      discovery:
+         type: openai-models-list
+   vllm-long:
+      baseUrl: http://host-b:8000/v1
+      auth: none
+      api: openai-completions
+      discovery:
+         type: openai-models-list
 ```
 
 ### Hosted proxy with env-based key
 
 ```yaml
 providers:
-  anthropic-proxy:
-    baseUrl: https://proxy.example.com/anthropic
-    apiKey: ANTHROPIC_PROXY_API_KEY
-    api: anthropic-messages
-    authHeader: true
-    disableStrictTools: true # if the proxy doesn't support strict tool schemas
-    models:
-      - id: claude-sonnet-4-20250514
-        name: Claude Sonnet 4 (Proxy)
-        reasoning: true
-        input: [text, image]
+   anthropic-proxy:
+      baseUrl: https://proxy.example.com/anthropic
+      apiKey: ANTHROPIC_PROXY_API_KEY
+      api: anthropic-messages
+      authHeader: true
+      disableStrictTools: true # if the proxy doesn't support strict tool schemas
+      models:
+         - id: claude-sonnet-4-20250514
+           name: Claude Sonnet 4 (Proxy)
+           reasoning: true
+           input: [text, image]
 ```
 
 ### Override built-in provider route + model metadata
 
 ```yaml
 providers:
-  openrouter:
-    baseUrl: https://my-proxy.example.com/v1
-    headers:
-      X-Team: platform
-    modelOverrides:
-      anthropic/claude-sonnet-4:
-        name: Sonnet 4 (Corp)
-        compat:
-          openRouterRouting:
-            only: [anthropic]
+   openrouter:
+      baseUrl: https://my-proxy.example.com/v1
+      headers:
+         X-Team: platform
+      modelOverrides:
+         anthropic/claude-sonnet-4:
+            name: Sonnet 4 (Corp)
+            compat:
+               openRouterRouting:
+                  only: [anthropic]
 ```
 
 ## Legacy consumer caveat

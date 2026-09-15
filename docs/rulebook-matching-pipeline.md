@@ -34,18 +34,18 @@ All providers normalize source files into `Rule`:
 
 ```ts
 interface Rule {
-  name: string;
-  path: string;
-  content: string;
-  globs?: string[];
-  alwaysApply?: boolean;
-  description?: string;
-  condition?: string[];
-  astCondition?: string[];
-  scope?: string[];
-  agents?: string[];
-  interruptMode?: "never" | "prose-only" | "tool-only" | "always";
-  _source: SourceMeta;
+	name: string;
+	path: string;
+	content: string;
+	globs?: string[];
+	alwaysApply?: boolean;
+	description?: string;
+	condition?: string[];
+	astCondition?: string[];
+	scope?: string[];
+	agents?: string[];
+	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
+	_source: SourceMeta;
 }
 ```
 
@@ -260,14 +260,14 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 - Filtering happens once, in `bucketRules(...)` at session creation, before TTSR registration: an unmatched rule joins no bucket, is never compiled into `TtsrManager`, and is not addressable via `rule://` in that session.
 - Subagents receive the parent's unfiltered discovered rule list and re-evaluate `agents` under their own name, so a scout-only rule loads in scouts and nowhere else.
 
-  ```yaml
-  agents: [scout, "foreman-*"]
-  ```
+   ```yaml
+   agents: [scout, "foreman-*"]
+   ```
 
-  ```yaml
-  # Main agent only; every subagent ignores this rule:
-  agents: main
-  ```
+   ```yaml
+   # Main agent only; every subagent ignores this rule:
+   agents: main
+   ```
 
 ### `condition`, `astCondition`, `scope`, and `interruptMode`
 
@@ -275,28 +275,28 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 - `astCondition` is the ast-grep trigger field: a string or YAML sequence of structural patterns, kept verbatim (no glob inference). It only matches on edit/write tool streams, where the language is inferred from the file path. A rule may set `condition`, `astCondition`, or both.
 - `scope` narrows TTSR matching to an allowlist of stream surfaces. It accepts either a comma-separated YAML string or a YAML sequence. Omitting it watches assistant prose (`text`) and all tool arguments (`tool`), but not thinking.
 
-  ```yaml
-  # Prose and thinking; equivalent forms:
-  scope: "text, thinking"
-  ```
+   ```yaml
+   # Prose and thinking; equivalent forms:
+   scope: "text, thinking"
+   ```
 
-  ```yaml
-  scope: [text, thinking]
-  ```
+   ```yaml
+   scope: [text, thinking]
+   ```
 
-  ```yaml
-  # A block-style YAML sequence is also valid:
-  scope:
-    - text
-    - thinking
-  ```
+   ```yaml
+   # A block-style YAML sequence is also valid:
+   scope:
+      - text
+      - thinking
+   ```
 
-  ```yaml
-  # Only TypeScript source snapshots produced by edit/write:
-  scope: "tool:edit(*.ts), tool:write(*.ts)"
-  ```
+   ```yaml
+   # Only TypeScript source snapshots produced by edit/write:
+   scope: "tool:edit(*.ts), tool:write(*.ts)"
+   ```
 
-  Valid tokens are `text`, `thinking`, `tool` (or `toolcall`), and `tool:<name>(<path-glob>)`. The parser tolerates the malformed fallback spelling `scope: "text","thinking"`, but portable rule files should put the comma inside one YAML string or use a YAML sequence.
+   Valid tokens are `text`, `thinking`, `tool` (or `toolcall`), and `tool:<name>(<path-glob>)`. The parser tolerates the malformed fallback spelling `scope: "text","thinking"`, but portable rule files should put the comma inside one YAML string or use a YAML sequence.
 
 - A `condition` token that looks like a file glob becomes `tool:edit(<glob>)` and `tool:write(<glob>)` scope entries plus catch-all condition `.*`; `astCondition` tokens never trigger this shorthand.
 - `interruptMode` can override the global TTSR interrupt mode for the rule.
@@ -317,11 +317,7 @@ This is advisory/contextual: prompt text asks the model to read applicable rules
 installed once per top-level session in `sdk.ts`:
 
 ```ts
-setActiveRules([
-  ...rulebookRules,
-  ...alwaysApplyRules,
-  ...ttsrManager.getRules(),
-]);
+setActiveRules([...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()]);
 ```
 
 Implications:

@@ -20,7 +20,15 @@
 import { parseArgs } from "node:util";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { BUILTIN_TOOLS, GithubTool, HIDDEN_TOOLS, IrcTool, type Tool, type ToolFactory, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	BUILTIN_TOOLS,
+	GithubTool,
+	HIDDEN_TOOLS,
+	IrcTool,
+	type Tool,
+	type ToolFactory,
+	type ToolSession,
+} from "@oh-my-pi/pi-coding-agent/tools";
 import { probe } from "./probe.ts";
 
 const OPEN_TAG = /^<[a-z_][\w-]*>$/i;
@@ -95,7 +103,9 @@ async function resolveTool(name: string): Promise<Tool> {
 	}
 	const tool = await factory(session);
 	if (!tool) {
-		throw new Error(`tool "${name}" did not construct here — blocked by an availability gate (e.g. ssh, or a memory backend that isn't configured). Fall back to the manual --schema/--template path.`);
+		throw new Error(
+			`tool "${name}" did not construct here — blocked by an availability gate (e.g. ssh, or a memory backend that isn't configured). Fall back to the manual --schema/--template path.`,
+		);
 	}
 	return tool;
 }
@@ -116,7 +126,9 @@ async function main(): Promise<void> {
 	});
 
 	if (!values.tool) {
-		console.error("usage: bun probe-builtin.ts --tool <name> [--no-summary] [--show] [--samples N] [--model p/id,...] [--max-tokens N] [--json]");
+		console.error(
+			"usage: bun probe-builtin.ts --tool <name> [--no-summary] [--show] [--samples N] [--model p/id,...] [--max-tokens N] [--json]",
+		);
 		process.exit(2);
 	}
 
@@ -137,7 +149,12 @@ async function main(): Promise<void> {
 		template: outline,
 		name: tool.name,
 		samples: values.samples ? Number(values.samples) : undefined,
-		models: values.model ? values.model.split(",").map(s => s.trim()).filter(Boolean) : undefined,
+		models: values.model
+			? values.model
+					.split(",")
+					.map(s => s.trim())
+					.filter(Boolean)
+			: undefined,
 		maxTokens: values["max-tokens"] ? Number(values["max-tokens"]) : undefined,
 	});
 

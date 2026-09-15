@@ -5,5 +5,5 @@ This fixture is derived from the completed-scan example in the pinned Codex Secu
 ## Findings
 
 - **High — Unsafe archive extraction can escape the output directory**
-  - Rule: `path-traversal.archive-extraction`
-  - Location: `src/extract.py:41-44`
+   - Rule: `path-traversal.archive-extraction`
+   - Location: `src/extract.py:41-44`

@@ -9,12 +9,12 @@ import { startPolling, stopPolling } from "./state";
 // shared 3s poll). handleRetry now lives inside each view that owns retry
 // buttons (Operations/Activity), reading the shared runTrigger passthrough.
 export function App(): JSX.Element {
-  onMount(() => {
-    startPolling();
-  });
-  onCleanup(() => {
-    stopPolling();
-  });
+	onMount(() => {
+		startPolling();
+	});
+	onCleanup(() => {
+		stopPolling();
+	});
 
-  return <Shell />;
+	return <Shell />;
 }

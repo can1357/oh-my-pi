@@ -9,7 +9,9 @@
 	const serializeFunction = (label, fn) => {
 		const source = String(fn);
 		if (source.includes("[native code]")) {
-			throw new TypeError(`${label} cannot serialize a native or bound function; pass an arrow or function expression`);
+			throw new TypeError(
+				`${label} cannot serialize a native or bound function; pass an arrow or function expression`,
+			);
 		}
 		return source;
 	};
@@ -83,7 +85,8 @@
 
 	const copyFields = (target, fields, snapshot) => {
 		for (const field of fields) {
-			if (snapshot[field] !== undefined) Object.defineProperty(target, field, { value: snapshot[field], enumerable: true });
+			if (snapshot[field] !== undefined)
+				Object.defineProperty(target, field, { value: snapshot[field], enumerable: true });
 		}
 	};
 	const makeElement = snapshot => {

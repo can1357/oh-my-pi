@@ -5,9 +5,7 @@
 description = "Compact shellcheck output — strip blank lines, keep caret indicators for error position"
 match_command = "^shellcheck$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-]
+strip_lines_matching = ["^\\s*$"]
 max_lines = 50
 
 [[tests.shellcheck]]

@@ -6,11 +6,7 @@ description = "Compact mix compile output"
 match_command = "^mix$"
 match_subcommand = "^compile$"
 strip_ansi = true
-strip_lines_matching = [
-  "^Compiling \\d+ file",
-  "^\\s*$",
-  "^Generated\\s",
-]
+strip_lines_matching = ["^Compiling \\d+ file", "^\\s*$", "^Generated\\s"]
 max_lines = 40
 on_empty = "mix compile: ok"
 

@@ -3,11 +3,13 @@ Edit files: `apply_patch` shell command.
 `apply_patch`: stripped-down, file-oriented diff; easy to parse, safe to apply.
 
 Envelope:
+
 ```
 *** Begin Patch
 [ one or more file sections ]
 *** End Patch
 ```
+
 Contains file operations. Each MUST have an action header:
 
 `*** Add File: <path>`: create file; every following line `+` (initial contents).
@@ -17,6 +19,7 @@ Contains file operations. Each MUST have an action header:
 `*** Update File: <path>`: patch existing file in place; optional immediate `*** Move to: <new path>` renames it; then one or more `@@` hunks (optional hunk header). Hunk lines start with space, `-`, or `+`.
 
 Context: default 3 code lines immediately before and after each change. Changes within 3 lines: do NOT duplicate first change's context-after lines as second change's context-before lines. If 3 lines do not uniquely identify code in the file, use `@@` with its class/function; if one `@@` plus 3 context lines still cannot uniquely identify repeated code in a class/function, use multiple `@@` lines to reach it:
+
 ```
 @@ class BaseClass
 [3 lines of pre-context]
@@ -24,6 +27,7 @@ Context: default 3 code lines immediately before and after each change. Changes 
 + [new_code]
 [3 lines of post-context]
 ```
+
 ```
 @@ class BaseClass
 @@ 	 def method():
@@ -34,6 +38,7 @@ Context: default 3 code lines immediately before and after each change. Changes 
 ```
 
 Grammar:
+
 ```
 Patch := Begin { FileOp } End
 Begin := "*** Begin Patch" NEWLINE
@@ -48,6 +53,7 @@ HunkLine := (" " | "-" | "+") text NEWLINE
 ```
 
 Full patches may combine operations:
+
 ```
 *** Begin Patch
 *** Add File: hello.txt

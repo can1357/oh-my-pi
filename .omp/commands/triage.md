@@ -27,6 +27,7 @@ gh issue list --state open --search "created:>=${CUTOFF_DATE}" --json number,tit
 ### 2. Candidates
 
 Skip issues older than cutoff or labeled `triaged`. Of the rest, skip only if all applicable requirements hold:
+
 - Exactly one primary: `bug`|`enhancement`|`question`|`proposal`|`documentation`|`invalid`|`duplicate`.
 - `bug` → exactly one `prio:*`.
 - Applicable functional scope → at least one: `agent`|`tool`|`tui`|`cli`|`prompting`|`sdk`|`auth`|`setup`|`ux`|`providers`.
@@ -37,6 +38,7 @@ Skip issues older than cutoff or labeled `triaged`. Of the rest, skip only if al
 For every candidate, read title, body, and all comments; comments may contain critical context. Labels below; primary exactly one, priority exactly one only for `bug`, functional all applicable. Provider/platform labels require explicit issue evidence.
 
 **Primary**
+
 - `bug`: broken existing behavior—crash, error, regression, "doesn't work".
 - `enhancement`: feature request/improvement to existing behavior.
 - `question`: how-to, clarification, usage question.
@@ -46,12 +48,14 @@ For every candidate, read title, body, and all comments; comments may contain cr
 - `duplicate`: clear duplicate; reference original in a comment.
 
 **Bug priority**
+
 - `prio:p0`: critical blocker, data loss/security breakage, unusable workflow.
 - `prio:p1`: high impact, common workflow broken, fix soon.
 - `prio:p2`: medium impact, workaround exists, not blocking most users.
 - `prio:p3`: low impact, edge case/minor issue.
 
 **Functional**
+
 - `agent`: planning/execution loops, orchestration, runtime behavior.
 - `tool`: contracts/behavior, call protocol, integration errors.
 - `tui`: terminal UI rendering/layout/input/view state.
@@ -67,12 +71,14 @@ For every candidate, read title, body, and all comments; comments may contain cr
 `provider:anthropic`, `provider:bedrock`, `provider:brave`, `provider:cerebras`, `provider:cloudflare`, `provider:codex`, `provider:copilot`, `provider:cursor`, `provider:exa`, `provider:gemini`, `provider:gitlab`, `provider:groq`, `provider:huggingface`, `provider:jina`, `provider:kimi`, `provider:litellm`, `provider:minimax`, `provider:mistral`, `provider:moonshot`, `provider:nanogpt`, `provider:novita`, `provider:nvidia`, `provider:openai`, `provider:opencode`, `provider:openrouter`, `provider:perplexity`, `provider:qianfan`, `provider:qwen`, `provider:synthetic`, `provider:together`, `provider:venice`, `provider:vercel`, `provider:xai`, `provider:xiaomi`, `provider:zai`.
 
 **Platforms** — only if material to reproduction/root cause:
+
 - `platform:linux`: Linux-specific behavior, distro/toolchain difference, Linux-only reproduction.
 - `platform:macos`: macOS-specific, including Homebrew/Darwin-specific.
 - `platform:windows`: native Windows, including PowerShell/cmd/Win32 specifics.
 - `platform:wsl`: WSL-specific; do not also apply linux/windows unless separately confirmed.
 
 **Meta** — manual judgment only:
+
 - `good first issue`: well-scoped, self-contained, suitable for new contributors.
 - `help wanted`: maintainers want community help.
 - `wontfix`: intentional behavior or explicitly out of scope.

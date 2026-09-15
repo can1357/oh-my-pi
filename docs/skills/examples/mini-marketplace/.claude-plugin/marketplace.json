@@ -1,14 +1,14 @@
 {
-  "name": "example-marketplace",
-  "owner": {
-    "name": "example"
-  },
-  "description": "Minimal marketplace demonstrating the catalog format",
-  "plugins": [
-    {
-      "name": "my-plugin",
-      "description": "Minimal extension bundled with this marketplace example",
-      "source": "./my-plugin"
-    }
-  ]
+	"name": "example-marketplace",
+	"owner": {
+		"name": "example"
+	},
+	"description": "Minimal marketplace demonstrating the catalog format",
+	"plugins": [
+		{
+			"name": "my-plugin",
+			"description": "Minimal extension bundled with this marketplace example",
+			"source": "./my-plugin"
+		}
+	]
 }

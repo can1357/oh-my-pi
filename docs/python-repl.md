@@ -79,25 +79,25 @@ Status events the prelude emits (e.g. `_emit_status("find", count=…)`) ship in
 
 The runner's source transformer rewrites IPython-style magics to plain Python calls before parsing. Supported set:
 
-| Magic                             | Effect                                                                                                                                                      |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `%pip <args>`                     | `python -m pip <args>` with live streaming output. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
-| `%cd <path>`                      | `os.chdir(path)` (with `~` expansion); emits status event.                                                                                                  |
-| `%pwd`                            | Returns `os.getcwd()`.                                                                                                                                      |
-| `%ls [path]`                      | Returns `sorted(os.listdir(path))`.                                                                                                                         |
-| `%env [KEY[=VAL]]`                | List, read, or set env vars (matches prelude `env()` semantics).                                                                                            |
-| `%set_env KEY VALUE`              | Set `os.environ[KEY]`.                                                                                                                                      |
-| `%time <expr>` / `%timeit <expr>` | Time the expression; emits status event with elapsed ms.                                                                                                    |
-| `%who` / `%whos`                  | List user-namespace names.                                                                                                                                  |
-| `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                   |
-| `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                  |
-| `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
+| Magic                             | Effect                                                                                                                                                               |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `%pip <args>`                     | `python -m pip <args>` with live streaming output. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install.          |
+| `%cd <path>`                      | `os.chdir(path)` (with `~` expansion); emits status event.                                                                                                           |
+| `%pwd`                            | Returns `os.getcwd()`.                                                                                                                                               |
+| `%ls [path]`                      | Returns `sorted(os.listdir(path))`.                                                                                                                                  |
+| `%env [KEY[=VAL]]`                | List, read, or set env vars (matches prelude `env()` semantics).                                                                                                     |
+| `%set_env KEY VALUE`              | Set `os.environ[KEY]`.                                                                                                                                               |
+| `%time <expr>` / `%timeit <expr>` | Time the expression; emits status event with elapsed ms.                                                                                                             |
+| `%who` / `%whos`                  | List user-namespace names.                                                                                                                                           |
+| `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                            |
+| `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                           |
+| `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                             |
 | `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
-| `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |
-| `%%timeit`                        | Time the cell body.                                                                                                                                         |
-| `%%writefile <path>`              | Write body to file.                                                                                                                                         |
-| `!cmd` / `var = !cmd`             | Run command via subprocess shell; returns an SList-style result with `.n` / `.s` helpers.                                                                   |
-| `var = %name args`                | Assignment forms work for line magics and `!cmd`.                                                                                                           |
+| `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                                    |
+| `%%timeit`                        | Time the cell body.                                                                                                                                                  |
+| `%%writefile <path>`              | Write body to file.                                                                                                                                                  |
+| `!cmd` / `var = !cmd`             | Run command via subprocess shell; returns an SList-style result with `.n` / `.s` helpers.                                                                            |
+| `var = %name args`                | Assignment forms work for line magics and `!cmd`.                                                                                                                    |
 
 Unknown magic names raise `NameError: UsageError: ...` inside the cell.
 
@@ -106,15 +106,15 @@ Unknown magic names raise `NameError: UsageError: ...` inside the cell.
 `python.kernelMode` controls retained kernel reuse:
 
 - `session` (default)
-  - Reuses kernel sessions keyed by namespaced eval session id plus normalized cwd and interpreter.
-  - Multiple owners can share the same retained kernel for that key.
-  - Calls through the tool are exclusive, so tool invocations do not overlap.
-  - A dead retained subprocess is replaced before execution.
-  - If the subprocess dies during execution, it is replaced and the call is retried once.
+   - Reuses kernel sessions keyed by namespaced eval session id plus normalized cwd and interpreter.
+   - Multiple owners can share the same retained kernel for that key.
+   - Calls through the tool are exclusive, so tool invocations do not overlap.
+   - A dead retained subprocess is replaced before execution.
+   - If the subprocess dies during execution, it is replaced and the call is retried once.
 - `per-call`
-  - Spawns a fresh subprocess for each call.
-  - Shuts the subprocess down after the call.
-  - No cross-call state persistence.
+   - Spawns a fresh subprocess for each call.
+   - Shuts the subprocess down after the call.
+   - No cross-call state persistence.
 
 ### State across eval calls
 
@@ -207,14 +207,14 @@ Output is streamed through `OutputSink` and may be persisted to artifact storage
 ### Renderer behavior
 
 - Tool renderer (`eval-render.ts`, re-exported from `eval.ts`):
-  - shows code-cell blocks with per-cell status
-  - collapsed preview defaults to 10 lines
-  - supports expanded mode for all output retained in the tool result
+   - shows code-cell blocks with per-cell status
+   - collapsed preview defaults to 10 lines
+   - supports expanded mode for all output retained in the tool result
 - Interactive renderer (`eval-execution.ts`):
-  - used for user-triggered Python execution in TUI
-  - collapsed preview defaults to 20 lines
-  - clamps very long individual lines to 4000 chars for display safety
-  - shows cancellation/error/truncation notices
+   - used for user-triggered Python execution in TUI
+   - collapsed preview defaults to 20 lines
+   - clamps very long individual lines to 4000 chars for display safety
+   - shows cancellation/error/truncation notices
 
 ## Operational troubleshooting
 

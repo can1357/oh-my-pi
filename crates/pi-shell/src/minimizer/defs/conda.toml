@@ -3,11 +3,11 @@ description = "Compact conda install/create/update output — strip download pro
 match_command = "^conda$"
 strip_ansi = true
 strip_lines_matching = [
-  "^\\s*$",
-  "^(Downloading|Extracting|Preparing transaction|Verifying transaction|Executing transaction)",
-  "^\\s*##",
-  "^\\s*\\d+%",
-  "^\\s*[#=]{3,}",
+	"^\\s*$",
+	"^(Downloading|Extracting|Preparing transaction|Verifying transaction|Executing transaction)",
+	"^\\s*##",
+	"^\\s*\\d+%",
+	"^\\s*[#=]{3,}",
 ]
 max_lines = 50
 on_empty = "ok"

@@ -1,7 +1,13 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { HistoryEntry, HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
+import {
+	HISTORY_SCOPE_LABELS,
+	type HistoryEntry,
+	type HistoryScope,
+	type HistoryScopeKind,
+	type HistoryStorage,
+} from "@oh-my-pi/pi-coding-agent/session/history-storage";
 
 beforeAll(async () => {
 	await initTheme();
@@ -29,6 +35,16 @@ function fakeStorage(entries: HistoryEntry[]): HistoryStorage {
 	} as unknown as HistoryStorage;
 }
 
+/** Stand-in whose result set depends on the scope the component asks for. */
+function scopedStorage(byKind: Partial<Record<HistoryScopeKind, HistoryEntry[]>>): HistoryStorage {
+	return {
+		getRecent: (_limit: number, scope?: HistoryScope) => byKind[scope?.kind ?? "global"] ?? [],
+		search: (_query: string, _limit: number, scope?: HistoryScope) => byKind[scope?.kind ?? "global"] ?? [],
+	} as unknown as HistoryStorage;
+}
+const GLOBAL_ONLY: HistoryScope[] = [{ kind: "global" }];
+const ALL_SCOPES: HistoryScope[] = [{ kind: "session" }, { kind: "cwd" }, { kind: "global" }];
+
 function render(component: HistorySearchComponent, width = 80): { raw: string; plain: string } {
 	const lines = component.render(width);
 	const raw = lines.join("\n");
@@ -43,6 +59,7 @@ describe("HistorySearchComponent", () => {
 	it("paints the selected row with the selectedBg highlight bar and a relative timestamp", () => {
 		const component = new HistorySearchComponent(
 			fakeStorage([makeEntry(1, "deploy the release"), makeEntry(2, "older prompt", 7200)]),
+			GLOBAL_ONLY,
 			() => {},
 			() => {},
 		);
@@ -60,6 +77,7 @@ describe("HistorySearchComponent", () => {
 	it("highlights the matched query tokens within results", () => {
 		const component = new HistorySearchComponent(
 			fakeStorage([makeEntry(1, "deploy the needle rollback"), makeEntry(2, "routine status update")]),
+			GLOBAL_ONLY,
 			() => {},
 			() => {},
 		);
@@ -76,17 +94,108 @@ describe("HistorySearchComponent", () => {
 	it("distinguishes an empty query from an unmatched query", () => {
 		const empty = new HistorySearchComponent(
 			fakeStorage([]),
+			GLOBAL_ONLY,
 			() => {},
 			() => {},
 		);
-		expect(render(empty).plain).toContain("No history yet");
+		expect(render(empty).plain).toContain("No history in all projects");
 
 		const unmatched = new HistorySearchComponent(
 			fakeStorage([makeEntry(1, "deploy the release")]),
+			GLOBAL_ONLY,
 			() => {},
 			() => {},
 		);
 		type(unmatched, "zzzz");
 		expect(render(unmatched).plain).toContain("No matching history");
+	});
+
+	it("cycles the recall scope with Tab and Shift+Tab", () => {
+		const component = new HistorySearchComponent(
+			scopedStorage({
+				session: [makeEntry(1, "in this conversation")],
+				cwd: [makeEntry(2, "in this folder")],
+				global: [makeEntry(3, "everywhere")],
+			}),
+			ALL_SCOPES,
+			() => {},
+			() => {},
+		);
+
+		expect(render(component).plain).toContain("in this conversation");
+		expect(render(component).plain).toContain("History (this session)");
+
+		component.handleInput("\t");
+		const widened = render(component).plain;
+		expect(widened).toContain("in this folder");
+		expect(widened).toContain("History (current folder)");
+		expect(widened).not.toContain("in this conversation");
+
+		component.handleInput("\x1b[Z");
+		expect(render(component).plain).toContain("in this conversation");
+		expect(render(component).plain).toContain("History (this session)");
+	});
+
+	it("contains a failing read instead of letting it escape a keystroke", () => {
+		const failing = {
+			getRecent: () => {
+				throw new Error("read failed");
+			},
+			search: () => {
+				throw new Error("read failed");
+			},
+		} as unknown as HistoryStorage;
+		const component = new HistorySearchComponent(
+			failing,
+			ALL_SCOPES,
+			() => {},
+			() => {},
+		);
+
+		// Switching scope re-reads: the panel must show its empty state, not throw out of the key
+		// handler it runs inside.
+		component.handleInput("\t");
+		type(component, "deploy");
+		expect(render(component).plain).toContain(`No matching history in ${HISTORY_SCOPE_LABELS.cwd}`);
+	});
+
+	it("drops the Tab hint when the ring has a single scope", () => {
+		const component = new HistorySearchComponent(
+			scopedStorage({}),
+			GLOBAL_ONLY,
+			() => {},
+			() => {},
+		);
+
+		const { plain } = render(component);
+		// Advertising a Tab that cannot change anything would promise a no-op. Scope the check to
+		// the footer so a title or prompt containing "tab" cannot mask a stray hint.
+		const footer = plain.split("\n").find(line => line.includes("navigate"));
+		expect(footer).toBeDefined();
+		expect(footer).not.toContain("tab");
+		expect(plain).not.toContain("Press Tab for");
+	});
+
+	it("reads the scope the Tab ring reaches, then the next one after Tab", () => {
+		const asked: HistoryScope[] = [];
+		const scoped = {
+			getRecent: (_limit: number, scope?: HistoryScope) => {
+				asked.push(scope ?? { kind: "global" });
+				return [] as HistoryEntry[];
+			},
+			search: (_query: string, _limit: number, scope?: HistoryScope) => [] as HistoryEntry[],
+		} as unknown as HistoryStorage;
+		const component = new HistorySearchComponent(
+			scoped,
+			[{ kind: "session" }, { kind: "cwd" }, { kind: "global" }],
+			() => {},
+			() => {},
+		);
+
+		// The constructor seeds with the ring's first scope; Tab moves the read to the next one.
+		expect(asked[0]).toEqual({ kind: "session" });
+		component.handleInput("\t");
+		expect(asked.at(-1)).toEqual({ kind: "cwd" });
+		expect(asked.at(-2)).toEqual({ kind: "session" });
 	});
 });

@@ -22,15 +22,15 @@ my-marketplace/
 
 ```json
 {
-  "name": "my-marketplace",
-  "owner": { "name": "Your Name" },
-  "plugins": [
-    {
-      "name": "my-plugin",
-      "description": "What it does",
-      "source": "./plugins/my-plugin"
-    }
-  ]
+	"name": "my-marketplace",
+	"owner": { "name": "Your Name" },
+	"plugins": [
+		{
+			"name": "my-plugin",
+			"description": "What it does",
+			"source": "./plugins/my-plugin"
+		}
+	]
 }
 ```
 
@@ -47,68 +47,68 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
 
 ### Top-level fields
 
-| Field | Required | Description |
-|---|---|---|
-| `name` | yes | Marketplace name. Lowercase alphanumeric, hyphens, dots. Must start and end with alphanumeric. Max 64 chars. |
-| `owner` | yes | Object with at minimum `owner.name` (string) |
-| `owner.name` | yes | Marketplace owner name |
-| `owner.email` | no | Owner contact email |
-| `plugins` | yes | Array of plugin entries (see below) |
-| `metadata.description` | no | Short description of the marketplace |
-| `metadata.version` | no | Catalog metadata version string |
-| `metadata.pluginRoot` | no | String prepended to all relative plugin source paths |
-| extra top-level fields | no | Preserved by the parser but not used by marketplace install/runtime logic |
+| Field                  | Required | Description                                                                                                  |
+| ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
+| `name`                 | yes      | Marketplace name. Lowercase alphanumeric, hyphens, dots. Must start and end with alphanumeric. Max 64 chars. |
+| `owner`                | yes      | Object with at minimum `owner.name` (string)                                                                 |
+| `owner.name`           | yes      | Marketplace owner name                                                                                       |
+| `owner.email`          | no       | Owner contact email                                                                                          |
+| `plugins`              | yes      | Array of plugin entries (see below)                                                                          |
+| `metadata.description` | no       | Short description of the marketplace                                                                         |
+| `metadata.version`     | no       | Catalog metadata version string                                                                              |
+| `metadata.pluginRoot`  | no       | String prepended to all relative plugin source paths                                                         |
+| extra top-level fields | no       | Preserved by the parser but not used by marketplace install/runtime logic                                    |
 
 ### Plugin entry fields
 
-| Field | Required | Description |
-|---|---|---|
-| `name` | yes | Plugin name (same naming rules as marketplace name) |
-| `source` | yes | Where to find the plugin — string or object (see source types below) |
-| `description` | no | Short plugin description |
-| `version` | no | Version string; falls back to `.claude-plugin/plugin.json`, `package.json`, source SHA, then `0.0.0` |
-| `author` | no | `{ name, email? }` |
-| `homepage` | no | URL |
-| `category` | no | e.g. `development`, `productivity`, `security` |
-| `tags` / `keywords` | no | Arrays of string tags/keywords |
-| `repository` | no | Repository URL |
-| `license` | no | License string |
-| `strict` | no | Boolean metadata flag; preserved but not used by install/runtime logic |
-| `commands`, `agents`, `hooks`, `mcpServers` | no | Catalog metadata preserved by the parser; runtime discovery comes from the installed plugin tree and manifests |
-| `lspServers` | no | Inline server map or path inside the plugin; installation writes `.lsp.json` |
-| `dapAdapters` | no | Inline adapter map or JSON/YAML path inside the plugin; installation writes `.dap.json`, `.dap.yaml`, or `.dap.yml` |
+| Field                                       | Required | Description                                                                                                         |
+| ------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| `name`                                      | yes      | Plugin name (same naming rules as marketplace name)                                                                 |
+| `source`                                    | yes      | Where to find the plugin — string or object (see source types below)                                                |
+| `description`                               | no       | Short plugin description                                                                                            |
+| `version`                                   | no       | Version string; falls back to `.claude-plugin/plugin.json`, `package.json`, source SHA, then `0.0.0`                |
+| `author`                                    | no       | `{ name, email? }`                                                                                                  |
+| `homepage`                                  | no       | URL                                                                                                                 |
+| `category`                                  | no       | e.g. `development`, `productivity`, `security`                                                                      |
+| `tags` / `keywords`                         | no       | Arrays of string tags/keywords                                                                                      |
+| `repository`                                | no       | Repository URL                                                                                                      |
+| `license`                                   | no       | License string                                                                                                      |
+| `strict`                                    | no       | Boolean metadata flag; preserved but not used by install/runtime logic                                              |
+| `commands`, `agents`, `hooks`, `mcpServers` | no       | Catalog metadata preserved by the parser; runtime discovery comes from the installed plugin tree and manifests      |
+| `lspServers`                                | no       | Inline server map or path inside the plugin; installation writes `.lsp.json`                                        |
+| `dapAdapters`                               | no       | Inline adapter map or JSON/YAML path inside the plugin; installation writes `.dap.json`, `.dap.yaml`, or `.dap.yml` |
 
 ### Full catalog example
 
 ```json
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "acme-plugins",
-  "owner": {
-    "name": "Acme Corp",
-    "email": "plugins@acme.example"
-  },
-  "metadata": {
-    "description": "Official Acme plugins for oh-my-pi"
-  },
-  "plugins": [
-    {
-      "name": "acme-linter",
-      "description": "Enforce Acme coding standards",
-      "category": "development",
-      "source": "./plugins/linter"
-    },
-    {
-      "name": "acme-deploy",
-      "description": "One-command deploy to Acme cloud",
-      "category": "devops",
-      "source": {
-        "source": "github",
-        "repo": "acme-corp/omp-deploy-plugin",
-        "ref": "main"
-      }
-    }
-  ]
+	"$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+	"name": "acme-plugins",
+	"owner": {
+		"name": "Acme Corp",
+		"email": "plugins@acme.example"
+	},
+	"metadata": {
+		"description": "Official Acme plugins for oh-my-pi"
+	},
+	"plugins": [
+		{
+			"name": "acme-linter",
+			"description": "Enforce Acme coding standards",
+			"category": "development",
+			"source": "./plugins/linter"
+		},
+		{
+			"name": "acme-deploy",
+			"description": "One-command deploy to Acme cloud",
+			"category": "devops",
+			"source": {
+				"source": "github",
+				"repo": "acme-corp/omp-deploy-plugin",
+				"ref": "main"
+			}
+		}
+	]
 }
 ```
 
@@ -128,11 +128,11 @@ Use `metadata.pluginRoot` to avoid repeating a common prefix:
 
 ```json
 {
-  "metadata": { "pluginRoot": "./plugins" },
-  "plugins": [
-    { "name": "plugin-a", "source": "./plugin-a" },
-    { "name": "plugin-b", "source": "./plugin-b" }
-  ]
+	"metadata": { "pluginRoot": "./plugins" },
+	"plugins": [
+		{ "name": "plugin-a", "source": "./plugin-a" },
+		{ "name": "plugin-b", "source": "./plugin-b" }
+	]
 }
 ```
 

@@ -1,8 +1,8 @@
 ---
 description: "Use the standard library slices and maps packages instead of golang.org/x/exp/{slices,maps}"
 condition:
-  - '"golang.org/x/exp/slices"'
-  - '"golang.org/x/exp/maps"'
+   - '"golang.org/x/exp/slices"'
+   - '"golang.org/x/exp/maps"'
 scope: "tool:edit(*.go), tool:write(*.go)"
 interruptMode: never
 ---

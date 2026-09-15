@@ -4,9 +4,10 @@ Before substantial work: compare next action with todos. If item stale, already 
 
 Overall: {{closed}}/{{total}} done, {{open}} open.
 {{#each phases}}
+
 - {{name}}
-{{#each tasks}}
-  - [{{status}}] {{content}}
-{{/each}}
-{{/each}}
-</todo_context>
+  {{#each tasks}}
+   - [{{status}}] {{content}}
+     {{/each}}
+     {{/each}}
+     </todo_context>

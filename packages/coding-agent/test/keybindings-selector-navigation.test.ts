@@ -364,6 +364,7 @@ describe("selector navigation keybindings", () => {
 		const storage = await createHistoryStorage(["old prompt", "middle prompt", "new prompt"]);
 		const selector = new HistorySearchComponent(
 			storage,
+			[{ kind: "global" }],
 			prompt => selected.push(prompt),
 			() => {},
 		);
@@ -380,6 +381,7 @@ describe("selector navigation keybindings", () => {
 		const storage = await createHistoryStorage(Array.from({ length: 15 }, (_, i) => `p${i}`));
 		const selector = new HistorySearchComponent(
 			storage,
+			[{ kind: "global" }],
 			prompt => selected.push(prompt),
 			() => {},
 		);

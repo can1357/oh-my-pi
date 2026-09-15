@@ -8,6 +8,7 @@ import {
 	BUILTIN_BLOB_DESTINATIONS,
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
+import { type HistoryScopeKind, HISTORY_SCOPE_KINDS, HISTORY_SCOPE_LABELS } from "../session/history-storage";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
 import {
 	COMPACTION_METHOD_CHOICES,
@@ -487,6 +488,12 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 ];
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
+
+/** Submenu rows for the history-scope enums, labelled with the names the Ctrl+R panel shows. */
+const HISTORY_SCOPE_OPTIONS: ReadonlyArray<SubmenuOption<HistoryScopeKind>> = HISTORY_SCOPE_KINDS.map(kind => ({
+	value: kind,
+	label: HISTORY_SCOPE_LABELS[kind],
+}));
 
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
@@ -2156,6 +2163,34 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	"history.scope": {
+		type: "enum",
+		values: HISTORY_SCOPE_KINDS,
+		default: "global",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Prompt History Scope",
+			description:
+				"Which prompts the Up arrow recalls: all projects by default, or this session, the current folder or this repository (worktrees included)",
+			options: HISTORY_SCOPE_OPTIONS,
+		},
+	},
+
+	"history.searchScope": {
+		type: "enum",
+		values: HISTORY_SCOPE_KINDS,
+		default: "global",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "History Search Scope",
+			description:
+				"Which scope Ctrl+R opens on: this session, the current folder, this repository or all projects; Tab and Shift+Tab change it while the panel is open",
+			options: HISTORY_SCOPE_OPTIONS,
+		},
+	},
+
 	"composer.recallClearedDrafts": {
 		type: "boolean",
 		default: true,

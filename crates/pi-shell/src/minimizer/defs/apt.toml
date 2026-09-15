@@ -3,20 +3,20 @@ description = "Compact apt/apt-get/yum/dnf/apk package manager output — strip 
 match_command = "^(apt|apt-get|yum|dnf|apk)$"
 strip_ansi = true
 strip_lines_matching = [
-  "^\\s*$",
-  "^\\s*(Get:|Hit:|Ign:)",
-  "^\\s*(Fetched|Processing|Selecting|Preparing|Unpacking|Setting up|Reading|Building)\\s",
-  "^\\s*\\[\\d+%\\]",
-  "^\\(Reading database",
-  "^Loaded plugins:",
-  "^Loading mirror",
-  "^\\s*-->",
-  "^\\s*Package\\s",
-  "^\\s*Marking\\s",
-  "^fetch\\s",
-  "^\\(\\d+/\\d+\\)",
-  "^OK:",
-  "^\\s*\\d+/\\d+:",
+	"^\\s*$",
+	"^\\s*(Get:|Hit:|Ign:)",
+	"^\\s*(Fetched|Processing|Selecting|Preparing|Unpacking|Setting up|Reading|Building)\\s",
+	"^\\s*\\[\\d+%\\]",
+	"^\\(Reading database",
+	"^Loaded plugins:",
+	"^Loading mirror",
+	"^\\s*-->",
+	"^\\s*Package\\s",
+	"^\\s*Marking\\s",
+	"^fetch\\s",
+	"^\\(\\d+/\\d+\\)",
+	"^OK:",
+	"^\\s*\\d+/\\d+:",
 ]
 max_lines = 60
 on_empty = "ok"

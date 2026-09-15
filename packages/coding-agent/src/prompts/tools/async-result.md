@@ -6,8 +6,10 @@
 {{/if}}{{this.result}}{{#if this.schemaStatus}}
 
 Structured output: schema {{this.schemaStatus}}{{#if this.schemaError}}: {{this.schemaError}}{{/if}}{{#if this.hasStructuredData}}; full payload at agent://{{this.agentUrlId}}, fields via agent://{{this.agentUrlId}}?q=.<field>{{/if}}{{#unless this.schemaValid}}{{#if this.structuredJson}}; preview:
-```json
+
+````json
 {{this.structuredJson}}
 ```{{/if}}{{/unless}}{{/if}}{{#unless @last}}
 {{/unless}}{{/each}}
 </system-notice>
+````

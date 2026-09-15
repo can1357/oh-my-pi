@@ -3,7 +3,7 @@ description: "Use for b.Loop() in benchmarks instead of the for i := 0; i < b.N;
 interruptMode: never
 scope: "tool:edit(*_test.go), tool:write(*_test.go)"
 astCondition:
-  - "func $F($B *testing.B) { $$$PRE for $I := 0; $I < $B.N; $I++ { $$$BODY } $$$POST }"
+   - "func $F($B *testing.B) { $$$PRE for $I := 0; $I < $B.N; $I++ { $$$BODY } $$$POST }"
 ---
 
 Go 1.24 added `testing.B.Loop`. Write `for b.Loop() { ... }` instead of looping over `b.N`.

@@ -5,11 +5,7 @@
 description = "Compact ty (astral) type checker output"
 match_command = "^ty$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^Checking \\d+ file",
-	"^ty \\d+\\.\\d+",
-]
+strip_lines_matching = ["^\\s*$", "^Checking \\d+ file", "^ty \\d+\\.\\d+"]
 truncate_lines_at = 250
 max_lines = 80
 on_empty = "ty: ok"

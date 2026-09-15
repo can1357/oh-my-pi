@@ -52,6 +52,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import type { HistoryScope } from "../../session/history-storage";
 import { isTranscriptEntry, isUserRequestEntry, type TranscriptEntry } from "../../session/session-context";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
@@ -117,6 +118,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
+import { historyScopeRing } from "../history-scope";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
@@ -464,6 +466,7 @@ export class SelectorController {
 		this.showSelector(done => {
 			const component = new HistorySearchComponent(
 				historyStorage,
+				this.#historyScopeRing(),
 				prompt => {
 					done();
 					this.ctx.editor.setText(prompt);
@@ -475,6 +478,20 @@ export class SelectorController {
 				},
 			);
 			return { component, focus: component };
+		});
+	}
+
+	/**
+	 * Scope ring for history search: the resolved start scope first, then the remaining
+	 * scopes in canonical (narrowest-first) order, wrapped — a rotation, not an
+	 * ordering by width. The conversation id comes from the session manager — the
+	 * provider-side `AgentSession.sessionId` is not what prompts are stored under — and
+	 * the directory is the one prompts are written with.
+	 */
+	#historyScopeRing(): HistoryScope[] {
+		return historyScopeRing(this.ctx.settings.get("history.searchScope"), {
+			sessionId: this.ctx.sessionManager.getSessionId(),
+			cwd: getProjectDir(),
 		});
 	}
 

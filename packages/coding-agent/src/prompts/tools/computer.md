@@ -36,6 +36,7 @@ tree = await win.ax(maxDepth=6)
 await (await win.ref("e12")).press()
 await win.click(120, 48, button="right")
 ```
+
 </examples>
 
 <rules>

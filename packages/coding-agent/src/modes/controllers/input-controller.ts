@@ -34,7 +34,11 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	guestRefusesSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -966,16 +970,20 @@ export class InputController {
 					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
+				// Commands such as /new, /resume, /fork and /move switch the conversation or the
+				// working directory while they run. Recording before dispatch files the command
+				// under the context it was typed in — in the database *and* in the editor's local
+				// list, which is still the one that context seeded. Recording after dispatch put
+				// the command in the destination's list, where the next Up would recall it.
+				if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
+					this.ctx.editor.addToHistory(text);
+				}
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls
-					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			}
@@ -1656,17 +1664,30 @@ export class InputController {
 
 		if (text) {
 			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+			// Same reason as the submit path: record before dispatch files the command under the
+			// context it was typed in — in the database and in the editor's local list, which is
+			// still the one that context seeded.
+			if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
+				this.ctx.editor.addToHistory(text);
+			}
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
 			if (slashResult === true) {
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				return;
 			}
 			if (typeof slashResult === "string") {
 				// Command handled but returned remaining text to use as prompt.
-				// Record the original slash command text so Up Arrow recalls it.
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				text = slashResult;
 			}
+		}
+
+		// A guest gets the same refusal on this path as on submit: the dispatcher left slash text it
+		// did not consume — a host-only builtin, a skill, an unknown command — and this path would
+		// otherwise run it locally and record it (skills record inside `#invokeSkillCommand`, below).
+		// Bash and python input stay ungated here, as they always were.
+		if (this.ctx.collabGuest && text.startsWith("/")) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			this.ctx.editor.setText("");
+			return;
 		}
 
 		// Skill commands invoke through the custom-message path regardless of
@@ -2188,6 +2209,14 @@ export class InputController {
 			this.ctx.editor.insertTextAttachment(text);
 			this.ctx.showError("Failed to save paste to a file — attached as a text chip instead");
 		}
+	}
+
+	/**
+	 * Whether this session's collab guest gates refuse `text` instead of running it. A refused
+	 * command must not enter history: the next Up would offer a command that cannot be repeated.
+	 */
+	#guestRefusesSlash(text: string): boolean {
+		return this.ctx.collabGuest !== undefined && guestRefusesSlashCommand(text);
 	}
 
 	/**

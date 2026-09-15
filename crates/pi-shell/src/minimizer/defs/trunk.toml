@@ -5,12 +5,7 @@
 description = "Compact trunk check / fmt output"
 match_command = "^trunk$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^\\s*Downloading ",
-	"^\\s*Installing ",
-	"^\\s*Checking \\.\\.\\.",
-]
+strip_lines_matching = ["^\\s*$", "^\\s*Downloading ", "^\\s*Installing ", "^\\s*Checking \\.\\.\\."]
 truncate_lines_at = 250
 max_lines = 80
 on_empty = "trunk: ok"

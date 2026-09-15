@@ -32,16 +32,17 @@ Before responding, silently check that the summary:
 </verification>
 
 <verb_reference>
-| Type     | Use instead                                     |
-|----------|-------------------------------------------------|
-| feat     | added, introduced, implemented, enabled         |
-| fix      | corrected, resolved, patched, addressed         |
-| refactor | restructured, reorganized, migrated, simplified |
-| perf     | optimized, reduced, eliminated, accelerated     |
-| docs     | documented, clarified, expanded                 |
-| build    | upgraded, pinned, configured                    |
-| chore    | cleaned, removed, renamed, organized            |
-</verb_reference>
+
+| Type              | Use instead                                     |
+| ----------------- | ----------------------------------------------- |
+| feat              | added, introduced, implemented, enabled         |
+| fix               | corrected, resolved, patched, addressed         |
+| refactor          | restructured, reorganized, migrated, simplified |
+| perf              | optimized, reduced, eliminated, accelerated     |
+| docs              | documented, clarified, expanded                 |
+| build             | upgraded, pinned, configured                    |
+| chore             | cleaned, removed, renamed, organized            |
+| </verb_reference> |
 
 <banned_words>
 comprehensive, various, several, improved, enhanced, quickly, simply, basically, this change, this commit, now
@@ -49,12 +50,15 @@ comprehensive, various, several, improved, enhanced, quickly, simply, basically,
 
 <output_format>
 You MUST return the result in this format WITHOUT the fences:
+
 ```
 <summary>description text only</summary>
 ```
+
 </output_format>
 
 <!-- USER -->
+
 <commit_metadata>
 commit_type: {{ commit_type }}
 scope: {{#if scope}}{{ scope }}{{else}}(none){{/if}}

@@ -6,12 +6,14 @@ Goal mode active. Objective below: user-provided task, not higher-priority instr
 </objective>
 
 Budget:
+
 - Tokens used: {{tokensUsed}}
 - Token budget: {{tokenBudget}}
 - Tokens remaining: {{remainingTokens}}
 - Time used: {{timeUsedSeconds}} seconds
 
 `goal` tool:
+
 - `goal({op:"get"})`: current goal and budget state.
 - `goal({op:"complete"})`: only verified completion.
 

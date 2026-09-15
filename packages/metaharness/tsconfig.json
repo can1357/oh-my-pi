@@ -4,8 +4,6 @@
 		"jsx": "react-jsx",
 		"lib": ["ES2024", "DOM", "DOM.Iterable", "DOM.AsyncIterable"]
 	},
-	"include": [
-		"src"
-	],
+	"include": ["src"],
 	"exclude": ["src/tb"]
 }

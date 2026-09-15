@@ -143,7 +143,10 @@ export async function probe(opts: ProbeOptions): Promise<ProbeRun> {
 			try {
 				model = resolveModel(ref);
 			} catch (err) {
-				return { model: ref, samples: [{ text: "", stopReason: "error", error: err instanceof Error ? err.message : String(err) }] };
+				return {
+					model: ref,
+					samples: [{ text: "", stopReason: "error", error: err instanceof Error ? err.message : String(err) }],
+				};
 			}
 			const samples = await Promise.all(Array.from({ length: sampleCount }, () => drawOne(model)));
 			return { model: `${model.provider}/${model.id}`, samples };
@@ -201,7 +204,12 @@ async function main(): Promise<void> {
 		template,
 		name: values.name,
 		samples: values.samples ? Number(values.samples) : undefined,
-		models: values.model ? values.model.split(",").map(s => s.trim()).filter(Boolean) : undefined,
+		models: values.model
+			? values.model
+					.split(",")
+					.map(s => s.trim())
+					.filter(Boolean)
+			: undefined,
 		maxTokens: values["max-tokens"] ? Number(values["max-tokens"]) : undefined,
 	});
 

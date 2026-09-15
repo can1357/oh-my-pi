@@ -6,10 +6,7 @@
 description = "Compact systemctl status output"
 match_command = "^systemctl$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^[A-Z][a-z]{2}\\s+\\d+\\s+\\d\\d:\\d\\d:\\d\\d\\s",
-]
+strip_lines_matching = ["^\\s*$", "^[A-Z][a-z]{2}\\s+\\d+\\s+\\d\\d:\\d\\d:\\d\\d\\s"]
 truncate_lines_at = 250
 max_lines = 60
 on_empty = "systemctl: ok"

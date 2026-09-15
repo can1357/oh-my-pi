@@ -5,12 +5,7 @@
 description = "Compact gcc/g++ compiler output — strip notes, keep errors and warnings"
 match_command = "^(gcc|g\\+\\+|clang|clang\\+\\+)$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^\\s+\\|\\s*$",
-  "^In file included from",
-  "^\\s+from\\s",
-]
+strip_lines_matching = ["^\\s*$", "^\\s+\\|\\s*$", "^In file included from", "^\\s+from\\s"]
 max_lines = 50
 on_empty = "gcc: ok"
 

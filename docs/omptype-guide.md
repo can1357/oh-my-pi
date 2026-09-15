@@ -4,7 +4,6 @@ Internal schemas use **`@oh-my-pi/omptype`** — an ArkType-compatible validator
 with a lazy JIT runtime (`packages/omptype`). Author types with
 `import { type } from "@oh-my-pi/omptype"`.
 
-
 ## Why omptype (perf contract)
 
 - `type()` construction is ~100x cheaper than arktype (no eager codegen, no node interning).
@@ -29,22 +28,22 @@ validate locally but degrade to their base schema on the wire.
 
 ## Definition language (arktype-compatible subset)
 
-| Construct                  | Form                                                              |
-| -------------------------- | ----------------------------------------------------------------- |
-| Primitives                 | `"string"`, `"number"`, `"boolean"`, `"null"`, `"undefined"`, `"unknown"`, `"object"`, `"bigint"` |
-| Integer                    | `"number.integer"`                                                |
-| URL string                 | `"string.url"`                                                    |
-| Literals                   | `"'x'"`, `"5"`, `"true"`                                          |
-| Unions                     | `"'a' \| 'b'"`, `"string \| null"`                                |
-| Arrays                     | `"string[]"`, `"(string \| number)[]"`, `[def, "[]"]`             |
-| Bounds                     | `"number >= 0"`, `"0 < number <= 3600"`, `"1 <= string <= 10"`    |
-| Optional key               | `{ "limit?": "number" }` or value-suffix `{ limit: "number?" }`   |
-| Defaults                   | `{ count: "number = 10" }`, `type("string[]").default(() => [])`  |
-| Undeclared keys            | `"+": "reject"` (fail) / `"+": "delete"` (strip) / default keep   |
-| Records                    | `{ "[string]": "number" }` — NOT `"Record<string, number>"`       |
-| Runtime enums              | `type.enumerated(...RUNTIME_ARRAY)`                               |
-| Runtime-built object defs  | `type.raw({...})` (returns `BaseType`)                            |
-| Keyword statics            | `type.number.atLeast(5).atMost(300)`, `type.string`               |
+| Construct                 | Form                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------- |
+| Primitives                | `"string"`, `"number"`, `"boolean"`, `"null"`, `"undefined"`, `"unknown"`, `"object"`, `"bigint"` |
+| Integer                   | `"number.integer"`                                                                                |
+| URL string                | `"string.url"`                                                                                    |
+| Literals                  | `"'x'"`, `"5"`, `"true"`                                                                          |
+| Unions                    | `"'a' \| 'b'"`, `"string \| null"`                                                                |
+| Arrays                    | `"string[]"`, `"(string \| number)[]"`, `[def, "[]"]`                                             |
+| Bounds                    | `"number >= 0"`, `"0 < number <= 3600"`, `"1 <= string <= 10"`                                    |
+| Optional key              | `{ "limit?": "number" }` or value-suffix `{ limit: "number?" }`                                   |
+| Defaults                  | `{ count: "number = 10" }`, `type("string[]").default(() => [])`                                  |
+| Undeclared keys           | `"+": "reject"` (fail) / `"+": "delete"` (strip) / default keep                                   |
+| Records                   | `{ "[string]": "number" }` — NOT `"Record<string, number>"`                                       |
+| Runtime enums             | `type.enumerated(...RUNTIME_ARRAY)`                                                               |
+| Runtime-built object defs | `type.raw({...})` (returns `BaseType`)                                                            |
+| Keyword statics           | `type.number.atLeast(5).atMost(300)`, `type.string`                                               |
 
 ## Validating (same as arktype)
 
@@ -52,8 +51,8 @@ validate locally but degrade to their base schema on the wire.
 import { type } from "@oh-my-pi/omptype";
 const out = schema(value);
 if (out instanceof type.errors) {
-  // out.summary → human message; entries have .path (array) and .problem
-  throw new Error(out.summary);
+	// out.summary → human message; entries have .path (array) and .problem
+	throw new Error(out.summary);
 }
 // `out` is the validated/morphed value (defaults filled, extras stripped)
 ```

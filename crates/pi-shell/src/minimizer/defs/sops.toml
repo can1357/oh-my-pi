@@ -6,12 +6,7 @@
 description = "Compact sops encrypt/decrypt output"
 match_command = "^sops$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^\\[AGE\\] ",
-	"^sops detected a legacy",
-	"^Please rotate your data key",
-]
+strip_lines_matching = ["^\\s*$", "^\\[AGE\\] ", "^sops detected a legacy", "^Please rotate your data key"]
 truncate_lines_at = 300
 max_lines = 120
 on_empty = "sops: ok"

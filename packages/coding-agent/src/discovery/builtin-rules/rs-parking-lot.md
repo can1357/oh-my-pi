@@ -1,9 +1,9 @@
 ---
 description: Use parking_lot instead of std::sync for Mutex/RwLock
 condition:
-  - "\\.lock\\(\\)\\.unwrap\\(\\)"
-  - "\\.read\\(\\)\\.unwrap\\(\\)"
-  - "\\.write\\(\\)\\.unwrap\\(\\)"
+   - "\\.lock\\(\\)\\.unwrap\\(\\)"
+   - "\\.read\\(\\)\\.unwrap\\(\\)"
+   - "\\.write\\(\\)\\.unwrap\\(\\)"
 scope: "tool:edit(*.rs), tool:write(*.rs)"
 interruptMode: never
 ---
@@ -33,12 +33,12 @@ let guard = data.lock();
 
 ## Equivalents
 
-|std::sync|parking_lot|
-|---|---|
-|`Mutex<T>`|`Mutex<T>`|
-|`RwLock<T>`|`RwLock<T>`|
-|`Condvar`|`Condvar`|
-|`Once`|`Once`|
+| std::sync   | parking_lot |
+| ----------- | ----------- |
+| `Mutex<T>`  | `Mutex<T>`  |
+| `RwLock<T>` | `RwLock<T>` |
+| `Condvar`   | `Condvar`   |
+| `Once`      | `Once`      |
 
 ## Keep async locks async
 

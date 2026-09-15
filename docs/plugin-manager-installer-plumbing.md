@@ -36,7 +36,7 @@ omp plugin install name@marketplace / omp install name@marketplace
 
 - `src/commands/plugin.ts` defines command/flags and forwards to `runPluginCommand`.
 - `src/cli/plugin-cli.ts` maps npm/link subcommands to `PluginManager` methods:
-  - `install`, `uninstall`, `list`, `link`, `doctor`, `features`, `config`, `enable`, `disable`
+   - `install`, `uninstall`, `list`, `link`, `doctor`, `features`, `config`, `enable`, `disable`
 - `discover`, `upgrade`, and `marketplace ...` subcommands use `MarketplaceManager`.
 - No explicit npm-plugin `update` action exists; update is done by re-running `install` with a new package/version spec.
 
@@ -47,9 +47,9 @@ User plugin state lives under the plugins data root (`~/.omp/plugins` by default
 - `package.json` — dependency manifest used by `bun install`/`bun uninstall` for npm-installed plugins
 - `node_modules/` — installed npm packages plus link and marketplace-cache symlinks
 - `omp-plugins.lock.json` — runtime state for npm/link/marketplace plugins:
-  - enabled/disabled per plugin
-  - selected feature set per plugin
-  - persisted plugin settings
+   - enabled/disabled per plugin
+   - selected feature set per plugin
+   - persisted plugin settings
 
 When a project anchor (`.omp/` or `.git/`) exists at or above cwd, project runtime plugins live in `<anchor>/.omp/plugins/{node_modules,omp-plugins.lock.json}`. Marketplace project installs populate this root; enabled project packages shadow user packages with the same package name.
 
@@ -264,8 +264,8 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 ## Malformed/missing manifest behavior summary
 
 - Missing `omp`/`pi` field:
-  - install/list: tolerated (minimal manifest)
-  - runtime enabled-plugin discovery: skipped as non-plugin
+   - install/list: tolerated (minimal manifest)
+   - runtime enabled-plugin discovery: skipped as non-plugin
 - Missing feature referenced by install spec or `features --set/--enable`: hard error with available feature list
 - Invalid `plugin-overrides.json`: ignored with fallback to `{}` in both manager and loader paths
 - Missing tool/hook/command file paths referenced by manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`

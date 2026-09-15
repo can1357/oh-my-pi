@@ -5,14 +5,9 @@ description = "Compact rails db:migrate / db:rollback output"
 match_command = "^(rails|rake)$"
 match_subcommand = "^db:(migrate|rollback)$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^\\s*(--|->)",
-]
+strip_lines_matching = ["^\\s*$", "^\\s*(--|->)"]
 keep_lines_matching = ["(migrating|migrated|aborted|error|Error|reverting|reverted)"]
-replace_after = [
-	{ pattern = "^== \\d+ ([\\w:]+): (?:migrated|reverted).*$", replacement = "✓ $1" },
-]
+replace_after = [{ pattern = "^== \\d+ ([\\w:]+): (?:migrated|reverted).*$", replacement = "✓ $1" }]
 max_lines = 40
 on_empty = "ok (no pending migrations)"
 

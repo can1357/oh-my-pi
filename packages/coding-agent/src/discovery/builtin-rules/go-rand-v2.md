@@ -27,12 +27,12 @@ n := rand.IntN(100)
 f := rand.Float64()
 ```
 
-| math/rand | math/rand/v2 |
-| --- | --- |
-| `rand.Intn(n)` | `rand.IntN(n)` |
-| `rand.Int63n(n)` | `rand.Int64N(n)` |
-| `rand.Intn`/`Int31n` on a `*Rand` | `(*Rand).IntN` / `Int32N` |
-| `rand.Seed(x)` | drop it — `v2` has no global seed |
+| math/rand                                 | math/rand/v2                                               |
+| ----------------------------------------- | ---------------------------------------------------------- |
+| `rand.Intn(n)`                            | `rand.IntN(n)`                                             |
+| `rand.Int63n(n)`                          | `rand.Int64N(n)`                                           |
+| `rand.Intn`/`Int31n` on a `*Rand`         | `(*Rand).IntN` / `Int32N`                                  |
+| `rand.Seed(x)`                            | drop it — `v2` has no global seed                          |
 | explicit `rand.New(rand.NewSource(seed))` | `rand.New(rand.NewPCG(s1, s2))` or `rand.NewChaCha8(seed)` |
 
 ## Keep math/rand only when

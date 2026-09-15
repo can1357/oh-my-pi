@@ -97,6 +97,7 @@ helm install arc \
 ```
 
 **Scale set** (`omp-kata`), using the runner cache PVC and values file from step 3:
+
 ```bash
 helm install omp-kata \
   --namespace arc-runners --create-namespace \
@@ -137,14 +138,14 @@ against the lockfile: Bun's global package store and Cargo's registry cache.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: runner-cache
-  namespace: arc-runners
+   name: runner-cache
+   namespace: arc-runners
 spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 100Gi
+   accessModes: ["ReadWriteOnce"]
+   storageClassName: local-path
+   resources:
+      requests:
+         storage: 100Gi
 ```
 
 Apply it once:
@@ -164,56 +165,56 @@ minRunners: 0
 maxRunners: 8
 # none: each job runs inside the runner container, which itself lives in a Kata microVM
 containerMode:
-  type: ""
+   type: ""
 template:
-  spec:
-    runtimeClassName: kata-qemu
-    securityContext:
-      fsGroup: 1001
-      fsGroupChangePolicy: OnRootMismatch
-    containers:
-      - name: runner
-        image: omp-kata-runner:2026-07-27-072222
-        imagePullPolicy: IfNotPresent
-        command: ["/home/runner/run.sh"]
-        envFrom:
-          - secretRef:
-              name: bazel-remote-ci
-          - secretRef:
-              name: sccache-s3   # legacy - removed together with the cargo CI pipeline
-        volumeMounts:
-          - name: runner-cache
-            mountPath: /home/runner/.bun/install/cache
-            subPath: bun-store
-          - name: runner-cache
-            mountPath: /home/runner/.cargo/registry/cache
-            subPath: cargo-registry/cache
-          - name: runner-cache
-            mountPath: /home/runner/.cargo/registry/index
-            subPath: cargo-registry/index
-          # Shared Bazel repository cache: pods are ephemeral, so without it
-          # every job re-downloads toolchains and crate archives. Content-
-          # addressed and written atomically, safe to share across pods.
-          # Deliberately OUTSIDE $HOME: kubelet creates missing mountpoint
-          # parents root-owned, and a root-owned ~/.cache breaks bazel's
-          # default output root and zig's wrapper cache.
-          - name: runner-cache
-            mountPath: /opt/bazel-repo-cache
-            subPath: bazel-repo-cache
-        resources:
-          # Burstable on purpose: requests bin-pack 8 runners onto the
-          # 32-vCPU / 125 GiB host; limits are each Kata VM's hotplug
-          # ceiling. Keep sum(memory limits) under host RAM.
-          requests:
-            cpu: "3"
-            memory: "10Gi"
-          limits:
-            cpu: "8"
-            memory: "14Gi"
-    volumes:
-      - name: runner-cache
-        persistentVolumeClaim:
-          claimName: runner-cache
+   spec:
+      runtimeClassName: kata-qemu
+      securityContext:
+         fsGroup: 1001
+         fsGroupChangePolicy: OnRootMismatch
+      containers:
+         - name: runner
+           image: omp-kata-runner:2026-07-27-072222
+           imagePullPolicy: IfNotPresent
+           command: ["/home/runner/run.sh"]
+           envFrom:
+              - secretRef:
+                   name: bazel-remote-ci
+              - secretRef:
+                   name: sccache-s3 # legacy - removed together with the cargo CI pipeline
+           volumeMounts:
+              - name: runner-cache
+                mountPath: /home/runner/.bun/install/cache
+                subPath: bun-store
+              - name: runner-cache
+                mountPath: /home/runner/.cargo/registry/cache
+                subPath: cargo-registry/cache
+              - name: runner-cache
+                mountPath: /home/runner/.cargo/registry/index
+                subPath: cargo-registry/index
+              # Shared Bazel repository cache: pods are ephemeral, so without it
+              # every job re-downloads toolchains and crate archives. Content-
+              # addressed and written atomically, safe to share across pods.
+              # Deliberately OUTSIDE $HOME: kubelet creates missing mountpoint
+              # parents root-owned, and a root-owned ~/.cache breaks bazel's
+              # default output root and zig's wrapper cache.
+              - name: runner-cache
+                mountPath: /opt/bazel-repo-cache
+                subPath: bazel-repo-cache
+           resources:
+              # Burstable on purpose: requests bin-pack 8 runners onto the
+              # 32-vCPU / 125 GiB host; limits are each Kata VM's hotplug
+              # ceiling. Keep sum(memory limits) under host RAM.
+              requests:
+                 cpu: "3"
+                 memory: "10Gi"
+              limits:
+                 cpu: "8"
+                 memory: "14Gi"
+      volumes:
+         - name: runner-cache
+           persistentVolumeClaim:
+              claimName: runner-cache
 ```
 
 Field by field:
@@ -227,13 +228,13 @@ Field by field:
   there are zero runner microVMs. Runner pods are **burstable**: a small
   request (3 vCPU / 10 GiB) bin-packs eight runners onto the reference host,
   while the limit (8 vCPU / 14 GiB) is each Kata VM's hotplug ceiling, so a
-  lone heavy job still gets 8 vCPUs. Keep the sum of memory *limits* under
+  lone heavy job still gets 8 vCPUs. Keep the sum of memory _limits_ under
   host RAM — host OOM under Kata kills VMs unpredictably. (The original
   guaranteed sizing, 4 x 8 vCPU / 24 GiB requests=limits, reserved the whole
   host and queued every >4-job workflow fan-out for minutes.)
 - **`containerMode.type: ""`** - **none**. The default chart offers `dind`
   (Docker-in-Docker sidecar) or `kubernetes` mode for job-container isolation;
-  both are unnecessary here because the *whole runner pod* is already isolated in
+  both are unnecessary here because the _whole runner pod_ is already isolated in
   a microVM. The job runs directly in the runner container - no privileged dind
   sidecar, no extra attack surface.
 - **`template.spec.runtimeClassName: kata-qemu`** - the critical line. It binds
@@ -347,20 +348,20 @@ Unlike the legacy stack, the whole deployment lives in the repo under
 - [`setup.sh`](../bazel-remote/setup.sh) - the idempotent bootstrap, run **on
   the CI host** as root:
 
-  ```bash
-  ./setup.sh   # from a checkout of infra/bazel-remote/ on the host
-  ```
+   ```bash
+   ./setup.sh   # from a checkout of infra/bazel-remote/ on the host
+   ```
 
-  It generates a self-signed CA + server certificate (SANs:
-  `bazel-remote.bazel-cache.svc.cluster.local`, `bazel-remote.bazel-cache.svc`,
-  plus a private admin name via `ADMIN_SAN`), creates the secrets
-  ([5b](#5b-endpoints-tls-and-auth)), applies `bazel-remote.yaml`, patches the
-  egress policy ([step 6](#6-runner-egress-lockdown)), and removes any retired
-  public exposure (NodePort service, firewalld `30992/tcp`) from earlier
-  iterations.
-  Re-running is safe: the CA, server cert, and `ci` password persist under
-  `/root/bazel-remote-cache`, and every kubectl step is `apply`-based or
-  guarded by a presence check.
+   It generates a self-signed CA + server certificate (SANs:
+   `bazel-remote.bazel-cache.svc.cluster.local`, `bazel-remote.bazel-cache.svc`,
+   plus a private admin name via `ADMIN_SAN`), creates the secrets
+   ([5b](#5b-endpoints-tls-and-auth)), applies `bazel-remote.yaml`, patches the
+   egress policy ([step 6](#6-runner-egress-lockdown)), and removes any retired
+   public exposure (NodePort service, firewalld `30992/tcp`) from earlier
+   iterations.
+   Re-running is safe: the CA, server cert, and `ci` password persist under
+   `/root/bazel-remote-cache`, and every kubectl step is `apply`-based or
+   guarded by a presence check.
 
 Verify:
 
@@ -382,31 +383,31 @@ curl -sk "https://$(kubectl -n bazel-cache get pod -l app=bazel-remote \
 One endpoint, one auth model — **reads are unauthenticated, writes require the
 `ci` credentials**, and only in-cluster clients can reach it at all:
 
-| Client | Endpoint | Writes |
-| --- | --- | --- |
-| omp-kata runner pods (trusted `push`/main + release) | `grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092` | yes - `ci` credentials injected via the `bazel-remote-ci` secret |
-| GitHub-hosted runners (PRs, macOS, release) | — never touch this infrastructure; they persist a local `--disk_cache`/`--repository_cache` via `actions/cache` (`.github/actions/bazel-cache`) | n/a |
+| Client                                               | Endpoint                                                                                                                                        | Writes                                                           |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| omp-kata runner pods (trusted `push`/main + release) | `grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092`                                                                                       | yes - `ci` credentials injected via the `bazel-remote-ci` secret |
+| GitHub-hosted runners (PRs, macOS, release)          | — never touch this infrastructure; they persist a local `--disk_cache`/`--repository_cache` via `actions/cache` (`.github/actions/bazel-cache`) | n/a                                                              |
 
 - **TLS.** The server certificate is signed by a self-signed CA committed at
   [`infra/bazel-remote/ca.crt`](../bazel-remote/ca.crt); every client passes
-  `--tls_certificate=infra/bazel-remote/ca.crt`. Only the CA *key* stays on the
+  `--tls_certificate=infra/bazel-remote/ca.crt`. Only the CA _key_ stays on the
   host (`/root/bazel-remote-cache/ca.key`). `setup.sh` echoes the CA cert so
   the operator can commit it (the script cannot commit).
 - **Secrets** (all maintained by `setup.sh`):
-  - `bazel-cache/bazel-remote-tls` - server cert + key, mounted at `/tls`;
-  - `bazel-cache/bazel-remote-auth` - bcrypt htpasswd with the single user
-    `ci`, mounted at `/auth` (`--allow_unauthenticated_reads` keeps reads open);
-  - `arc-runners/bazel-remote-ci` - `BAZEL_REMOTE_USER` / `BAZEL_REMOTE_PASSWORD`,
-    injected into every runner pod via `envFrom`
-    ([step 3](#3-scale-set-values-arc-omp-valuesyaml); `infra/reload-runner.sh`
-    inserts the `envFrom` entry into `arc-omp-values.yaml` idempotently on the
-    next image reload).
+   - `bazel-cache/bazel-remote-tls` - server cert + key, mounted at `/tls`;
+   - `bazel-cache/bazel-remote-auth` - bcrypt htpasswd with the single user
+     `ci`, mounted at `/auth` (`--allow_unauthenticated_reads` keeps reads open);
+   - `arc-runners/bazel-remote-ci` - `BAZEL_REMOTE_USER` / `BAZEL_REMOTE_PASSWORD`,
+     injected into every runner pod via `envFrom`
+     ([step 3](#3-scale-set-values-arc-omp-valuesyaml); `infra/reload-runner.sh`
+     inserts the `envFrom` entry into `arc-omp-values.yaml` idempotently on the
+     next image reload).
 - **No GitHub secrets.** Nothing outside the cluster holds cache credentials;
-  the public repo carries only the CA *certificate*.
+  the public repo carries only the CA _certificate_.
 
 ### 5c. The cache consumers
 
-**(a) Bazel remote cache** - `.bazelrc` carries the cache *policy* configs
+**(a) Bazel remote cache** - `.bazelrc` carries the cache _policy_ configs
 (`cache-rw` / `cache-ro`); CI composes the endpoint and credentials per
 environment:
 
@@ -464,7 +465,7 @@ credentials. The primary defense is to keep untrusted code away from them:
   `actions/cache`-backed disk cache — and fork code never sees
   `bazel-remote-ci` (the cache has no publicly reachable endpoint to attack).
 - As defense in depth, set the repo's **Settings -> Actions -> Fork pull request
-  workflows** policy to *Require approval for all outside collaborators* (or all
+  workflows** policy to _Require approval for all outside collaborators_ (or all
   forks). GitHub's public-repo default only gates first-time contributors.
 
 The mounted-cache design still narrows the blast radius of trusted runs: no
@@ -517,57 +518,57 @@ server-managed metadata omitted, host public IP redacted):
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: runner-egress-lockdown
-  namespace: arc-runners
+   name: runner-egress-lockdown
+   namespace: arc-runners
 spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
-    - Egress
-  egress:
-    # 1. Cluster DNS only (CoreDNS + kube-system).
-    - to:
-        - ipBlock:
-            cidr: 10.43.0.10/32
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # 2. Public internet, MINUS all private/infra ranges and the host's own public IP.
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-              - 169.254.0.0/16
-              - 100.64.0.0/10
-              - <PUBLIC_IP>/32
-    # 3. RustFS shared cache (S3) - legacy, removed together with sccache.
-    - to:
-        - ipBlock:
-            cidr: 10.43.0.0/16
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: sccache
-      ports:
-        - port: 9000
-          protocol: TCP
-    # 4. bazel-remote shared cache (gRPC) over the cluster network.
-    - to:
-        - ipBlock:
-            cidr: 10.43.0.0/16
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: bazel-cache
-      ports:
-        - port: 9092
-          protocol: TCP
+   podSelector: {}
+   policyTypes:
+      - Ingress
+      - Egress
+   egress:
+      # 1. Cluster DNS only (CoreDNS + kube-system).
+      - to:
+           - ipBlock:
+                cidr: 10.43.0.10/32
+           - namespaceSelector:
+                matchLabels:
+                   kubernetes.io/metadata.name: kube-system
+        ports:
+           - port: 53
+             protocol: UDP
+           - port: 53
+             protocol: TCP
+      # 2. Public internet, MINUS all private/infra ranges and the host's own public IP.
+      - to:
+           - ipBlock:
+                cidr: 0.0.0.0/0
+                except:
+                   - 10.0.0.0/8
+                   - 172.16.0.0/12
+                   - 192.168.0.0/16
+                   - 169.254.0.0/16
+                   - 100.64.0.0/10
+                   - <PUBLIC_IP>/32
+      # 3. RustFS shared cache (S3) - legacy, removed together with sccache.
+      - to:
+           - ipBlock:
+                cidr: 10.43.0.0/16
+           - namespaceSelector:
+                matchLabels:
+                   kubernetes.io/metadata.name: sccache
+        ports:
+           - port: 9000
+             protocol: TCP
+      # 4. bazel-remote shared cache (gRPC) over the cluster network.
+      - to:
+           - ipBlock:
+                cidr: 10.43.0.0/16
+           - namespaceSelector:
+                matchLabels:
+                   kubernetes.io/metadata.name: bazel-cache
+        ports:
+           - port: 9092
+             protocol: TCP
 ```
 
 The allow-list, rule by rule:
@@ -590,14 +591,15 @@ The allow-list, rule by rule:
   this rule idempotently via
   [`runner-egress-patch.yaml`](../bazel-remote/runner-egress-patch.yaml):
 
-  ```bash
-  kubectl -n arc-runners get networkpolicy runner-egress-lockdown -o json \
-    | jq -e '.spec.egress[].to[]? | select(.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "bazel-cache")' >/dev/null \
-    || kubectl -n arc-runners patch networkpolicy runner-egress-lockdown \
-         --type=json --patch-file=infra/bazel-remote/runner-egress-patch.yaml
-  ```
+   ```bash
+   kubectl -n arc-runners get networkpolicy runner-egress-lockdown -o json \
+     | jq -e '.spec.egress[].to[]? | select(.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "bazel-cache")' >/dev/null \
+     || kubectl -n arc-runners patch networkpolicy runner-egress-lockdown \
+          --type=json --patch-file=infra/bazel-remote/runner-egress-patch.yaml
+   ```
+
 - **Ingress.** `policyTypes` lists `Ingress` but no ingress rule is defined, which
-  is a **default-deny**: nothing can open a connection *into* a runner pod.
+  is a **default-deny**: nothing can open a connection _into_ a runner pod.
 
 Egress that survives rule 2 leaves the node via the host's firewalld masquerade
 (SNAT to the public IP) over the default interface - see
@@ -617,8 +619,8 @@ Egress that survives rule 2 leaves the node via the host's firewalld masquerade
   artifact survives into the next job.
 - **Public-repo recommendation.** For a public repo, require approval for fork
   PRs so untrusted code cannot auto-run on the infra: **repo - Settings - Actions
-  - General - Fork pull request workflows from outside collaborators - Require
-  approval for all outside collaborators**.
+   - General - Fork pull request workflows from outside collaborators - Require
+     approval for all outside collaborators**.
 
 ---
 

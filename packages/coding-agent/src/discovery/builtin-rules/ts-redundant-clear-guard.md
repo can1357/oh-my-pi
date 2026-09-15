@@ -3,36 +3,36 @@ description: Do not guard clearTimeout/clearInterval/clearImmediate with a truth
 scope: "tool:edit(*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}), tool:write(*.{ts,tsx,js,jsx,mts,cts,mjs,cjs})"
 interruptMode: never
 astCondition:
-  - "if ($X) clearTimeout($X)"
-  - "if ($X) { clearTimeout($X) }"
-  - "if ($X) clearInterval($X)"
-  - "if ($X) { clearInterval($X) }"
-  - "if ($X) clearImmediate($X)"
-  - "if ($X) { clearImmediate($X) }"
-  - "if ($X !== null) clearTimeout($X)"
-  - "if ($X !== null) { clearTimeout($X) }"
-  - "if ($X !== null) clearInterval($X)"
-  - "if ($X !== null) { clearInterval($X) }"
-  - "if ($X !== null) clearImmediate($X)"
-  - "if ($X !== null) { clearImmediate($X) }"
-  - "if ($X != null) clearTimeout($X)"
-  - "if ($X != null) { clearTimeout($X) }"
-  - "if ($X != null) clearInterval($X)"
-  - "if ($X != null) { clearInterval($X) }"
-  - "if ($X != null) clearImmediate($X)"
-  - "if ($X != null) { clearImmediate($X) }"
-  - "if ($X !== undefined) clearTimeout($X)"
-  - "if ($X !== undefined) { clearTimeout($X) }"
-  - "if ($X !== undefined) clearInterval($X)"
-  - "if ($X !== undefined) { clearInterval($X) }"
-  - "if ($X !== undefined) clearImmediate($X)"
-  - "if ($X !== undefined) { clearImmediate($X) }"
-  - "if ($X != undefined) clearTimeout($X)"
-  - "if ($X != undefined) { clearTimeout($X) }"
-  - "if ($X != undefined) clearInterval($X)"
-  - "if ($X != undefined) { clearInterval($X) }"
-  - "if ($X != undefined) clearImmediate($X)"
-  - "if ($X != undefined) { clearImmediate($X) }"
+   - "if ($X) clearTimeout($X)"
+   - "if ($X) { clearTimeout($X) }"
+   - "if ($X) clearInterval($X)"
+   - "if ($X) { clearInterval($X) }"
+   - "if ($X) clearImmediate($X)"
+   - "if ($X) { clearImmediate($X) }"
+   - "if ($X !== null) clearTimeout($X)"
+   - "if ($X !== null) { clearTimeout($X) }"
+   - "if ($X !== null) clearInterval($X)"
+   - "if ($X !== null) { clearInterval($X) }"
+   - "if ($X !== null) clearImmediate($X)"
+   - "if ($X !== null) { clearImmediate($X) }"
+   - "if ($X != null) clearTimeout($X)"
+   - "if ($X != null) { clearTimeout($X) }"
+   - "if ($X != null) clearInterval($X)"
+   - "if ($X != null) { clearInterval($X) }"
+   - "if ($X != null) clearImmediate($X)"
+   - "if ($X != null) { clearImmediate($X) }"
+   - "if ($X !== undefined) clearTimeout($X)"
+   - "if ($X !== undefined) { clearTimeout($X) }"
+   - "if ($X !== undefined) clearInterval($X)"
+   - "if ($X !== undefined) { clearInterval($X) }"
+   - "if ($X !== undefined) clearImmediate($X)"
+   - "if ($X !== undefined) { clearImmediate($X) }"
+   - "if ($X != undefined) clearTimeout($X)"
+   - "if ($X != undefined) { clearTimeout($X) }"
+   - "if ($X != undefined) clearInterval($X)"
+   - "if ($X != undefined) { clearInterval($X) }"
+   - "if ($X != undefined) clearImmediate($X)"
+   - "if ($X != undefined) { clearImmediate($X) }"
 ---
 
 **Do not guard `clearTimeout` / `clearInterval` / `clearImmediate` with truthiness or `null`/`undefined` checks.** Per WHATWG/Node timers spec, calls no-op for `null`, `undefined`, or values without a live timer; guards cannot change behavior, add branches readers must reason about, inflate code, hide the line that matters, and signal timer-API misunderstanding.
@@ -55,7 +55,7 @@ clearInterval(handle);
 clearImmediate(id);
 ```
 
-## When a guard *is* warranted
+## When a guard _is_ warranted
 
 Keep it only if the body does more than clear, e.g. reassigns the handle or runs other cleanup:
 

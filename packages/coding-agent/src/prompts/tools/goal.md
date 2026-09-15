@@ -1,6 +1,7 @@
 Manage active goal-mode objective.
 
 Single `op` field:
+
 - `create`: starts goal; enables goal mode. Requires `objective`; optional positive `token_budget`. Only when no goal exists and none is paused.
 - `get`: returns current active/paused goal and remaining token budget.
 - `resume`: re-activates paused goal for continued work.

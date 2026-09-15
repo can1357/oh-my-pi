@@ -19,7 +19,7 @@ function varint(n: number): number[] {
 
 async function pack(name: string, expected: number) {
 	const text = await Bun.file(`${root}tools/cache/${name}.tiktoken`).text();
-	const lines = text.split("\n").filter((l) => l.length > 0);
+	const lines = text.split("\n").filter(l => l.length > 0);
 	if (lines.length !== expected) {
 		throw new Error(`${name}: expected ${expected} entries, got ${lines.length}`);
 	}

@@ -19,19 +19,19 @@ The prelude exists only while Eval and `browser.enabled` are enabled. It is not 
 
 ```js
 const tab = await browser.open({
-  name: "main",
-  url: "https://example.com",
-  wait_until: "load",
+	name: "main",
+	url: "https://example.com",
+	wait_until: "load",
 });
 
 const observation = await tab.observe();
 await tab.id(observation.elements[0].id).click();
 const title = await tab.title();
 
-const length = await tab.run(
-  async ({ tab }, suffix) => (await tab.title() + suffix).length,
-  { args: ["!"], timeout: 30 },
-);
+const length = await tab.run(async ({ tab }, suffix) => ((await tab.title()) + suffix).length, {
+	args: ["!"],
+	timeout: 30,
+});
 
 await tab.close();
 ```
@@ -65,13 +65,10 @@ A run accepts either a serialized function or a JavaScript function-body string,
 
 ```js
 const hrefs = await tab.run(async ({ page }) => {
-  return await page.$$eval("a", links => links.map(link => link.href));
+	return await page.$$eval("a", links => links.map(link => link.href));
 });
 
-const title = await tab.run(
-  "return await tab.title();",
-  { timeout: 10 },
-);
+const title = await tab.run("return await tab.title();", { timeout: 10 });
 ```
 
 Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.

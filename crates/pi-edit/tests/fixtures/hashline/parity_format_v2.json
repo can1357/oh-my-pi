@@ -378,18 +378,14 @@
 					"input": "PUT 2-2:\nraw",
 					"expect": {
 						"editCount": 2,
-						"warnings": [
-							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
-						]
+						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
 					}
 				},
 				{
 					"input": "PUT 2-2:\nraw",
 					"expect": {
 						"editCount": 2,
-						"warnings": [
-							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
-						]
+						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
 					}
 				}
 			],
@@ -411,9 +407,7 @@
 					"input": "PUT 2-2:\n3:replaced",
 					"expect": {
 						"editCount": 2,
-						"warnings": [
-							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
-						]
+						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
 					}
 				}
 			],

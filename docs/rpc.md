@@ -37,11 +37,11 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 
 ```json
 {
-  "type": "ready",
-  "protocolVersion": 1,
-  "supportedProtocolVersions": [1, 2],
-  "maxFrameBytes": 1048576,
-  "maxReassembledFrameBytes": 67108864
+	"type": "ready",
+	"protocolVersion": 1,
+	"supportedProtocolVersions": [1, 2],
+	"maxFrameBytes": 1048576,
+	"maxReassembledFrameBytes": 67108864
 }
 ```
 
@@ -55,12 +55,12 @@ After the success response, oversized stdout objects are emitted losslessly as a
 
 ```json
 {
-  "type": "rpc_chunk",
-  "chunkId": "rpc-1",
-  "index": 0,
-  "count": 7,
-  "byteLength": 1600042,
-  "data": "eyJ0eXBlIjoicmVzcG9uc2UiLC4uLn0="
+	"type": "rpc_chunk",
+	"chunkId": "rpc-1",
+	"index": 0,
+	"count": 7,
+	"byteLength": 1600042,
+	"data": "eyJ0eXBlIjoicmVzcG9uc2UiLC4uLn0="
 }
 ```
 
@@ -83,8 +83,8 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
-10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+10.   Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
+11.   Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
 ### Inbound frame categories (stdin)
 
@@ -216,11 +216,11 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 
 ```json
 {
-  "id": "req_1",
-  "type": "response",
-  "command": "prompt",
-  "success": true,
-  "data": { "agentInvoked": false }
+	"id": "req_1",
+	"type": "response",
+	"command": "prompt",
+	"success": true,
+	"data": { "agentInvoked": false }
 }
 ```
 
@@ -251,48 +251,48 @@ is re-armed.
 
 ```json
 {
-  "model": { "provider": "...", "id": "..." },
-  "thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
-  "isStreaming": false,
-  "isCompacting": false,
-  "steeringMode": "all|one-at-a-time",
-  "followUpMode": "all|one-at-a-time",
-  "interruptMode": "immediate|wait",
-  "sessionFile": "...",
-  "sessionId": "...",
-  "sessionName": "...",
-  "fastModeEnabled": false,
-  "tokensPerSecond": null,
-  "fastModeActive": false,
-  "autoCompactionEnabled": true,
-  "messageCount": 0,
-  "queuedMessageCount": 0,
-  "todoPhases": [
-    {
-      "id": "phase-1",
-      "name": "Todos",
-      "tasks": [
-        {
-          "id": "task-1",
-          "content": "Map the tool surface",
-          "status": "in_progress"
-        }
-      ]
-    }
-  ],
-  "systemPrompt": ["..."],
-  "dumpTools": [
-    {
-      "name": "read",
-      "description": "Read files and URLs",
-      "parameters": {}
-    }
-  ],
-  "contextUsage": {
-    "tokens": 1100,
-    "contextWindow": 200000,
-    "percent": 0.55
-  }
+	"model": { "provider": "...", "id": "..." },
+	"thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
+	"isStreaming": false,
+	"isCompacting": false,
+	"steeringMode": "all|one-at-a-time",
+	"followUpMode": "all|one-at-a-time",
+	"interruptMode": "immediate|wait",
+	"sessionFile": "...",
+	"sessionId": "...",
+	"sessionName": "...",
+	"fastModeEnabled": false,
+	"tokensPerSecond": null,
+	"fastModeActive": false,
+	"autoCompactionEnabled": true,
+	"messageCount": 0,
+	"queuedMessageCount": 0,
+	"todoPhases": [
+		{
+			"id": "phase-1",
+			"name": "Todos",
+			"tasks": [
+				{
+					"id": "task-1",
+					"content": "Map the tool surface",
+					"status": "in_progress"
+				}
+			]
+		}
+	],
+	"systemPrompt": ["..."],
+	"dumpTools": [
+		{
+			"name": "read",
+			"description": "Read files and URLs",
+			"parameters": {}
+		}
+	],
+	"contextUsage": {
+		"tokens": 1100,
+		"contextWindow": 200000,
+		"percent": 0.55
+	}
 }
 ```
 
@@ -315,11 +315,11 @@ the sticky rejection fallback, even when fast mode was already enabled.
 
 ```json
 {
-  "id": "req_fast_on",
-  "type": "response",
-  "command": "set_fast_mode",
-  "success": true,
-  "data": { "enabled": true, "active": true }
+	"id": "req_fast_on",
+	"type": "response",
+	"command": "set_fast_mode",
+	"success": true,
+	"data": { "enabled": true, "active": true }
 }
 ```
 
@@ -328,11 +328,11 @@ exact error below:
 
 ```json
 {
-  "id": "req_fast_on",
-  "type": "response",
-  "command": "set_fast_mode",
-  "success": false,
-  "error": "Fast mode is unavailable for the current model."
+	"id": "req_fast_on",
+	"type": "response",
+	"command": "set_fast_mode",
+	"success": false,
+	"error": "Fast mode is unavailable for the current model."
 }
 ```
 
@@ -346,11 +346,11 @@ priority keeps the computed active state true:
 
 ```json
 {
-  "id": "req_fast_off",
-  "type": "response",
-  "command": "set_fast_mode",
-  "success": true,
-  "data": { "enabled": false, "active": true }
+	"id": "req_fast_off",
+	"type": "response",
+	"command": "set_fast_mode",
+	"success": true,
+	"data": { "enabled": false, "active": true }
 }
 ```
 
@@ -358,8 +358,8 @@ The corresponding `get_state` result reports the same computed state:
 
 ```json
 {
-  "fastModeEnabled": false,
-  "fastModeActive": true
+	"fastModeEnabled": false,
+	"fastModeActive": true
 }
 ```
 
@@ -369,26 +369,26 @@ Replaces the in-memory todo state for the current session and returns the normal
 
 ```json
 {
-  "id": "req_2",
-  "type": "set_todos",
-  "phases": [
-    {
-      "id": "phase-1",
-      "name": "Evaluation",
-      "tasks": [
-        {
-          "id": "task-1",
-          "content": "Map the read tool surface",
-          "status": "in_progress"
-        },
-        {
-          "id": "task-2",
-          "content": "Exercise edit operations",
-          "status": "pending"
-        }
-      ]
-    }
-  ]
+	"id": "req_2",
+	"type": "set_todos",
+	"phases": [
+		{
+			"id": "phase-1",
+			"name": "Evaluation",
+			"tasks": [
+				{
+					"id": "task-1",
+					"content": "Map the read tool surface",
+					"status": "in_progress"
+				},
+				{
+					"id": "task-2",
+					"content": "Exercise edit operations",
+					"status": "pending"
+				}
+			]
+		}
+	]
 }
 ```
 
@@ -401,23 +401,23 @@ into over stdio:
 
 ```json
 {
-  "id": "req_3",
-  "type": "set_host_tools",
-  "tools": [
-    {
-      "name": "echo_host",
-      "label": "Echo Host",
-      "description": "Echo a value from the embedding host",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "message": { "type": "string" }
-        },
-        "required": ["message"],
-        "additionalProperties": false
-      }
-    }
-  ]
+	"id": "req_3",
+	"type": "set_host_tools",
+	"tools": [
+		{
+			"name": "echo_host",
+			"label": "Echo Host",
+			"description": "Echo a value from the embedding host",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"message": { "type": "string" }
+				},
+				"required": ["message"],
+				"additionalProperties": false
+			}
+		}
+	]
 }
 ```
 
@@ -425,7 +425,7 @@ The response payload is:
 
 ```json
 {
-  "toolNames": ["echo_host"]
+	"toolNames": ["echo_host"]
 }
 ```
 
@@ -444,16 +444,16 @@ dispatch reads/writes through:
 
 ```json
 {
-  "id": "req_4",
-  "type": "set_host_uri_schemes",
-  "schemes": [
-    {
-      "scheme": "db",
-      "description": "Virtual db row files",
-      "writable": true,
-      "immutable": false
-    }
-  ]
+	"id": "req_4",
+	"type": "set_host_uri_schemes",
+	"schemes": [
+		{
+			"scheme": "db",
+			"description": "Virtual db row files",
+			"writable": true,
+			"immutable": false
+		}
+	]
 }
 ```
 
@@ -461,7 +461,7 @@ The response payload is:
 
 ```json
 {
-  "schemes": ["db"]
+	"schemes": ["db"]
 }
 ```
 
@@ -494,10 +494,10 @@ Extension runner errors are emitted separately as:
 
 ```json
 {
-  "type": "extension_error",
-  "extensionPath": "...",
-  "event": "...",
-  "error": "..."
+	"type": "extension_error",
+	"extensionPath": "...",
+	"event": "...",
+	"error": "..."
 }
 ```
 
@@ -578,11 +578,11 @@ From `packages/agent/src/agent.ts` defaults:
 ### Mode semantics
 
 - `set_steering_mode` / `set_follow_up_mode`
-  - `"one-at-a-time"`: dequeue one queued message per turn
-  - `"all"`: dequeue entire queue at once
+   - `"one-at-a-time"`: dequeue one queued message per turn
+   - `"all"`: dequeue entire queue at once
 - `set_interrupt_mode`
-  - `"immediate"`: tool execution checks steering between tool calls; pending steering can abort remaining tool calls in the turn
-  - `"wait"`: defer steering until turn completion
+   - `"immediate"`: tool execution checks steering between tool calls; pending steering can abort remaining tool calls in the turn
+   - `"wait"`: defer steering until turn completion
 
 ## Extension UI Sub-Protocol
 
@@ -593,10 +593,10 @@ Extensions in RPC mode use request/response UI frames.
 `RpcExtensionUIRequest` (`type: "extension_ui_request"`) methods:
 
 - `select`, `confirm`, `input`, `editor`, `cancel`
-  - `select` keeps labels in `options: string[]` and, when any option has a
-    description, emits a positionally aligned
-    `optionDetails: Array<{ description?: string }>` array. Hosts that do not
-    render descriptions can continue using `options` alone.
+   - `select` keeps labels in `options: string[]` and, when any option has a
+     description, emits a positionally aligned
+     `optionDetails: Array<{ description?: string }>` array. Hosts that do not
+     render descriptions can continue using `options` alone.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows)
 
@@ -611,12 +611,12 @@ Example:
 
 ```json
 {
-  "type": "extension_ui_request",
-  "id": "123",
-  "method": "confirm",
-  "title": "Confirm",
-  "message": "Continue?",
-  "timeout": 30000
+	"type": "extension_ui_request",
+	"id": "123",
+	"method": "confirm",
+	"title": "Confirm",
+	"message": "Continue?",
+	"timeout": 30000
 }
 ```
 
@@ -641,11 +641,11 @@ When the agent wants the host to execute one of those tools, RPC mode emits:
 
 ```json
 {
-  "type": "host_tool_call",
-  "id": "host_1",
-  "toolCallId": "toolu_123",
-  "toolName": "echo_host",
-  "arguments": { "message": "hello" }
+	"type": "host_tool_call",
+	"id": "host_1",
+	"toolCallId": "toolu_123",
+	"toolName": "echo_host",
+	"arguments": { "message": "hello" }
 }
 ```
 
@@ -653,9 +653,9 @@ If the tool execution is later aborted, RPC mode emits:
 
 ```json
 {
-  "type": "host_tool_cancel",
-  "id": "host_cancel_1",
-  "targetId": "host_1"
+	"type": "host_tool_cancel",
+	"id": "host_cancel_1",
+	"targetId": "host_1"
 }
 ```
 
@@ -665,11 +665,11 @@ Hosts can optionally stream progress:
 
 ```json
 {
-  "type": "host_tool_update",
-  "id": "host_1",
-  "partialResult": {
-    "content": [{ "type": "text", "text": "working" }]
-  }
+	"type": "host_tool_update",
+	"id": "host_1",
+	"partialResult": {
+		"content": [{ "type": "text", "text": "working" }]
+	}
 }
 ```
 
@@ -677,11 +677,11 @@ Completion uses:
 
 ```json
 {
-  "type": "host_tool_result",
-  "id": "host_1",
-  "result": {
-    "content": [{ "type": "text", "text": "done" }]
-  }
+	"type": "host_tool_result",
+	"id": "host_1",
+	"result": {
+		"content": [{ "type": "text", "text": "done" }]
+	}
 }
 ```
 
@@ -700,10 +700,10 @@ When a session tool resolves a host-owned URL, RPC mode emits:
 
 ```json
 {
-  "type": "host_uri_request",
-  "id": "uri_1",
-  "operation": "read",
-  "url": "db://users/42"
+	"type": "host_uri_request",
+	"id": "uri_1",
+	"operation": "read",
+	"url": "db://users/42"
 }
 ```
 
@@ -715,9 +715,9 @@ emits:
 
 ```json
 {
-  "type": "host_uri_cancel",
-  "id": "uri_cancel_1",
-  "targetId": "uri_1"
+	"type": "host_uri_cancel",
+	"id": "uri_cancel_1",
+	"targetId": "uri_1"
 }
 ```
 
@@ -727,12 +727,12 @@ For successful reads:
 
 ```json
 {
-  "type": "host_uri_result",
-  "id": "uri_1",
-  "content": "id=42\nname=Alice\n",
-  "contentType": "text/plain",
-  "notes": ["fresh from cache"],
-  "immutable": false
+	"type": "host_uri_result",
+	"id": "uri_1",
+	"content": "id=42\nname=Alice\n",
+	"contentType": "text/plain",
+	"notes": ["fresh from cache"],
+	"immutable": false
 }
 ```
 
@@ -747,10 +747,10 @@ a message or fall back to `content` for textual error surfacing:
 
 ```json
 {
-  "type": "host_uri_result",
-  "id": "uri_1",
-  "isError": true,
-  "error": "row 42 not found"
+	"type": "host_uri_result",
+	"id": "uri_1",
+	"isError": true,
+	"error": "row 42 not found"
 }
 ```
 
@@ -775,11 +775,11 @@ Failures are `success: false` with string `error`.
 
 ```json
 {
-  "id": "req_2",
-  "type": "response",
-  "command": "set_model",
-  "success": false,
-  "error": "Model not found: provider/model"
+	"id": "req_2",
+	"type": "response",
+	"command": "set_model",
+	"success": false,
+	"error": "Model not found: provider/model"
 }
 ```
 
@@ -816,10 +816,10 @@ stdin:
 
 ```json
 {
-  "id": "req_2",
-  "type": "prompt",
-  "message": "Also include risks",
-  "streamingBehavior": "followUp"
+	"id": "req_2",
+	"type": "prompt",
+	"message": "Also include risks",
+	"streamingBehavior": "followUp"
 }
 ```
 
@@ -839,11 +839,11 @@ stdout:
 
 ```json
 {
-  "type": "extension_ui_request",
-  "id": "ui_7",
-  "method": "input",
-  "title": "Branch name",
-  "placeholder": "feature/..."
+	"type": "extension_ui_request",
+	"id": "ui_7",
+	"method": "input",
+	"title": "Branch name",
+	"placeholder": "feature/..."
 }
 ```
 

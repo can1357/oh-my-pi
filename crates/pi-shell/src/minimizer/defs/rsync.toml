@@ -5,15 +5,9 @@
 description = "Compact rsync transfer logs"
 match_command = "^rsync$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^sending incremental file list$",
-	"^receiving incremental file list$",
-]
+strip_lines_matching = ["^\\s*$", "^sending incremental file list$", "^receiving incremental file list$"]
 only_on_exit = [0]
-match_output = [
-	{ pattern = "total size is", message = "ok (synced)", unless = "(?i)(error|failed|no such file)" },
-]
+match_output = [{ pattern = "total size is", message = "ok (synced)", unless = "(?i)(error|failed|no such file)" }]
 truncate_lines_at = 250
 head_lines = 5
 tail_lines = 15

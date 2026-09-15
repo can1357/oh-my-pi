@@ -15,12 +15,12 @@ Built for [oh-my-pi](https://github.com/can1357/oh-my-pi)'s compaction pipeline,
 
 Frame shapes are provider-aware, chosen by SQuAD recall evals (see `research/`) against real provider billing:
 
-| Reader | Default shape | Notes |
-| --- | --- | --- |
-| Anthropic | `11on16-bw` | X.org 8x13 glyphs on an 11px advance; high-res Claude lines get 1932px frames |
-| Google | `8on22-bw` @2048 | X.org 8x13 glyphs on a 22px pitch; Gemini bills a fixed per-image budget, so larger frames are free chars |
-| OpenAI | `8on22-bw` | X.org 8x13 glyphs on a 22px pitch, sent at `detail: "original"` |
-| Unknown | Anthropic shape | Per-provider image-count budgets guard against gateways that silently drop frames |
+| Reader    | Default shape    | Notes                                                                                                     |
+| --------- | ---------------- | --------------------------------------------------------------------------------------------------------- |
+| Anthropic | `11on16-bw`      | X.org 8x13 glyphs on an 11px advance; high-res Claude lines get 1932px frames                             |
+| Google    | `8on22-bw` @2048 | X.org 8x13 glyphs on a 22px pitch; Gemini bills a fixed per-image budget, so larger frames are free chars |
+| OpenAI    | `8on22-bw`       | X.org 8x13 glyphs on a 22px pitch, sent at `detail: "original"`                                           |
+| Unknown   | Anthropic shape  | Per-provider image-count budgets guard against gateways that silently drop frames                         |
 
 `resolveShape({ api, id })` matches the model id, not just the wire API — a Claude routed through Vertex or OpenRouter keeps its Claude shape, priced for the gateway actually carrying the request.
 
@@ -42,8 +42,8 @@ Render arbitrary text into LLM image blocks:
 import { renderMany, frames, resolveShape } from "@oh-my-pi/snapcompact";
 
 const images = renderMany(longText, { model }); // ImageContent[], first page first
-const count = frames(longText, { model });      // frame count without rendering
-const shape = resolveShape(model);              // eval-optimal Shape for the reader
+const count = frames(longText, { model }); // frame count without rendering
+const shape = resolveShape(model); // eval-optimal Shape for the reader
 ```
 
 Run a full compaction pass over prepared messages:

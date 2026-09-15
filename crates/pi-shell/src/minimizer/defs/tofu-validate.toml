@@ -6,9 +6,7 @@ description = "Compact OpenTofu validate output"
 match_command = "^tofu$"
 match_subcommand = "^validate$"
 strip_ansi = true
-match_output = [
-  { pattern = "Success! The configuration is valid", message = "ok (valid)" },
-]
+match_output = [{ pattern = "Success! The configuration is valid", message = "ok (valid)" }]
 
 [[tests.tofu-validate]]
 name = "success short-circuits to ok"

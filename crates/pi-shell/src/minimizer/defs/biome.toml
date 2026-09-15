@@ -5,13 +5,7 @@
 description = "Compact Biome lint/format output — strip blank lines, keep diagnostics"
 match_command = "^biome$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^Checked \\d+ file",
-  "^Fixed \\d+ file",
-  "^The following command",
-  "^Run it with",
-]
+strip_lines_matching = ["^\\s*$", "^Checked \\d+ file", "^Fixed \\d+ file", "^The following command", "^Run it with"]
 max_lines = 50
 on_empty = "biome: ok"
 

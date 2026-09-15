@@ -5,9 +5,7 @@
 description = "Compact jq output — truncate large JSON results"
 match_command = "^jq$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-]
+strip_lines_matching = ["^\\s*$"]
 max_lines = 40
 truncate_lines_at = 120
 

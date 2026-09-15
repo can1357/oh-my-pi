@@ -132,7 +132,10 @@
 	background: var(--bg-raised);
 	color: var(--fg-muted);
 	cursor: pointer;
-	transition: color 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+	transition:
+		color 0.14s ease,
+		background 0.14s ease,
+		border-color 0.14s ease;
 }
 
 .sh-theme-toggle:hover {
