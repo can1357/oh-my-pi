@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed credential-generation subscribers observing a partial mutation: `AuthStorage` now resets invalid assignments before notifying them and applies a complete multi-provider reload before one generation transition ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
 - Fixed the auth-gateway sending a model's own reasoning back to Anthropic as demoted plain text, which tripped the `reasoning_extraction` classifier on Fable, leaked reasoning into visible answers on Opus, Sonnet and Haiku, and broke the prompt cache prefix on every tool-calling turn. Replayed assistant turns now carry the model id the request resolves to and a `stopReason` derived from the turn's own tool calls, so same-model thinking blocks keep their signatures and replay natively ([#12115](https://github.com/can1357/oh-my-pi/pull/12115) by [@Zhu-Aemon](https://github.com/Zhu-Aemon)).
 - Fixed custom OpenAI-compatible Responses streams crashing on omitted delta payloads or reasoning-summary fields, and recovered text delivered only in completed snapshots ([#11863](https://github.com/can1357/oh-my-pi/pull/11863) by [@moodiness](https://github.com/moodiness)).
 - Fixed streaming CPU blowup on long Responses turns: per-delta content-index lookups are now O(1) instead of re-scanning the accumulated content blocks, eliminating the quadratic work that could freeze the TUI for tens of seconds to minutes while a subagent streams ([#10605](https://github.com/can1357/oh-my-pi/issues/10605)).
@@ -33,6 +34,7 @@
 - Fixed provider requests failing with `ENOENT` when another process removes a stale shared concurrency lock during acquisition.
 - Fixed Devin-hosted Gemini models rejecting turns that include nullable tool parameters by normalizing tool schemas to Gemini's supported JSON Schema dialect ([#8647](https://github.com/can1357/oh-my-pi/issues/8647), [#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed Devin gateway failures leaking raw proxy HTML into turn errors; HTTP status and retry metadata remain available for recovery ([#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed a session's sticky OAuth/API-key account silently repointing to whatever credential now occupies its old storage position after the credential list was reordered or shrank mid-process (a sibling `/logout` from another process, or an auth-broker snapshot delivery): the in-memory sticky is now re-resolved from its durable credential id on every read, matching the persisted-cache path. A background auth-broker snapshot delivery now also refreshes `AuthStorage`'s own cached view and bumps its generation, so `onGenerationChanged` subscribers see accounts that appeared after the cached startup snapshot ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
 
 ## [18.2.0] - 2026-09-15
 

@@ -97,6 +97,7 @@ function createHost(
 		setModelWithProviderSessionReset: async () => {},
 		resolveActiveEditMode: () => "hashline",
 		syncAfterModelChange: async () => {},
+		applyStartupOAuthAccountPin: () => {},
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemCodexReset: async () => false,
 		runAutoCompaction: async () =>
