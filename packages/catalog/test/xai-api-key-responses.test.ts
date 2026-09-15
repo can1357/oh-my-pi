@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { CATALOG_PROVIDERS, DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { applyXaiCatalogPricing, xaiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
 
@@ -36,7 +37,7 @@ const XAI_COMPLETIONS_SPEC: ModelSpec<"openai-completions"> = {
 
 describe("paid xai (XAI_API_KEY) Responses contract", () => {
 	it("registers xai on the catalog Responses discovery path", () => {
-		const entry = CATALOG_PROVIDERS.find(provider => provider.id === "xai");
+		const entry = providerEntry("xai");
 		expect(entry, "xai catalog descriptor").toBeDefined();
 		expect(entry!.defaultModel).toBe("grok-4.6");
 		expect(DEFAULT_MODEL_PER_PROVIDER.xai).toBe("grok-4.6");

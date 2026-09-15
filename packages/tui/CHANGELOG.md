@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapseToAtom method to compress text spans into UI-friendly atoms
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

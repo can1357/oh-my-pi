@@ -825,17 +825,10 @@ describe("AsyncJobManager", () => {
 	});
 });
 
-describe("AsyncJobManager smart poll-wait escalation", () => {
+describe("AsyncJobManager adaptive wait ladder", () => {
 	const newManager = () => new AsyncJobManager({ onJobComplete: async () => {} });
 
-	test("first poll waits the ladder floor", () => {
-		const m = newManager();
-		expect(m.nextPollWaitMs("Main", 1_000)).toBe(5_000);
-		// A fresh owner also starts at the floor.
-		expect(m.nextPollWaitMs("Other", 1_000)).toBe(5_000);
-	});
-
-	test("back-to-back polls climb the ladder to the top rung", () => {
+	test("back-to-back waits climb the ladder and saturate at the top rung", () => {
 		const m = newManager();
 		const owner = "Main";
 		const t = 1_000;
@@ -845,7 +838,6 @@ describe("AsyncJobManager smart poll-wait escalation", () => {
 			waits.push(m.nextPollWaitMs(owner, t));
 			m.recordPollWaitEnd(owner, t);
 		}
-		// Climbs the rungs, then saturates at the top.
 		expect(waits).toEqual([5_000, 10_000, 30_000, 60_000, 300_000, 300_000]);
 	});
 
@@ -856,11 +848,11 @@ describe("AsyncJobManager smart poll-wait escalation", () => {
 		expect(m.nextPollWaitMs(owner, 0)).toBe(5_000);
 		m.recordPollWaitEnd(owner, 0);
 
-		// Still within the reset window (just under a minute) → keeps climbing.
+		// Just under the reset window → keeps climbing.
 		expect(m.nextPollWaitMs(owner, 59_999)).toBe(10_000);
 		m.recordPollWaitEnd(owner, 60_000);
 
-		// A full minute without polling resets the climb to the floor.
+		// A full minute without waiting resets the climb to the floor.
 		expect(m.nextPollWaitMs(owner, 120_000)).toBe(5_000);
 	});
 

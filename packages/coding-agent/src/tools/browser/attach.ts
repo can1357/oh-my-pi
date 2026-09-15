@@ -1,6 +1,7 @@
 import * as net from "node:net";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import { getBrowserProfilesDir } from "@oh-my-pi/pi-utils";
 import type { Socket } from "bun";
 import type { Browser, Page } from "puppeteer-core";
 import { ToolError, throwIfAborted } from "../tool-errors";
@@ -160,6 +161,69 @@ function findUserDataDirInArgs(args: string[] | undefined): string | null {
 	return result;
 }
 
+/**
+ * Executable basenames of Chromium-family browsers (release channels and
+ * vendor suffixes included), as opposed to Electron apps that also speak CDP.
+ * Matched against the basename without `.exe`.
+ */
+const CHROMIUM_BROWSER_BASENAME =
+	/^(?:google[ -]chrome|chrome|chromium|microsoft[ -]edge|msedge|brave|vivaldi|opera|thorium|ungoogled[ -]chromium)(?:[ -](?:beta|dev|canary|unstable|stable|nightly|snapshot|browser|gx|for[ -]testing))*$/i;
+const CHROMIUM_FLATPAK_IDS: Record<string, true> = {
+	"com.google.Chrome": true,
+	"org.chromium.Chromium": true,
+	"io.github.ungoogled_software.ungoogled_chromium": true,
+};
+
+/**
+ * Launch argv for a spawned executable. Chrome 136+ silently ignores
+ * `--remote-debugging-port` when the default user-data-dir is in use: the
+ * browser opens as usual, nothing listens, and attach waits out its timeout.
+ * Chromium-family browsers therefore get a stable omp-owned profile under
+ * `~/.omp/browser-profiles/<exe slug>` unless the caller already picked one.
+ * That profile is also what lets a second instance start beside the user's
+ * running default-profile browser instead of handing off to it. Electron apps
+ * are left untouched: `--user-data-dir` would relocate their app data.
+ *
+ * An omp-owned profile also bypasses the OS keystore (`--use-mock-keychain`,
+ * `--password-store=basic`, the same pair puppeteer's launcher sets): Chromium
+ * otherwise derives its cookie-encryption key from the login keychain and
+ * macOS blocks on a "wants to use your confidential information" dialog for
+ * every fresh binary. A caller-supplied profile keeps the real keystore; its
+ * existing cookies are encrypted with that key and a mock one would corrupt them.
+ */
+export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
+	const args = appArgs ?? [];
+	const base = path.basename(exe).replace(/\.exe$/i, "");
+	if (!CHROMIUM_BROWSER_BASENAME.test(base) && !Object.hasOwn(CHROMIUM_FLATPAK_IDS, base)) return args;
+	const requestedProfile = findUserDataDirInArgs(args);
+	if (requestedProfile !== null) {
+		// Chromium accepts switch values as --name=value, not a separate argv
+		// item. Canonicalize both spellings so reuse and process launch agree.
+		const launchArgs: string[] = [];
+		for (let index = 0; index < args.length; index++) {
+			const arg = args[index]!;
+			if (arg === "--user-data-dir") {
+				if (args[index + 1] && !args[index + 1]!.startsWith("--")) index++;
+			} else if (!arg.startsWith("--user-data-dir=")) {
+				launchArgs.push(arg);
+			}
+		}
+		launchArgs.push(`--user-data-dir=${path.resolve(cwd, requestedProfile)}`);
+		return launchArgs;
+	}
+	const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+	const hash = Bun.hash.wyhash(exe).toString(16).padStart(16, "0");
+	const launchArgs = [...args];
+	// A fresh profile otherwise opens the welcome tour and default-browser
+	// prompt as extra page targets, which attach may adopt instead of ours.
+	for (const flag of ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"]) {
+		if (!args.includes(flag)) launchArgs.push(flag);
+	}
+	if (!args.some(arg => arg.startsWith("--password-store"))) launchArgs.push("--password-store=basic");
+	launchArgs.push(`--user-data-dir=${path.join(getBrowserProfilesDir(), `${slug}-${hash}`)}`);
+	return launchArgs;
+}
+
 function normalizeUserDataDir(userDataDir: string): string {
 	const normalized = path.resolve(userDataDir);
 	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -180,6 +244,11 @@ export async function findReusableCdp(
 	exe: string,
 	options: { signal?: AbortSignal; appArgs?: string[] } = {},
 ): Promise<{ cdpUrl: string; pid: number } | null> {
+	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
+	const normalizedRequestedUserDataDir =
+		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
+			? normalizeUserDataDir(requestedUserDataDir)
+			: null;
 	const candidates = Process.fromPath(exe).filter(process => process.status() === ProcessStatus.Running);
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
@@ -192,17 +261,22 @@ export async function findReusableCdp(
 			continue;
 		}
 		candidateArgs.push(args);
+		const candidateProfile = findUserDataDirInArgs(args);
+		if (
+			requestedUserDataDir !== null &&
+			(normalizedRequestedUserDataDir === null ||
+				candidateProfile === null ||
+				!path.isAbsolute(candidateProfile) ||
+				normalizeUserDataDir(candidateProfile) !== normalizedRequestedUserDataDir)
+		) {
+			continue;
+		}
 		const port = findCdpPortInArgs(args);
 		if (port === null) continue;
 		if (await probeCdpAt(port, options.signal)) {
 			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
 		}
 	}
-	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
-	const normalizedRequestedUserDataDir =
-		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
-			? normalizeUserDataDir(requestedUserDataDir)
-			: null;
 	const canLaunchIsolatedProfile =
 		normalizedRequestedUserDataDir !== null &&
 		!hasUnreadableCandidate &&

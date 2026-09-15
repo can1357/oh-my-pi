@@ -428,9 +428,31 @@ export interface ParsedSkillInvocation {
 	name: string;
 	/** User-supplied arguments (everything outside the `/skill:<name>` token). */
 	args: string;
+	/** The draft as submitted (trimmed), token in place — drives the transcript layout. */
+	prompt: string;
 }
 
-const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
+/**
+ * One `/skill:<name>` token delimited by whitespace or line edges. Group 1 is
+ * the leading delimiter (empty at line start), group 2 the bare skill name.
+ * Global so callers can walk every token; reset `lastIndex` before reuse.
+ */
+export const SKILL_TOKEN_RE = /(^|\s)\/skill:([^\s/]+)(?=\s|$)/g;
+
+/**
+ * Whether `/skill:<name>` tokens in `text` are invocations. False when the
+ * draft starts with a different slash command (`/compact /skill:foo`) or a
+ * local-execution sigil — `!cmd` / `!!cmd` for the bash tool and `$ cmd` /
+ * `$$ cmd` for the python tool. Those handlers run after the skill-command
+ * dispatcher and their bodies routinely contain `/skill:<name>` references
+ * that are not meant as skill invocations.
+ */
+export function allowsSkillTokens(text: string): boolean {
+	const trimmedStart = text.trimStart();
+	if (trimmedStart.startsWith("/skill:")) return true;
+	if (trimmedStart.startsWith("/")) return false;
+	return !startsWithLocalExecutionPrefix(trimmedStart);
+}
 
 /**
  * Detect a `/skill:<name>` invocation in a user draft.
@@ -441,40 +463,33 @@ const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
  *     args=`fix the bug focus on auth` — the surrounding prose collapsed
  *     into a single args string.
  *
- * Mid-prompt detection is disabled when the draft itself starts with a
- * different slash command (e.g. `/compact /skill:foo`) or a local-execution
- * sigil — `!cmd` / `!!cmd` for the bash tool and `$ cmd` / `$$ cmd` for the
- * python tool. Those handlers run after the skill-command dispatcher and
- * their bodies routinely contain `/skill:<name>` references that are not
- * meant as skill invocations.
+ * Mid-prompt detection is gated by {@link allowsSkillTokens}.
  */
 export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
 	const trimmedStart = text.trimStart();
+	const prompt = trimmedStart.trimEnd();
 	if (trimmedStart.startsWith("/skill:")) {
-		const spaceIndex = trimmedStart.indexOf(" ");
+		const spaceIndex = trimmedStart.search(/\s/);
 		const name =
 			spaceIndex === -1 ? trimmedStart.slice("/skill:".length) : trimmedStart.slice("/skill:".length, spaceIndex);
 		if (!name) return undefined;
 		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
-		return { name, args };
+		return { name, args, prompt };
 	}
-	if (trimmedStart.startsWith("/")) return undefined;
-	if (startsWithLocalExecutionPrefix(trimmedStart)) return undefined;
-	const match = MID_PROMPT_SKILL_RE.exec(text);
+	if (!allowsSkillTokens(trimmedStart)) return undefined;
+	SKILL_TOKEN_RE.lastIndex = 0;
+	const match = SKILL_TOKEN_RE.exec(text);
 	if (!match) return undefined;
-	const leading = match[1] ?? "";
-	const trailing = match[3] ?? "";
-	const tokenStart = match.index + leading.length;
-	const tokenEnd = match.index + match[0].length - trailing.length;
-	const name = match[2] ?? "";
-	if (!name) return undefined;
+	const tokenStart = match.index + match[1].length;
+	const tokenEnd = match.index + match[0].length;
+	const name = match[2];
 	const before = text.slice(0, tokenStart).trimEnd();
 	const after = text.slice(tokenEnd).trimStart();
 	const args = [before, after]
 		.filter(part => part.length > 0)
 		.join(" ")
 		.trim();
-	return { name, args };
+	return { name, args, prompt };
 }
 
 /**
@@ -496,14 +511,17 @@ function startsWithLocalExecutionPrefix(trimmedStart: string): boolean {
 
 export type SkillInvocationKind = "user" | "autoload";
 
+/** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
+export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
+
 export async function buildSkillPromptMessage(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
-	args: string,
+	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
 	const content = await Bun.file(skill.filePath).text();
 	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-	const trimmedArgs = args.trim();
+	const trimmedArgs = input.args.trim();
 	let message: string;
 	if (invocation === "user") {
 		// User-invoked skills announce themselves and expose their skill directory
@@ -533,6 +551,7 @@ export async function buildSkillPromptMessage(
 			name: skill.name,
 			path: skill.filePath,
 			args: trimmedArgs || undefined,
+			prompt: input.prompt,
 			lineCount: body ? body.split("\n").length : 0,
 		},
 	};

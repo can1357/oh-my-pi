@@ -925,9 +925,10 @@ describe("Mnemopi backend lifecycle", () => {
 		await state.dispose({ timeoutMs: BUDGET_MS });
 		const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 
-		// Dispose must surrender within the budget (plus a generous slack); the
-		// in-flight consolidate is detached, not awaited.
-		expect(elapsedMs).toBeLessThan(BUDGET_MS * 5);
+		// Dispose must surrender within the budget; the in-flight consolidate is
+		// detached, not awaited. The ceiling is only there to catch a hang, so
+		// it absorbs a full second of timer/scheduling delay on a loaded runner.
+		expect(elapsedMs).toBeLessThan(BUDGET_MS + 1_000);
 		expect(elapsedMs).toBeGreaterThanOrEqual(BUDGET_MS - 10);
 		expect(flushSpy).toHaveBeenCalled();
 		expect(flushCalls).toBe(1);

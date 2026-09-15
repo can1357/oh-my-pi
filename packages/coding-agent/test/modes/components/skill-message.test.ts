@@ -1,8 +1,10 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "../../../src/config/settings";
+import * as url from "node:url";
+import { resetSettingsForTest, Settings } from "../../../src/config/settings";
 import { SkillMessageComponent } from "../../../src/modes/components/skill-message";
+import { skillChipLabel } from "../../../src/modes/composer-attachments";
 import { getThemeByName, setThemeInstance, type Theme } from "../../../src/modes/theme/theme";
 import type { CustomMessage, SkillPromptDetails } from "../../../src/session/messages";
 
@@ -24,56 +26,101 @@ describe("SkillMessageComponent", () => {
 	let uiTheme: Theme;
 
 	beforeAll(async () => {
+		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
+		Settings.instance.set("tui.hyperlinks", "always");
 		const loaded = await getThemeByName("dark");
 		if (!loaded) throw new Error("theme unavailable");
 		uiTheme = loaded;
 		setThemeInstance(uiTheme);
 	});
 
+	afterAll(() => {
+		resetSettingsForTest();
+	});
+
 	const skillPath = path.join(os.homedir(), ".agent/skills/atomic-commit/SKILL.md");
+	const skillUri = url.pathToFileURL(skillPath).href;
+	const chip = () => skillChipLabel("atomic-commit");
 
-	it("renders a compact, outlined card instead of the archaic key:value dump", () => {
+	it("renders a leading invocation as a railed callout with the chip, meta, and the full multi-line body", () => {
 		const component = new SkillMessageComponent(
-			makeMessage({ name: "atomic-commit", path: skillPath, lineCount: 88 }),
+			makeMessage({
+				name: "atomic-commit",
+				path: skillPath,
+				lineCount: 88,
+				args: "stage all\n- then split\n- then push",
+				prompt: "/skill:atomic-commit stage all\n- then split\n- then push",
+			}),
 		);
-		const text = strip(component.render(80));
+		const lines = component.render(80);
+		const text = strip(lines);
 
-		// New look: an icon-tagged "skill" header with the name and a single meta line.
-		expect(text).toContain("skill");
-		expect(text).toContain("atomic-commit");
-		expect(text).toContain("skill atomic-commit");
-		expect(text).not.toContain("skill  atomic-commit");
+		// Every row carries the rail; the header is the chip, not the raw token.
+		const rail = uiTheme.symbol("skill.rail");
+		for (const line of lines) expect(Bun.stripANSI(line).startsWith(rail)).toBe(true);
+		expect(text).toContain(chip());
+		expect(text).not.toContain("/skill:");
+
+		// The chip is the link to SKILL.md; the path itself is never spelled out.
+		expect(lines.join("\n")).toContain(skillUri);
+		expect(text).not.toContain("SKILL.md");
 		expect(text).toContain("88 lines");
 
-		// The card is drawn with an outline.
-		expect(text).toContain(uiTheme.boxRound.topLeft);
-		expect(text).toContain(uiTheme.boxRound.bottomRight);
-
-		// Path is home-shortened and never leaks the absolute home dir.
-		expect(text).toContain("~/.agent/skills/atomic-commit/SKILL.md");
-		expect(text).not.toContain(os.homedir());
-
-		// The old archaic framing is gone.
-		expect(text).not.toContain("[skill]");
-		expect(text).not.toContain("Skill:");
-		expect(text).not.toContain("Path:");
-		expect(text).not.toContain("Prompt:");
+		// The body keeps its line structure instead of collapsing onto the header.
+		const rows = lines.map(line => Bun.stripANSI(line));
+		expect(rows.findIndex(row => row.includes("stage all"))).toBeGreaterThan(
+			rows.findIndex(row => row.includes(chip())),
+		);
+		expect(rows.some(row => row.includes("then split"))).toBe(true);
+		expect(rows.some(row => row.includes("then push"))).toBe(true);
+		expect(rows.find(row => row.includes("stage all"))).not.toContain("then split");
 	});
 
-	it("flattens multi-line args onto the single-line header", () => {
+	it("renders a mid-prompt invocation as a plain user bubble with the chip inline", () => {
 		const component = new SkillMessageComponent(
-			makeMessage({ name: "atomic-commit", path: skillPath, lineCount: 88, args: "stage all\nthen split" }),
+			makeMessage({
+				name: "atomic-commit",
+				path: skillPath,
+				lineCount: 88,
+				args: "fix the auth bug then",
+				prompt: "fix the auth bug /skill:atomic-commit then",
+			}),
+		);
+		const lines = component.render(80);
+		const text = strip(lines);
+
+		expect(text).toContain(`fix the auth bug ${chip()} then`);
+		expect(text).not.toContain("/skill:");
+		// The inline chip still opens the SKILL.md.
+		expect(lines.join("\n")).toContain(skillUri);
+		// No rail, no meta line: it reads as an ordinary user turn.
+		const rail = uiTheme.symbol("skill.rail");
+		expect(lines.some(line => Bun.stripANSI(line).startsWith(rail))).toBe(false);
+		expect(text).not.toContain("88 lines");
+	});
+
+	it("only chips the invoked skill; a second token the dispatcher ignored stays literal", () => {
+		const component = new SkillMessageComponent(
+			makeMessage({
+				name: "atomic-commit",
+				path: skillPath,
+				lineCount: 88,
+				prompt: "/skill:atomic-commit then /skill:other",
+			}),
 		);
 		const text = strip(component.render(80));
-		// Whitespace (including the newline) collapsed to single spaces so the header can't break.
-		expect(text).toContain("stage all then split");
-		expect(text).not.toContain("stage all\nthen split");
+		expect(text).toContain(chip());
+		expect(text).toContain("/skill:other");
 	});
 
-	it("uses a singular unit for a one-line prompt", () => {
-		const component = new SkillMessageComponent(makeMessage({ name: "tiny", path: skillPath, lineCount: 1 }));
+	it("falls back to a callout built from args for sessions recorded before prompts were stored", () => {
+		const component = new SkillMessageComponent(
+			makeMessage({ name: "atomic-commit", path: skillPath, lineCount: 1, args: "stage all" }),
+		);
 		const text = strip(component.render(80));
+		expect(text).toContain(chip());
+		expect(text).toContain("stage all");
 		expect(text).toContain("1 line");
 		expect(text).not.toContain("1 lines");
 	});

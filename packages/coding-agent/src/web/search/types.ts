@@ -56,6 +56,7 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	},
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
+	{ value: "ollama", label: "Ollama", description: "Requires OLLAMA_CLOUD_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
 	{
 		value: "startpage",

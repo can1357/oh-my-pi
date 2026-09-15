@@ -565,8 +565,8 @@ mod tests {
 		#[test]
 		fn non_terminal_stdin_detaches_regardless_of_pipeline() {
 			assert_eq!(child_session_action(true, false, false), ChildSessionAction::DetachSession);
-			// A leading-new-pgroup stage of a pipeline still detaches: setsid keeps
-			// it off the host's controlling tty.
+			// A leading-new-pgroup stage of a pipeline still detaches: setsid
+			// keeps it off the host's controlling tty.
 			assert_eq!(child_session_action(true, false, true), ChildSessionAction::DetachSession);
 		}
 
@@ -589,7 +589,8 @@ mod tests {
 		fn pipeline_stage_with_non_terminal_stdin_detaches() {
 			// Regression: an interactive child inside a pipeline (`zsh -i | awk`)
 			// must not stay in the host session and seize its tty. Pre-fix this
-			// returned `None`, leaving the stage attached and able to SIGTTIN the host.
+			// returned `None`, leaving the stage attached and able to SIGTTIN the
+			// host.
 			assert_eq!(child_session_action(false, false, true), ChildSessionAction::DetachSession);
 		}
 	}

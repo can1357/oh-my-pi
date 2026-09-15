@@ -57,7 +57,7 @@ function createToolSession(asyncJobManager?: AsyncJobManager): ToolSession {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings: {
-			get: (key: string) => (key === "async.pollWaitDuration" ? "5s" : undefined),
+			get: () => undefined,
 		},
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,

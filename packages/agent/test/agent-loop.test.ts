@@ -23,10 +23,8 @@ import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolRes
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { createAssistantMessage, createUserMessage } from "./helpers";
+import { createAssistantMessage, createHarmonyMitigationModel, createUserMessage } from "./helpers";
 
 declare module "@oh-my-pi/pi-agent-core/types" {
 	interface CustomAgentMessages {
@@ -46,7 +44,7 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
 
-const harmonyMitigationModel = buildModel({ ...getBundledModel("openai-codex", "gpt-5.4") });
+const harmonyMitigationModel = createHarmonyMitigationModel();
 
 describe("agentLoop with AgentMessage", () => {
 	it("should emit events with AgentMessage types", async () => {

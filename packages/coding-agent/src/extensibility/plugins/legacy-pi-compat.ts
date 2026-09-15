@@ -91,9 +91,8 @@ function parseExtensionSource(source: string, importerPath: string): ParseResult
 }
 
 const REQUIRE_BINDING = 1 << 0;
-const OBJECT_BINDING = 1 << 1;
-const EXPORTS_BINDING = 1 << 2;
-const MODULE_BINDING = 1 << 3;
+const EXPORTS_BINDING = 1 << 1;
+const MODULE_BINDING = 1 << 2;
 
 interface StructuralAstNode {
 	readonly type: string;
@@ -144,8 +143,6 @@ function trackedBinding(name: unknown): number {
 	switch (name) {
 		case "require":
 			return REQUIRE_BINDING;
-		case "Object":
-			return OBJECT_BINDING;
 		case "exports":
 			return EXPORTS_BINDING;
 		case "module":
@@ -461,13 +458,6 @@ function staticMemberPropertyName(node: StructuralAstNode): string | null {
 	return null;
 }
 
-function staticObjectPropertyName(node: StructuralAstNode): string | null {
-	if (node.computed === true) return null;
-	const key = asAstNode(node.key);
-	if (key?.type === "Identifier" && typeof key.name === "string") return key.name;
-	return key?.type === "StringLiteral" && typeof key.value === "string" ? key.value : null;
-}
-
 function collectExtensionSpecifierReferences(
 	source: string,
 	importerPath: string,
@@ -545,22 +535,20 @@ function collectExtensionSpecifierReferences(
 	return references;
 }
 
-const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 1;
+const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 2;
+const CREATE_EXTENSION_PARSE_CACHE_TABLE =
+	"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL)";
 const EXTENSION_PARSE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const EXTENSION_PARSE_CACHE_MAX_ENTRIES = 10_000;
 
 interface ExtensionSourceAnalysis {
 	readonly sourceType: "script" | "module";
 	readonly references: readonly ExtensionSpecifierReference[];
-	readonly commonJsNamedExports: readonly string[];
-	readonly commonJsReexportSpecifiers: readonly string[];
 }
 
 interface ExtensionParseCacheRow {
 	source_type: "script" | "module";
 	references: string;
-	commonjs_named_exports: string;
-	commonjs_reexport_specifiers: string;
 }
 
 let extensionParseCacheDb: Database | null | undefined;
@@ -600,9 +588,16 @@ function getExtensionParseCacheDb(): Database | null {
 		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		db.run("PRAGMA journal_mode=WAL");
 		db.run("PRAGMA synchronous=NORMAL");
-		db.run(
-			"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
-		);
+		const schemaVersion = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+		if (schemaVersion === EXTENSION_PARSE_CACHE_SCHEMA_VERSION) {
+			db.run(CREATE_EXTENSION_PARSE_CACHE_TABLE);
+		} else {
+			db.transaction(() => {
+				db.run("DROP TABLE IF EXISTS extension_parse_cache");
+				db.run(CREATE_EXTENSION_PARSE_CACHE_TABLE);
+				db.run(`PRAGMA user_version = ${EXTENSION_PARSE_CACHE_SCHEMA_VERSION}`);
+			})();
+		}
 		extensionParseCacheDb = db;
 		return db;
 	} catch (error) {
@@ -627,8 +622,6 @@ function parseCachedAnalysis(row: ExtensionParseCacheRow): ExtensionSourceAnalys
 	try {
 		if (row.source_type !== "script" && row.source_type !== "module") return null;
 		const references = JSON.parse(row.references) as unknown;
-		const commonJsNamedExports = JSON.parse(row.commonjs_named_exports) as unknown;
-		const commonJsReexportSpecifiers = JSON.parse(row.commonjs_reexport_specifiers) as unknown;
 		if (
 			!Array.isArray(references) ||
 			!references.every(
@@ -639,19 +632,13 @@ function parseCachedAnalysis(row: ExtensionParseCacheRow): ExtensionSourceAnalys
 					typeof reference.specifier === "string" &&
 					typeof reference.start === "number" &&
 					typeof reference.end === "number",
-			) ||
-			!Array.isArray(commonJsNamedExports) ||
-			!commonJsNamedExports.every(name => typeof name === "string") ||
-			!Array.isArray(commonJsReexportSpecifiers) ||
-			!commonJsReexportSpecifiers.every(specifier => typeof specifier === "string")
+			)
 		) {
 			return null;
 		}
 		return {
 			sourceType: row.source_type,
 			references: references as ExtensionSpecifierReference[],
-			commonJsNamedExports,
-			commonJsReexportSpecifiers,
 		};
 	} catch {
 		return null;
@@ -664,14 +651,8 @@ function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourc
 			const db = getExtensionParseCacheDb();
 			if (!db) return;
 			db.run(
-				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references], commonjs_named_exports, commonjs_reexport_specifiers) VALUES (?, ?, ?, ?, ?)",
-				[
-					cacheKey,
-					analysis.sourceType,
-					JSON.stringify(analysis.references),
-					JSON.stringify(analysis.commonJsNamedExports),
-					JSON.stringify(analysis.commonJsReexportSpecifiers),
-				],
+				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references]) VALUES (?, ?, ?)",
+				[cacheKey, analysis.sourceType, JSON.stringify(analysis.references)],
 			);
 			const count =
 				db.query<{ count: number }, []>("SELECT count(*) AS count FROM extension_parse_cache").get()?.count ?? 0;
@@ -695,7 +676,7 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	try {
 		const row = db
 			?.query<ExtensionParseCacheRow, [string]>(
-				"SELECT source_type, [references], commonjs_named_exports, commonjs_reexport_specifiers FROM extension_parse_cache WHERE cache_key = ?",
+				"SELECT source_type, [references] FROM extension_parse_cache WHERE cache_key = ?",
 			)
 			.get(cacheKey);
 		if (row) {
@@ -712,11 +693,9 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	}
 
 	const ast = parseExtensionSource(source, importerPath);
-	const commonJs = collectCommonJsExportAnalysis(ast);
 	const analysis: ExtensionSourceAnalysis = {
 		sourceType: ast.program.sourceType,
 		references: collectExtensionSpecifierReferences(source, importerPath, ast),
-		...commonJs,
 	};
 	extensionSourceAnalysisCache.set(cacheKey, analysis);
 	writeExtensionSourceAnalysis(cacheKey, analysis);
@@ -1957,18 +1936,26 @@ async function resolveExtensionCommonJsRequire(specifier: string, importerPath: 
 	}
 	const remappedSpecifier = remapLegacyPiSpecifier(specifier);
 	if (remappedSpecifier) {
+		let resolved: string | null = null;
 		try {
-			const resolved = resolveCanonicalPiSpecifier(remappedSpecifier);
+			resolved = resolveCanonicalPiSpecifier(remappedSpecifier);
+		} catch {
+			// A malformed compiled registry can still fall through to an
+			// extension-installed legacy peer dependency.
+		}
+		if (resolved) {
 			if (isBundledVirtualSpecifier(resolved)) {
 				const moduleKey = resolved.slice(BUNDLED_VIRTUAL_SCHEME.length);
 				if (!(moduleKey in loadedBundledModules)) {
 					await loadBundledModule(moduleKey);
 				}
+			} else {
+				// Object-loader callbacks evaluate CommonJS during module linking,
+				// before sibling ESM imports execute. Prime host-owned ESM shims so
+				// the synchronous evaluator can require their namespace.
+				await import(toImportSpecifier(resolved));
 			}
 			return resolved;
-		} catch {
-			// A malformed compiled registry can still fall through to an
-			// extension-installed legacy peer dependency.
 		}
 	}
 	return resolveExtensionBareRequire(specifier, importerPath);
@@ -2074,7 +2061,6 @@ function escapeRegExp(value: string): string {
 // the previous load.
 const extensionGraphHookModules = new Map<string, Set<string>>();
 const extensionGraphCacheBustResolvedImportModules = new Map<string, Set<string>>();
-const commonJsModuleSources = new Map<string, string>();
 const commonJsFallbackModulePaths = new Map<string, string>();
 const extensionSynchronousSpecifierTargets = new Map<string, Map<string, string>>();
 const synchronousModuleSources = new Map<string, string>();
@@ -2103,7 +2089,7 @@ function evaluateGraphCommonJs(modulePath: string): unknown {
 	if (!definition && commonJsGraphModulePaths.has(modulePath)) {
 		const targetPath = commonJsFallbackModulePaths.get(modulePath) ?? modulePath;
 		const source = rewriteExtensionSpecifiersFromCache(fs.readFileSync(targetPath, "utf8"), modulePath);
-		synthesizeCommonJsDefaultModule(modulePath, source, targetPath);
+		prepareGraphCommonJsDefinition(modulePath, source, targetPath);
 		definition = commonJsModuleDefinitions.get(modulePath);
 	}
 	if (!definition) {
@@ -2261,6 +2247,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		);
 		if (sourceIsCommonJs) {
 			commonJsPaths.add(file);
+			commonJsGraphModulePaths.add(file);
 		}
 		const dir = path.dirname(file);
 		const references = analysis.references;
@@ -2440,109 +2427,11 @@ export async function __collectLegacyPiExtensionSourcesForTests(
 }
 
 /**
- * Discovers CommonJS export names Bun normally exposes to ESM importers. The
- * bridge must declare them statically because its default export is synthetic.
+ * Register executable source with the shared CommonJS evaluator, which gives
+ * ESM imports and sibling `require()` calls the same `module.exports` value and
+ * cycle-aware cache.
  */
-const COMMONJS_NAMED_EXPORT_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
-
-function collectCommonJsExportAnalysis(
-	ast: ParseResult,
-): Pick<ExtensionSourceAnalysis, "commonJsNamedExports" | "commonJsReexportSpecifiers"> {
-	const names = new Set<string>();
-	const reexportSpecifiers = new Set<string>();
-	for (const { node, scope } of collectScopedAstNodes(
-		ast,
-		candidate => candidate.type === "CallExpression" || candidate.type === "AssignmentExpression",
-	)) {
-		if (node.type === "CallExpression") {
-			const callee = asAstNode(node.callee);
-			if (isUncomputedMember(callee, "Object", "defineProperty") && !scopeHasBinding(scope, OBJECT_BINDING)) {
-				const target = nodeArgument(node, 0);
-				const property = nodeArgument(node, 1);
-				if (
-					isUnshadowedExportsTarget(target, scope) &&
-					property?.type === "StringLiteral" &&
-					typeof property.value === "string" &&
-					property.value !== "default" &&
-					COMMONJS_NAMED_EXPORT_IDENTIFIER.test(property.value)
-				) {
-					names.add(property.value);
-				}
-				continue;
-			}
-			if (isIdentifier(callee, "__exportStar")) {
-				const sourceCall = nodeArgument(node, 0);
-				const target = nodeArgument(node, 1);
-				if (isUnshadowedExportsTarget(target, scope) && isGlobalRequireCall(sourceCall, scope)) {
-					const argument = nodeArgument(sourceCall, 0);
-					if (argument?.type === "StringLiteral" && typeof argument.value === "string") {
-						reexportSpecifiers.add(argument.value);
-					}
-				}
-				continue;
-			}
-		}
-		if (node.type !== "AssignmentExpression" || node.operator !== "=") continue;
-		const left = asAstNode(node.left);
-		if (left?.type !== "MemberExpression") continue;
-		const propertyName = staticMemberPropertyName(left);
-		const object = asAstNode(left.object);
-		if (propertyName !== null && isUnshadowedExportsTarget(object, scope)) {
-			if (propertyName !== "default" && COMMONJS_NAMED_EXPORT_IDENTIFIER.test(propertyName)) names.add(propertyName);
-			continue;
-		}
-		if (!isUncomputedMember(left, "module", "exports") || scopeHasBinding(scope, MODULE_BINDING)) continue;
-		const right = asAstNode(node.right);
-		if (right?.type === "ObjectExpression") {
-			const properties = nodeArray(right, "properties");
-			if (properties) {
-				for (const value of properties) {
-					const property = asAstNode(value);
-					if (!property || (property.type !== "ObjectProperty" && property.type !== "ObjectMethod")) continue;
-					const name = staticObjectPropertyName(property);
-					if (name && name !== "default" && COMMONJS_NAMED_EXPORT_IDENTIFIER.test(name)) names.add(name);
-				}
-			}
-			continue;
-		}
-		if (isGlobalRequireCall(right, scope)) {
-			const argument = nodeArgument(right, 0);
-			if (argument?.type === "StringLiteral" && typeof argument.value === "string")
-				reexportSpecifiers.add(argument.value);
-		}
-	}
-	return { commonJsNamedExports: [...names], commonJsReexportSpecifiers: [...reexportSpecifiers] };
-}
-
-function collectCommonJsNamedExports(source: string, modulePath: string, visited = new Set<string>()): string[] {
-	let realModulePath = modulePath;
-	try {
-		realModulePath = fs.realpathSync(modulePath);
-	} catch {
-		// The caller's path remains the stable cycle key when realpath fails.
-	}
-	if (visited.has(realModulePath)) return [];
-	visited.add(realModulePath);
-	const analysis = getExtensionSourceAnalysis(source, modulePath);
-	const names = new Set(analysis.commonJsNamedExports);
-	const nativeRequire = createRequire(modulePath);
-	for (const specifier of analysis.commonJsReexportSpecifiers) {
-		try {
-			const resolved = fs.realpathSync(nativeRequire.resolve(specifier));
-			const reexportedSource = rewriteExtensionSpecifiersFromCache(fs.readFileSync(resolved, "utf8"), resolved);
-			for (const name of collectCommonJsNamedExports(reexportedSource, resolved, visited)) names.add(name);
-		} catch {
-			// Native modules and non-source re-exports do not expose analyzable names.
-		}
-	}
-	return [...names];
-}
-
-/**
- * The shared evaluator gives ESM imports and sibling `require()` calls the
- * same `module.exports` value and cycle-aware cache.
- */
-function synthesizeCommonJsDefaultModule(modulePath: string, source: string, targetPath = modulePath): string {
+function prepareGraphCommonJsDefinition(modulePath: string, source: string, targetPath = modulePath): void {
 	let commonJsSource = source;
 	if (commonJsSource.startsWith("#!")) {
 		const firstLineEnd = commonJsSource.indexOf("\n");
@@ -2558,39 +2447,30 @@ function synthesizeCommonJsDefaultModule(modulePath: string, source: string, tar
 		dirname: path.dirname(targetPath),
 	});
 	commonJsModuleCache.delete(modulePath);
-	const exportsBinding = "__ompLegacyPiCommonJsExports";
-	const namedExports = collectCommonJsNamedExports(executableSource, targetPath)
-		.map(
-			(name, index) =>
-				`const __ompLegacyPiCommonJsExport${index} = ${exportsBinding}[${JSON.stringify(name)}]; export { __ompLegacyPiCommonJsExport${index} as ${name} };`,
-		)
-		.join("\n");
-	return `const ${exportsBinding} = globalThis[${JSON.stringify(COMMONJS_REQUIRE_GLOBAL)}](${JSON.stringify(modulePath)});\nexport default ${exportsBinding};\n${namedExports}\n`;
 }
 
 /**
  * Linkedom's canvas bridge uses its bundled fallback because OMP does not ship
  * native canvas.
  */
-async function prepareCommonJsDefaultModule(modulePath: string, source: string): Promise<string> {
+async function prepareGraphCommonJsModule(modulePath: string, source: string): Promise<void> {
 	const packageRoot = await findPackageRoot(modulePath);
-	if (!packageRoot) {
-		return synthesizeCommonJsDefaultModule(modulePath, source);
+	const manifest = packageRoot ? await readPackageManifest(packageRoot) : null;
+	const packageRelativePath = packageRoot ? path.relative(packageRoot, modulePath).split(path.sep).join("/") : null;
+	let targetPath = modulePath;
+	let executableSource = source;
+	if (packageRoot && manifest?.name === "linkedom" && packageRelativePath === "commonjs/canvas.cjs") {
+		targetPath = path.join(packageRoot, "commonjs", "canvas-shim.cjs");
+		commonJsFallbackModulePaths.set(modulePath, targetPath);
+		executableSource = await Bun.file(targetPath).text();
 	}
-	const manifest = await readPackageManifest(packageRoot);
-	const packageRelativePath = path.relative(packageRoot, modulePath).split(path.sep).join("/");
-	if (manifest?.name !== "linkedom" || packageRelativePath !== "commonjs/canvas.cjs") {
-		return synthesizeCommonJsDefaultModule(modulePath, source);
-	}
-
-	const targetPath = path.join(packageRoot, "commonjs", "canvas-shim.cjs");
-	commonJsFallbackModulePaths.set(modulePath, targetPath);
-	return synthesizeCommonJsDefaultModule(modulePath, await Bun.file(targetPath).text(), targetPath);
+	prepareGraphCommonJsDefinition(modulePath, executableSource, targetPath);
 }
 
 /**
  * Install exact-path load hooks for the current extension graph. ESM/TS source
- * retains the async rewrite path. Graph-owned CommonJS modules and native-addon
+ * retains the async rewrite path. Graph-owned CommonJS modules use Bun's
+ * synchronous object loader backed by the shared evaluator; native-addon
  * loaders stay synchronous because Bun rejects `require()` targets backed by
  * async `onLoad` callbacks.
  */
@@ -2660,13 +2540,20 @@ async function installExtensionGraphHook(
 				build.onLoad({ filter, namespace: "file" }, args => {
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
-					let source = commonJsModuleSources.get(sourcePath);
-					if (source === undefined) {
-						const targetPath = commonJsFallbackModulePaths.get(sourcePath) ?? sourcePath;
-						const raw = rewriteExtensionSpecifiersFromCache(fs.readFileSync(targetPath, "utf8"), sourcePath);
-						source = synthesizeCommonJsDefaultModule(sourcePath, raw, targetPath);
+					const moduleExports = evaluateGraphCommonJs(sourcePath);
+					const moduleNamespace: Record<string, unknown> = Object.create(null);
+					moduleNamespace.default = moduleExports;
+					if (
+						(typeof moduleExports === "object" && moduleExports !== null) ||
+						typeof moduleExports === "function"
+					) {
+						for (const key of Object.getOwnPropertyNames(moduleExports)) {
+							if (key !== "default") {
+								moduleNamespace[key] = Reflect.get(moduleExports, key);
+							}
+						}
 					}
-					return { contents: source, loader: getLoader(sourcePath) };
+					return { exports: moduleNamespace, loader: "object" };
 				});
 			},
 		});
@@ -2719,8 +2606,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 	}
 	for (const [modulePath, source] of currentModules) {
 		if (commonJsPaths.has(modulePath)) {
-			commonJsModuleSources.set(modulePath, await prepareCommonJsDefaultModule(modulePath, source));
-			commonJsGraphModulePaths.add(modulePath);
+			await prepareGraphCommonJsModule(modulePath, source);
 		}
 		if (synchronousSourcePaths.has(modulePath)) {
 			synchronousModuleSources.set(modulePath, source);
@@ -2773,7 +2659,6 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 		clear() {
 			asyncModules.clear();
 			for (const modulePath of commonJsPaths) {
-				commonJsModuleSources.delete(modulePath);
 				commonJsModuleDefinitions.delete(modulePath);
 				commonJsModuleCache.delete(modulePath);
 			}
@@ -2787,9 +2672,8 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
  * The extension runs in place, so its `import.meta.url` is the real source file
  * and `__dirname`-relative `readFileSync` asset loads (HTML/CSS bundled next to
  * the entry) resolve exactly as they do under the original Pi runtime — no
- * temp-directory mirroring and no asset copying. An `onLoad` hook scoped to the
- * entry's source graph rewrites only host-resolved compatibility imports in the
- * extension's own source; everything else resolves natively.
+ * temp-directory mirroring and no asset copying. Graph-scoped `onLoad` hooks
+ * rewrite ESM/TS sources and expose evaluated CommonJS namespaces directly.
  */
 export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
 	// Bun reports the realpath of a loaded module to `onLoad` and exposes it as

@@ -523,8 +523,8 @@ describe("model thinking derivation", () => {
 		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal)).toBe("MINIMAL");
 	});
 
-	it("drops minimal from Gemini 3.7 Flash only on the direct google-level transports (#10543)", () => {
-		// Google's thinkingLevel table marks `minimal` unsupported for 3.7 Flash
+	it("drops minimal from Gemini 3.7+ Flash only on the direct google-level transports (#10543)", () => {
+		// Google's thinkingLevel table marks `minimal` unsupported for 3.7+ Flash
 		// (400 THINKING_LEVEL_MINIMAL). Only the direct google-level transports emit
 		// `thinkingLevel` on the wire, so the tier is dropped there; budget and
 		// reasoning-effort resellers never send the rejected value and keep it. These
@@ -537,7 +537,15 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(vertexFlash37)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		expect(() => requireSupportedEffort(vertexFlash37, Effort.Minimal)).toThrow(/not supported/);
 
-		// Every other Flash revision on the same transport keeps the four-tier scale.
+		// The drop is open-ended: 3.8 Flash rejects MINIMAL the same way.
+		const googleFlash38 = createModel({
+			id: "gemini-3.8-flash",
+			api: "google-generative-ai",
+			provider: "google",
+		});
+		expect(getSupportedEfforts(googleFlash38)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+
+		// Earlier Flash revisions on the same transport keep the four-tier scale.
 		const vertexFlash36 = createModel({
 			id: "gemini-3.6-flash",
 			api: "google-vertex",

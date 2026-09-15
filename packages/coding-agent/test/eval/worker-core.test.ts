@@ -168,9 +168,9 @@ describe("WorkerCore", () => {
 			});
 			await entered.promise;
 
-			// Re-init the second core while the first still owns the realm. Production
-			// inline workers deliver this on a microtask; a setCwd throw here used to
-			// become a process-fatal unhandledRejection / uncaughtException.
+			// Re-init the second core while the first still owns the realm. The
+			// same-realm harness delivers this on a microtask; a setCwd throw here
+			// used to become a process-fatal unhandledRejection / uncaughtException.
 			const reinit = waitForMessage(second, message => message.type === "ready" || message.type === "init-failed");
 			second.send({ type: "init", snapshot: { cwd, sessionId: "reinit-second", localRoots: {} } });
 			const reply = await reinit;

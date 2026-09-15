@@ -53,6 +53,36 @@ test("legacy extension analysis persists and reads its SQLite parse cache", asyn
 	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js";\n');
 });
 
+test("legacy extension parse cache drops obsolete CommonJS export-analysis columns", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-schema-");
+	tempDirs.push(tempDir);
+	const cacheRoot = tempDir.path();
+	const cachePath = path.join(cacheRoot, "omp", "cache", "legacy-pi-extension-cache.db");
+	await fs.mkdir(path.dirname(cachePath), { recursive: true });
+
+	const seed = new Database(cachePath, { create: true });
+	seed.run(
+		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+	);
+	seed.run("PRAGMA user_version = 1");
+	seed.close();
+
+	expect((await runProbe(cacheRoot, healthProbePath)).trim()).toBe("AVAILABLE");
+
+	const migrated = new Database(cachePath);
+	try {
+		const columns = migrated
+			.query<{ name: string }, []>("PRAGMA table_info(extension_parse_cache)")
+			.all()
+			.map(column => column.name);
+		const schemaVersion = migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
+		expect(columns).toEqual(["cache_key", "source_type", "references"]);
+		expect(schemaVersion).toBe(2);
+	} finally {
+		migrated.close();
+	}
+});
+
 test("legacy extension parse cache opens in WAL mode (#9549)", async () => {
 	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-wal-");
 	tempDirs.push(tempDir);
@@ -85,9 +115,10 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	// Seed a cache whose main db file exceeds the 8 MiB eviction cap.
 	const seed = new Database(cachePath, { create: true });
 	seed.run(
-		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL)",
 	);
-	seed.run("INSERT INTO extension_parse_cache VALUES ('big', 'module', ?, '[]', '[]')", ["x".repeat(9 * 1024 * 1024)]);
+	seed.run("PRAGMA user_version = 2");
+	seed.run("INSERT INTO extension_parse_cache VALUES ('big', 'module', ?)", ["x".repeat(9 * 1024 * 1024)]);
 	seed.close();
 
 	// A concurrent omp process holds the cache open in WAL mode with
@@ -97,9 +128,7 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	try {
 		concurrent.run("PRAGMA busy_timeout = 5000");
 		concurrent.run("PRAGMA journal_mode=WAL");
-		const insert = concurrent.prepare(
-			"INSERT OR REPLACE INTO extension_parse_cache VALUES (?, 'module', ?, '[]', '[]')",
-		);
+		const insert = concurrent.prepare("INSERT OR REPLACE INTO extension_parse_cache VALUES (?, 'module', ?)");
 		for (let i = 0; i < 500; i++) insert.run(`live-${i}`, "y".repeat(4096));
 
 		// The probe opens the cache, sees the oversized main file, and evicts.

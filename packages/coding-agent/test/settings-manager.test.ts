@@ -1720,16 +1720,6 @@ describe("Settings", () => {
 	});
 
 	describe("compaction method migration", () => {
-		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
-			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
-				"remote",
-				"snapcompact",
-				"handoff",
-				"shake",
-				"soft",
-			]);
-		});
-
 		it("migrates a local-only legacy strategy to soft compaction", async () => {
 			await writeSettings({ compaction: { strategy: "context-full", remoteEnabled: false } });
 

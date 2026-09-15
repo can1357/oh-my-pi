@@ -6,7 +6,6 @@
   cmake,
   darwin,
   lib,
-  libopus,
   libpulseaudio,
   makeBinaryWrapper,
   ninja,
@@ -101,17 +100,10 @@ stdenv.mkDerivation {
   ]
   ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.autoSignDarwinBinariesHook ];
 
-  # pcre2 is vendored via PCRE2_SYS_STATIC, but opus must link the nixpkgs
-  # library: audiopus_sys' bundled cmake build installs to lib64 while its
-  # link-search hardcodes lib, so the pkg-config path is the one that works.
   # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
-  # All dynamic store paths are pinned into the closure via nix-support (see
-  # installPhase).
-  buildInputs = [
-    libopus
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
-  ++ lib.optionals withWaylandScreencast [ pipewire ];
+  buildInputs =
+    lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
+    ++ lib.optionals withWaylandScreencast [ pipewire ];
 
   strictDeps = true;
   # Nix builders cannot reliably hardlink cache files into node_modules
@@ -178,21 +170,13 @@ stdenv.mkDerivation {
     install -Dm644 LICENSE "$out/share/doc/omp/LICENSE"
     install -Dm644 THIRD-PARTY-NOTICES.txt "$out/share/doc/omp/THIRD-PARTY-NOTICES.txt"
 
-    # The addon is gzip-compressed inside the compiled binary, so the store
-    # paths it links against are invisible to the output reference scanner.
-    # Record them in plain text to pin the libraries into the runtime closure.
-    mkdir -p "$out/nix-support"
-    ${
-      if stdenv.hostPlatform.isLinux then
-        ''
-          patchelf --print-rpath "packages/natives/native/${platform.addon}" \
-            > "$out/nix-support/embedded-addon-runpath"
-        ''
-      else
-        ''
-          echo "${lib.getLib libopus}/lib" > "$out/nix-support/embedded-addon-runpath"
-        ''
-    }
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The addon is gzip-compressed inside the compiled binary, so its linked
+      # store paths are invisible to the output reference scanner.
+      mkdir -p "$out/nix-support"
+      patchelf --print-rpath "packages/natives/native/${platform.addon}" \
+        > "$out/nix-support/embedded-addon-runpath"
+    ''}
 
     runHook postInstall
   '';

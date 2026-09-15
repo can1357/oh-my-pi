@@ -391,6 +391,12 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Record todo phases on the session branch. Direct `todo` calls persist via
+	 * their toolResult entry; callers that produce none (the eval bridge) use this
+	 * so branch rehydration agrees with the in-memory list.
+	 */
+	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */

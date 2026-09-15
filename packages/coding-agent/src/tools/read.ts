@@ -2816,7 +2816,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return resultBuilder.done();
 	}
 
-	/** Read directory contents as a formatted listing, sliced by a single-range or tail selector. */
+	/**
+	 * Read directory contents as a formatted listing, sliced by a single-range or tail selector.
+	 *
+	 * The root level is uncapped; long listings page through line selectors and the
+	 * byte-truncation `:N` continuation. Child directories cap at
+	 * `READ_DIRECTORY_CHILD_LIMIT` entries and render an inline `… N more` marker;
+	 * reading the sub-path expands it, so no trailing limit notice is emitted.
+	 */
 	async #readDirectory(
 		absolutePath: string,
 		parsed: ParsedSelector,
@@ -2875,18 +2882,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const remaining = allLines.length - end;
 				text += `\n\n[${remaining} more lines in listing. Use :${end + 1} to continue]`;
 			}
-			resultBuilder.text(text);
-			if (tree.truncated) {
-				resultBuilder.limits({ resultLimit: 1 });
-			}
-			return resultBuilder.done();
+			return resultBuilder.text(text).done();
 		}
 
 		const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
 		const resultBuilder = toolResult(details).text(truncation.content).sourcePath(tree.rootPath);
-		if (tree.truncated) {
-			resultBuilder.limits({ resultLimit: 1 });
-		}
 		if (truncation.truncated) {
 			resultBuilder.truncation(truncation, { direction: "head" });
 			details.truncation = truncation;
