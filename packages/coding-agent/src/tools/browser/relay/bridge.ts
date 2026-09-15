@@ -3472,20 +3472,24 @@ export class RelayBridge {
 			if (recoveryLoaderId !== undefined && previousFrameLoaderIds && currentDocumentState?.mainFrameId) {
 				previousFrameLoaderIds[currentDocumentState.mainFrameId] = recoveryLoaderId;
 			}
-			const frameDocumentChanged =
-				previousFrameLoaderIds !== undefined &&
-				currentDocumentState !== undefined &&
-				hasNewFrameDocument(previousFrameLoaderIds, currentDocumentState.frameLoaderIds);
+			const changedChildFramesBeforeRegistration =
+				previousFrameLoaderIds !== undefined && currentDocumentState !== undefined
+					? Object.entries(currentDocumentState.frameLoaderIds)
+							.filter(
+								([frameId, loaderId]) =>
+									frameId !== currentDocumentState.mainFrameId && previousFrameLoaderIds[frameId] !== loaderId,
+							)
+							.map(([frameId]) => frameId)
+					: [];
 			const runImmediately =
 				script.params?.runImmediately === true &&
-				(frameDocumentChanged ||
-					(previousLoaderId !== undefined && currentLoaderId !== undefined
-						? previousLoaderId !== currentLoaderId
-						: previousLoaderId === undefined ||
-							currentLoaderId === undefined ||
-							runImmediatePreloads ||
-							(recoveryNavigationGeneration !== undefined &&
-								tab.mainFrameNavigationGeneration !== recoveryNavigationGeneration)));
+				(previousLoaderId !== undefined && currentLoaderId !== undefined
+					? previousLoaderId !== currentLoaderId
+					: previousLoaderId === undefined ||
+						currentLoaderId === undefined ||
+						runImmediatePreloads ||
+						(recoveryNavigationGeneration !== undefined &&
+							tab.mainFrameNavigationGeneration !== recoveryNavigationGeneration));
 			const applicationMarker =
 				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
 					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
@@ -3563,15 +3567,20 @@ export class RelayBridge {
 					currentDocumentState !== undefined &&
 					documentStateAfterRegistration !== undefined &&
 					hasNewFrameDocument(currentDocumentState.frameLoaderIds, documentStateAfterRegistration.frameLoaderIds);
-				const changedChildFrames = frameNavigationDuringRegistration
-					? Object.entries(documentStateAfterRegistration?.frameLoaderIds ?? {})
-							.filter(
-								([frameId, loaderId]) =>
-									frameId !== documentStateAfterRegistration?.mainFrameId &&
-									currentDocumentState?.frameLoaderIds[frameId] !== loaderId,
-							)
-							.map(([frameId]) => frameId)
-					: [];
+				const changedChildFrames = [
+					...new Set([
+						...changedChildFramesBeforeRegistration,
+						...(frameNavigationDuringRegistration
+							? Object.entries(documentStateAfterRegistration?.frameLoaderIds ?? {})
+									.filter(
+										([frameId, loaderId]) =>
+											frameId !== documentStateAfterRegistration?.mainFrameId &&
+											currentDocumentState?.frameLoaderIds[frameId] !== loaderId,
+									)
+									.map(([frameId]) => frameId)
+							: []),
+					]),
+				];
 				const mainFrameChanged =
 					currentLoaderId !== undefined &&
 					loaderAfterRegistration !== undefined &&
@@ -3581,7 +3590,7 @@ export class RelayBridge {
 					(currentLoaderId !== undefined &&
 						loaderAfterRegistration !== undefined &&
 						loaderAfterRegistration !== currentLoaderId);
-				if (navigationDuringRegistration) {
+				if (navigationDuringRegistration || changedChildFrames.length > 0) {
 					// Command replies and Page events travel through separate queues, so
 					// their relay-side order is not application evidence. The probe was
 					// registered after the real script: seeing it in this document proves

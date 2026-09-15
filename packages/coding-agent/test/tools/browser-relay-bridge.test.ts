@@ -3954,7 +3954,7 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
-	it("reruns an immediate preload when only a child frame navigated during recovery", async () => {
+	it("reruns an immediate preload only in a child that navigated during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1, url: "https://example.test/same" })]);
@@ -4005,10 +4005,43 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(replay?.params).toMatchObject({
-			source: "window.__relayInjected = true;",
-			runImmediately: true,
+		expect(replay?.params).toMatchObject({ runImmediately: false });
+		ack(bridge, ext2, "send", { identifier: "root-script-after-recovery" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-after" } }],
+			},
 		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.executionContextCreated",
+				params: { context: { id: 102, name: "", auxData: { isDefault: true, frameId: "child" } } },
+			}),
+		);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		expect(ext2.pending("send").find(rpc => rpc.method === "Runtime.evaluate")?.params).toMatchObject({
+			contextId: 102,
+		});
+		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
+		await flush();
+		expect(
+			ext2.rpcs("send").filter(rpc => {
+				if (rpc.method !== "Page.addScriptToEvaluateOnNewDocument") return false;
+				const params = rpc.params as { source?: string; runImmediately?: boolean } | undefined;
+				return params?.runImmediately === true && params.source?.includes("window.__relayInjected");
+			}),
+		).toHaveLength(0);
 	});
 
 	it("does not rerun an immediate preload for a child navigation covered before orphan detach", async () => {
