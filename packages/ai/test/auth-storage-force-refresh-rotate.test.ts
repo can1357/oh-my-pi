@@ -1,18 +1,26 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { withAuth } from "@oh-my-pi/pi-ai";
-import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthCredentialStore,
+	AuthStorage,
+	type CredentialDisabledEvent,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
+import * as compatBehavior from "@oh-my-pi/pi-catalog/compat/behavior";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";
+const COPILOT_PROVIDER = "github-copilot";
 
 const CODEX_PROVIDER = "openai-codex";
 const DAYBREAK_MODEL = "gpt-daybreak-blue-latest";
@@ -67,6 +75,38 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		}
 	});
 
+	test("aborting an explicit id and bearer lookup leaves an uncooperative credential untouched", async () => {
+		if (!store) throw new Error("test setup failed");
+		const started = Promise.withResolvers<void>();
+		const stalled = Promise.withResolvers<string | undefined>();
+		authStorage = new AuthStorage(store, {
+			configValueResolver: () => {
+				started.resolve();
+				return stalled.promise;
+			},
+		});
+		await authStorage.set(PROVIDER, { type: "api_key", key: "uncooperative-config" });
+		const [row] = store.listAuthCredentials(PROVIDER);
+		const controller = new AbortController();
+		const failure = authStorage.rotateSessionCredential(PROVIDER, "cancelled-lookup", {
+			error: authError(),
+			credentialId: row!.id,
+			apiKey: "failed-bearer",
+			signal: controller.signal,
+		});
+		const outcome = failure.catch(error => error);
+		try {
+			await started.promise;
+			controller.abort();
+			expect(await outcome).toMatchObject({ name: "AbortError" });
+			expect(store.listAuthCredentials(PROVIDER)).toEqual([row]);
+			expect(authStorage.listCredentialBlocks([row!.id])).toEqual([]);
+			expect(await authStorage.listDisabledCredentials(PROVIDER)).toEqual([]);
+		} finally {
+			stalled.resolve("failed-bearer");
+		}
+	});
+
 	function registerProvider(onRefresh?: () => void, nextAccess?: () => string): void {
 		registerOAuthProvider({
 			id: PROVIDER,
@@ -89,6 +129,279 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			},
 		});
 	}
+
+	function copilotStorage(): AuthStorage {
+		if (!store) throw new Error("test setup failed");
+		// Exercise the built-in OAuth refresh without performing unrelated usage requests.
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			rankingStrategyResolver: () => undefined,
+		});
+		return authStorage;
+	}
+
+	function copilotBearer(apiKey: string | undefined): string | undefined {
+		return apiKey === undefined ? undefined : (JSON.parse(apiKey) as { token: string }).token;
+	}
+
+	test.each([true, false, undefined] as const)(
+		"resolver obeys provider credential-retirement fact %s after refresh and retry",
+		async retireOAuthOnHard401 => {
+			if (!authStorage || !store) throw new Error("test setup failed");
+			vi.spyOn(compatBehavior, "credentialRetirementFor").mockReturnValue(
+				retireOAuthOnHard401 === undefined ? undefined : { provider: PROVIDER, retireOAuthOnHard401 },
+			);
+			registerProvider();
+			await authStorage.set(PROVIDER, {
+				type: "oauth",
+				access: "cached-access",
+				refresh: "cached-refresh",
+				expires: farExpiry(),
+			});
+			const [failed] = store.listAuthCredentials(PROVIDER);
+			const attemptedKeys: string[] = [];
+			const denied = new ProviderHttpError("Bad credentials", 401);
+			await expect(
+				withAuth(authStorage.resolver(PROVIDER, { sessionId: "retirement-policy" }), async key => {
+					attemptedKeys.push(key);
+					expect(await authStorage!.listDisabledCredentials(PROVIDER)).toEqual([]);
+					throw denied;
+				}),
+			).rejects.toBe(denied);
+			expect(attemptedKeys).toEqual(["cached-access", "minted-access"]);
+			expect((await authStorage.listDisabledCredentials(PROVIDER)).map(row => row.id)).toEqual(
+				retireOAuthOnHard401 ? [failed!.id] : [],
+			);
+			expect(store.listAuthCredentials(PROVIDER).map(row => row.id)).toEqual(
+				retireOAuthOnHard401 ? [] : [failed!.id],
+			);
+		},
+	);
+
+	test("Copilot hard 401 retires only the retried bearer and persists its sign-out across reopen", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, [
+			{ type: "oauth", access: "cached-A", refresh: "retried-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "cached-B", refresh: "retried-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const sessionId = "copilot-hard-auth";
+		const initialKey = copilotBearer(await storage.getApiKey(COPILOT_PROVIDER, sessionId));
+		const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+		const failed = rows.find(row => row.credential.type === "oauth" && row.credential.access === initialKey);
+		const sibling = rows.find(row => row.id !== failed?.id);
+		if (failed?.credential.type !== "oauth" || sibling?.credential.type !== "oauth") {
+			throw new Error("expected failed and sibling OAuth accounts");
+		}
+		const siblingBearer = sibling.credential.access;
+		const events: CredentialDisabledEvent[] = [];
+		storage.onCredentialDisabled(event => {
+			events.push(event);
+		});
+		const attemptedKeys: string[] = [];
+		const denied = new ProviderHttpError("Bad credentials", 401);
+		const result = await withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId }), async key => {
+			const bearer = copilotBearer(key)!;
+			attemptedKeys.push(bearer);
+			if (bearer === siblingBearer) return bearer;
+			// Neither the first failure nor the refresh itself may sign out the account.
+			expect(store!.listAuthCredentials(COPILOT_PROVIDER).map(row => row.id)).toEqual(rows.map(row => row.id));
+			expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+			expect(events).toEqual([]);
+			throw denied;
+		});
+		expect(result).toBe(sibling.credential.access);
+		expect(attemptedKeys).toEqual([initialKey!, failed.credential.refresh, sibling.credential.access]);
+		expect(events.map(event => event.credentialId)).toEqual([failed.id]);
+		expect((await storage.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed.id]);
+		expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual([sibling]);
+
+		storage.close();
+		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const reopened = copilotStorage();
+		await reopened.reload();
+		expect(copilotBearer(await reopened.getApiKey(COPILOT_PROVIDER, "reopened"))).toBe(sibling.credential.access);
+		expect((await reopened.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed.id]);
+		expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual([sibling]);
+	});
+
+	test("Copilot same-bearer refresh exhaustion retires a revoked last account after bounded retry", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "revoked",
+			refresh: "revoked",
+			expires: farExpiry(),
+		});
+		const [failed] = store.listAuthCredentials(COPILOT_PROVIDER);
+		const denied = new ProviderHttpError("Bad credentials", 401);
+		const attemptedKeys: string[] = [];
+		await expect(
+			withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId: "same-bearer" }), async key => {
+				attemptedKeys.push(copilotBearer(key)!);
+				throw denied;
+			}),
+		).rejects.toBe(denied);
+		// The structured key changes expiry during refresh, but both requests send the same bearer.
+		expect(attemptedKeys).toEqual(["revoked", "revoked"]);
+		expect(await storage.getApiKey(COPILOT_PROVIDER)).toBeUndefined();
+		expect((await storage.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed!.id]);
+	});
+
+	test("Copilot retirement matches a row id against its structured request bearer", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "revoked",
+			refresh: "revoked",
+			expires: farExpiry(),
+		});
+		const [failed] = store.listAuthCredentials(COPILOT_PROVIDER);
+		const apiKey = await storage.getApiKey(COPILOT_PROVIDER, "structured-row");
+		expect(copilotBearer(apiKey)).toBe("revoked");
+		await storage.rotateSessionCredential(COPILOT_PROVIDER, "structured-row", {
+			error: new ProviderHttpError("Bad credentials", 401),
+			apiKey,
+			credentialId: failed!.id,
+		});
+		expect(await storage.getApiKey(COPILOT_PROVIDER)).toBeUndefined();
+		expect((await storage.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed!.id]);
+	});
+
+	test("Copilot refresh recovery preserves the now-healthy account", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "old",
+			refresh: "healthy",
+			expires: farExpiry(),
+		});
+		const attemptedKeys: string[] = [];
+		expect(
+			await withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId: "recovery" }), async key => {
+				const bearer = copilotBearer(key)!;
+				attemptedKeys.push(bearer);
+				if (bearer === "old") throw new ProviderHttpError("Bad credentials", 401);
+				return bearer;
+			}),
+		).toBe("healthy");
+		expect(attemptedKeys).toEqual(["old", "healthy"]);
+		expect(copilotBearer(await storage.getApiKey(COPILOT_PROVIDER))).toBe("healthy");
+		expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+	});
+
+	test.each(["missing", "row-only", "stale-bearer", "stale-bearer-with-row"])(
+		"Copilot hard 401 preserves the stored bearer when request identity is %s",
+		async identity => {
+			const storage = copilotStorage();
+			if (!store) throw new Error("test setup failed");
+			const stale = identity.startsWith("stale");
+			await storage.set(COPILOT_PROVIDER, {
+				type: "oauth",
+				access: stale ? "superseded" : "healthy",
+				refresh: "healthy",
+				expires: farExpiry(),
+			});
+			const previousKey = await storage.getApiKey(COPILOT_PROVIDER, "identity");
+			const [target] = store.listAuthCredentials(COPILOT_PROVIDER);
+			if (target?.credential.type !== "oauth") throw new Error("expected OAuth account");
+			if (stale) store.updateAuthCredential(target.id, { ...target.credential, access: "healthy" });
+			const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+			await storage.rotateSessionCredential(COPILOT_PROVIDER, "identity", {
+				error: new ProviderHttpError("Bad credentials", 401),
+				apiKey: stale ? previousKey : undefined,
+				credentialId: identity === "row-only" || identity.endsWith("with-row") ? rows[0]!.id : undefined,
+			});
+			expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual(rows);
+			expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+			expect(store.getCredentialBlock?.(rows[0]!.id, `${COPILOT_PROVIDER}:oauth`, "")).toBeUndefined();
+		},
+	);
+
+	test("Copilot retirement loses to a concurrent bearer replacement without blocking it", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "failed",
+			refresh: "failed",
+			expires: farExpiry(),
+		});
+		const [row] = store.listAuthCredentials(COPILOT_PROVIDER);
+		if (row?.credential.type !== "oauth") throw new Error("expected OAuth account");
+		const healthy = { ...row.credential, access: "replacement", refresh: "replacement" };
+		const disableIfMatches = store.tryDisableAuthCredentialIfMatches.bind(store);
+		vi.spyOn(store, "tryDisableAuthCredentialIfMatches").mockImplementation((id, expected, cause) => {
+			store!.updateAuthCredential(id, healthy);
+			return disableIfMatches(id, expected, cause);
+		});
+		const events: CredentialDisabledEvent[] = [];
+		storage.onCredentialDisabled(event => {
+			events.push(event);
+		});
+		expect(
+			copilotBearer(
+				await storage.resolver(COPILOT_PROVIDER, { sessionId: "concurrent" })({
+					lastChance: true,
+					error: new ProviderHttpError("Bad credentials", 401),
+					previousKey: "failed",
+				}),
+			),
+		).toBe("replacement");
+		expect(store.listAuthCredentials(COPILOT_PROVIDER)[0]?.credential).toEqual(healthy);
+		expect(store.getCredentialBlock?.(row.id, `${COPILOT_PROVIDER}:oauth`, "")).toBeUndefined();
+		expect(events).toEqual([]);
+		expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+	});
+
+	test.each(["runtime", "config"])(
+		"Copilot %s overrides never retire a stored account with equal bearer bytes",
+		async origin => {
+			const storage = copilotStorage();
+			if (!store) throw new Error("test setup failed");
+			await storage.set(COPILOT_PROVIDER, {
+				type: "oauth",
+				access: "override",
+				refresh: "override",
+				expires: farExpiry(),
+			});
+			const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+			if (origin === "runtime") storage.setRuntimeApiKey(COPILOT_PROVIDER, "override");
+			else storage.setConfigApiKey(COPILOT_PROVIDER, "override");
+			const denied = new ProviderHttpError("Bad credentials", 401);
+			await expect(
+				withAuth(storage.resolver(COPILOT_PROVIDER), async () => {
+					throw denied;
+				}),
+			).rejects.toBe(denied);
+			expect(await storage.getApiKey(COPILOT_PROVIDER)).toBe("override");
+			expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual(rows);
+			expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+		},
+	);
+
+	test.each([
+		["usage cap", new ProviderHttpError("Account usage limit reached", 401)],
+		["concurrency cap", new ProviderHttpError("Too many concurrent requests", 401)],
+		["model/org/account policy", new ProviderHttpError("Access denied", 403)],
+		["rewritten policy denial", new ProviderHttpError("GitHub Copilot access denied (HTTP 403)", 401)],
+	] as const)("Copilot %s preserves the stored credential", async (_kind, denied) => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, { type: "oauth", access: "valid", refresh: "valid", expires: farExpiry() });
+		const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+		await expect(
+			withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId: "policy" }), async () => {
+				throw denied;
+			}),
+		).rejects.toBe(denied);
+		expect(store.listAuthCredentials(COPILOT_PROVIDER).map(row => row.id)).toEqual(rows.map(row => row.id));
+		expect(copilotBearer(await storage.getApiKey(COPILOT_PROVIDER))).toBe("valid");
+		expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+	});
 
 	test("forceRefresh re-mints a not-yet-expired token; a normal resolve uses the cached token", async () => {
 		if (!authStorage) throw new Error("test setup failed");
@@ -305,8 +618,16 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 		const firstMark = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
 			credentialId: target.id,
+			apiKey: previousKey,
 		});
-		expect(firstMark.switched).toBe(true);
+		expect(firstMark).toEqual({ switched: false });
+		expect(authStorage.listCredentialBlocks([target.id, sibling.id])).toEqual([]);
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(`${previousKey}-refreshed`);
+
+		const rowMark = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
+			credentialId: target.id,
+		});
+		expect(rowMark.switched).toBe(true);
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sibling.credential.access);
 
 		const delayedMark = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
@@ -356,6 +677,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		});
 		expect(retainedMark.switched).toBe(true);
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sibling.credential.access);
+	});
+
+	test("a peer that retires the row mid-disable still leaves a distinct sibling retryable", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const backing = store;
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-target", refresh: "ref-target", expires: farExpiry(), email: "t@example.com" },
+			{ type: "oauth", access: "acc-sibling", refresh: "ref-sib", expires: farExpiry(), email: "s@example.com" },
+		]);
+		const target = backing
+			.listAuthCredentials(PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.email === "t@example.com");
+		if (target?.credential.type !== "oauth") throw new Error("expected the target row");
+
+		// A peer retires the row after this session resolved it but before the
+		// guarded disable lands, so the disable reports no transition of its own.
+		const guarded = backing.tryDisableAuthCredentialIfMatches.bind(backing);
+		vi.spyOn(backing, "tryDisableAuthCredentialIfMatches").mockImplementationOnce((id, expected, cause, lease) => {
+			const peer = new Database(path.join(tempDir, "agent.db"));
+			try {
+				peer.run("DELETE FROM auth_credentials WHERE id = ?", [id]);
+			} finally {
+				peer.close();
+			}
+			return guarded(id, expected, cause, lease);
+		});
+
+		// Who performed the removal is irrelevant: a distinct sibling is still
+		// usable, so the session must be told it can retry rather than having the
+		// original authentication error surfaced.
+		expect(
+			await authStorage.rotateSessionCredential(PROVIDER, "peer-retired", {
+				error: new Error("Encountered invalidated oauth token for user, failing request"),
+				apiKey: target.credential.access,
+				credentialId: target.id,
+			}),
+		).toBe(true);
+		expect(authStorage.listStoredCredentials(PROVIDER).map(row => row.id)).not.toContain(target.id);
+		expect(await authStorage.getApiKey(PROVIDER, "peer-retired")).toBe("acc-sibling");
 	});
 
 	test("usage marking does not block a sibling when its target disappears during usage lookup", async () => {
@@ -449,7 +809,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sticky);
 	});
 
-	test("credentialId rotation targets the failed row after bearer changes without clearing stale sticky", async () => {
+	test("credentialId rotation never retires a peer's replacement", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		await authStorage.set(PROVIDER, [
 			{ type: "api_key", key: "acc-A" },
@@ -470,12 +830,24 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		store.updateAuthCredential(targetRow.id, { type: "api_key", key: changedKey });
 		await authStorage.reload();
 
+		// The failed bearer is gone, so there is nothing to retire under it and
+		// nothing to switch to on this request: auth-retry keys attempts by row id,
+		// so the replacement on the same row is already considered attempted.
 		const rotated = await authStorage.rotateSessionCredential(PROVIDER, sessionId, {
 			error: authError(),
 			apiKey: oldKey,
 			credentialId: targetRow.id,
 		});
-		expect(rotated).toBe(true);
+		expect(rotated).toBe(false);
+		expect(authStorage.listCredentialBlocks([targetRow.id])).toEqual([]);
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sticky);
+
+		expect(
+			await authStorage.rotateSessionCredential(PROVIDER, sessionId, {
+				error: authError(),
+				credentialId: targetRow.id,
+			}),
+		).toBe(true);
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sticky);
 
 		const laterSelections = new Set<string>();
