@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `ctx.agentIdentity` to extension contexts: tells a handler whether it runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)).
 - Added `ollama` web search provider using Ollama's hosted web search API (`POST https://ollama.com/api/web_search`), authenticated via `OLLAMA_CLOUD_API_KEY` ([#3791](https://github.com/can1357/oh-my-pi/issues/3791)).
 - Added `readUrl` support for Ollama model pages (`ollama.com/<model>` and `ollama.com/library/<model>`), extracting descriptions, tags, and architecture metadata.
 - `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
@@ -84,10 +85,6 @@
 - Fixed prompts awaiting setup crossing a fork, branch, or tree-navigation commit, multi-question extension dialogs moving later questions to a replacement Collab room, and stale rooms blocking `/collab` or `/join` after a failed session change ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
 - Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
-
-### Added
-
-- Added `ctx.agentIdentity` to extension contexts: tells a handler whether it runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)).
 
 ## [18.1.19] - 2026-09-12
 
