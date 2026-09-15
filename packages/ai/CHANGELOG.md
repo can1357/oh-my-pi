@@ -36,6 +36,10 @@
 - Fixed provider requests failing with `ENOENT` when another process removes a stale shared concurrency lock during acquisition.
 - Fixed Devin-hosted Gemini models rejecting turns that include nullable tool parameters by normalizing tool schemas to Gemini's supported JSON Schema dialect ([#8647](https://github.com/can1357/oh-my-pi/issues/8647), [#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed Devin gateway failures leaking raw proxy HTML into turn errors; HTTP status and retry metadata remain available for recovery ([#10233](https://github.com/can1357/oh-my-pi/pull/10233) by [@will-bogusz](https://github.com/will-bogusz)).
+### Fixed
+- An OAuth credential the auth layer disables automatically (definitive refresh failure, upstream token invalidation, Copilot hard-401 retirement, broker disable) is now logged with its provider, account, and cause and reported through `credential_disabled`, so a session can no longer degrade to a sibling account with no record of what happened. Display surfaces name a classified cause (`sign-in expired`, `token revoked`, …) rather than provider-controlled text, and a managed MCP provider id loses its URL query structurally; the verbatim cause stays in the store ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Automatic OAuth failure history now survives a later login for 30 days from the original disable, so `omp usage` can still explain why an account went away instead of losing that record the moment the user signs back in. A deliberate logout clears the history it owns ([#11911](https://github.com/can1357/oh-my-pi/pull/11911) by [@alphastorm](https://github.com/alphastorm)).
+- An automatic credential disable now compares the failed credential before disabling it, locally and through the auth broker, so a stale failure can no longer sign out a token or API key that another process just refreshed ([#11912](https://github.com/can1357/oh-my-pi/pull/11912) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.2.0] - 2026-09-15
 

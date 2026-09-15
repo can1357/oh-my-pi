@@ -305,6 +305,12 @@ export interface CompiledPlanRequirement {
 	tiers: { tier: string; match: CompiledMatchList }[];
 }
 
+/** Provider-level OAuth retirement policy after refresh and retry are exhausted. */
+export interface CompiledCredentialRetirement {
+	provider: string;
+	retireOAuthOnHard401: boolean;
+}
+
 /** Cross-provider pricing-peer aliases for one provider. */
 export interface CompiledPricingPeer {
 	provider: string;
@@ -331,6 +337,7 @@ export interface CompiledBehavior {
 	excludeDiscoveryModes: CompiledExcludeDiscoveryModes[];
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
+	credentialRetirements: CompiledCredentialRetirement[];
 	pricingPeers: CompiledPricingPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];

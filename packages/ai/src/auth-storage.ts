@@ -8,18 +8,25 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
-import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { credentialRetirementFor, planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { $env, $envExact, getAgentDbPath, logger, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import {
+	copyOAuthCredentialIdentity,
+	isAutomaticDisableCause,
+	isDeliberateRemovalCause,
+	isOAuthCredentialIdentityRecovered,
 	isSqliteCorruptionError,
+	normalizeDisabledCause,
 	resolveCredentialIdentityKey,
+	type ResolvedOAuthCredentialIdentity,
+	resolveOAuthCredentialIdentity,
 	SqliteAuthCredentialStore,
 	serializeCredential,
 	USAGE_REPORT_TTL_MS,
 } from "./auth/sqlite-credential-store";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
-import { isUsageLimitOutcome } from "./error/rate-limit";
+import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "./registry/oauth";
 import type {
@@ -78,7 +85,12 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
-export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export {
+	isAutomaticDisableCause,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	SqliteAuthCredentialStore,
+} from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -90,7 +102,7 @@ const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 
 /** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
-function fingerprintOAuthBearer(bearer: string): string {
+export function fingerprintOAuthBearer(bearer: string): string {
 	return createHash("sha256").update(bearer).digest("base64url");
 }
 const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
@@ -119,6 +131,18 @@ export type OAuthCredential = {
 } & OAuthCredentials;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
+
+/**
+ * Broker disable condition: preserve the OAuth bearer fingerprint on the wire,
+ * and tag API-key hashes so equal key/access strings cannot match across kinds.
+ * API keys compare the stored key representation, not an environment variable
+ * or command's resolved value; changing only that value does not version the row.
+ */
+export function fingerprintCredentialForDisable(credential: AuthCredential): string {
+	return credential.type === "oauth"
+		? fingerprintOAuthBearer(credential.access)
+		: `api_key:${fingerprintOAuthBearer(credential.key)}`;
+}
 
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
@@ -166,6 +190,8 @@ export interface StoredAuthCredential {
 	id: number;
 	provider: string;
 	credential: AuthCredential;
+	/** Authoritative identity from a store whose credential may omit refresh-token claims. */
+	identityKey?: string | null;
 	disabledCause: string | null;
 }
 
@@ -196,13 +222,189 @@ export interface DisabledCredentialSummary {
 	type: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
+	/** Google project the credential was scoped to (`google-gemini-cli`, `google-antigravity`). */
+	projectId?: string;
 	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
-	/** Verbatim disable cause captured when the row was torn down. */
+	/** Disable cause; AuthStorage projects credential-redacted text for display/transport. */
 	cause: string;
 	/** Epoch ms the row was disabled (SQLite `updated_at`), when known. */
 	disabledAtMs?: number;
+}
+
+/** Account identity of a live credential, matched against tombstones by {@link isActionableCredentialDisable}. */
+export interface CredentialAccountIdentity {
+	provider: string;
+	/** Resolved primary and alternate identifiers, never token material. */
+	identity?: ResolvedOAuthCredentialIdentity;
+	/** Only an OAuth credential can recover an OAuth tombstone; an API key for the same provider proves nothing. */
+	type?: AuthCredential["type"];
+	email?: string;
+	accountId?: string;
+	projectId?: string;
+	orgId?: string;
+}
+
+/** Disabled history and the live accounts it was matched against, read from one revalidated snapshot. */
+export interface RevalidatedDisabledHistory {
+	/** Tombstones as of the revalidated pool, the pre-refresh read when `revalidated` is false, or `undefined` when unreadable. */
+	history: DisabledCredentialSummary[] | undefined;
+	/** Live OAuth identities from that same pool. Empty when `revalidated` is false, so nothing proves recovery. */
+	activeAccounts: CredentialAccountIdentity[];
+	/** Whether the credential snapshot itself was refreshed. */
+	revalidated: boolean;
+	/**
+	 * Whether history was successfully read *after* that refresh. Only then may
+	 * `activeAccounts` be used to prove recovery; otherwise a freshly loaded row
+	 * could hide a tombstone this call never managed to re-read.
+	 */
+	historyRechecked: boolean;
+}
+
+/**
+ * Whether an automatically disabled OAuth credential still needs a re-login.
+ * Recovery shares persistence's provider-specific identity priority, one-way
+ * organization upgrades, and alternate-identity matching. Only email is case
+ * insensitive; all identity fields are trimmed. An API key proves no recovery.
+ *
+ * Loaded accounts retain resolved token claims and the broker authoritative key
+ * even when the snapshot withholds refresh tokens.
+ * A summary with no recoverable identity likewise cannot prove a re-login.
+ */
+export function isActionableCredentialDisable(
+	summary: DisabledCredentialSummary,
+	activeAccounts: readonly CredentialAccountIdentity[],
+): boolean {
+	if (summary.type !== "oauth" || !isAutomaticDisableCause(summary.cause)) return false;
+	const identity = resolveOAuthCredentialIdentity(summary.provider, summary);
+	if (identity.identifiers.length === 0) return true;
+	return !activeAccounts.some(account => {
+		if (account.provider !== summary.provider || account.type === "api_key") return false;
+		return isOAuthCredentialIdentityRecovered(
+			identity,
+			account.identity ?? resolveOAuthCredentialIdentity(account.provider, account),
+		);
+	});
+}
+
+/**
+ * One warning per unambiguous canonical OAuth account, keeping the latest
+ * actual disable (row id breaks equal-timestamp ties). This is display-only:
+ * callers must use raw history for authority and retain the original rows/events.
+ * Recovery's one-way identity upgrades cannot establish that two historical
+ * accounts are identical. Unknown accounts and API-key generations stay separate.
+ */
+export function coalesceDisabledCredentialWarnings(
+	disabled: readonly DisabledCredentialSummary[],
+): DisabledCredentialSummary[] {
+	const warnings: DisabledCredentialSummary[] = [];
+	const accounts = new Map<string, number>();
+	for (const summary of disabled) {
+		const identity = summary.type === "oauth" ? resolveOAuthCredentialIdentity(summary.provider, summary) : undefined;
+		const org = identity?.identifiers.find(identifier => identifier.startsWith("org:"));
+		const base = org && identity?.key?.endsWith(`|${org}`) ? identity.key.slice(0, -org.length - 1) : identity?.key;
+		// A workspace without a member identity is not an unambiguous account.
+		if (!base || (org && base.slice(base.indexOf(":") + 1) === org.slice(4))) {
+			warnings.push(summary);
+			continue;
+		}
+		// Some providers' canonical keys omit org scope; never cross it for warnings.
+		const key = JSON.stringify([summary.provider, identity!.key, org]);
+		const index = accounts.get(key);
+		if (index === undefined) {
+			accounts.set(key, warnings.length);
+			warnings.push(summary);
+			continue;
+		}
+		const previous = warnings[index]!;
+		const timestamp = summary.disabledAtMs ?? 0;
+		const previousTimestamp = previous.disabledAtMs ?? 0;
+		if (timestamp > previousTimestamp || (timestamp === previousTimestamp && summary.id > previous.id)) {
+			warnings[index] = summary;
+		}
+	}
+	return warnings;
+}
+
+/**
+ * A token endpoint's failure body can echo the submitted refresh token or
+ * client secret, so no part of it reaches a display surface: the cause is
+ * classified into a fixed vocabulary and the verbatim text stays in the store.
+ * Recognizing known causes is bounded work; deciding whether arbitrary provider
+ * prose is safe to print is not.
+ */
+export function summarizeDisableCause(cause: string): string {
+	// Idempotent: a projected event can cross a second boundary, and several of
+	// these labels do not match their own classifier arm — `replaced by a newer
+	// sign-in` would be re-read as a deliberate logout and reported as `signed
+	// out`, turning a routine rotation into a false sign-out notice.
+	if (DISABLE_CAUSE_SUMMARIES.has(cause)) return cause;
+	const text = cause.toLowerCase();
+	// Replacement is a non-automatic cause, so it has to be named before the
+	// generic deliberate branch below — otherwise a routine re-login or key
+	// rotation is reported to the operator as "signed out".
+	// Anchored on the lifecycle cause the store writes, not a substring: a
+	// provider error body that happens to contain "replaced by" is not a
+	// rotation and must not be summarised as one.
+	if (text.startsWith("replaced by")) return "replaced by a newer sign-in";
+	if (!isAutomaticDisableCause(cause)) return "signed out";
+	if (text.includes("invalid_grant") || text.includes("expired")) return "sign-in expired";
+	if (text.includes("invalid_client") || text.includes("unauthorized_client")) return "client no longer authorized";
+	if (text.includes("invalid_token") || text.includes("revoked")) return "token revoked";
+	if (text.includes("http 401") || text.includes("invalidated oauth token")) return "rejected by the provider";
+	return "authentication failed";
+}
+
+/**
+ * Every value {@link summarizeDisableCause} can return. Closed by construction:
+ * the summary is shown to users and shared in `omp usage --json`, so it is a
+ * fixed vocabulary rather than provider-controlled text.
+ */
+const DISABLE_CAUSE_SUMMARIES: ReadonlySet<string> = new Set([
+	"signed out",
+	"replaced by a newer sign-in",
+	"sign-in expired",
+	"client no longer authorized",
+	"token revoked",
+	"rejected by the provider",
+	"authentication failed",
+]);
+
+/**
+ * A managed MCP credential's provider id embeds the server URL, which can carry
+ * a credential in its userinfo or query. The structure is known, so both are
+ * dropped outright rather than guessed at: origin and path are all a reader
+ * needs to identify the server.
+ */
+export function providerIdForDisplay(provider: string): string {
+	const scheme = provider.search(/https?:\/\//i);
+	if (scheme === -1) return provider;
+	try {
+		// Origin only: a managed MCP URL can carry credentials in its userinfo,
+		// query, or path (`https://host/mcp/SECRET`), and the origin already
+		// identifies the server. Dropping the rest is structural, not a guess.
+		return `${provider.slice(0, scheme)}${new URL(provider.slice(scheme)).origin}`;
+	} catch {
+		// Not a parseable URL: withhold everything from the scheme onward.
+		return `${provider.slice(0, scheme)}[url]`;
+	}
+}
+
+/**
+ * Display label for an OAuth account: email, account id, or Google project,
+ * qualified by the organization when it is a distinct value. `mask` runs over
+ * each part so redacting surfaces (`omp usage --redact`) can substitute
+ * placeholders.
+ */
+export function credentialAccountLabel(
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "projectId" | "orgId" | "orgName">,
+	mask: (part: string) => string = part => part,
+): string {
+	const base = identity.email ?? identity.accountId ?? identity.projectId ?? "OAuth account";
+	const org = identity.orgName ?? identity.orgId;
+	if (!org || org === base) return mask(base);
+	return `${mask(base)} · ${mask(org)}`;
 }
 
 /**
@@ -402,16 +604,30 @@ export interface AuthCredentialStore {
 	 * per-credential data; local SQLite stores omit it — their reads are
 	 * always current.
 	 */
-	refreshSnapshot?(): Promise<unknown>;
+	refreshSnapshot?(signal?: AbortSignal): Promise<unknown>;
 	/**
 	 * Disabled credential tombstones (see {@link DisabledCredentialSummary}).
 	 * Optional: remote stores forward to the broker's
 	 * `GET /v1/credentials/disabled` (empty list when the broker predates the
-	 * endpoint); stores without tombstones omit it.
+	 * endpoint); stores without tombstones omit it. requireSupported must reject
+	 * unsupported lookups rather than report an authoritative empty history.
 	 */
-	listDisabledCredentials?(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]>;
+	listDisabledCredentials?(
+		provider?: string,
+		signal?: AbortSignal,
+		options?: { requireSupported?: boolean },
+	): Promise<DisabledCredentialSummary[]>;
+	/** Subscribe to automatic disables observed from the backing source, not initiated by this client. */
+	onCredentialDisabled?(listener: (event: CredentialDisabledEvent) => void): () => void;
 	updateAuthCredential(id: number, credential: AuthCredential): void;
-	deleteAuthCredential(id: number, disabledCause: string): void;
+	/**
+	 * Disable the credential. Returning `false` reports that no transition
+	 * happened — a peer already tombstoned the row, or it is gone — so the
+	 * persisted cause is theirs and callers must not announce a teardown they
+	 * did not perform. `void` remains accepted for stores written against the
+	 * previous contract and is treated as an unconditional disable.
+	 */
+	deleteAuthCredential(id: number, disabledCause: string): boolean | void;
 	tryDisableAuthCredentialIfMatches(
 		id: number,
 		expectedData: string,
@@ -555,12 +771,22 @@ export interface AuthCredentialStore {
 	/**
 	 * Optional async write hook for disabling one stored credential. Remote stores
 	 * use it to await broker persistence before AuthStorage updates its snapshot.
+	 * A condition from `fingerprintCredentialForDisable` guards the access/key;
+	 * `false` means the broker found a replacement (or the row is missing).
 	 */
-	deleteAuthCredentialRemote?(id: number, disabledCause: string): Promise<boolean>;
+	deleteAuthCredentialRemote?(
+		id: number,
+		disabledCause: string,
+		expectedAccessFingerprint?: string,
+		signal?: AbortSignal,
+	): Promise<boolean>;
 	/**
-	 * Optional async write hook for clearing every credential for a provider
-	 * (logout). When present, `AuthStorage.remove` routes through this instead
-	 * of the sync `deleteAuthCredentialsForProvider`.
+	 * Optional async write hook for deliberate whole-provider logout, clearing
+	 * prior disabled history as well as active credentials. When present,
+	 * `AuthStorage.remove` routes through this instead of the sync
+	 * `deleteAuthCredentialsForProvider`. Reject on persistence failure and
+	 * update the in-memory snapshot only after success.
+	 * The cause remains "deleted by user" for existing store implementations.
 	 */
 	deleteAuthCredentialsRemote?(provider: string, disabledCause: string): Promise<void>;
 }
@@ -572,9 +798,13 @@ export interface AuthCredentialStore {
 /**
  * Event payload describing a credential that was just soft-disabled.
  *
- * Today the only call site is OAuth refresh failures with a definitive cause
- * (`invalid_grant`, `401/403` not from a network blip, etc.) — the
- * disabled_cause string is the verbatim error captured for forensics.
+ * Fired by every automatic teardown — a definitive OAuth refresh failure
+ * (`invalid_grant`, `revoked`, …), an upstream response that invalidated the
+ * bearer, or a broker-issued disable. The disabled_cause string is the
+ * verbatim error captured for forensics locally, or the broker-redacted cause
+ * for remote notifications; the identity fields mirror the
+ * tombstone's {@link DisabledCredentialSummary} so a subscriber can name the
+ * account that was signed out.
  *
  * Subscribers can use this to surface a notification, banner, or auto-launch
  * a re-login flow instead of letting the credential silently disappear.
@@ -582,6 +812,67 @@ export interface AuthCredentialStore {
 export interface CredentialDisabledEvent {
 	provider: string;
 	disabledCause: string;
+	/** Database row id of the tombstoned credential (matches {@link StoredAuthCredential.id}). */
+	credentialId: number;
+	/** Named `credentialType`, not `type`: the extension runner spreads this event under its own `type` discriminator. */
+	credentialType: AuthCredential["type"];
+	email?: string;
+	accountId?: string;
+	projectId?: string;
+	orgId?: string;
+	orgName?: string;
+	/**
+	 * For an API-key teardown, the provider's other API-key rows that were live
+	 * when it happened. An API key carries no identity, so only a row outside
+	 * this set is a replacement; consumers must not re-derive it from a snapshot
+	 * that may have advanced since.
+	 */
+	siblingApiKeyIds?: ReadonlySet<number>;
+}
+
+/** Build the {@link CredentialDisabledEvent} for a row that is being torn down. */
+function credentialDisabledEvent(
+	provider: string,
+	credentialId: number,
+	credential: AuthCredential,
+	disabledCause: string,
+	siblingApiKeyIds?: ReadonlySet<number>,
+): CredentialDisabledEvent {
+	// In-process values, carried raw: notice reconciliation matches this provider
+	// against live account identities and API-key maps keyed by the stored id, so
+	// projecting here would break that comparison. The projection belongs at each
+	// external boundary — see `projectCredentialDisabledEvent`, applied by the
+	// extension runner and the SDK embedder bridge.
+	const event: CredentialDisabledEvent = {
+		provider,
+		disabledCause,
+		credentialId,
+		credentialType: credential.type,
+	};
+	if (credential.type === "api_key" && siblingApiKeyIds) event.siblingApiKeyIds = siblingApiKeyIds;
+	if (credential.type === "oauth") {
+		copyOAuthCredentialIdentity(event, credential);
+		if (credential.orgName) event.orgName = credential.orgName;
+	}
+	return event;
+}
+
+/**
+ * Reduce a {@link CredentialDisabledEvent} to what an untrusted consumer may see.
+ *
+ * `AuthStorage` emits raw values because in-process reconciliation correlates on
+ * the stored provider id. Anything handing the event to code outside that trust
+ * boundary — extension handlers, SDK embedders — applies this first: the cause is
+ * provider-controlled and can echo a submitted refresh token, and a managed MCP
+ * provider id embeds its server URL. Applied exactly once per boundary, so the
+ * classifier only ever sees a raw store cause.
+ */
+export function projectCredentialDisabledEvent(event: CredentialDisabledEvent): CredentialDisabledEvent {
+	return {
+		...event,
+		provider: providerIdForDisplay(event.provider),
+		disabledCause: summarizeDisableCause(event.disabledCause),
+	};
 }
 
 export type AuthStorageOptions = {
@@ -1217,7 +1508,7 @@ function raceCredentialRefreshWithSignal<T>(
 	});
 }
 
-function authCredentialEquals(left: AuthCredential, right: AuthCredential): boolean {
+export function authCredentialEquals(left: AuthCredential, right: AuthCredential): boolean {
 	if (left.type !== right.type) return false;
 	if (left.type === "api_key") {
 		return right.type === "api_key" && left.key === right.key;
@@ -1230,6 +1521,7 @@ function authCredentialEquals(left: AuthCredential, right: AuthCredential): bool
 		left.accountId === right.accountId &&
 		left.email === right.email &&
 		left.projectId === right.projectId &&
+		left.orgId === right.orgId &&
 		left.enterpriseUrl === right.enterpriseUrl
 	);
 }
@@ -1241,6 +1533,7 @@ function storedCredentialArraysEqual(left: StoredCredential[], right: StoredCred
 		const rightEntry = right[index];
 		if (!leftEntry || !rightEntry) return false;
 		if (leftEntry.id !== rightEntry.id) return false;
+		if (leftEntry.identityKey !== rightEntry.identityKey) return false;
 		if (!authCredentialEquals(leftEntry.credential, rightEntry.credential)) return false;
 	}
 	return true;
@@ -1292,7 +1585,7 @@ class AuthStorageUsageCache implements UsageCache {
 // In-memory representation
 // ─────────────────────────────────────────────────────────────────────────────
 
-type StoredCredential = { id: number; credential: AuthCredential };
+type StoredCredential = Pick<StoredAuthCredential, "id" | "credential" | "identityKey">;
 type CredentialSelection<T extends AuthCredential> = {
 	credential: T;
 	index: number;
@@ -1349,6 +1642,26 @@ type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
  * Reads from storage on reload(), manages round-robin credential selection,
  * usage limit tracking, and OAuth token refresh.
  */
+/**
+ * What a definitive OAuth teardown did. Pool adoption is the caller's, not the
+ * teardown's: adoption compacts the credential array, and the preflight caller
+ * still holds positional candidate indices taken before the teardown.
+ */
+type DefinitiveDisableOutcome = { outcome: "disabled" | "peer-rotated" | "cas-lost" };
+
+/**
+ * The backing store keeps no tombstones, so disabled history cannot be answered
+ * authoritatively. This is a stable capability fact, not a transient failure:
+ * the broker maps it to `501` and clients stop asking, rather than retrying a
+ * `500` with backoff for the lifetime of the process.
+ */
+export class UnsupportedDisabledHistoryError extends Error {
+	constructor() {
+		super("Disabled credential history is not supported by this store");
+		this.name = "UnsupportedDisabledHistoryError";
+	}
+}
+
 export class AuthStorage {
 	static readonly #defaultBackoffMs = 60_000; // Default backoff when no reset time available
 
@@ -1415,6 +1728,7 @@ export class AuthStorage {
 	 * but a process that runs without subscribers for a long time shouldn't grow this unboundedly).
 	 */
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
+	#unsubscribeStoreCredentialDisabled?: () => void;
 	#generation = 1;
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
@@ -1458,6 +1772,9 @@ export class AuthStorage {
 				debug: (message, meta) => logger.debug(message, meta),
 				warn: (message, meta) => logger.warn(message, meta),
 			} satisfies UsageLogger);
+		this.#unsubscribeStoreCredentialDisabled = this.#store.onCredentialDisabled?.(event => {
+			if (!this.#closed) this.#emitCredentialDisabled(event);
+		});
 	}
 
 	/**
@@ -1478,6 +1795,8 @@ export class AuthStorage {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#unsubscribeStoreCredentialDisabled?.();
+		this.#unsubscribeStoreCredentialDisabled = undefined;
 		this.#store.close();
 	}
 
@@ -1545,11 +1864,8 @@ export class AuthStorage {
 		for (const listener of Array.from(this.#generationListeners)) {
 			try {
 				listener(this.#generation);
-			} catch (error) {
-				logger.debug("AuthStorage generation listener failed", {
-					reason,
-					error: String(error),
-				});
+			} catch {
+				logger.debug("AuthStorage generation listener failed", { reason, error: "generation listener rejected" });
 			}
 		}
 	}
@@ -1563,7 +1879,9 @@ export class AuthStorage {
 	 * If `credential_disabled` events were emitted while no listener was subscribed, they are
 	 * replayed (in insertion order) to the listener that triggers the empty→non-empty
 	 * transition. The drain is one-shot — listeners that subscribe after that no longer see
-	 * past events.
+	 * past events. A sign-out handed back by {@link AuthStorage.retainUndeliveredCredentialDisabled}
+	 * is replayed the same way to the next subscriber, whether or not one is already
+	 * registered: a long-lived subscriber passed to the constructor must not strand it.
 	 *
 	 * Returns an unsubscribe function. The function is idempotent: calling it more than once
 	 * is a no-op. After every subscriber has unsubscribed, subsequent disable events buffer
@@ -1573,9 +1891,12 @@ export class AuthStorage {
 	 * @returns A function that removes this listener from the subscriber set.
 	 */
 	onCredentialDisabled(listener: (event: CredentialDisabledEvent) => void | Promise<void>): () => void {
-		const wasEmpty = this.#credentialDisabledListeners.size === 0;
 		this.#credentialDisabledListeners.add(listener);
-		if (wasEmpty && this.#pendingDisabledEvents.length > 0) {
+		// Not conditioned on the empty→non-empty transition: the buffer only fills
+		// while nobody is listening *or* when a failed session hands its events
+		// back, and in the second case a permanent subscriber would otherwise keep
+		// the set non-empty forever and strand them.
+		if (this.#pendingDisabledEvents.length > 0) {
 			const drained = this.#pendingDisabledEvents;
 			this.#pendingDisabledEvents = [];
 			for (const event of drained) {
@@ -1585,6 +1906,21 @@ export class AuthStorage {
 		return () => {
 			this.#credentialDisabledListeners.delete(listener);
 		};
+	}
+
+	/**
+	 * Hand back sign-outs that were drained to a subscriber which then died
+	 * before delivering them. Subscribing empties the pending buffer, so a
+	 * session that fails during startup would otherwise take the only record of
+	 * an automatic teardown with it — the exact silent loss this reporting
+	 * exists to prevent. Same cap and ordering as the buffer itself.
+	 */
+	retainUndeliveredCredentialDisabled(events: readonly CredentialDisabledEvent[]): void {
+		if (this.#closed || events.length === 0) return;
+		this.#pendingDisabledEvents.unshift(...events);
+		if (this.#pendingDisabledEvents.length > MAX_PENDING_DISABLED_EVENTS) {
+			this.#pendingDisabledEvents.splice(0, this.#pendingDisabledEvents.length - MAX_PENDING_DISABLED_EVENTS);
+		}
 	}
 
 	/**
@@ -1679,7 +2015,7 @@ export class AuthStorage {
 		const grouped = new Map<string, StoredCredential[]>();
 		for (const record of records) {
 			const list = grouped.get(record.provider) ?? [];
-			list.push({ id: record.id, credential: record.credential });
+			list.push({ id: record.id, credential: record.credential, identityKey: record.identityKey });
 			grouped.set(record.provider, list);
 		}
 
@@ -1708,6 +2044,30 @@ export class AuthStorage {
 	 */
 	#getStoredCredentials(provider: string): StoredCredential[] {
 		return this.#data.get(provider) ?? [];
+	}
+
+	/**
+	 * The store's current identity key for a row this process just updated.
+	 *
+	 * An identity-aware store recomputes `identity_key` on write, and a refresh
+	 * that newly supplies an email, project or organization claim changes it.
+	 * Every path that keeps its in-memory credential object instead of re-reading
+	 * the row — to preserve fields the caller set to an explicit `undefined` —
+	 * must still take the key from the store, or account matching and the key
+	 * returned to callers stay on the pre-update identity.
+	 */
+	#storedIdentityKey(provider: string, id: number): string | null | undefined {
+		return this.#store.listAuthCredentials(provider).find(entry => entry.id === id)?.identityKey;
+	}
+
+	/** Hydrate entries from store authority, not a pre-update identity or a redacted refresh result. */
+	#loadStoredCredentials(
+		provider: string,
+		rows: readonly StoredAuthCredential[] = this.#store.listAuthCredentials(provider),
+	): StoredCredential[] {
+		const entries = rows.map(row => ({ id: row.id, credential: row.credential, identityKey: row.identityKey }));
+		this.#setStoredCredentials(provider, entries);
+		return entries;
 	}
 
 	/**
@@ -1795,7 +2155,10 @@ export class AuthStorage {
 				kept.push(entry);
 				continue;
 			}
-			const identityKey = this.#resolveOAuthDedupeIdentityKey(provider, credential);
+			const identityKey =
+				entry.identityKey !== undefined
+					? entry.identityKey
+					: this.#resolveOAuthDedupeIdentityKey(provider, credential);
 			if (!identityKey) {
 				kept.push(entry);
 				continue;
@@ -1808,10 +2171,16 @@ export class AuthStorage {
 			kept.push(entry);
 		}
 		if (removed.length > 0) {
+			let refused = false;
 			for (const entry of removed) {
-				this.#store.deleteAuthCredential(entry.id, "deduplicated duplicate credential");
+				if (this.#store.deleteAuthCredential(entry.id, "deduplicated duplicate credential") === false)
+					refused = true;
 			}
 			this.#resetProviderAssignments(provider);
+			// A store that refused still holds the row. Hand the caller the
+			// store's rows instead of `kept`, which it would otherwise write
+			// straight back over the refused credential.
+			if (refused) return this.#store.listAuthCredentials(provider);
 		}
 		return kept.reverse();
 	}
@@ -2441,6 +2810,64 @@ export class AuthStorage {
 	 * Clears round-robin and session assignment state for a provider.
 	 * Called when credentials are added/removed to prevent stale index references.
 	 */
+	/**
+	 * Adopt the store's view after any disable attempt, then report whether the
+	 * session can retry. Every caller that retires a credential goes through
+	 * here so the three things that have to happen together cannot drift apart:
+	 *
+	 * - the pool is re-read authoritatively, because a peer may have added or
+	 *   removed rows while the disable was in flight;
+	 * - provider assignments are reset, because round-robin, session stickiness
+	 *   and backoff are keyed by array position and a removal compacts the array,
+	 *   so a surviving sibling would otherwise inherit the retired row's block;
+	 * - availability excludes the retired row **by id**, not by index, and does
+	 *   not care who removed it. A peer that won the race leaves the session just
+	 *   as able to continue, while a replacement on the same row id is excluded
+	 *   because `auth-retry` keys attempted credentials by row id.
+	 */
+	async #adoptPoolAfterDisable(
+		provider: string,
+		retiredId: number,
+		type: AuthCredential["type"],
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		// A broker client's `listAuthCredentials` answers from its cached snapshot,
+		// and a remote disable only schedules a refresh, so without awaiting one
+		// here "authoritative" would mean "whatever this client last heard".
+		// The caller's signal comes with it: on an aborted turn this must not hold
+		// the request open for the client's own retry budget.
+		if (this.#store.refreshSnapshot) {
+			try {
+				await this.#store.refreshSnapshot(signal);
+			} catch (error) {
+				// An aborted turn is not a refresh failure: reporting on the cached
+				// pool would let `rotateSessionCredential` resolve with an ordinary
+				// sibling verdict instead of propagating the caller's cancellation.
+				signal?.throwIfAborted();
+				logger.debug("post-disable snapshot refresh failed; reporting on the cached pool", {
+					provider: providerIdForDisplay(provider),
+					error: String(error),
+				});
+			}
+		}
+		this.#loadStoredCredentials(provider);
+		this.#resetProviderAssignments(provider);
+		// Row existence is not availability. `#resetProviderAssignments` clears the
+		// in-memory backoff, but persisted usage blocks survive it, so a pool whose
+		// only remaining sibling is quota-blocked must report no sibling: answering
+		// `true` lets `withOAuth()` continue and `#resolveOAuthSelection()` pick
+		// that sibling on its `allowBlocked` pass, retrying an account already
+		// known to be unavailable. Evaluated after the reload so the indices and
+		// the surviving blocks are both the post-disable ones.
+		const providerKey = this.#getProviderTypeKey(provider, type);
+		return this.#getStoredCredentials(provider).some(
+			(row, index) =>
+				row.id !== retiredId &&
+				row.credential.type === type &&
+				!this.#isCredentialBlocked(provider, providerKey, index),
+		);
+	}
+
 	#resetProviderAssignments(provider: string): void {
 		for (const key of this.#providerRoundRobinIndex.keys()) {
 			if (key.startsWith(`${provider}:`)) {
@@ -2467,69 +2894,101 @@ export class AuthStorage {
 		if (index < 0 || index >= entries.length) return;
 		const target = entries[index];
 		this.#store.updateAuthCredential(target.id, credential);
-		const updated = [...entries];
-		updated[index] = { id: target.id, credential };
-		this.#setStoredCredentials(provider, updated);
+		this.#loadStoredCredentials(provider);
 	}
 
 	/**
-	 * CAS-style disable used when OAuth refresh definitively fails: only disables
-	 * persisted `data` still matches the credential we attempted to refresh.
+	 * CAS-style disable for definitive refresh failure or upstream invalidation:
+	 * only disables when persisted `data` (or the broker-held access/key) still
+	 * matches the failed credential.
 	 * Returns `false` when a peer rotated the row between our pre-check and the
 	 * disable, so the caller can reload and retry instead of clobbering the
 	 * freshly-rotated credential.
 	 */
-	#tryDisableCredentialAtIfMatches(
+	async #tryDisableCredentialAtIfMatches(
 		provider: string,
 		index: number,
 		expectedCredential: AuthCredential,
 		disabledCause: string,
-	): boolean {
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const entries = this.#getStoredCredentials(provider);
 		if (index < 0 || index >= entries.length) return false;
 		const target = entries[index];
-		const serialized = serializeCredential(provider, expectedCredential);
-		if (!serialized) return false;
-		const disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
+		const cause = normalizeDisabledCause(disabledCause);
+		let disabled: boolean;
+		if (this.#store.deleteAuthCredentialRemote) {
+			const expectedAccessFingerprint = fingerprintCredentialForDisable(expectedCredential);
+			disabled = await this.#store.deleteAuthCredentialRemote(target.id, cause, expectedAccessFingerprint, signal);
+		} else {
+			const serialized = serializeCredential(provider, expectedCredential);
+			if (!serialized) return false;
+			disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, cause);
+		}
 		if (!disabled) return false;
-		const updated = entries.filter((_value, idx) => idx !== index);
+		const updated = this.#getStoredCredentials(provider).filter(entry => entry.id !== target.id);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
-		this.#emitCredentialDisabled({ provider, disabledCause });
+		if (isAutomaticDisableCause(cause)) {
+			this.#emitCredentialDisabled(
+				credentialDisabledEvent(provider, target.id, expectedCredential, cause, this.#liveApiKeyIds(provider)),
+			);
+		}
 		return true;
 	}
 
 	/**
 	 * Persist a refreshed credential by id only while the row still matches this
-	 * process's snapshot. A peer rotation wins the CAS and is reloaded instead of
+	 * pre-refresh snapshot. A peer rotation wins the CAS and is reloaded instead of
 	 * being overwritten after this process releases its refresh lease.
 	 *
 	 * Returns the row's current index, or -1 when it was disabled or removed.
 	 */
-	#replaceCredentialById(provider: string, id: number, credential: AuthCredential): number {
+	#replaceCredentialById(provider: string, previous: StoredCredential, credential: AuthCredential): number {
+		const id = previous.id;
 		const entries = this.#getStoredCredentials(provider);
 		const index = entries.findIndex(entry => entry.id === id);
 		if (index === -1) return -1;
-		const expected = serializeCredential(provider, entries[index]!.credential);
-		if (
-			expected &&
-			this.#store.tryUpdateAuthCredentialIfMatches &&
-			!this.#store.tryUpdateAuthCredentialIfMatches(id, expected.data, credential)
-		) {
-			const latest = this.#store.listAuthCredentials(provider);
-			this.#setStoredCredentials(
-				provider,
-				latest.map(row => ({ id: row.id, credential: row.credential })),
-			);
-			return latest.findIndex(row => row.id === id);
+		const expected = serializeCredential(provider, previous.credential);
+		const authoritative = expected && this.#getAuthoritativeCredentialChange(provider, previous, expected.data);
+		if (authoritative) {
+			return this.#loadStoredCredentials(provider, authoritative).findIndex(row => row.id === id);
 		}
-		if (!expected || !this.#store.tryUpdateAuthCredentialIfMatches) {
+		if (expected && this.#store.tryUpdateAuthCredentialIfMatches) {
+			// Only a lost CAS needs the store re-read: adopt the peer rotation that
+			// won. On success the row is exactly `credential`, and re-reading would
+			// round-trip it through JSON, silently dropping explicitly-undefined
+			// fields the caller set.
+			if (!this.#store.tryUpdateAuthCredentialIfMatches(id, expected.data, credential)) {
+				return this.#loadStoredCredentials(provider).findIndex(row => row.id === id);
+			}
+		} else {
 			this.#store.updateAuthCredential(id, credential);
 		}
 		const updated = [...entries];
-		updated[index] = { id, credential };
+		updated[index] = { id, credential, identityKey: this.#storedIdentityKey(provider, id) };
 		this.#setStoredCredentials(provider, updated);
 		return index;
+	}
+
+	/** Adopt a broker/peer write instead of mirroring a refresh merged with the old client projection. */
+	#getAuthoritativeCredentialChange(
+		provider: string,
+		previous: StoredCredential,
+		expectedData: string,
+	): StoredAuthCredential[] | undefined {
+		if (previous.identityKey === undefined) return undefined;
+		const rows = this.#store.listAuthCredentials(provider);
+		const current = rows.find(row => row.id === previous.id);
+		if (!current) return rows;
+		if (current.identityKey === undefined) return undefined;
+		if (
+			current.identityKey === previous.identityKey &&
+			serializeCredential(provider, current.credential)?.data === expectedData
+		) {
+			return undefined;
+		}
+		return rows;
 	}
 
 	/**
@@ -2538,19 +2997,31 @@ export class AuthStorage {
 	 * Addresses the row by id (re-resolved here, then matched on `data` in the
 	 * store) so a concurrent reorder can't tear down the wrong credential.
 	 */
-	#disableCredentialByIdIfMatches(
+	async #disableCredentialByIdIfMatches(
 		provider: string,
 		id: number,
 		expected: AuthCredential,
 		disabledCause: string,
-	): boolean {
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const entries = this.#getStoredCredentials(provider);
 		const index = entries.findIndex(entry => entry.id === id);
 		if (index === -1) return false;
-		return this.#tryDisableCredentialAtIfMatches(provider, index, expected, disabledCause);
+		return await this.#tryDisableCredentialAtIfMatches(provider, index, expected, disabledCause, signal);
 	}
 
 	#emitCredentialDisabled(event: CredentialDisabledEvent): void {
+		// The only log line any automatic teardown produces in a plain session:
+		// extension handlers are optional and the broker daemon is the only
+		// built-in subscriber, so without this an account can vanish from the
+		// pool with no trace in ~/.omp/logs. A managed MCP credential's id embeds
+		// its server URL, so its userinfo and query are dropped structurally; the
+		// provider-controlled cause is classified rather than printed.
+		logger.warn("Auth credential disabled", {
+			...event,
+			provider: providerIdForDisplay(event.provider),
+			disabledCause: summarizeDisableCause(event.disabledCause),
+		});
 		if (this.#credentialDisabledListeners.size === 0) {
 			// No subscribers — buffer for later replay. Cap the backlog so a process that runs
 			// without subscribers for a long time can't grow memory unboundedly; drop oldest
@@ -2573,10 +3044,12 @@ export class AuthStorage {
 		listener: (event: CredentialDisabledEvent) => void | Promise<void>,
 		event: CredentialDisabledEvent,
 	): void {
-		const logListenerError = (error: unknown): void => {
+		const logListenerError = (): void => {
+			// A listener's thrown text is arbitrary and routinely echoes the event it
+			// was handed; the rejection itself is what this records.
 			logger.warn("onCredentialDisabled listener threw", {
-				provider: event.provider,
-				error: String(error),
+				provider: providerIdForDisplay(event.provider),
+				error: "onCredentialDisabled listener rejected",
 			});
 		};
 		try {
@@ -2584,8 +3057,8 @@ export class AuthStorage {
 			if (result && typeof (result as PromiseLike<void>).then === "function") {
 				(result as Promise<void>).catch(logListenerError);
 			}
-		} catch (error) {
-			logListenerError(error);
+		} catch {
+			logListenerError();
 		}
 	}
 
@@ -2605,13 +3078,7 @@ export class AuthStorage {
 		const stored = this.#store.replaceAuthCredentialsRemote
 			? await this.#store.replaceAuthCredentialsRemote(provider, deduped)
 			: this.#store.replaceAuthCredentialsForProvider(provider, deduped);
-		this.#setStoredCredentials(
-			provider,
-			stored.map(record => ({
-				id: record.id,
-				credential: record.credential,
-			})),
-		);
+		this.#loadStoredCredentials(provider, stored);
 		this.#resetProviderAssignments(provider);
 	}
 
@@ -2624,6 +3091,7 @@ export class AuthStorage {
 				id: entry.id,
 				provider,
 				credential: entry.credential,
+				identityKey: entry.identityKey,
 				disabledCause: null,
 			}));
 		}
@@ -2634,6 +3102,7 @@ export class AuthStorage {
 					id: entry.id,
 					provider: storedProvider,
 					credential: entry.credential,
+					identityKey: entry.identityKey,
 					disabledCause: null,
 				});
 			}
@@ -2660,10 +3129,7 @@ export class AuthStorage {
 		while (hasDurableLease) {
 			if (options.signal?.aborted) throw new AIError.AbortError("OAuth refresh ownership aborted by caller");
 			const rows = this.#store.listAuthCredentials(provider);
-			this.#setStoredCredentials(
-				provider,
-				rows.map(row => ({ id: row.id, credential: row.credential })),
-			);
+			this.#loadStoredCredentials(provider, rows);
 			const row = rows.find(
 				entry =>
 					entry.credential.type === "oauth" &&
@@ -2712,10 +3178,7 @@ export class AuthStorage {
 
 		try {
 			const rows = this.#store.listAuthCredentials(provider);
-			this.#setStoredCredentials(
-				provider,
-				rows.map(row => ({ id: row.id, credential: row.credential })),
-			);
+			this.#loadStoredCredentials(provider, rows);
 			const row = rows.find(
 				entry =>
 					entry.credential.type === "oauth" &&
@@ -2785,14 +3248,27 @@ export class AuthStorage {
 					refreshed = await options.refresh(current, refreshAbort.signal);
 				} catch (error) {
 					if (options.isDefinitiveFailure?.(error)) {
-						const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
-						const disabled = this.#store.tryDisableAuthCredentialIfMatches(
-							row.id,
-							serialized.data,
-							disabledCause,
-							leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
+						const disabledCause = normalizeDisabledCause(
+							options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`,
 						);
+						const disabled = this.#store.deleteAuthCredentialRemote
+							? await this.#store.deleteAuthCredentialRemote(
+									row.id,
+									disabledCause,
+									fingerprintCredentialForDisable(current),
+									options.signal,
+								)
+							: this.#store.tryDisableAuthCredentialIfMatches(
+									row.id,
+									serialized.data,
+									disabledCause,
+									leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
+								);
 						if (disabled) {
+							// Filter the snapshot in place rather than re-reading: candidate
+							// preflights run concurrently on positional indices, so this path
+							// must not await a store round-trip that could reorder the pool
+							// under a sibling's in-flight index.
 							this.#setStoredCredentials(
 								provider,
 								rows
@@ -2800,10 +3276,21 @@ export class AuthStorage {
 									.map(entry => ({
 										id: entry.id,
 										credential: entry.credential,
+										identityKey: entry.identityKey,
 									})),
 							);
 							this.#resetProviderAssignments(provider);
-							this.#emitCredentialDisabled({ provider, disabledCause });
+							if (isAutomaticDisableCause(disabledCause)) {
+								this.#emitCredentialDisabled(
+									credentialDisabledEvent(
+										provider,
+										row.id,
+										current,
+										disabledCause,
+										this.#liveApiKeyIds(provider),
+									),
+								);
+							}
 							return { credential: undefined, refreshed: false, removed: true };
 						}
 						await this.reload();
@@ -2831,6 +3318,17 @@ export class AuthStorage {
 				clearTimeout(refreshTimeout);
 			}
 			if (leaseRenewalError) throw leaseRenewalError;
+
+			const authoritative = this.#getAuthoritativeCredentialChange(provider, row, serialized.data);
+			if (authoritative) {
+				this.#loadStoredCredentials(provider, authoritative);
+				const latest = authoritative.find(entry => entry.id === row.id)?.credential;
+				return {
+					credential: latest?.type === "oauth" ? options.credentialFromRow(latest) : undefined,
+					refreshed: latest?.type === "oauth",
+					removed: false,
+				};
+			}
 
 			const merged: T = options.mergeRefreshedCredential
 				? options.mergeRefreshedCredential(current, refreshed)
@@ -2867,11 +3365,17 @@ export class AuthStorage {
 			} else {
 				this.#store.updateAuthCredential(row.id, merged);
 			}
+			// Keep the merged object rather than re-reading the store: the row now
+			// holds exactly `merged`, and a store round-trip would drop fields the
+			// caller set to an explicit `undefined`. The identity key is the
+			// exception — see `#storedIdentityKey`.
+			const refreshedIdentityKey = this.#storedIdentityKey(provider, row.id);
 			this.#setStoredCredentials(
 				provider,
 				rows.map(entry => ({
 					id: entry.id,
 					credential: entry.id === row.id ? merged : entry.credential,
+					identityKey: entry.id === row.id ? refreshedIdentityKey : entry.identityKey,
 				})),
 			);
 			return { credential: merged, refreshed: true, removed: false };
@@ -2886,15 +3390,12 @@ export class AuthStorage {
 		const stored = this.#store.upsertAuthCredentialRemote
 			? await this.#store.upsertAuthCredentialRemote(provider, credential)
 			: this.#store.upsertAuthCredentialForProvider(provider, credential);
-		this.#setStoredCredentials(
-			provider,
-			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-		);
+		this.#loadStoredCredentials(provider, stored);
 		this.#resetProviderAssignments(provider);
 	}
 
 	/**
-	 * Remove credential for a provider.
+	 * Deliberately remove all credentials and prior disabled history for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
 		if (this.#store.deleteAuthCredentialsRemote) {
@@ -2917,8 +3418,12 @@ export class AuthStorage {
 		if (this.#store.deleteAuthCredentialRemote) {
 			const deleted = await this.#store.deleteAuthCredentialRemote(credentialId, "deleted by user");
 			if (!deleted) return false;
-		} else {
-			this.#store.deleteAuthCredential(credentialId, "deleted by user");
+		} else if (this.#store.deleteAuthCredential(credentialId, "deleted by user") === false) {
+			// The store kept the row: report the refusal instead of advertising a
+			// removal the user asked for but persistence declined.
+			this.#loadStoredCredentials(provider, this.#store.listAuthCredentials(provider));
+			this.#resetProviderAssignments(provider);
+			return false;
 		}
 		this.#setStoredCredentials(
 			provider,
@@ -3214,10 +3719,7 @@ export class AuthStorage {
 			const stored = this.#store.upsertAuthCredentialRemote
 				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
 				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
-			this.#setStoredCredentials(
-				provider,
-				stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-			);
+			this.#loadStoredCredentials(provider, stored);
 			this.#resetProviderAssignments(provider);
 			return { type: "api_key" };
 		}
@@ -3480,14 +3982,11 @@ export class AuthStorage {
 
 	#persistRefreshedUsageCredential(
 		provider: Provider,
-		previous: UsageCredential,
+		entry: StoredCredential | undefined,
 		next: UsageCredential,
-		credentialId = this.#findStoredCredentialIdForUsageCredential(provider, previous),
 	): void {
-		if (credentialId === undefined) return;
-		const entry = this.#getStoredCredentials(provider).find(candidate => candidate.id === credentialId);
 		if (entry?.credential.type !== "oauth") return;
-		this.#replaceCredentialById(provider, credentialId, {
+		this.#replaceCredentialById(provider, entry, {
 			type: "oauth",
 			access: next.accessToken ?? entry.credential.access,
 			refresh: next.refreshToken ?? entry.credential.refresh,
@@ -3531,6 +4030,9 @@ export class AuthStorage {
 						request.provider,
 						request.credential,
 					);
+					const refreshableEntry = this.#getStoredCredentials(request.provider).find(
+						entry => entry.id === refreshableCredentialId,
+					);
 					const refreshed = await this.#refreshOAuthCredential(
 						request.provider,
 						refreshableCredential,
@@ -3538,12 +4040,7 @@ export class AuthStorage {
 						timeoutSignal,
 					);
 					const refreshedCredential = this.#mergeRefreshedUsageCredential(request.credential, refreshed);
-					this.#persistRefreshedUsageCredential(
-						request.provider,
-						request.credential,
-						refreshedCredential,
-						refreshableCredentialId,
-					);
+					this.#persistRefreshedUsageCredential(request.provider, refreshableEntry, refreshedCredential);
 					params = {
 						...request,
 						credential: refreshedCredential,
@@ -4607,12 +5104,7 @@ export class AuthStorage {
 							probeSignal,
 						);
 						const refreshedCredential = this.#mergeRefreshedUsageCredential(initialRequest.credential, refreshed);
-						this.#persistRefreshedUsageCredential(
-							row.provider as Provider,
-							initialRequest.credential,
-							refreshedCredential,
-							row.id,
-						);
+						this.#persistRefreshedUsageCredential(row.provider as Provider, row, refreshedCredential);
 						params = {
 							...params,
 							credential: refreshedCredential,
@@ -4697,34 +5189,56 @@ export class AuthStorage {
 	async #resolveCredentialTarget(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { credentialId?: number; apiKey?: string },
-	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean } | undefined> {
+		options?: { credentialId?: number; apiKey?: string; signal?: AbortSignal },
+	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean; entry: StoredCredential } | undefined> {
+		// Propagate, never swallow: a caller that aborted is owed a rejection, and
+		// reporting "no target" instead makes an aborted `markUsageLimitReached`
+		// resolve as though it had nothing to do.
+		options?.signal?.throwIfAborted();
 		const explicit = options?.credentialId !== undefined || options?.apiKey !== undefined;
 		if (explicit) {
 			const latestRows = this.#store.listAuthCredentials(provider);
-			this.#setStoredCredentials(
-				provider,
-				latestRows.map(row => ({ id: row.id, credential: row.credential })),
-			);
+			this.#loadStoredCredentials(provider, latestRows);
 		}
 		if (options?.credentialId !== undefined) {
 			const stored = this.#getStoredCredentials(provider);
 			const index = stored.findIndex(entry => entry.id === options.credentialId);
 			const entry = index === -1 ? undefined : stored[index];
-			if (entry) return { type: entry.credential.type, index, explicit: true };
+			if (entry) {
+				// A row id survives refresh; it cannot override the failed request bearer.
+				if (options.apiKey !== undefined) {
+					const matches = await raceCredentialRefreshWithSignal(
+						this.#credentialMatchesApiKey(entry.credential, options.apiKey),
+						options.signal,
+						"credential lookup aborted",
+					);
+					options.signal?.throwIfAborted();
+					// A peer replaced this row's bearer. The failed credential may still
+					// be stored under a different row, so keep looking rather than
+					// retiring one this request never used.
+					if (matches) return { type: entry.credential.type, index, explicit: true, entry };
+				} else return { type: entry.credential.type, index, explicit: true, entry };
+			}
 		}
 		if (options?.apiKey !== undefined) {
 			const stored = this.#getStoredCredentials(provider);
 			for (let index = 0; index < stored.length; index++) {
+				options.signal?.throwIfAborted();
 				const entry = stored[index];
-				if (entry && (await this.#credentialMatchesApiKey(entry.credential, options.apiKey))) {
-					return { type: entry.credential.type, index, explicit: true };
-				}
+				if (!entry) continue;
+				const matches = await raceCredentialRefreshWithSignal(
+					this.#credentialMatchesApiKey(entry.credential, options.apiKey),
+					options.signal,
+					"credential lookup aborted",
+				);
+				options.signal?.throwIfAborted();
+				if (matches) return { type: entry.credential.type, index, explicit: true, entry };
 			}
 		}
 		if (explicit) return undefined;
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
-		return sessionCredential ? { ...sessionCredential, explicit: false } : undefined;
+		const entry = sessionCredential && this.#getStoredCredentials(provider)[sessionCredential.index];
+		return sessionCredential && entry ? { ...sessionCredential, explicit: false, entry } : undefined;
 	}
 
 	#credentialBlockRouting(
@@ -4859,6 +5373,7 @@ export class AuthStorage {
 		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
+			signal: options?.signal,
 		});
 		if (!sessionCredential && options?.credentialId === undefined && options?.apiKey !== undefined) {
 			// Account quota survives OAuth bearer rotation. Attribute a delayed
@@ -4871,11 +5386,12 @@ export class AuthStorage {
 					: this.#getStoredCredentials(provider).findIndex(
 							entry => entry.id === credentialId && entry.credential.type === "oauth",
 						);
-			if (index >= 0) sessionCredential = { type: "oauth", index, explicit: true };
+			const entry = this.#getStoredCredentials(provider)[index];
+			if (entry) sessionCredential = { type: "oauth", index, explicit: true, entry };
 		}
 		if (!sessionCredential) return { switched: false };
-		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
-		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
+		const target = sessionCredential.entry;
+		if (target.credential.type !== sessionCredential.type) return { switched: false };
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 
@@ -4894,7 +5410,7 @@ export class AuthStorage {
 		// independently of whether the report extends the hint so a shorter
 		// authoritative window still counts as provider timing.
 		let reportResetAtMs: number | undefined;
-		if (target && routing.strategy) {
+		if (routing.strategy) {
 			const report = await raceUsageWithSignal(
 				this.#getUsageReport(provider, target.credential, options),
 				options?.signal,
@@ -5294,6 +5810,8 @@ export class AuthStorage {
 						usageChecked: false,
 					}));
 		const preflightFailures = new Set<OAuthCandidate>();
+		// Row id per candidate, captured before any teardown can compact the array.
+		const preflightCredentialIds = new Map<OAuthCandidate, number>();
 
 		// On the warm skip path the candidate list follows the round-robin `order`, not the pin, so
 		// hoist the pinned credential to the front to actually reuse it. When ranking ran, the pin is
@@ -5320,6 +5838,7 @@ export class AuthStorage {
 			candidates.map(async candidate => {
 				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
 				const initialCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				if (initialCredentialId !== undefined) preflightCredentialIds.set(candidate, initialCredentialId);
 				let syncedPeerCredential = false;
 				if (initialCredentialId !== undefined) {
 					const beforeSync = candidate.selection.credential;
@@ -5337,7 +5856,8 @@ export class AuthStorage {
 					candidate.selection.credential = latestCredential;
 					return;
 				}
-				const credentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				const selectedRow = this.#getStoredCredentials(provider)[candidate.selection.index];
+				const credentialId = selectedRow?.id;
 				try {
 					// Hand #refreshOAuthCredential a stale clone (expires:0) so its
 					// not-yet-expired short-circuit doesn't suppress the forced
@@ -5359,8 +5879,12 @@ export class AuthStorage {
 					};
 					candidate.selection.credential = updated;
 					if (credentialId !== undefined) {
-						const idx = this.#replaceCredentialById(provider, credentialId, updated);
-						if (idx !== -1) candidate.selection.index = idx;
+						const idx = this.#replaceCredentialById(provider, selectedRow!, updated);
+						if (idx !== -1) {
+							candidate.selection.index = idx;
+							const latest = this.#getStoredCredentials(provider)[idx]!.credential;
+							if (latest.type === "oauth") candidate.selection.credential = latest;
+						}
 					} else {
 						this.#replaceCredentialAt(provider, candidate.selection.index, updated);
 					}
@@ -5381,15 +5905,16 @@ export class AuthStorage {
 						// so if this branch only blocked the row (like the transient case), the
 						// definitive failure would never reach `#tryOAuthCredential`'s own
 						// disable logic and the row would be retried forever instead of torn down.
-						const outcome = await this.#disableDefinitiveOAuthFailure(
+						const result = await this.#disableDefinitiveOAuthFailure(
 							provider,
 							credentialId,
 							candidate.selection.credential,
 							candidate.selection.index,
 							errorMsg,
+							options?.signal,
 						);
 						if (
-							outcome !== "disabled" &&
+							result.outcome !== "disabled" &&
 							credentialId !== undefined &&
 							this.#syncOAuthSelectionFromStore(provider, candidate.selection, credentialId)
 						) {
@@ -5422,6 +5947,22 @@ export class AuthStorage {
 				}
 			}),
 		);
+
+		// A definitive preflight teardown compacts this provider's array, so every
+		// surviving candidate's captured index can now point at a different row —
+		// or past the end. Rebind by row id before the final pass, or a healthy
+		// sibling is skipped and the request fails with the original auth error.
+		if (preflightFailures.size > 0) {
+			const rowIndexById = new Map(this.#getStoredCredentials(provider).map((row, at) => [row.id, at]));
+			for (const candidate of candidates) {
+				if (preflightFailures.has(candidate)) continue;
+				const candidateId = preflightCredentialIds.get(candidate);
+				if (candidateId === undefined) continue;
+				const rebound = rowIndexById.get(candidateId);
+				if (rebound === undefined) preflightFailures.add(candidate);
+				else candidate.selection.index = rebound;
+			}
+		}
 
 		// Enforce a tier only when at least one account is confirmed eligible. If
 		// every report is unknown or ineligible, preserve trial/grandfathered access
@@ -5511,7 +6052,10 @@ export class AuthStorage {
 		attemptedCredential: OAuthCredential,
 		index: number,
 		errorMsg: string,
-	): Promise<"disabled" | "peer-rotated" | "cas-lost"> {
+		signal?: AbortSignal,
+	): Promise<DefinitiveDisableOutcome> {
+		// Never begin a teardown for a turn the caller already abandoned.
+		signal?.throwIfAborted();
 		// The credential at this index may have been rotated by another process between
 		// our in-memory snapshot and the refresh attempt: Anthropic rotates refresh
 		// tokens on every use, so the peer's success leaves our stored token invalid.
@@ -5529,7 +6073,7 @@ export class AuthStorage {
 					credentialId,
 				});
 				await this.reload();
-				return "peer-rotated";
+				return { outcome: "peer-rotated" };
 			}
 		}
 		// Permanently disable invalid credentials with an explicit cause for inspection/debugging.
@@ -5538,24 +6082,33 @@ export class AuthStorage {
 		// this disable doesn't soft-delete the freshly-rotated row.
 		const disabled =
 			credentialId !== undefined
-				? this.#disableCredentialByIdIfMatches(
+				? await this.#disableCredentialByIdIfMatches(
 						provider,
 						credentialId,
 						attemptedCredential,
 						`oauth refresh failed: ${errorMsg}`,
+						signal,
 					)
-				: this.#tryDisableCredentialAtIfMatches(
+				: await this.#tryDisableCredentialAtIfMatches(
 						provider,
 						index,
 						attemptedCredential,
 						`oauth refresh failed: ${errorMsg}`,
+						signal,
 					);
 		if (!disabled) {
-			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", { provider, index });
+			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", {
+				provider,
+				index,
+			});
 			await this.reload();
-			return "cas-lost";
+			return { outcome: "cas-lost" };
 		}
-		return "disabled";
+		// Deliberately does NOT adopt the pool here. Adoption compacts the provider's
+		// credential array, and the preflight caller holds positional candidate
+		// indices captured before this teardown: compacting under them rebinds a
+		// survivor to the wrong row. Only callers that have no live index adopt.
+		return { outcome: "disabled" };
 	}
 
 	async #refreshOAuthCredential(
@@ -5704,10 +6257,7 @@ export class AuthStorage {
 		credentialId: number,
 	): boolean {
 		const latestRows = this.#store.listAuthCredentials(provider);
-		this.#setStoredCredentials(
-			provider,
-			latestRows.map(row => ({ id: row.id, credential: row.credential })),
-		);
+		this.#loadStoredCredentials(provider, latestRows);
 		const latestIndex = latestRows.findIndex(row => row.id === credentialId);
 		if (latestIndex === -1) return false;
 		const latest = latestRows[latestIndex];
@@ -5782,7 +6332,8 @@ export class AuthStorage {
 		// resynced selection.index from the store. A concurrent disable during the
 		// usage/refresh awaits below can shift positional indices, so every later
 		// refresh / persist / CAS-disable addresses the row by this stable id.
-		const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+		const selectedRow = this.#getStoredCredentials(provider)[selection.index];
+		const credentialId = selectedRow?.id;
 
 		const planRequirement = providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
@@ -5822,38 +6373,42 @@ export class AuthStorage {
 		}
 
 		try {
+			const expected =
+				selectedRow?.identityKey !== undefined && serializeCredential(provider, selectedRow.credential);
+			// Refresh through broker-aware single-flighting before deriving API-key bytes.
+			let refreshedCredentials = await this.#refreshOAuthCredential(
+				provider,
+				selection.credential,
+				credentialId,
+				options?.signal,
+			);
+			const authoritative =
+				expected && this.#getAuthoritativeCredentialChange(provider, selectedRow!, expected.data);
+			let authoritativeCredential: OAuthCredential | undefined;
+			if (authoritative) {
+				const rows = this.#loadStoredCredentials(provider, authoritative);
+				const index = rows.findIndex(row => row.id === credentialId);
+				const latest = rows[index]?.credential;
+				if (latest?.type !== "oauth") return undefined;
+				selection.index = index;
+				authoritativeCredential = latest;
+				refreshedCredentials = latest;
+			}
 			let result: { newCredentials: OAuthCredentials; apiKey: string } | null;
 			const customProvider = getOAuthProvider(provider);
 			if (customProvider) {
-				const refreshedCredentials = await this.#refreshOAuthCredential(
-					provider,
-					selection.credential,
-					credentialId,
-					options?.signal,
-				);
 				const apiKey = customProvider.getApiKey
 					? customProvider.getApiKey(refreshedCredentials)
 					: refreshedCredentials.access;
 				result = { newCredentials: refreshedCredentials, apiKey };
 			} else {
-				// Refresh first through the broker-aware single-flighted machinery
-				// so transient failures surface as network errors (5-min temp block)
-				// instead of `getOAuthApiKey`'s "expired" precondition error, which
-				// the definitive-failure regex below would otherwise classify as
-				// auth failure and soft-disable a still-valid credential.
-				const refreshedCredentials = await this.#refreshOAuthCredential(
-					provider,
-					selection.credential,
-					credentialId,
-					options?.signal,
-				);
 				const oauthCreds: Record<string, OAuthCredentials> = {
 					[provider]: refreshedCredentials,
 				};
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
 			if (!result) return undefined;
-			const updated: OAuthCredential = {
+			const updated: OAuthCredential = authoritativeCredential ?? {
 				type: "oauth",
 				access: result.newCredentials.access,
 				refresh: result.newCredentials.refresh,
@@ -5867,15 +6422,23 @@ export class AuthStorage {
 				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
 				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
 			};
-			if (credentialId !== undefined) {
-				const idx = this.#replaceCredentialById(provider, credentialId, updated);
-				if (idx !== -1) selection.index = idx;
-			} else {
-				this.#replaceCredentialAt(provider, selection.index, updated);
+			if (!authoritativeCredential) {
+				if (credentialId !== undefined) {
+					// A peer that won the CAS keeps its row; this request continues on
+					// the bearer it just minted. See the upstream contract in
+					// `does not overwrite a peer rotation after releasing the refresh lease`.
+					const idx = this.#replaceCredentialById(provider, selectedRow!, updated);
+					if (idx !== -1) selection.index = idx;
+				} else {
+					this.#replaceCredentialAt(provider, selection.index, updated);
+				}
 			}
 			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
-				const sameAccount = selection.credential.accountId === updated.accountId;
-				if (!usageChecked || !sameAccount) {
+				if (
+					!usageChecked ||
+					this.#buildUsageCacheIdentity(this.#buildUsageCredential(selection.credential)) !==
+						this.#buildUsageCacheIdentity(this.#buildUsageCredential(updated))
+				) {
 					usage = await this.#getUsageReport(provider, updated, {
 						...options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -5918,21 +6481,32 @@ export class AuthStorage {
 			});
 
 			if (isDefinitiveFailure) {
-				const outcome = await this.#disableDefinitiveOAuthFailure(
+				const result = await this.#disableDefinitiveOAuthFailure(
 					provider,
 					credentialId,
 					selection.credential,
 					selection.index,
 					errorMsg,
+					options?.signal,
 				);
-				if (outcome === "peer-rotated") {
+				if (result.outcome === "peer-rotated") {
 					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
 					return undefined;
 				}
-				if (outcome === "cas-lost") return undefined;
-				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+				// A teardown reports its own availability from the re-read it already
+				// performed; a lost CAS reloaded instead, so judge that one here. Both
+				// exclude this row by id — `auth-retry` keys attempts by row id, so a
+				// peer's replacement on the same row is not a retry target either way.
+				// This caller holds no positional candidate index past this point, so it
+				// is the one that adopts: an authoritative re-read excluding this row by
+				// id. `auth-retry` keys attempts by row id, so a peer's replacement on
+				// the same row is not a retry target either way.
+				const sibling = await this.#adoptPoolAfterDisable(provider, credentialId ?? -1, "oauth", options?.signal);
+				if (result.outcome === "cas-lost") {
+					if (sibling && allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					return undefined;
 				}
+				if (sibling && allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
 			} else {
 				// Block temporarily for transient failures (5 minutes)
 				this.#markCredentialBlocked(
@@ -6949,10 +7523,7 @@ export class AuthStorage {
 		}
 
 		const latestRows = this.#store.listAuthCredentials(provider);
-		this.#setStoredCredentials(
-			provider,
-			latestRows.map(row => ({ id: row.id, credential: row.credential })),
-		);
+		this.#loadStoredCredentials(provider, latestRows);
 		return true;
 	}
 
@@ -6974,6 +7545,9 @@ export class AuthStorage {
 	 *   temporarily block only that requested model, then rotate.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
+	 * - catalog-opted-in OAuth hard 401 after refresh/retry → retire only the
+	 *   still-matching request bearer; session stickiness or a row id alone cannot
+	 *   prove revocation.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
@@ -7017,7 +7591,11 @@ export class AuthStorage {
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
+			signal: options?.signal,
 		});
+		// A bearer no longer stored has nothing to retire, and reporting a switch
+		// would be a lie: `oauthCredentialIdentity` in auth-retry keys on the row
+		// id, so the replacement on the same row is rejected as already attempted.
 		if (!sessionCredential) return false;
 
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
@@ -7058,7 +7636,54 @@ export class AuthStorage {
 				index !== sessionCredential.index &&
 				!this.#isCredentialBlocked(provider, providerKey, index),
 		);
-		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
+		// Keep the matched snapshot across the async resolver handoff: a cache
+		// update must not substitute a refreshed bearer into the later CAS.
+		const target = sessionCredential.entry;
+		const retireOnHard401 =
+			credentialRetirementFor(provider)?.retireOAuthOnHard401 === true &&
+			sessionCredential.type === "oauth" &&
+			status === 401 &&
+			!AIError.isGitHubCopilotPolicyDenial(provider, status, message) &&
+			!isConcurrencyCapExclusion(status, message);
+		const invalidatedToken = AIError.isInvalidatedOAuthTokenError(error);
+		// Both branches below retire a stored row, so both must prove the failed
+		// request actually ran on it. A credential id or a sticky selection names
+		// a slot, not the credential version that failed, and a pinned
+		// runtime/config key never rotated through the stored pool at all.
+		if (
+			(retireOnHard401 || invalidatedToken) &&
+			(options?.apiKey === undefined ||
+				this.#runtimeOverrides.has(provider) ||
+				this.#configOverrides.has(provider) ||
+				!(await this.#credentialMatchesApiKey(target.credential, options.apiKey)))
+		) {
+			return false;
+		}
+
+		if (retireOnHard401 || invalidatedToken) {
+			const reason = retireOnHard401
+				? "upstream rejected OAuth bearer after refresh and retry"
+				: "upstream reported invalidated OAuth token";
+			const disabledCause = message ? `${reason}: ${message}` : reason;
+			// Do not block before the conditional disable: a peer replacement must
+			// remain usable when it wins the race against this failed request.
+			// The shared CAS path announces only an accepted disable, both here
+			// and on the broker host; a peer rotation/removal must stay silent.
+			const deleted = await this.#disableCredentialByIdIfMatches(
+				provider,
+				target.id,
+				target.credential,
+				disabledCause,
+				options?.signal,
+			);
+			if (!deleted) await this.reload();
+			// Whether *this* call did the removing is irrelevant to whether the
+			// request can retry, so the outcome is judged on the pool, not on
+			// `deleted`: a peer that removed the row first leaves a distinct-row
+			// sibling just as usable.
+			return await this.#adoptPoolAfterDisable(provider, target.id, sessionCredential.type, options?.signal);
+		}
+
 		const sticky = this.#getSessionCredential(provider, sessionId);
 		if (
 			!sessionCredential.explicit ||
@@ -7073,21 +7698,6 @@ export class AuthStorage {
 			Date.now() + AuthStorage.#defaultBackoffMs,
 		);
 
-		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
-			const disabledCause = message ?? "upstream reported invalidated OAuth token";
-			const deleted = this.#store.deleteAuthCredentialRemote
-				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause)
-				: this.disableCredentialById(target.id, disabledCause);
-			if (deleted) {
-				const latestRows = this.#store.listAuthCredentials(provider);
-				this.#setStoredCredentials(
-					provider,
-					latestRows.map(row => ({ id: row.id, credential: row.credential })),
-				);
-			}
-			return deleted && hasSibling;
-		}
-
 		if (target) {
 			const markSuspect = this.#store.markCredentialSuspect?.bind(this.#store);
 			if (markSuspect) {
@@ -7096,10 +7706,7 @@ export class AuthStorage {
 				await this.reload();
 			}
 			const latestRows = this.#store.listAuthCredentials(provider);
-			this.#setStoredCredentials(
-				provider,
-				latestRows.map(row => ({ id: row.id, credential: row.credential })),
-			);
+			this.#loadStoredCredentials(provider, latestRows);
 		}
 
 		return hasSibling;
@@ -7177,7 +7784,10 @@ export class AuthStorage {
 					id: entry.id,
 					provider,
 					credential: redacted,
-					identityKey: resolveCredentialIdentityKey(provider, credential),
+					identityKey:
+						entry.identityKey !== undefined
+							? entry.identityKey
+							: resolveCredentialIdentityKey(provider, credential),
 				});
 			}
 		}
@@ -7192,10 +7802,180 @@ export class AuthStorage {
 	 * Disabled credential tombstones for display surfaces (`omp usage`,
 	 * broker `GET /v1/credentials/disabled`). Empty when the backing store
 	 * keeps no tombstones or the remote broker predates the endpoint.
+	 * requireSupported rejects those cases so callers can safely interpret absence.
+	 * SQLite retains automatic OAuth failures for 30 days after disable, even
+	 * after recovery. Use `listActionableDisabledCredentials` for reminders.
 	 */
-	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
-		if (!this.#store.listDisabledCredentials) return [];
-		return this.#store.listDisabledCredentials(provider, signal);
+	async listDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+		options: { requireSupported?: boolean } = {},
+	): Promise<DisabledCredentialSummary[]> {
+		if (!this.#store.listDisabledCredentials) {
+			if (options.requireSupported) throw new UnsupportedDisabledHistoryError();
+			return [];
+		}
+		const disabled = await this.#store.listDisabledCredentials(provider, signal, options);
+		// Keep identity raw for account matching; forensic causes remain in the store.
+		return disabled;
+	}
+
+	/**
+	 * Read disabled history against a revalidated credential pool.
+	 *
+	 * A sibling process can disable or purge rows while the snapshot refreshes,
+	 * so history is always read again afterwards and the live identities are
+	 * taken from that same refreshed pool. Every tombstone consumer needs this
+	 * ordering, and open-coding it per call site silently drops the second read
+	 * — so this is the only place it exists.
+	 *
+	 * `signal` bounds the reads cooperatively; `deadlineMs` (a
+	 * `performance.now()` instant) additionally bounds store hooks that ignore
+	 * it. Nothing here throws: an unreadable history is `undefined` (distinct
+	 * from a proven-empty one) and a failed refresh reports `revalidated: false`
+	 * with no active accounts, so recovery is never inferred from a snapshot
+	 * that could not be refreshed. Callers choose between retaining that
+	 * history and withholding their claim. The refresh still runs when history
+	 * is unreadable, because callers reconcile their own records against it.
+	 */
+	async readRevalidatedDisabledHistory(
+		options: {
+			provider?: string;
+			signal?: AbortSignal;
+			deadlineMs?: number;
+			requireSupported?: boolean;
+			/** Skip the refresh when history is proven empty, so a clean startup makes no broker round-trip. */
+			skipRefreshWhenEmpty?: boolean;
+		} = {},
+	): Promise<RevalidatedDisabledHistory> {
+		const { provider, signal, deadlineMs, requireSupported, skipRefreshWhenEmpty } = options;
+		// Lazy: an expired budget must not start work whose rejection nobody would
+		// then be awaiting, which would surface as an unhandled rejection.
+		const bounded = <T>(start: () => Promise<T>, timeout: string): Promise<T> => {
+			// Never start work whose rejection nobody would await: withTimeout
+			// short-circuits an already-aborted signal without observing the
+			// promise, and an expired budget has nothing left to spend.
+			if (signal?.aborted)
+				return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error(timeout));
+			if (deadlineMs === undefined) return start();
+			const remainingMs = Math.ceil(deadlineMs - performance.now());
+			if (remainingMs <= 0) return Promise.reject(new Error(timeout));
+			const work = start();
+			// A hook that aborts the signal while starting sends withTimeout down
+			// its early-abort path, which never observes this promise. Mark it
+			// handled so a later rejection cannot surface as an unhandled one.
+			void work.catch(() => {});
+			return withTimeout(work, remainingMs, timeout, signal);
+		};
+		const read = async (): Promise<DisabledCredentialSummary[] | undefined> => {
+			try {
+				return await bounded(
+					() => this.listDisabledCredentials(provider, signal, { requireSupported }),
+					"Disabled credential lookup timed out",
+				);
+			} catch (error) {
+				logger.debug("Disabled credential lookup failed", { error: String(error) });
+				return undefined;
+			}
+		};
+		const history = await read();
+		if (history?.length === 0 && skipRefreshWhenEmpty)
+			return { history, activeAccounts: [], revalidated: false, historyRechecked: false };
+		try {
+			await bounded(() => this.revalidateCredentials(signal), "Credential snapshot revalidation timed out");
+		} catch (error) {
+			logger.debug("Credential snapshot revalidation failed; reporting disabled history without recovery", {
+				error: String(error),
+			});
+			return { history, activeAccounts: [], revalidated: false, historyRechecked: false };
+		}
+		// A history the refresh outran is still worth reporting, but only a
+		// post-refresh read can be matched against the refreshed pool.
+		const rechecked = await read();
+		// Identities must agree with the history they are matched against. A local
+		// reload is enough for a SQLite store, but a broker client's cached
+		// snapshot can still predate a peer disable that the authoritative
+		// tombstone read already saw, so drop any row the history calls disabled
+		// instead of paying for a second snapshot fetch on every replay.
+		try {
+			await bounded(() => this.reload(), "Credential snapshot revalidation timed out");
+		} catch (error) {
+			logger.debug("Credential reload failed after tombstone recheck; reporting without recovery", {
+				error: String(error),
+			});
+			return { history: rechecked ?? history, activeAccounts: [], revalidated: false, historyRechecked: false };
+		}
+		// The refresh succeeded, so the pool is authoritative even when this store
+		// has no tombstone history at all (an older broker). Callers still need
+		// those identities to retire their own retained notices.
+		const tombstoned = new Set(rechecked?.map(summary => summary.id) ?? []);
+		return {
+			history: rechecked ?? history,
+			activeAccounts: this.listCredentialAccountIdentities(provider, tombstoned),
+			revalidated: true,
+			historyRechecked: rechecked !== undefined,
+		};
+	}
+
+	/**
+	 * Tombstones that still need the user's attention (see
+	 * {@link isActionableCredentialDisable}), matched against the live OAuth
+	 * credentials of the same provider. Sessions replay these at startup so an
+	 * account signed out while nobody was watching is not discovered days later
+	 * as a missing model.
+	 *
+	 * A failed revalidation retains the history without trusting the loaded
+	 * snapshot to prove recovery: a stale reminder beats the silent sign-out
+	 * this exists to catch.
+	 */
+	async listActionableDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+	): Promise<DisabledCredentialSummary[]> {
+		const { history, activeAccounts, historyRechecked } = await this.readRevalidatedDisabledHistory({
+			provider,
+			signal,
+		});
+		// Without a post-refresh history read, a loaded row cannot prove recovery.
+		const recovered = historyRechecked ? activeAccounts : [];
+		return coalesceDisabledCredentialWarnings(
+			(history ?? []).filter(summary => isActionableCredentialDisable(summary, recovered)),
+		);
+	}
+
+	/** Live API-key row ids for a provider, used to attribute a teardown's siblings. */
+	#liveApiKeyIds(provider: string): ReadonlySet<number> {
+		const ids = new Set<number>();
+		for (const entry of this.#getStoredCredentials(provider)) {
+			if (entry.credential.type === "api_key") ids.add(entry.id);
+		}
+		return ids;
+	}
+
+	/**
+	 * Loaded OAuth identities, including alternate token claims but never token
+	 * bytes. Revalidate before inferring recovery. `disabledIds` drops rows an
+	 * authoritative tombstone read already reported as disabled, so a snapshot
+	 * that has not caught up cannot present them as proof of a later login.
+	 */
+	listCredentialAccountIdentities(provider?: string, disabledIds?: ReadonlySet<number>): CredentialAccountIdentity[] {
+		const activeAccounts: CredentialAccountIdentity[] = [];
+		for (const [entryProvider, entries] of this.#data) {
+			if (provider !== undefined && entryProvider !== provider) continue;
+			for (const entry of entries) {
+				if (entry.credential.type !== "oauth" || disabledIds?.has(entry.id)) continue;
+				const identity = resolveOAuthCredentialIdentity(entryProvider, entry.credential);
+				if (entry.identityKey !== undefined) identity.key = entry.identityKey;
+				const account: CredentialAccountIdentity = {
+					provider: entryProvider,
+					type: "oauth",
+					identity,
+				};
+				copyOAuthCredentialIdentity(account, entry.credential, identity);
+				activeAccounts.push(account);
+			}
+		}
+		return activeAccounts;
 	}
 
 	/**
@@ -7205,8 +7985,8 @@ export class AuthStorage {
 	 * per-credential data with stored identities (`omp usage`) use this so a
 	 * disk-cached snapshot cannot misattribute fresh reports.
 	 */
-	async revalidateCredentials(): Promise<void> {
-		if (this.#store.refreshSnapshot) await this.#store.refreshSnapshot();
+	async revalidateCredentials(signal?: AbortSignal): Promise<void> {
+		if (this.#store.refreshSnapshot) await this.#store.refreshSnapshot(signal);
 		await this.reload();
 	}
 
@@ -7276,12 +8056,13 @@ export class AuthStorage {
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.
 					if (
-						!this.#disableCredentialByIdIfMatches(
+						!(await this.#disableCredentialByIdIfMatches(
 							provider,
 							id,
 							attempted,
 							`oauth refresh failed: ${String(error)}`,
-						)
+							signal,
+						))
 					) {
 						await this.reload();
 					}
@@ -7306,33 +8087,103 @@ export class AuthStorage {
 			// refresh was in flight, so the pre-await positional index is unsafe. A
 			// -1 means the row was disabled/removed mid-refresh — surface that as a
 			// miss rather than implying a live row the snapshot won't contain.
-			if (this.#replaceCredentialById(provider, id, updated) === -1) {
+			const latestIndex = this.#replaceCredentialById(provider, target, updated);
+			if (latestIndex === -1) {
 				throw new AIError.ValidationError(`No credential with id=${id}`);
 			}
+			const latest = this.#getStoredCredentials(provider)[latestIndex]!;
 			return {
 				id,
 				provider,
-				credential: { ...updated, refresh: REMOTE_REFRESH_SENTINEL },
-				identityKey: resolveCredentialIdentityKey(provider, updated),
+				credential:
+					latest.credential.type === "oauth"
+						? { ...latest.credential, refresh: REMOTE_REFRESH_SENTINEL }
+						: latest.credential,
+				identityKey:
+					latest.identityKey !== undefined
+						? latest.identityKey
+						: resolveCredentialIdentityKey(provider, latest.credential),
 			};
 		}
 		throw new AIError.ValidationError(`No credential with id=${id}`);
 	}
 
 	/**
-	 * Disable the credential with the given id and emit a
-	 * {@link CredentialDisabledEvent}. Used by the auth-broker server to honour
-	 * `POST /v1/credential/:id/disable`. Returns `false` when no such row exists.
+	 * Disable a credential only while its access/key fingerprint still matches. Used by
+	 * the auth-broker server to honour `If-Match` on `POST /v1/credential/:id/disable`.
+	 */
+	async disableCredentialIfFingerprintMatches(
+		id: number,
+		expectedAccessFingerprint: string,
+		disabledCause: string,
+	): Promise<"disabled" | "stale" | "missing"> {
+		for (const [provider, entries] of this.#data) {
+			const target = entries.find(entry => entry.id === id);
+			if (!target) continue;
+			const credential = target.credential;
+			if (fingerprintCredentialForDisable(credential) !== expectedAccessFingerprint) {
+				return "stale";
+			}
+			if (await this.#disableCredentialByIdIfMatches(provider, id, credential, disabledCause)) return "disabled";
+			await this.reload();
+			return "stale";
+		}
+		return "missing";
+	}
+
+	/**
+	 * Disable the credential with the given id. Used by the auth-broker server
+	 * to honour `POST /v1/credential/:id/disable`. Automatic disables return
+	 * `false` when no active row exists; deliberate removals also clear persisted
+	 * tombstones and succeed idempotently. A {@link CredentialDisabledEvent} is emitted only for an
+	 * automatic cause: a remote client's own `removeCredential()` arrives here as
+	 * `deleted by user`, and the event contract excludes user-initiated
+	 * removals just as the local path does.
+	 *
+	 * A peer that deliberately logged the account out between this client's
+	 * snapshot and the request already owns the tombstone, so persistence
+	 * reports no transition: drop the stale entry, but never announce a
+	 * sign-out under a cause that is not the persisted one.
 	 */
 	disableCredentialById(id: number, disabledCause: string): boolean {
+		// Persistence normalizes before it classifies, so classification and the
+		// event must read the same value: a padded " deleted by user" is a
+		// deliberate removal in SQLite and must not be announced as a failure.
+		const cause = normalizeDisabledCause(disabledCause);
 		for (const [provider, entries] of this.#data) {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;
-			this.#store.deleteAuthCredential(id, disabledCause);
+			const target = entries[index]!;
+			// A store predating the boolean contract reports nothing; treat that as
+			// the previous unconditional behaviour, not a failed transition.
+			const disabled = this.#store.deleteAuthCredential(id, cause) !== false;
+			if (!disabled) {
+				// The row may still be active (a store that refused) or already
+				// tombstoned by a peer. Re-read rather than assuming it is gone,
+				// so the snapshot cannot advertise a credential persistence kept.
+				this.#loadStoredCredentials(provider, this.#store.listAuthCredentials(provider));
+				this.#resetProviderAssignments(provider);
+				// A deliberate logout is idempotent: once the re-read confirms the
+				// row is gone, the requested removal is already complete and the
+				// broker must not answer 404. A refused automatic disable is still
+				// a failed transition.
+				const stillStored = this.#data.get(provider)?.some(entry => entry.id === id) ?? false;
+				return !stillStored && isDeliberateRemovalCause(cause);
+			}
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.#setStoredCredentials(provider, next);
 			this.#resetProviderAssignments(provider);
-			this.#emitCredentialDisabled({ provider, disabledCause });
+			if (isAutomaticDisableCause(cause)) {
+				this.#emitCredentialDisabled(
+					credentialDisabledEvent(provider, id, target.credential, cause, this.#liveApiKeyIds(provider)),
+				);
+			}
+			return true;
+		}
+		if (isDeliberateRemovalCause(cause)) {
+			// A peer may have disabled the selected row after the client snapshot.
+			// The deliberate-removal transaction also purges that tombstone.
+			this.#store.deleteAuthCredential(id, cause);
 			return true;
 		}
 		return false;
@@ -7349,10 +8200,7 @@ export class AuthStorage {
 	 */
 	upsertCredential(provider: string, credential: AuthCredential): AuthCredentialSnapshotEntry[] {
 		const stored = this.#store.upsertAuthCredentialForProvider(provider, credential);
-		this.#setStoredCredentials(
-			provider,
-			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-		);
+		this.#loadStoredCredentials(provider, stored);
 		this.#resetProviderAssignments(provider);
 		return stored.map(entry => {
 			const persisted = entry.credential;

@@ -16,6 +16,7 @@ import {
 	markPerCallContextMessage,
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { projectCredentialDisabledEvent } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -793,10 +794,12 @@ export class ExtensionRunner {
 		const pending = this.#pendingCredentialDisabled.splice(0);
 		queueMicrotask(() => {
 			for (const event of pending) {
-				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
+				this.emit({ type: "credential_disabled", ...event }).catch(() => {
+					// A handler's thrown text is arbitrary and routinely echoes the cause
+					// it was given; the failure itself is what this records.
 					logger.warn("credential_disabled handler threw during initialize flush", {
 						provider: event.provider,
-						error: error instanceof Error ? error.message : String(error),
+						error: "credential_disabled handler rejected",
 					});
 				});
 			}
@@ -834,7 +837,12 @@ export class ExtensionRunner {
 	 * Always returns; never throws. Errors from handlers are routed through
 	 * {@link onError} via {@link emit}'s normal isolation.
 	 */
-	async emitCredentialDisabled(event: CredentialDisabledEvent): Promise<void> {
+	async emitCredentialDisabled(rawEvent: CredentialDisabledEvent): Promise<void> {
+		// Project at ingress, not in the caller: this runner is the boundary where
+		// an in-process event crosses into third-party extension code. Doing it here
+		// means the pre-initialize buffer never holds a verbatim cause, neither drain
+		// path can forget, and the failure log below cannot echo a raw provider id.
+		const event = projectCredentialDisabledEvent(rawEvent);
 		if (!this.#initialized) {
 			if (this.#pendingCredentialDisabled.length >= MAX_PENDING_CREDENTIAL_DISABLED) {
 				this.#pendingCredentialDisabled.shift();

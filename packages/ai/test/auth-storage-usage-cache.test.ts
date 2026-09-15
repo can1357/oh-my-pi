@@ -81,7 +81,9 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 			return rows;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
@@ -945,7 +947,9 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			close() {},
 			listAuthCredentials: () => rows.filter(candidate => !candidate.disabledCause),
 			updateAuthCredential() {},
-			deleteAuthCredential() {},
+			deleteAuthCredential() {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				disableCalls += 1;
 				return true;
@@ -1034,7 +1038,9 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			close() {},
 			listAuthCredentials: () => rows.filter(r => !r.disabledCause),
 			updateAuthCredential() {},
-			deleteAuthCredential() {},
+			deleteAuthCredential() {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				return true;
 			},

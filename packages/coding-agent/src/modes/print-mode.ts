@@ -174,14 +174,8 @@ async function runPrintModeCore(
 		);
 	}
 
+	const disabledCredentialNoticeMark = session.disabledCredentialNoticeMark;
 	// Always subscribe to enable session persistence via _handleAgentEvent
-	session.subscribe(event => {
-		// In JSON mode, output all events
-		if (mode === "json") {
-			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		}
-	});
-
 	// process.stderr.write is fire-and-forget as well: a diagnostic buffered
 	// behind a backpressured pipe would still be undelivered when runPrintMode
 	// returns, and the caller drains stdout only. Serialize the persistence
@@ -209,6 +203,36 @@ async function runPrintModeCore(
 			// every later diagnostic and reject the awaited tail below.
 			.catch(() => {});
 	};
+
+	session.subscribe(event => {
+		// In JSON mode, output all events
+		if (mode === "json") {
+			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+		}
+		// Text mode has no transcript to carry a sign-out raised mid-run (an account
+		// signed out while a sibling took the request), so it goes to stderr where
+		// the run's other diagnostics live. JSON mode already serialized it above,
+		// and unrelated notices keep their existing surfaces.
+		if (mode === "text" && event.type === "notice" && event.level !== "info" && event.source === "auth") {
+			writeStderrLine(event.message);
+		}
+	});
+	// Headless runs have no /login surface, but a silently signed-out account is
+	// exactly what makes a scripted run fail on a model it used yesterday. Text
+	// mode has no transcript to carry it, so it goes to stderr with the run's
+	// other diagnostics; JSON mode gets the same information as a `notice` event
+	// so machine consumers see it too and stderr stays empty.
+	for (const notice of await session.getDisabledCredentialNotices({
+		announcedAfter: disabledCredentialNoticeMark,
+	})) {
+		if (mode === "json") {
+			writeStdoutLine(
+				`${JSON.stringify(printableEvent({ type: "notice", level: "warning", message: notice, source: "auth" }))}\n`,
+			);
+		} else {
+			writeStderrLine(notice);
+		}
+	}
 
 	// Discriminates a store failure from any other dispose rejection below.
 	let persistenceFailure: Error | undefined;
