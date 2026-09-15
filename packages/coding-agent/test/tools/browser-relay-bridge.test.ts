@@ -3857,7 +3857,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(replay?.params).toMatchObject({ runImmediately: false });
 	});
 
-	it("keeps the pre-registration loader when the post-registration probe fails", async () => {
+	it("does not trust the pre-registration loader when the post-registration probe fails", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3891,7 +3891,7 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(replay?.params).toMatchObject({ runImmediately: false });
+		expect(replay?.params).toMatchObject({ runImmediately: true });
 	});
 
 	it("drops an initial preload identifier when detach completes during its loader probe", async () => {
@@ -11108,6 +11108,11 @@ describe("RelayBridge Runtime sessions", () => {
 				attachedTabIds: [1],
 			}),
 		);
+		await waitFor(() => nextExt.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, nextExt, "send");
+		await waitFor(() => nextExt.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, nextExt, "send");
+		await flush();
 
 		const second = new FakeCdpSocket();
 		const secondConn = bridge.cdpConnected(second);
@@ -11120,12 +11125,6 @@ describe("RelayBridge Runtime sessions", () => {
 				method: "Runtime.enable",
 			}),
 		);
-		await flush();
-		expect(nextExt.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
-		ack(bridge, nextExt, "send");
-		await flush();
-		expect(nextExt.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
-
 		const currentContext = { context: { id: 18 } };
 		bridge.extMessage(
 			nextExt,
@@ -11136,7 +11135,6 @@ describe("RelayBridge Runtime sessions", () => {
 				params: currentContext,
 			}),
 		);
-		ack(bridge, nextExt, "send");
 		await flush();
 
 		const contexts = second.messages.filter(
@@ -12189,6 +12187,47 @@ describe("RelayBridge attachment release", () => {
 				message => message.sessionId === disabledSession && message.method === "Runtime.executionContextCreated",
 			),
 		).toHaveLength(0);
+	});
+
+	it("restores root Runtime when reconnect preserves the debugger attachment", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.enable" }));
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const context = { context: { id: 43 } };
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Runtime.executionContextCreated", params: context }),
+		);
+		expect(
+			cdp.messages.filter(
+				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
+			),
+		).toHaveLength(1);
 	});
 
 	it("keeps a preserved page session across a second reconnect racing a recovery attach", async () => {

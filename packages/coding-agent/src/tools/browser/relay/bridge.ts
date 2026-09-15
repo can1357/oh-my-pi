@@ -780,7 +780,8 @@ export class RelayBridge {
 				// dedupe. The reconnect hello still reports the debugger attached, so
 				// the stale root would otherwise be reused as-is: honor the pending
 				// fresh-root request here too, not just an in-flight replay resume.
-				const needsRecoveryReplay = (tab.restorePending || tab.forceFreshRootBeforeReplay) && !sameSocketReplay;
+				const needsRecoveryReplay =
+					(tab.restorePending || tab.forceFreshRootBeforeReplay || tab.restoreRootRuntime) && !sameSocketReplay;
 				tab.resumeSubscriptionReconcileAfterRestore =
 					needsRecoveryReplay && tab.pendingSubscriptionReconcile.length > 0;
 				if (tab.pendingSubscriptionReconcile.length > 0) {
@@ -802,7 +803,7 @@ export class RelayBridge {
 					// so resume the pending journal instead of treating the root as ready.
 					// A forced fresh root must also replay the surviving holders' state
 					// onto the new root, so mark the journal pending before recovery.
-					if (tab.forceFreshRootBeforeReplay) tab.restorePending = true;
+					if (tab.forceFreshRootBeforeReplay || tab.restoreRootRuntime) tab.restorePending = true;
 					this.#pruneSubscriptions(tab, preserve);
 					this.#prunePreloadScripts(tab, preserve);
 					this.#startTabRecovery(tab, false, preserve);
@@ -1050,17 +1051,14 @@ export class RelayBridge {
 			return;
 		}
 		let rootGeneration = tab.runtimeGeneration;
-		// Keep the pre-registration read to distinguish a navigation that overlaps
-		// the command from one that happened earlier. Prefer the post-registration
-		// snapshot below, but retain this state as the baseline if that later probe
-		// fails without indicating a lost extension transport.
-		const initialDocumentState =
-			msg.params?.runImmediately === true
-				? await this.#frameDocumentState(ref.tabId).catch(err => {
-						if (isExtensionTransportInterrupted(err)) throw err;
-						return undefined;
-					})
-				: undefined;
+		// Keep a pre-registration read so an overlapping navigation cannot pass
+		// unnoticed before the add. The snapshot itself is not retained: only the
+		// post-registration state proves which document received the script.
+		if (msg.params?.runImmediately === true) {
+			await this.#frameDocumentState(ref.tabId).catch(err => {
+				if (isExtensionTransportInterrupted(err)) throw err;
+			});
+		}
 		// The probe can outlive the root it was sent to. A surviving holder may
 		// trigger fresh-root recovery while it is pending, so wait for that
 		// recovery to finish and revalidate ownership before forwarding the add.
@@ -1113,7 +1111,11 @@ export class RelayBridge {
 							tab.forceFreshRootBeforeReplay = true;
 							throw err;
 						}
-						return initialDocumentState;
+						// A failed post-registration probe cannot prove which document
+						// received the immediate registration. Reusing the pre-add loader
+						// would make a navigation during the add look already covered on
+						// recovery, so keep the baseline unknown and replay conservatively.
+						return undefined;
 					})
 				: undefined;
 		// The post-registration document probe is another await on the same
