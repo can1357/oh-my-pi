@@ -631,8 +631,13 @@ async function generateModels() {
 	// merge: live discovery rows win, the current seed (not a stale snapshot
 	// copy) is the fallback row, and snapshot rows fill only unfetched ids.
 	// Keep this order: pushing seeds earlier lets them shadow live discovery.
+	// Codex seeds are completed here, before combining: backfilling later
+	// would also match same-id live rows and resurrect stale snapshot values
+	// over authoritative omissions.
 	for (const entry of seededProviders("upstream")) {
-		allModels.push(...bundledSeedRows(entry, allModels, authoritativeCatalogProviders));
+		const seeds = [...bundledSeedRows(entry, allModels, authoritativeCatalogProviders)];
+		backfillCodexSeedGaps(seeds, prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>);
+		allModels.push(...seeds);
 	}
 
 	const modelsDevSnapshotExcludedProviders = new Set<string>();
@@ -661,7 +666,6 @@ async function generateModels() {
 		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
 		previousSnapshotExcludedProviders,
 	);
-	backfillCodexSeedGaps(allModels, prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>);
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.
