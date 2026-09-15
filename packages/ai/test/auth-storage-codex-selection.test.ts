@@ -244,6 +244,31 @@ async function fetchCodexPlanExhaustedReport(
 			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
 			secondary_window: null,
 		},
+		// Untouched side meters, as the live payload carries them: the Spark and
+		// reserve meters are separate allowances the spent chat window does not
+		// gate, and each block scope heals against its own meter.
+		additional_rate_limits: [
+			{
+				limit_name: "GPT-5.3-Codex-Spark",
+				metered_feature: "codex_bengalfox",
+				rate_limit: {
+					allowed: true,
+					limit_reached: false,
+					primary_window: { used_percent: 0, limit_window_seconds: 18000, reset_at: 2_000_500_000 },
+					secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+				},
+			},
+			{
+				limit_name: "gpt-reserve",
+				metered_feature: "base_model_inference",
+				rate_limit: {
+					allowed: true,
+					limit_reached: false,
+					primary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+					secondary_window: null,
+				},
+			},
+		],
 		credits,
 		spend_control: { reached: false },
 	};
@@ -2963,6 +2988,9 @@ describe("AuthStorage codex oauth ranking", () => {
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-overage-heal");
 		expectExclusivePreference(counts, "api-acct-credits", "api-acct-dry");
 		expect(readCodexBlock(dbPath, creditRow.id, "chat")).toBeUndefined();
+		// The meter→shared delete trigger must take the legacy row with it, or a
+		// pre-meter reader would still see the account blocked.
+		expect(readLegacyCodexSharedBlock(dbPath, creditRow.id)).toBeUndefined();
 	});
 });
 
