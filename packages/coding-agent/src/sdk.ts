@@ -449,6 +449,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
+	/** Raw Handlebars template replacing the bundled default system prompt rendering. */
+	systemPromptTemplate?: string;
 	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
 	customSystemPrompt?: string;
 	/** Already-loaded text appended through the bundled system prompt templates. */
@@ -936,6 +938,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
 	customPrompt?: string;
+	/** Raw Handlebars template replacing the bundled default system prompt rendering. */
+	systemPromptTemplate?: string;
 	appendPrompt?: string;
 	inlineToolDescriptors?: boolean;
 	includeWorkspaceTree?: boolean;
@@ -965,6 +969,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
 		customPrompt: options.customPrompt,
+		systemPromptTemplate: options.systemPromptTemplate,
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
@@ -1479,6 +1484,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.modelPattern !== undefined ||
 		options.thinkingLevel !== undefined ||
 		options.systemPrompt !== undefined ||
+		options.systemPromptTemplate !== undefined ||
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
 		options.toolNames !== undefined ||
@@ -3288,6 +3294,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
 					: "",
 				resolvedCustomPrompt: options.customSystemPrompt,
+				systemPromptTemplate: options.systemPromptTemplate,
 				skills: settings.get("skillful") ? (session?.skills ?? skills) : [],
 				contextFiles,
 				tools: promptTools,
