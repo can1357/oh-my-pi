@@ -1165,10 +1165,18 @@ async function attachTabOperation(
 					(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
 					shouldRetrackAfterDetachFailure(targets, tabId)
 				) {
-					attachmentGuard.retry(
-						tabId,
-						() => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
-					);
+					const isCurrent = () =>
+						(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch;
+					try {
+						// The first ownership write failed and the compensating detach did
+						// not remove the attachment. Persist ownership again before relying
+						// on an in-memory retry timer, since an MV3 worker restart would lose
+						// that timer and otherwise classify the surviving tab as foreign.
+						await trackAttachments([tabId], isCurrent);
+					} catch {
+						if (!isCurrent()) return;
+					}
+					if (isCurrent()) attachmentGuard.retry(tabId, isCurrent);
 				}
 			},
 		);
