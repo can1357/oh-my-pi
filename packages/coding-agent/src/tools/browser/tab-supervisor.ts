@@ -367,20 +367,21 @@ async function acquireTabImpl(
 		}
 	}
 	let initPayload: WorkerInitPayload;
-	let worker: WorkerHandle;
 	try {
 		initPayload = await buildInitPayload(browser, opts);
-		worker = await spawnTabWorker();
-		// Headless workers report their own created target via a `page-created`
-		// message once they exist; an attach-mode target omp created itself
-		// (forced-fresh relay tab) is already known here, before the worker
-		// that will drive it can crash mid-init and leave it untracked.
-		if (initPayload.mode === "attach" && initPayload.ownsTarget) {
-			workerPageTargets.set(worker, initPayload.targetId);
-		}
 	} catch (error) {
 		// Failing before the worker took its own hold must release the
 		// temporary one, or the browser's refCount never reaches 0 again.
+		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+		throw error;
+	}
+	let worker: WorkerHandle;
+	try {
+		worker = await spawnTabWorker();
+	} catch (error) {
+		// The target was created (relay forced-fresh tab) but no worker will
+		// ever drive or close it — this is terminal, no retry reattaches to it.
+		closeAbandonedOwnedTarget(browser, initPayload);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 		throw error;
 	}
@@ -404,6 +405,8 @@ async function acquireTabImpl(
 		// reported (no-op when it never got that far).
 		closeAbandonedWorkerPage(browser, worker);
 		if (worker.mode === "inline" || isReportedInitFailure(error)) {
+			// Terminal: no retry follows, so an owned target is abandoned for good.
+			closeAbandonedOwnedTarget(browser, initPayload);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			throw error;
 		}
@@ -411,6 +414,7 @@ async function acquireTabImpl(
 		// fired, so a retried result would only be discarded by the post-init abort check —
 		// don't spend the phase floors' excess on a cold start nobody is waiting for.
 		if (initBudgetExhausted(initBudgetMs, startedAt)) {
+			closeAbandonedOwnedTarget(browser, initPayload);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			throw error;
 		}
@@ -423,6 +427,8 @@ async function acquireTabImpl(
 		} catch (inlineError) {
 			await worker.terminate().catch(() => undefined);
 			closeAbandonedWorkerPage(browser, worker);
+			// Terminal: both attempts failed, no further retry reattaches to this target.
+			closeAbandonedOwnedTarget(browser, initPayload);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			const finalError = new ToolError(
 				`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
@@ -442,6 +448,9 @@ async function acquireTabImpl(
 	if (opts.signal?.aborted) {
 		await worker.terminate().catch(() => undefined);
 		closeAbandonedWorkerPage(browser, worker);
+		// Init already finished (`info` is populated): a successfully-attached
+		// owned target is abandoned for good here, not retried.
+		closeAbandonedOwnedTarget(browser, initPayload);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
 		throw new ToolAbortError("Browser tab open aborted");
 	}
@@ -1250,7 +1259,16 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		preferVisible: !activateForScreenshot,
 		forceFresh: browser.kind.kind === "relay",
 	});
-	const targetId = await targetIdForPage(page);
+	let targetId: string;
+	try {
+		targetId = await targetIdForPage(page);
+	} catch (error) {
+		// A tab omp just created (relay forced-fresh) is otherwise unreachable —
+		// nothing else has its targetId yet to close it later. An adopted tab
+		// is the user's and is left alone.
+		if (ownsTarget && !page.isClosed()) await page.close().catch(() => undefined);
+		throw error;
+	}
 	return {
 		mode: "attach",
 		browserWSEndpoint,
@@ -1369,6 +1387,10 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		emulateFocus: tab.kindTag === "headless",
 		timeoutMs,
 		activateForScreenshot: tab.activateForScreenshot,
+		// A recycled worker is a fresh WorkerCore instance: it must be told the
+		// tab's ownership again, or its own #ownsTarget defaults false and a
+		// later graceful close leaks the Chrome tab omp created for this session.
+		ownsTarget: tab.ownsTarget,
 	};
 	let worker = await spawnTabWorker();
 	try {
@@ -1474,6 +1496,21 @@ function closeAbandonedWorkerPage(browser: PuppeteerBrowserHandle, worker: Worke
 	// ends where it would have, one turn later.
 	holdBrowser(browser);
 	void closeTargetById(browser, targetId)
+		.catch(() => undefined)
+		.finally(() => void releaseBrowser(browser, { kill: false }).catch(() => undefined));
+}
+
+/**
+ * Close an attach-mode target omp created itself (a relay-forced fresh tab)
+ * when the open is being abandoned before the tab is ever published and no
+ * retry will reattach to the same `targetId` — unlike {@link closeAbandonedWorkerPage},
+ * safe to call even when a subsequent retry still needs the target alive. A
+ * no-op for anything omp did not create: an adopted tab belongs to the user.
+ */
+function closeAbandonedOwnedTarget(browser: PuppeteerBrowserHandle, initPayload: WorkerInitPayload): void {
+	if (initPayload.mode !== "attach" || !initPayload.ownsTarget) return;
+	holdBrowser(browser);
+	void closeTargetById(browser, initPayload.targetId)
 		.catch(() => undefined)
 		.finally(() => void releaseBrowser(browser, { kill: false }).catch(() => undefined));
 }
