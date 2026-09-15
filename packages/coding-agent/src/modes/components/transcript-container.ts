@@ -144,6 +144,8 @@ export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
 	#nextBatchId = 1;
+	#childrenVersion = 0;
+	#syncedVersion = -1;
 	#offered: Offered | undefined;
 	#replayPending = false;
 	#replayRequested = false;
@@ -158,11 +160,11 @@ export class TranscriptContainer extends Container {
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 	/** Block spans of the last `renderViewport` output, for click hit-testing. */
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
-
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		if (supportsToolOutputDetails(component)) component.setToolOutputDetailsHidden(this.#toolOutputDetailsHidden);
 		super.addChild(component);
+		this.#childrenVersion++;
 		this.#entries.push({
 			component,
 			state: "active",
@@ -177,6 +179,7 @@ export class TranscriptContainer extends Container {
 	override removeChild(component: Component): void {
 		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
 		super.removeChild(component);
+		this.#childrenVersion++;
 		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
@@ -184,8 +187,10 @@ export class TranscriptContainer extends Container {
 
 	override clear(): void {
 		super.clear();
+		this.#childrenVersion++;
 		this.#entries = [];
 		this.#frontier = 0;
+		this.#syncedVersion = this.#childrenVersion;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
 		this.#pinnedFrontier = undefined;
@@ -858,11 +863,14 @@ export class TranscriptContainer extends Container {
 	}
 
 	#syncEntries(): void {
+		if (this.#syncedVersion === this.#childrenVersion) return;
 		if (
 			this.#entries.length === this.children.length &&
 			this.#entries.every((entry, index) => entry.component === this.children[index])
-		)
+		) {
+			this.#syncedVersion = this.#childrenVersion;
 			return;
+		}
 		const existing = new Map(this.#entries.map(entry => [entry.component, entry]));
 		this.#entries = this.children.map(
 			component =>
@@ -878,6 +886,7 @@ export class TranscriptContainer extends Container {
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");
 		if (this.#frontier < 0) this.#frontier = this.#entries.length;
+		this.#syncedVersion = this.#childrenVersion;
 	}
 }
 

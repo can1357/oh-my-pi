@@ -208,19 +208,28 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
  */
 export class CachedOutputBlock {
 	#cache?: RenderCache;
+	#lastOptions?: OutputBlockOptions;
 
 	/** Render with caching. Returns the cached (shared, caller-immutable) lines if options haven't changed. */
 	render(options: OutputBlockOptions, theme: Theme): readonly string[] {
+		// Reference fast path: rebuild paths often hand back the same options
+		// object when nothing changed; skip the full content hash entirely.
+		if (this.#lastOptions === options && this.#cache) return this.#cache.lines;
 		const key = this.#buildKey(options);
-		if (this.#cache?.key === key) return this.#cache.lines;
+		if (this.#cache?.key === key) {
+			this.#lastOptions = options;
+			return this.#cache.lines;
+		}
 		const lines = renderOutputBlock(options, theme);
 		this.#cache = { key, lines };
+		this.#lastOptions = options;
 		return lines;
 	}
 
 	/** Invalidate the cache, forcing a rebuild on next render. */
 	invalidate(): void {
 		this.#cache = undefined;
+		this.#lastOptions = undefined;
 	}
 
 	#buildKey(options: OutputBlockOptions): bigint {

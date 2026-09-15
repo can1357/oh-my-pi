@@ -1,5 +1,4 @@
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { EvalPreludeContext, EvalPreludeDefinition } from "../../eval/preludes";
+import type { EvalPreludeDefinition } from "../../eval/preludes";
 import browserDescription from "../../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../../sdk";
 // @ts-expect-error Bun imports this declaration source as text instead of a TypeScript module.
@@ -11,7 +10,7 @@ import browserPython from "./prelude.py" with { type: "text" };
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
-	invoke: (parameters: unknown, context: EvalPreludeContext) => Promise<AgentToolResult<unknown>>,
+	host: Pick<EvalPreludeDefinition, "invoke" | "status">,
 ): EvalPreludeDefinition {
 	return {
 		name: "browser",
@@ -22,6 +21,7 @@ export function createBrowserPreludeDefinition(
 		codeModeDeclarations: browserDeclarations,
 		approval: "exec",
 		enabled: () => session.settings.get("browser.enabled"),
-		invoke,
+		invoke: host.invoke,
+		status: host.status,
 	};
 }

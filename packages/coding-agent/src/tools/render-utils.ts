@@ -818,11 +818,29 @@ export function truncateDiffByHunk(
 // Path Utilities
 // =============================================================================
 
+let cachedHomeDir: string | undefined;
+
+const homePatternCache = new Map<string, RegExp>();
+function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
+	const key = `${windowsStyle ? 1 : 0} ${homeDir}`;
+	let pattern = homePatternCache.get(key);
+	if (pattern === undefined) {
+		const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		pattern = new RegExp(
+			`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+			windowsStyle ? "gi" : "g",
+		);
+		if (homePatternCache.size >= 16) homePatternCache.clear();
+		homePatternCache.set(key, pattern);
+	}
+	return pattern;
+}
+
 export function shortenPath(filePath: unknown, homeDir?: string): string {
 	if (typeof filePath !== "string") {
 		return "";
 	}
-	const home = homeDir ?? os.homedir();
+	const home = homeDir ?? (cachedHomeDir ??= os.homedir());
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
 	const hasHomePrefix = windowsStyle
 		? filePath.toLowerCase().startsWith(home.toLowerCase())
@@ -838,23 +856,19 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 
 /** Shorten home-prefixed paths inside free text, preserving surrounding
  * punctuation so error strings with embedded paths stay readable. */
-export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
-	if (homeDir.length === 0) return text;
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
+export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
+	const resolvedHome = homeDir ?? (cachedHomeDir ??= os.homedir());
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
 	// Every rewrite below requires the home directory to appear literally, so text
 	// that does not contain it returns untouched — callers on a render path pay no
 	// allocation for the common case. Windows paths compare case-insensitively,
 	// matching the `gi` replacement below.
-	const hasHome = windowsStyle ? text.toLowerCase().includes(homeDir.toLowerCase()) : text.includes(homeDir);
+	const hasHome = windowsStyle ? text.toLowerCase().includes(resolvedHome.toLowerCase()) : text.includes(resolvedHome);
 	if (!hasHome) return text;
-	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
-	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const homePattern = new RegExp(
-		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
-		windowsStyle ? "gi" : "g",
-	);
+	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
+	const homePattern = homePatternFor(resolvedHome, windowsStyle);
 	const textWithShortenedHome =
-		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
+		shortenedHome !== resolvedHome ? text.replace(homePattern, match => shortenPath(match, resolvedHome)) : text;
 	return textWithShortenedHome
 		.split(" ")
 		.map(segment => {
@@ -862,7 +876,7 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
 			const end = segment.length - trailing.length;
 			if (leading.length >= end) return segment;
-			const shortened = shortenPath(segment.slice(leading.length, end), homeDir);
+			const shortened = shortenPath(segment.slice(leading.length, end), resolvedHome);
 			const normalized = shortened.startsWith("~")
 				? shortened.replaceAll(path.win32.sep, path.posix.sep)
 				: shortened;
