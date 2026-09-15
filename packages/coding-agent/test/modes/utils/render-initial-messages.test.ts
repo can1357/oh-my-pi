@@ -17,6 +17,7 @@ import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/p
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -143,6 +144,16 @@ function countImageComponents(component: Component): number {
 
 function hasImageComponent(component: Component): boolean {
 	return countImageComponents(component) > 0;
+}
+
+function findToolCard(component: Component): ToolExecutionComponent | undefined {
+	if (component instanceof ToolExecutionComponent) return component;
+	if (!("children" in component) || !Array.isArray(component.children)) return undefined;
+	for (const child of component.children) {
+		const found = findToolCard(child);
+		if (found) return found;
+	}
+	return undefined;
 }
 
 function makeRenderCtx(
@@ -488,6 +499,30 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		expect(assistant).toBeDefined();
 		assistant?.setToolResultImagesVisible(true);
 		expect(hasImageComponent(chatContainer)).toBe(true);
+	});
+
+	it("lays a replayed tool card out under the current fold setting", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": false } });
+		const transcript = transcriptWith([
+			assistantToolCall("bash-folded", "bash", { command: "ls -la" }),
+			{
+				role: "toolResult",
+				toolCallId: "bash-folded",
+				toolName: "bash",
+				content: [{ type: "text", text: "file-a" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+		// The visible container never learned the setting, which is the state a replay
+		// leaves behind when the toggle lands while it is yielding between entries.
+		const { ctx, chatContainer } = makeRenderCtx(transcript, false, false, true);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		const card = findToolCard(chatContainer);
+		expect(card).toBeDefined();
+		expect(card?.render(120)).toHaveLength(1);
 	});
 
 	it("hides read-result images while tool output details are folded", async () => {

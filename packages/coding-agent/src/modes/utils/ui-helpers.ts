@@ -1004,6 +1004,13 @@ export class UiHelpers {
 			const replayedChatChildren = [...stagedChatContainer.children];
 			stagedChatContainer.clear();
 			this.ctx.chatContainer = visibleChatContainer;
+			// The replay yields to terminal input between entries, so a display
+			// setting toggled mid-replay already reached the staged container while
+			// this one kept the older flags. `addChild` below stamps the visible
+			// container's flags onto every transferred block, so re-sync them here or
+			// the replay would lay out under the stale presentation.
+			visibleChatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
+			visibleChatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
 			if (preservedChatChildren) {
 				visibleChatContainer.clear();
 			} else {
