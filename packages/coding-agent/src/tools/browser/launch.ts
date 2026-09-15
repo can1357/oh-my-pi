@@ -209,9 +209,8 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 		}
 		const cacheDir = getPuppeteerDir();
 		const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
-		const buildId = await browsers.resolveBuildId(browsers.Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
+		const buildId = PUPPETEER_REVISIONS.chrome;
 		const executablePath = browsers.computeExecutablePath({
-			browser: browsers.Browser.CHROME,
 			buildId,
 			cacheDir,
 			platform,
@@ -225,7 +224,6 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 		});
 		let lastReportedPercent = -1;
 		await browsers.install({
-			browser: browsers.Browser.CHROME,
 			buildId,
 			cacheDir,
 			platform,

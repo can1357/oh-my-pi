@@ -4,7 +4,8 @@
  * Lightweight utilities for calling MCP servers directly via HTTP
  * without maintaining persistent connections.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
+import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
@@ -28,39 +29,113 @@ export function redactUrlForLog(url: string): string {
 	}
 }
 
-/** Parse SSE response format (lines starting with "data: ") */
-export function parseSSE(text: string): unknown {
-	const lines = text.split("\n");
-	for (const line of lines) {
-		if (line.startsWith("data: ")) {
-			const data = line.slice(6).trim();
-			if (data === "[DONE]") continue;
-			try {
-				const result = JSON.parse(data) as unknown;
-				if (result) return result;
-			} catch {
-				// Non-JSON data line (keep-alive/comment) — skip and keep scanning.
-			}
-		}
+function decodeJsonRpcResponse(message: unknown): JsonRpcResponse | null {
+	if (!isRecord(message) || message.jsonrpc !== "2.0") {
+		throw new SyntaxError("Malformed JSON-RPC message");
 	}
-	// Fallback: try parsing entire response as JSON
-	try {
-		return JSON.parse(text);
-	} catch {
+
+	const hasResult = Object.hasOwn(message, "result");
+	const hasError = Object.hasOwn(message, "error");
+	if ("method" in message) {
+		if (
+			typeof message.method !== "string" ||
+			hasResult ||
+			hasError ||
+			("id" in message && typeof message.id !== "string" && typeof message.id !== "number")
+		) {
+			throw new SyntaxError("Malformed JSON-RPC request");
+		}
+		if ("params" in message && !isRecord(message.params) && !Array.isArray(message.params)) {
+			throw new SyntaxError("Malformed JSON-RPC request");
+		}
 		return null;
 	}
+
+	if (typeof message.id !== "string" && typeof message.id !== "number") {
+		throw new SyntaxError("Malformed JSON-RPC response");
+	}
+	if (hasResult === hasError) {
+		throw new SyntaxError("Malformed JSON-RPC response");
+	}
+
+	if (hasError) {
+		if (
+			!isRecord(message.error) ||
+			typeof message.error.code !== "number" ||
+			typeof message.error.message !== "string"
+		) {
+			throw new SyntaxError("Malformed JSON-RPC error response");
+		}
+		return {
+			jsonrpc: "2.0",
+			id: message.id,
+			error: {
+				code: message.error.code,
+				message: message.error.message,
+				...(Object.hasOwn(message.error, "data") ? { data: message.error.data } : {}),
+			},
+		};
+	}
+
+	return { jsonrpc: "2.0", id: message.id, result: message.result };
 }
 
-/** JSON-RPC 2.0 response structure */
-export interface JsonRpcResponse<T = unknown> {
-	jsonrpc: "2.0";
-	id: string | number;
-	result?: T;
-	error?: {
-		code: number;
-		message: string;
-		data?: unknown;
+/**
+ * Read the matching JSON-RPC response from a JSON or SSE HTTP response.
+ *
+ * Notifications, server requests, and responses for other request IDs do not
+ * satisfy the caller's request. Malformed messages always fail the response.
+ */
+export async function readMcpJsonRpcResponse(
+	response: Response,
+	expectedId: string | number,
+	signal?: AbortSignal,
+): Promise<JsonRpcResponse> {
+	let sawUnmatchedResponse = false;
+
+	const selectMessage = (message: unknown): JsonRpcResponse | null => {
+		const decoded = decodeJsonRpcResponse(message);
+		if (!decoded) return null;
+		if (decoded.id === expectedId) return decoded;
+		sawUnmatchedResponse = true;
+		return null;
 	};
+	const selectResponse = (payload: unknown): JsonRpcResponse | null => {
+		if (!Array.isArray(payload)) return selectMessage(payload);
+		for (const message of payload) {
+			const matched = selectMessage(message);
+			if (matched) return matched;
+		}
+		return null;
+	};
+
+	signal?.throwIfAborted();
+	if (response.headers.get("Content-Type")?.toLowerCase().includes("text/event-stream")) {
+		if (!response.body) throw new Error("MCP SSE response did not include a body");
+		for await (const event of readSseEvents(response.body, signal)) {
+			if (event.data === "") continue;
+			if (event.data === "[DONE]") break;
+			const payload: unknown = JSON.parse(event.data);
+			const matched = selectResponse(payload);
+			if (matched) {
+				signal?.throwIfAborted();
+				return matched;
+			}
+		}
+	} else {
+		const payload: unknown = await response.json();
+		const matched = selectResponse(payload);
+		if (matched) {
+			signal?.throwIfAborted();
+			return matched;
+		}
+	}
+	signal?.throwIfAborted();
+
+	if (sawUnmatchedResponse) {
+		throw new Error("MCP response ID did not match request ID");
+	}
+	throw new Error("MCP response did not include a result or error");
 }
 
 /** Options controlling a single MCP JSON-RPC HTTP request. */
@@ -77,12 +152,12 @@ export interface CallMcpOptions {
  * @param options - Optional transport controls such as cancellation.
  * @returns Parsed JSON-RPC response
  */
-export async function callMCP<T = unknown>(
+export async function callMCP(
 	url: string,
 	method: string,
 	params?: Record<string, unknown>,
 	options?: CallMcpOptions,
-): Promise<JsonRpcResponse<T>> {
+): Promise<JsonRpcResponse> {
 	const body = {
 		jsonrpc: "2.0",
 		id: Math.random().toString(36).slice(2),
@@ -90,6 +165,7 @@ export async function callMCP<T = unknown>(
 		params: params ?? {},
 	};
 
+	const signal = options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS);
 	const response = await fetch(url, {
 		method: "POST",
 		headers: {
@@ -97,7 +173,7 @@ export async function callMCP<T = unknown>(
 			Accept: "application/json, text/event-stream",
 		},
 		body: JSON.stringify(body),
-		signal: options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS),
+		signal,
 	});
 
 	if (!response.ok) {
@@ -106,17 +182,14 @@ export async function callMCP<T = unknown>(
 		throw new Error(errorMsg);
 	}
 
-	const text = await response.text();
-	const result = parseSSE(text) as JsonRpcResponse<T> | null;
-
-	if (!result) {
+	try {
+		return await readMcpJsonRpcResponse(response, body.id, signal);
+	} catch (error) {
 		logger.error("Failed to parse MCP response", {
 			url: redactUrlForLog(url),
 			method,
-			responseText: text.slice(0, 500),
+			error: error instanceof Error ? error.message : String(error),
 		});
-		throw new Error("Failed to parse MCP response");
+		throw error;
 	}
-
-	return result;
 }

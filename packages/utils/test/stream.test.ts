@@ -424,6 +424,52 @@ describe("readSseEvents", () => {
 		expect(events.map(e => `${e.event}=${e.data}`)).toEqual(["a=1", "b=2"]);
 	});
 
+	it("dispatches multiple CR-only events before EOF", async () => {
+		let sourceClosed = false;
+		let closeSource = () => {};
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode("event: first\rdata: 1\r\revent: second\rdata: 2\r\r"));
+				closeSource = () => {
+					if (sourceClosed) return;
+					sourceClosed = true;
+					controller.close();
+				};
+			},
+		});
+		const iterator = readSseEvents(stream)[Symbol.asyncIterator]();
+
+		const first = await iterator.next();
+		const second = await iterator.next();
+		expect(sourceClosed).toBe(false);
+		closeSource();
+		const end = await iterator.next();
+		expect(first.done).toBe(false);
+		expect(first.value?.event).toBe("first");
+		expect(first.value?.data).toBe("1");
+		expect(second.done).toBe(false);
+		expect(second.value?.event).toBe("second");
+		expect(second.value?.data).toBe("2");
+		expect(end.done).toBe(true);
+	});
+
+	it("handles chunk-split CRLF and UTF-8 sequences together", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode("event: utf\r"),
+			encoder.encode("\ndata: caf"),
+			Uint8Array.of(0xc3),
+			Uint8Array.of(0xa9, 0x0d),
+			encoder.encode("\n\r"),
+			encoder.encode("\nevent: next\r\ndata: ok\r\n\r\n"),
+		]);
+		const events = await collectAsync(readSseEvents(stream));
+
+		expect(events).toEqual([
+			{ event: "utf", data: "café", raw: ["event: utf", "data: café"] },
+			{ event: "next", data: "ok", raw: ["event: next", "data: ok"] },
+		] satisfies ServerSentEvent[]);
+	});
+
 	it("recovers when a chunk boundary splits inside a field name", async () => {
 		const stream = bytesStreamFromChunks([
 			encoder.encode("eve"),
