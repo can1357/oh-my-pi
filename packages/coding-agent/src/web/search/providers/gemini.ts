@@ -28,7 +28,12 @@ const DEVELOPER_API_VERSION = "v1beta";
 const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_SANDBOX_ENDPOINT] as const;
-const DEFAULT_MODEL = "gemini-2.5-flash";
+// Fallback grounding model when neither GEMINI_SEARCH_MODEL nor
+// providers.webSearchGeminiModel is set. The rolling `-latest` alias tracks
+// Google's current stable Flash (see #4722), so the default no longer needs a
+// manual bump per release. Users who need reproducibility can pin an explicit
+// version via providers.webSearchGeminiModel or GEMINI_SEARCH_MODEL.
+const DEFAULT_MODEL = "gemini-flash-latest";
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
