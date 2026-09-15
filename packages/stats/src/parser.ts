@@ -226,10 +226,10 @@ function extractStats(
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
+	modelProvider: ModelProvider | undefined,
 ): MessageStatsInput | null {
 	const msg = entry.message as AssistantMessage;
-	if (msg?.role !== "assistant") return null;
-	if (typeof msg.model !== "string" || typeof msg.provider !== "string" || typeof msg.api !== "string") return null;
+	if (msg?.role !== "assistant" || !modelProvider || typeof msg.api !== "string") return null;
 	const rawUsage = msg.usage as Partial<Usage> | undefined;
 	if (!rawUsage || typeof rawUsage !== "object") return null;
 
@@ -272,8 +272,7 @@ function extractStats(
 					premiumRequests: derived,
 				};
 
-	const servedModel = msg.upstreamModel ?? msg.model;
-	const provider = msg.upstreamProvider ?? msg.provider;
+	const { model: servedModel, provider } = modelProvider;
 	return {
 		sessionFile,
 		entryId: entry.id,
@@ -301,28 +300,24 @@ function extractModelUsageStats(
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
+	const message: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: entry.api,
+		provider: entry.provider,
+		model: entry.model,
+		usage: entry.usage,
+		stopReason: entry.stopReason ?? "stop",
+		errorMessage: entry.errorMessage,
+		timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+	};
 	return extractStats(
 		sessionFile,
 		folder,
-		{
-			type: "message",
-			id: entry.id,
-			parentId: entry.parentId,
-			timestamp: entry.timestamp,
-			message: {
-				role: "assistant",
-				content: [],
-				api: entry.api,
-				provider: entry.provider,
-				model: entry.model,
-				usage: entry.usage,
-				stopReason: entry.stopReason ?? "stop",
-				errorMessage: entry.errorMessage,
-				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
-			},
-		},
+		{ type: "message", id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp, message },
 		undefined,
 		agentType,
+		resolveUpstreamModelProvider(message),
 	);
 }
 
@@ -335,6 +330,26 @@ function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessa
 	return Number.isFinite(ts) ? ts : 0;
 }
 
+interface ModelProvider {
+	model: string;
+	provider: string;
+}
+
+/**
+ * Use the model and provider the router reports it used, when available.
+ * Example: an `openrouter/auto` request served by `anthropic/claude-sonnet-5`.
+ */
+function resolveUpstreamModelProvider(msg: AssistantMessage): ModelProvider | undefined {
+	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return undefined;
+	return {
+		model: typeof msg.upstreamModel === "string" && msg.upstreamModel.length > 0 ? msg.upstreamModel : msg.model,
+		provider:
+			typeof msg.upstreamProvider === "string" && msg.upstreamProvider.length > 0
+				? msg.upstreamProvider
+				: msg.provider,
+	};
+}
+
 /**
  * Extract one {@link ToolCallStats} per `toolCall` content block of an
  * assistant message. Returns an empty array for turns without tool calls.
@@ -344,14 +359,11 @@ function extractToolCalls(
 	folder: string,
 	entry: SessionMessageEntry,
 	agentType: AgentType,
+	modelProvider: ModelProvider | undefined,
 ): ToolCallStats[] {
 	const msg = entry.message as AssistantMessage;
-	if (msg?.role !== "assistant" || !Array.isArray(msg.content)) return [];
-	// `tool_calls` columns are NOT NULL: skip turns that can't be attributed
-	// (malformed persisted entries — see extractStats) and blocks missing ids.
-	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return [];
-	const model = msg.upstreamModel ?? msg.model;
-	const provider = msg.upstreamProvider ?? msg.provider;
+	if (msg?.role !== "assistant" || !modelProvider || !Array.isArray(msg.content)) return [];
+	const { model, provider } = modelProvider;
 	const blocks = msg.content.filter(
 		(block): block is ToolCall =>
 			block !== null &&
@@ -617,29 +629,26 @@ export async function parseSessionFile(
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const msg = entry.message as AssistantMessage;
+			const modelProvider = resolveUpstreamModelProvider(msg);
+			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType, modelProvider);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType, modelProvider));
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
-			if (parentId) {
-				const msg = entry.message as AssistantMessage;
-				const effectiveModel = msg.upstreamModel ?? msg.model;
-				const effectiveProvider = msg.upstreamProvider ?? msg.provider;
-				if (effectiveModel && effectiveProvider) {
-					// Emit unconditionally. The aggregator's UPDATE is guarded by
-					// `model IS NULL` so this is idempotent: a no-op for already
-					// linked rows, a fix-up for fresh inserts (which start NULL
-					// because the user row is recorded before its reply lands) and
-					// for cross-pass orphans whose parent was committed by an
-					// earlier incremental sync.
-					userLinks.push({
-						sessionFile: sessionPath,
-						entryId: parentId,
-						model: effectiveModel,
-						provider: effectiveProvider,
-					});
-				}
+			if (parentId && modelProvider) {
+				// Emit unconditionally. The aggregator's UPDATE is guarded by
+				// `model IS NULL` so this is idempotent: a no-op for already
+				// linked rows, a fix-up for fresh inserts (which start NULL
+				// because the user row is recorded before its reply lands) and
+				// for cross-pass orphans whose parent was committed by an
+				// earlier incremental sync.
+				userLinks.push({
+					sessionFile: sessionPath,
+					entryId: parentId,
+					model: modelProvider.model,
+					provider: modelProvider.provider,
+				});
 			}
 		}
 	}
