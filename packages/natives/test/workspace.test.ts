@@ -42,7 +42,13 @@ it("caps directory rules lexically without counting duplicate discoveries as tru
 		expect(exact.agentsMdFiles).toEqual(paths);
 		expect(exact.entries.filter(entry => entry.path.endsWith("/AGENTS.md")).map(entry => entry.path)).toEqual(paths);
 		const firstRulesStat = await fs.stat(path.join(root, paths[0]!));
-		expect(exact.entries.find(entry => entry.path === paths[0])?.mtime).toBe(Math.trunc(firstRulesStat.mtimeMs));
+		// `mtime_millis` keeps sub-millisecond precision (`nanos / 1e6`), so the
+		// walker reports fractional milliseconds. Truncating to whole
+		// milliseconds only matched on filesystems whose timestamps happen to
+		// land on a millisecond boundary.
+		const firstRulesMtime = exact.entries.find(entry => entry.path === paths[0])?.mtime;
+		expect(firstRulesMtime).toBeDefined();
+		expect(firstRulesMtime).toBeCloseTo(firstRulesStat.mtimeMs, 3);
 		expect(exact.truncated).toBe(false);
 		await Bun.write(path.join(root, "zzz/AGENTS.md"), "overflow");
 		const overflow = await listWorkspace({ path: root, maxDepth: 0, collectAgentsMd: true });
