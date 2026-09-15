@@ -93,6 +93,18 @@ interface MCPServerConfigBase {
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};
+	/**
+	 * Per-server tool allowlist: only tools whose raw advertised name matches
+	 * one entry are contributed to the session. Entries are literal tool names
+	 * or glob patterns (`*`, `?`, `[...]`, `{a,b}`) matched over the raw name.
+	 * OMP-specific; only OMP-owned discovery providers parse it.
+	 */
+	enabledTools?: string[];
+	/**
+	 * Per-server tool denylist: matching tools are excluded. When both filters
+	 * are set the denylist wins (deny subtracts from allow).
+	 */
+	disabledTools?: string[];
 }
 
 /** Stdio server configuration */

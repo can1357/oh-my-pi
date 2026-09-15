@@ -530,6 +530,11 @@ test(".mcp.json expands environment placeholders recursively", async () => {
 						args: [placeholder("OMP_PLUGIN_ARG")],
 						env: { TOKEN: placeholder("OMP_PLUGIN_ENV") },
 						cwd: placeholder("OMP_PLUGIN_CWD"),
+						// A filter entry is a tool-name pattern, not one of the
+						// documented expansion fields, so the placeholder must survive
+						// verbatim — expanding it would select a different tool than
+						// the same config in a standalone `.mcp.json`.
+						enabledTools: [placeholder("OMP_PLUGIN_COMMAND")],
 					},
 					http: {
 						type: "http",
@@ -560,6 +565,7 @@ test(".mcp.json expands environment placeholders recursively", async () => {
 			args: [variables.OMP_PLUGIN_ARG],
 			env: { TOKEN: variables.OMP_PLUGIN_ENV },
 			cwd: variables.OMP_PLUGIN_CWD,
+			enabledTools: [placeholder("OMP_PLUGIN_COMMAND")],
 		});
 		expect(http).toMatchObject({
 			url: variables.OMP_PLUGIN_URL,
