@@ -42,6 +42,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `qna.ts`         | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
 | `status-line.ts` | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
 | `thinking-note.ts` | Adds display-only supplemental UI below assistant thinking blocks              |
+| `prompt-suggestions.ts` | Predicts a short next message as ghost text; Tab accepts without submitting     |
 | `snake.ts`       | Snake game with custom UI, keyboard handling, and session persistence          |
 
 ### Git Integration
@@ -65,6 +66,45 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `chalk-logger.ts` | Uses chalk from parent node_modules (demonstrates jiti module resolution) |
 | `with-deps/`      | Extension with its own package.json and dependencies                      |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
+
+## Prompt suggestions
+
+Load `prompt-suggestions.ts` explicitly or copy it into your extensions
+directory. Its prompt wording lives in two sibling templates,
+`prompt-suggestions-system.md` and `prompt-suggestions-user.md`: keep those
+files next to `prompt-suggestions.ts` when loading it explicitly, and copy all
+three files together when copying it into your extensions directory.
+
+After a successful final response, it asks the configured `@tiny` model for a
+short follow-up and shows it as dim text in an empty composer. Tab inserts the
+suggestion for editing; it does not send it. Typing, pasting, starting another
+turn, or changing sessions discards pending and displayed suggestions.
+In IME-safe hardware-cursor layouts with side borders, the native editor cannot
+display an inline hint; the example leaves Tab to native completion instead of
+accepting an invisible suggestion.
+
+Use `/suggestions off` to stop prediction requests, `/suggestions on` to resume,
+and `/suggestions status` to inspect the current state. These switches last for
+the running extension instance, not across restarts.
+
+**Cost and privacy:** installing this example enables additional model requests.
+Each request sends up to six recent user/assistant text turns (8,000 characters)
+to the provider selected by `@tiny`, which may differ from your main model's
+provider. It excludes tool-result, thinking, and image blocks, but ordinary
+conversation text can still contain sensitive information. Requests use
+`completeSimple` directly, not the main session's side-request wrappers.
+Session-level side-request concurrency controls are not applied.
+
+**Known security limitation — do not use with `secrets.enabled`:** extension
+events contain the original, display-ready conversation text. This example does
+not apply the session's secret obfuscation, so protected original values in that
+text can be sent to `@tiny` unredacted, even when the main model only receives
+placeholders. The current public extension API does not expose the session's
+obfuscator or protected side-request path. This limitation requires maintainer
+input before recommending the example for use with secret protection.
+
+The example installs a custom editor, so do not combine it with another extension
+that replaces the editor.
 
 ## Writing Extensions
 
