@@ -3929,6 +3929,99 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toEqual([]);
 	});
 
+	it("journals an immediate preload on a root replaced during its pre-add probe", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const refresher = new FakeCdpSocket();
+		const refresherConn = bridge.cdpConnected(refresher);
+		const refresherSession = await attachPage(bridge, ext, refresher, refresherConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__ownerScript = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+
+		bridge.cdpMessage(
+			refresherConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: refresherSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await waitFor(
+			() => ext.pending("send").some(rpc => rpc.method === "Emulation.setHardwareConcurrencyOverride"),
+			"in-flight hardware override",
+		);
+		bridge.cdpClosed(refresherConn);
+		const override = ext.pending("send").find(rpc => rpc.method === "Emulation.setHardwareConcurrencyOverride")!;
+		ext.markAcked(override.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: override.id, ok: true, result: {} }));
+		await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach during pre-add probe");
+		ack(bridge, ext, "detach");
+		await waitFor(() => ext.pending("attach").length === 1, "replacement attach during pre-add probe");
+		ack(bridge, ext, "attach");
+
+		const probe = ext.pending("send").find(rpc => rpc.method === "Page.getFrameTree")!;
+		ext.markAcked(probe.id);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "rpcResult",
+				id: probe.id,
+				ok: true,
+				result: { frameTree: { frame: { loaderId: "replacement-loader" } } },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "replacement-script" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "replacement-loader" } } });
+		await flush();
+
+		const addReply = owner.messages.find(
+			message =>
+				"result" in message &&
+				message.result !== null &&
+				typeof message.result === "object" &&
+				"identifier" in message.result,
+		);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result !== null &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		expect(
+			ext.pending("send").find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")?.params,
+		).toEqual({ identifier: "replacement-script" });
+	});
+
 	it("reruns an immediate preload after a same-URL navigation during subscription recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

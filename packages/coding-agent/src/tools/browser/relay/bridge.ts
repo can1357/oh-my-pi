@@ -1049,7 +1049,7 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
 			return;
 		}
-		const rootGeneration = tab.runtimeGeneration;
+		let rootGeneration = tab.runtimeGeneration;
 		// Keep the pre-registration read to distinguish a navigation that overlaps
 		// the command from one that happened earlier. Prefer the post-registration
 		// snapshot below, but retain this state as the baseline if that later probe
@@ -1061,6 +1061,12 @@ export class RelayBridge {
 						return undefined;
 					})
 				: undefined;
+		// The document-state probe above is asynchronous and a surviving holder may
+		// replace the debugger root while it is pending. No mutating registration has
+		// happened yet, so rebase the fence to the root that will receive the add.
+		// The post-add checks below still prevent that registration from being
+		// journaled across any later replacement.
+		rootGeneration = tab.runtimeGeneration;
 		let result: Record<string, unknown> | undefined;
 		try {
 			result = (await this.#rpc({
