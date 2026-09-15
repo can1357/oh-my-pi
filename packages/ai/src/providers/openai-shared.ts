@@ -2880,6 +2880,7 @@ export interface ProcessResponsesStreamOptions {
 	 * response omits the `service_tier` echo. Only applied for `provider: "openai"`.
 	 */
 	requestServiceTier?: ServiceTier;
+	requestModelId?: string;
 }
 
 export function computerCallMetadata(item: ResponseComputerToolCall): ComputerToolCallMetadata {
@@ -2933,6 +2934,8 @@ export async function processResponsesStream<TApi extends Api>(
 			| ResponseComputerToolCall;
 		block: ThinkingContent | TextContent | StreamingToolCallBlock;
 	}
+
+	const requestedModelId = options?.requestModelId ?? model.id;
 
 	// Multiple items (parallel function_calls in particular) can be open at the same
 	// time. OpenAI's spec routes every per-item event by `output_index`/`item_id`;
@@ -3162,7 +3165,7 @@ export async function processResponsesStream<TApi extends Api>(
 		const terminalEvent = getOpenAIResponsesTerminalEvent(event);
 		const eventResponse = (event as { response?: { model?: string; provider?: string } }).response;
 		if (!output.upstreamModel && typeof eventResponse?.model === "string" && eventResponse.model.length > 0) {
-			if (eventResponse.model !== model.id) {
+			if (eventResponse.model !== requestedModelId) {
 				output.upstreamModel = eventResponse.model;
 			}
 		}
@@ -3510,7 +3513,7 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			if (!output.upstreamModel && typeof response?.model === "string" && response.model.length > 0) {
-				if (response.model !== model.id) {
+				if (response.model !== requestedModelId) {
 					output.upstreamModel = response.model;
 				}
 			}
