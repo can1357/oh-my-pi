@@ -192,23 +192,26 @@ export function buildStaticInlineHint(hint: string): (argumentText: string) => s
 }
 
 /**
- * Build getArgumentCompletions for `/switch <model>`: configured `@role`
- * aliases first, then the session's cycle scope (or every authenticated
- * model) as `provider/id`, substring-filtered on the typed prefix. Any
- * `:level` suffix already typed is kept out of the match and re-appended.
+ * Build getArgumentCompletions for model selectors: configured `@role` aliases
+ * first, then the session's cycle scope (or every authenticated model) as
+ * `provider/id`, substring-filtered on the typed prefix. Any `:level` suffix
+ * already typed is kept out of the match and re-appended. Optional subcommands
+ * remain in the same completion list, so they do not prevent model selection.
  * Returning matches also keeps `@smol` from falling through to `@`-file
  * mention completion.
  */
 export function buildModelSelectorCompletions(
 	runtime: TuiSlashCommandRuntime,
+	subcommands?: SubcommandDef[],
 ): (argumentPrefix: string) => AutocompleteItem[] | null {
+	const subcommandCompletions = subcommands ? buildArgumentCompletions(subcommands) : undefined;
 	return (argumentPrefix: string) => {
 		if (argumentPrefix.includes(" ")) return null;
 		const suffixIndex = argumentPrefix.indexOf(":");
 		const suffix = suffixIndex === -1 ? "" : argumentPrefix.slice(suffixIndex);
 		const query = (suffixIndex === -1 ? argumentPrefix : argumentPrefix.slice(0, suffixIndex)).toLowerCase();
 		const { session, settings } = runtime.ctx;
-		const matches: AutocompleteItem[] = [];
+		const matches = subcommandCompletions?.(argumentPrefix) ?? [];
 		for (const role of getKnownRoleIds(settings)) {
 			const configured = settings.getModelRole(role);
 			if (!configured) continue;

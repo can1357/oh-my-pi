@@ -74,11 +74,16 @@ function materializeTuiBuiltinSlashCommand(
 ): TuiBuiltinSlashCommand {
 	const materialized: TuiBuiltinSlashCommand = { ...cmd };
 	if (cmd.subcommands) {
-		materialized.getArgumentCompletions =
-			cmd.name === "mcp" && runtime
-				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: buildArgumentCompletions(cmd.subcommands);
-		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+		if (cmd.name === "prewalk" && runtime) {
+			materialized.getArgumentCompletions = buildModelSelectorCompletions(runtime, cmd.subcommands);
+			if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+		} else {
+			materialized.getArgumentCompletions =
+				cmd.name === "mcp" && runtime
+					? buildMcpArgumentCompletions(cmd.subcommands, runtime)
+					: buildArgumentCompletions(cmd.subcommands);
+			materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+		}
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
