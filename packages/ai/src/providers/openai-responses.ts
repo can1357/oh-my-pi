@@ -794,6 +794,7 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: options?.serviceTier,
+						requestModelId: activeRequestParams?.model,
 					});
 
 					const localAbortReason = abortTracker.getLocalAbortReason();
@@ -840,6 +841,7 @@ const streamOpenAIResponsesOnce = (
 					const retryOutput = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
 					output.content.length = 0;
 					output.responseId = undefined;
+					output.upstreamModel = undefined;
 					output.upstreamProvider = undefined;
 					output.errorMessage = undefined;
 					output.errorStatus = undefined;
