@@ -29,19 +29,26 @@ function makeRule(scope: string): Rule {
 
 function makeHost() {
 	const emitSessionEvent = vi.fn(async (_event: AgentSessionEvent) => undefined);
+	const followUp = vi.fn((_message: AgentMessage) => undefined);
+	const hasQueuedMessages = vi.fn(() => true);
+	const scheduleAgentContinue = vi.fn(
+		(_options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => undefined,
+	);
 	const host = {
 		agent: {
 			state: { messages: [], tools: [] },
 			abort: vi.fn(),
+			followUp,
+			hasQueuedMessages,
 		} as unknown as Agent,
-		sessionManager: {} as SessionManager,
+		sessionManager: { getCwd: () => "/tmp", appendTtsrInjection: vi.fn() } as unknown as SessionManager,
 		settings: {} as Settings,
 		emitSessionEvent,
 		schedulePostPromptTask: vi.fn(),
-		scheduleAgentContinue: vi.fn(),
+		scheduleAgentContinue,
 		promptGeneration: () => 0,
 	} as unknown as TtsrCoordinatorHost;
-	return { host, emitSessionEvent };
+	return { host, emitSessionEvent, followUp, hasQueuedMessages, scheduleAgentContinue };
 }
 
 function assistantMessage(content: unknown[] = []): AgentMessage {
@@ -102,6 +109,161 @@ function coordinatorFor(scope: string) {
 }
 
 describe("TTSR stream buffers", () => {
+	it("does not re-queue a deferred rule before its first injection is persisted", async () => {
+		const { host, scheduleAgentContinue } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const first = assistantMessage();
+		const second = assistantMessage();
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(first, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...first, stopReason: "stop" } as AssistantMessage);
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(second, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...second, stopReason: "stop" } as AssistantMessage);
+
+		expect(host.agent.followUp).toHaveBeenCalledTimes(1);
+		const scheduled = scheduleAgentContinue.mock.calls[0]?.[0];
+		scheduled?.onSkip?.("should-continue-false");
+
+		const third = assistantMessage();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(third, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...third, stopReason: "stop" } as AssistantMessage);
+
+		expect(host.agent.followUp).toHaveBeenCalledTimes(1);
+	});
+
+	it("commits repeatGap on persistence and counts completed turns", async () => {
+		const { host, followUp } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const first = assistantMessage();
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(first, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...first, stopReason: "stop" } as AssistantMessage);
+		const delivery = followUp.mock.calls[0]?.[0];
+		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
+		coordinator.markInjectedFromDetails(delivery.details);
+
+		for (let turn = 0; turn < 5; turn++) coordinator.onTurnEnd();
+		const beforeGap = assistantMessage();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(beforeGap, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...beforeGap, stopReason: "stop" } as AssistantMessage);
+		expect(host.agent.followUp).toHaveBeenCalledTimes(1);
+
+		coordinator.onTurnEnd();
+		const afterGap = assistantMessage();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(afterGap, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...afterGap, stopReason: "stop" } as AssistantMessage);
+		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
+	});
+
+	it("rolls back only the cancelled deferred delivery", async () => {
+		const { host, followUp, scheduleAgentContinue } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const queueMatch = async () => {
+			const message = assistantMessage();
+			coordinator.onAssistantMessageStart();
+			await coordinator.checkMessageUpdate(textDelta(message, CONDITION));
+			coordinator.onAssistantMessageEnd({ ...message, stopReason: "stop" } as AssistantMessage);
+		};
+
+		await queueMatch();
+		const firstDelivery = followUp.mock.calls[0]?.[0];
+		if (firstDelivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
+		scheduleAgentContinue.mock.calls[0]?.[0].onSkip?.("stale-generation");
+		await queueMatch();
+		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
+
+		coordinator.markInjectedFromDetails(firstDelivery.details);
+		for (let turn = 0; turn < 6; turn++) coordinator.onTurnEnd();
+		await queueMatch();
+		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
+	});
+
+	it("allows retry when a deferred delivery is no longer queued", async () => {
+		const { host, hasQueuedMessages, scheduleAgentContinue } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const first = assistantMessage();
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(first, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...first, stopReason: "stop" } as AssistantMessage);
+		hasQueuedMessages.mockReturnValue(false);
+		expect(scheduleAgentContinue.mock.calls[0]?.[0].shouldContinue?.()).toBe(false);
+
+		hasQueuedMessages.mockReturnValue(true);
+		const second = assistantMessage();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(second, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...second, stopReason: "stop" } as AssistantMessage);
+		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
+	});
+
+	it("releases a reservation when a queued delivery is discarded", async () => {
+		const { host, followUp } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const first = assistantMessage();
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(first, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...first, stopReason: "stop" } as AssistantMessage);
+		const delivery = followUp.mock.calls[0]?.[0];
+		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
+
+		coordinator.releaseDeferredReservationFromDetails(delivery.details);
+		const second = assistantMessage();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(second, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...second, stopReason: "stop" } as AssistantMessage);
+
+		expect(host.agent.followUp).toHaveBeenCalledTimes(2);
+	});
+
 	it("does not carry a fallback-key tool buffer into the next assistant message", async () => {
 		const { coordinator, emitSessionEvent } = coordinatorFor("tool:bash");
 		const first = assistantMessage([{ type: "toolCall", id: "", name: "bash", arguments: {} }]);

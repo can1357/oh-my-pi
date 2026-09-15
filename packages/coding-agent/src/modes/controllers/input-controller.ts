@@ -8,12 +8,14 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "../../modes/components/ask-dialog";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { extractImagePathFromText } from "../../modes/components/custom-editor";
+import { HistorySearchComponent } from "../../modes/components/history-search";
+import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
@@ -24,10 +26,11 @@ import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, setCachedImageDimensions } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
-import { buildSkillCommandPrompt, isKnownSkillCommand } from "../../modes/skill-command";
+import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
+import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
@@ -209,6 +212,7 @@ export class InputController {
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
+	#globalEditorActionsListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
 
@@ -327,6 +331,51 @@ export class InputController {
 				if (!this.ctx.keybindings.matches(data, "app.clipboard.pasteImage")) return undefined;
 				void this.handleImagePaste();
 				return { consume: true };
+			});
+		}
+		if (!this.#globalEditorActionsListenerInstalled) {
+			this.#globalEditorActionsListenerInstalled = true;
+			// These actions target the main transcript/editor rather than the
+			// focused prompt. Keep focused components' own bindings authoritative.
+			this.ctx.ui.addInputListener(data => {
+				if (this.ctx.keybindings.matches(data, "app.thinking.toggle")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					this.ctx.toggleThinkingBlockVisibility();
+					return { consume: true };
+				}
+				if (this.ctx.keybindings.matches(data, "app.history.search")) {
+					if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() instanceof HistorySearchComponent) {
+						return undefined;
+					}
+					this.ctx.showHistorySearch();
+					return { consume: true };
+				}
+				if (this.ctx.keybindings.matches(data, "app.editor.external")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					const focused = this.ctx.ui.getFocused();
+					if (
+						focused instanceof HookEditorComponent ||
+						focused === this.ctx.hookSelector ||
+						focused === this.ctx.hookInput
+					) {
+						return undefined;
+					}
+					void this.openExternalEditor();
+					return { consume: true };
+				}
+				if (this.ctx.keybindings.matches(data, "app.tools.toggleVisibility")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					const focused = this.ctx.ui.getFocused();
+					if (
+						focused instanceof TreeSelectorComponent &&
+						(matchesKey(data, "shift+ctrl+o") || matchesKey(data, "ctrl+shift+o"))
+					) {
+						return undefined;
+					}
+					this.toggleToolActivityVisibility();
+					return { consume: true };
+				}
+				return undefined;
 			});
 		}
 		if (!this.#expandToolsListenerInstalled) {
@@ -538,12 +587,6 @@ export class InputController {
 		this.ctx.ui.onDebug = () => this.ctx.showDebugSelector();
 		this.ctx.editor.setActionKeys("app.model.select", this.ctx.keybindings.getKeys("app.model.select"));
 		this.ctx.editor.onSelectModel = () => this.ctx.showModelSelector();
-		this.ctx.editor.setActionKeys("app.history.search", this.ctx.keybindings.getKeys("app.history.search"));
-		this.ctx.editor.onHistorySearch = () => this.ctx.showHistorySearch();
-		this.ctx.editor.setActionKeys("app.thinking.toggle", this.ctx.keybindings.getKeys("app.thinking.toggle"));
-		this.ctx.editor.onToggleThinking = () => this.ctx.toggleThinkingBlockVisibility();
-		this.ctx.editor.setActionKeys("app.editor.external", this.ctx.keybindings.getKeys("app.editor.external"));
-		this.ctx.editor.onExternalEditor = () => void this.openExternalEditor();
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteImage",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
@@ -561,11 +604,6 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.copyPrompt"),
 		);
 		this.ctx.editor.onCopyPrompt = () => this.handleCopyPrompt();
-		this.ctx.editor.setActionKeys(
-			"app.tools.toggleVisibility",
-			this.ctx.keybindings.getKeys("app.tools.toggleVisibility"),
-		);
-		this.ctx.editor.onToggleToolActivity = () => this.toggleToolActivityVisibility();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
@@ -982,12 +1020,23 @@ export class InputController {
 			// During compaction, queue immediately so bash/python/loop-mode branches do
 			// not consume the skill before the compaction-resume path re-parses it.
 			if (text && isKnownSkillCommand(this.ctx, text)) {
+				// Capture here too: this branch's own early returns below would
+				// otherwise skip the non-skill capture further down.
+				if (this.ctx.loopModeEnabled) {
+					this.ctx.setLoopPrompt(text);
+				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 					this.ctx.queueCompactionMessage(text, "steer", images);
 					return;
 				}
 				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+					// The dispatch above ran the turn inline without resolving the input
+					// callback, so nothing re-enters `getUserInput` to arm the next
+					// iteration. Arm it here, now that the turn has settled.
+					if (this.ctx.loopModeEnabled) {
+						this.ctx.armLoopAutoSubmit();
+					}
 					return;
 				}
 			}
@@ -1276,7 +1325,10 @@ export class InputController {
 		// common case; this is the defense-in-depth ladder for everything
 		// else. See issue #2600.
 		if (this.ctx.isShuttingDown) {
-			process.exit(130); // 128 + SIGINT
+			// Route through postmortem: this hard-abort can fire while an
+			// extension-load guard window is open, where raw process.exit is a
+			// throwing ExtensionExitError stub (#11789).
+			postmortem.exitProcess(130); // 128 + SIGINT
 		}
 
 		const now = Date.now();
@@ -1373,12 +1425,33 @@ export class InputController {
 	}
 
 	handleDequeue(): void {
-		const restored = this.restoreQueuedMessagesToEditor();
-		if (restored === 0) {
+		const popped = this.#popLastQueuedMessage();
+		if (!popped) {
 			this.ctx.showStatus("No queued messages to restore");
-		} else {
-			this.ctx.showStatus(`Restored ${restored} queued message${restored > 1 ? "s" : ""} to editor`);
+			return;
 		}
+		// Drop only the popped message's local-submission signature; the messages
+		// left in the queue keep theirs so their delivery echo is still recognized
+		// as local and does not blank the editor the dequeue just restored to.
+		this.ctx.locallySubmittedUserSignatures.delete(`${popped.text}\u0000${popped.images?.length ?? 0}`);
+		this.#restoreEntriesToEditor([popped]);
+		this.ctx.showStatus("Restored last queued message to editor");
+	}
+
+	/**
+	 * Pop the single most-recently-queued restorable message for the Alt+Up
+	 * dequeue key. Prefers the agent queues (steering, then follow-up) via the
+	 * session API that steps over hidden companions; falls back to the compaction
+	 * queue for messages typed while compacting, which live outside those queues.
+	 */
+	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+		const fromQueue = this.ctx.session.popLastQueuedMessage();
+		if (fromQueue) return fromQueue;
+		const compaction = this.ctx.compactionQueuedMessages;
+		if (compaction.length === 0) return undefined;
+		const last = compaction[compaction.length - 1];
+		this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
+		return { text: last.text, images: last.images };
 	}
 
 	/**
@@ -1410,42 +1483,20 @@ export class InputController {
 		};
 
 		this.ctx.editor.clearDraft(text);
-		let optimistic = false;
 		try {
-			// Build the user-attributed skill message once so the optimistic
-			// transcript row and the dispatched message share content.
-			const built = await buildSkillCommandPrompt(this.ctx, text, streamingBehavior, draftImages);
-			if (!built) {
-				restoreDraft();
-				return false;
-			}
-			// Paint the row before the awaited dispatch so a slow preflight (memory
-			// recall, before_agent_start hooks, auto-thinking, pre-prompt compaction)
-			// does not leave the submission invisible (issue #8895). A streaming
-			// submission queues instead and surfaces its chip, so only paint when the
-			// turn will run fresh.
-			optimistic = !this.ctx.session.isStreaming;
-			if (optimistic) {
-				// Mirror the message promptCustomMessage will build for the turn so the
-				// canonical message_start reconciles this row rather than duplicating it.
-				this.ctx.renderOptimisticSkillMessage(
-					{ role: "custom", ...built.message, timestamp: Date.now() },
-					{ imageLinks: draftImageLinks },
-				);
-			}
-			await this.ctx.session.promptCustomMessage(built.message, built.options);
-			return true;
+			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
+				images: draftImages,
+				imageLinks: draftImageLinks,
+				optimistic: true,
+				propagateErrors: true,
+			});
+			if (!dispatched) restoreDraft();
+			return dispatched;
 		} catch (error) {
-			if (optimistic) this.ctx.clearOptimisticSkillMessage();
 			restoreDraft();
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return true;
 		} finally {
-			if (optimistic && this.ctx.optimisticSkillMessagePending) {
-				// Dispatch resolved without a canonical skill message_start (aborted
-				// preflight, or a streaming-race requeue): drop the pending row.
-				this.ctx.clearOptimisticSkillMessage();
-			}
 			if (this.ctx.session.isStreaming) {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -1695,9 +1746,8 @@ export class InputController {
 		// Messages typed while compacting live in `compactionQueuedMessages`, not the
 		// agent queue `clearQueue()` drains — but the pending bar shows the same
 		// "Alt+Up to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
-		// Drain them here too so the dequeue restores every message the hint
-		// advertises; otherwise a skill/text queued during compaction is stranded and
-		// Alt+Up reports "No queued messages to restore".
+		// Drain them here too so the restore recovers every message the hint
+		// advertises; otherwise a skill/text queued during compaction is stranded.
 		const compactionQueued = this.ctx.compactionQueuedMessages;
 		this.ctx.compactionQueuedMessages = [];
 		const allQueued = [
@@ -1706,11 +1756,22 @@ export class InputController {
 			...followUp,
 			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
 		];
-		if (allQueued.length === 0) {
+		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
+		if (options?.abort) {
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+		}
+		return restored;
+	}
+
+	/**
+	 * Merge queued entries (oldest→newest) ahead of the current draft, folding
+	 * their images back into the pending-image buffer and refreshing the pending
+	 * bar. Shared by the Alt+Up dequeue (one entry) and the Esc restore-all path.
+	 * Returns the number of entries restored.
+	 */
+	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
+		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
-			if (options?.abort) {
-				void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
-			}
 			return 0;
 		}
 		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
@@ -1723,21 +1784,21 @@ export class InputController {
 		// indices by the running offset keeps the merged text aligned with the merged
 		// `pendingImages` order; draft markers stay valid because draft images
 		// keep their original positions.
-		const queuedImages = allQueued.flatMap(e => e.images ?? []);
+		const queuedImages = entries.flatMap(e => e.images ?? []);
 		let queuedText: string;
 		if (queuedImages.length > 0) {
 			const parts: string[] = [];
 			let imageOffset = this.ctx.editor.pendingImages.length;
-			for (const entry of allQueued) {
+			for (const entry of entries) {
 				parts.push(shiftImageMarkers(entry.text, imageOffset));
 				if (entry.images && entry.images.length > 0) imageOffset += entry.images.length;
 			}
 			queuedText = parts.join("\n\n");
 		} else {
-			queuedText = allQueued.map(e => e.text).join("\n\n");
+			queuedText = entries.map(e => e.text).join("\n\n");
 		}
-		const currentText = options?.currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, currentText].filter(t => t.trim()).join("\n\n");
+		const current = currentText ?? this.ctx.editor.getText();
+		const combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
 		// Hand queued images back to the pending-image buffer first (links are
 		// re-materialized lazily), then set the text: setCollapsedText folds the
 		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
@@ -1749,10 +1810,7 @@ export class InputController {
 		}
 		this.ctx.editor.setCollapsedText(combinedText);
 		this.ctx.updatePendingMessagesDisplay();
-		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
-		}
-		return allQueued.length;
+		return entries.length;
 	}
 
 	async #insertPendingImage(imageData: ImageContent, videoPath?: string): Promise<void> {

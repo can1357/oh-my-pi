@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -50,4 +51,22 @@ describe("BashExecutionComponent PTY rendering", () => {
 		expect(text).toContain("100%");
 		expect(text).not.toContain("50%");
 	});
+
+	for (const exitCode of [0, 7]) {
+		it(`keeps exit ${exitCode} output mutable until queued replay drains`, async () => {
+			const component = new BashExecutionComponent("markers", ui, false);
+			const transcript = new TranscriptContainer();
+			transcript.addChild(component);
+			component.appendPtyChunk("OUT-MARKER\r\nERR-MARKER\r\n");
+			component.setComplete(exitCode, false);
+
+			expect(component.isTranscriptBlockFinalized()).toBe(false);
+			expect(transcript.peekFlushBatch(100)).toBeUndefined();
+
+			const finalText = await renderUntil(component, () => component.isTranscriptBlockFinalized());
+			expect(Bun.stripANSI(finalText)).toContain("OUT-MARKER");
+			expect(Bun.stripANSI(finalText)).toContain("ERR-MARKER");
+			expect(transcript.peekFlushBatch(100)).toBeDefined();
+		});
+	}
 });

@@ -1,4 +1,4 @@
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, isRecord } from "@oh-my-pi/pi-utils";
 import { REJECT_PROMPT_COMMAND } from "../exec/non-interactive-env";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 
@@ -73,6 +73,54 @@ function formatGhFailure(args: readonly string[], stdout: string, stderr: string
 	return `GitHub CLI command failed: gh ${args.join(" ")}`;
 }
 
+function describeGitHubApiError(value: unknown): string | undefined {
+	if (typeof value === "string") return value.trim() || undefined;
+	if (!isRecord(value)) return undefined;
+	if (typeof value.message === "string") return value.message.trim() || undefined;
+
+	const resource = typeof value.resource === "string" ? value.resource.trim() : "";
+	const field = typeof value.field === "string" ? value.field.trim() : "";
+	const target = [resource, field].filter(Boolean).join(".");
+	const code = typeof value.code === "string" ? value.code.trim() : "";
+	if (target && code) return `${target}: ${code}`;
+	return target || code || undefined;
+}
+
+function parseGitHubApiErrorMessages(stdout: string): string[] {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(stdout);
+	} catch {
+		return [];
+	}
+	if (!isRecord(payload)) return [];
+
+	const messages = new Set<string>();
+	const summary = describeGitHubApiError(payload.message);
+	if (summary) messages.add(summary);
+	if (Array.isArray(payload.errors)) {
+		for (const error of payload.errors) {
+			const message = describeGitHubApiError(error);
+			if (message) messages.add(message);
+		}
+	}
+	return [...messages];
+}
+
+function formatGhJsonFailure(
+	args: readonly string[],
+	stdout: string,
+	stderr: string,
+	options?: GhCommandOptions,
+): string {
+	const rawMessage = (stderr || stdout).trim();
+	const fallback = formatGhFailure(args, stdout, stderr, options);
+	if (fallback !== rawMessage) return fallback;
+	const details = parseGitHubApiErrorMessages(stdout).filter(message => !fallback.includes(message));
+	if (details.length === 0) return fallback;
+	return `${fallback}\nGitHub details:\n${details.map(message => `- ${message}`).join("\n")}`;
+}
+
 /** The sanctioned `gh` CLI runner: non-interactive env, bounded capture, deadline. */
 export const github = {
 	/** Check if the `gh` CLI is installed. */
@@ -123,7 +171,9 @@ export const github = {
 	/** Run `gh` and parse stdout as JSON. Throws on non-zero exit or invalid JSON. */
 	async json<T>(cwd: string, args: string[], signal?: AbortSignal, options?: GhCommandOptions): Promise<T> {
 		const result = await github.run(cwd, args, signal, options);
-		if (result.exitCode !== 0) throw new ToolError(formatGhFailure(args, result.stdout, result.stderr, options));
+		if (result.exitCode !== 0) {
+			throw new ToolError(formatGhJsonFailure(args, result.stdout, result.stderr, options));
+		}
 		if (!result.stdout) throw new ToolError("GitHub CLI returned empty output.");
 		try {
 			return JSON.parse(result.stdout) as T;

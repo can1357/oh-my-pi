@@ -258,9 +258,9 @@ Behavior:
 
 Related APIs:
 
-- `sendUserMessage(content, { deliverAs? })`
-- `steer(text, images?)`
-- `followUp(text, images?)`
+- `sendUserMessage(content, { deliverAs?, attribution? })`
+- `steer(text, images?, { attribution? })`
+- `followUp(text, images?, { synthetic?, attribution? })`
 - `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
 - `abort()`
 

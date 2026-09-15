@@ -242,9 +242,29 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, `Your limit will reset at ${naiveWall} retry-after-ms=5000`)).toBe(5000);
 	});
 
-	it("parses Chinese '将在 YYYY-MM-DD HH:MM:SS 重置' reset timestamp in error body", () => {
-		const future = new Date(Date.now() + 3_600_000).toISOString().replace("T", " ").slice(0, 19);
-		const hint = extractRetryHint(undefined, `已达到使用上限。您的限额将在 ${future} 重置。`);
+	it("reads a naive Chinese reset stamp as UTC without a provider offset", () => {
+		const targetMs = Date.parse("2099-09-01T09:44:51Z");
+		const expected = targetMs - Date.now();
+		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。");
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("applies naiveResetTimezoneOffset to a naive Chinese reset stamp", () => {
+		const targetMs = Date.parse("2099-09-01T09:44:51+08:00");
+		const expected = targetMs - Date.now();
+		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。", {
+			naiveResetTimezoneOffset: "+08:00",
+		});
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("keeps a configured reset over a shorter retry-after-ms", () => {
+		const future = new Date(Date.now() + 3_600_000 + 8 * 60 * 60_000).toISOString().slice(0, 19).replace("T", " ");
+		const hint = extractRetryHint(undefined, `Your limit will reset at ${future} retry-after-ms=5000`, {
+			naiveResetTimezoneOffset: "+08:00",
+		});
 		expect(hint).toBeGreaterThan(3_500_000);
 		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});

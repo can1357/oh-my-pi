@@ -18,8 +18,9 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../../slash-commands/helpers/format";
+import { collapseSharedUsageReports } from "../../utils/usage-display";
 import { colorToAnsi } from "../theme/color";
-import { theme } from "../theme/theme";
+import { ensureThemeSync, theme } from "../theme/theme";
 import { formatAbsoluteOnlyAmount } from "../usage-amounts";
 import {
 	matchesSelectCancel,
@@ -123,8 +124,9 @@ function aggregateRowStatus(windows: CardWindowRow[]): UsageLimit["status"] {
  * what's burning is on top-left; fully idle providers collapse into a tick.
  */
 export function buildProviderCards(reports: UsageReport[], nowMs: number): ProviderCard[] {
+	const displayReports = collapseSharedUsageReports(reports);
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of reports) {
+	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
 		list.push(report);
 		grouped.set(report.provider, list);
@@ -326,6 +328,7 @@ export class UsageDashboardComponent implements Component {
 	readonly #closeController = new AbortController();
 
 	constructor(options: UsageDashboardOptions) {
+		ensureThemeSync();
 		this.#options = options;
 		this.#nowMs = Date.now();
 		this.#cards = buildProviderCards(options.reports, this.#nowMs);

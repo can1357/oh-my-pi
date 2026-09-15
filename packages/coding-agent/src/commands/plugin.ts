@@ -24,6 +24,7 @@ const ACTIONS: PluginAction[] = [
 
 export default class Plugin extends Command {
 	static description = commandHelp.description;
+	static aliases = ["plugins"];
 	static args = {
 		action: Args.string({
 			description: "Plugin action",

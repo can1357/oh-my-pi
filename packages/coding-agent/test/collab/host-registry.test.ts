@@ -653,7 +653,13 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(late.saw()).toBe(true);
 	});
 
-	it("revokes application frames queued, sealing, and awaiting sealing before sending goodbye", async () => {
+	/**
+	 * Host with one read-only guest whose event/bye frames are recorded. The
+	 * send queue seals and writes strictly in order, so a frame parked at the
+	 * head (behind transport backpressure or a held seal) holds every later
+	 * frame unsealed behind it.
+	 */
+	async function startRevocationScenario() {
 		const { ctx, state } = makeHostContext();
 		const originalConnect = CollabSocket.prototype.connect;
 		let transport: CollabSocket | undefined;
@@ -674,22 +680,37 @@ describe("collab host registry lifecycle (#6099)", () => {
 		if ("error" in parsed) throw new Error(parsed.error);
 		const reader = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
 		guestCleanups.push(() => reader.close());
-		const welcomed = Promise.withResolvers<void>();
+		const replicated = Promise.withResolvers<void>();
 		const goodbye = Promise.withResolvers<void>();
 		const received: CollabFrame[] = [];
 		reader.onFrame = frame => {
-			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "snapshot-chunk" && frame.final) replicated.resolve();
 			if (frame.t === "event" || frame.t === "bye") received.push(frame);
 			if (frame.t === "bye") goodbye.resolve();
 		};
 		reader.onOpen = () => reader.send({ t: "hello", proto: COLLAB_PROTO, name: "reader" });
 		reader.connect();
-		await welcomed.promise;
-		await transport.flush();
-		hostWire.bufferedAmount = 64 * 1024;
-		state.subscribed?.({ type: "message_start", message: { role: "user", content: "already encrypted" } });
-		await transport.flush();
+		// The welcome train must be fully written before the scenario parks the
+		// transport, or its tail — not the frames under test — is what stalls.
+		await replicated.promise;
+		const emit = (content: string) =>
+			state.subscribed?.({ type: "message_start", message: { role: "user", content } });
+		return { host, transport, hostWire, goodbye, received, emit };
+	}
 
+	it("revokes a sealed frame stalled by backpressure and the unsealed frames behind it before the goodbye", async () => {
+		const { host, transport, hostWire, goodbye, received, emit } = await startRevocationScenario();
+		hostWire.bufferedAmount = 64 * 1024;
+		emit("already encrypted");
+		await transport.flush();
+		emit("not yet encrypted");
+		await host.stop("revoked");
+		await goodbye.promise;
+		expect(received).toEqual([{ t: "bye", reason: "revoked" }]);
+	});
+
+	it("revokes a frame mid-seal and the frames queued behind it before the goodbye", async () => {
+		const { host, goodbye, received, emit } = await startRevocationScenario();
 		const sealing = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const originalEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
@@ -703,8 +724,8 @@ describe("collab host registry lifecycle (#6099)", () => {
 			return originalEncrypt(algorithm, key, data);
 		});
 		try {
-			state.subscribed?.({ type: "message_start", message: { role: "user", content: "sealing" } });
-			state.subscribed?.({ type: "message_start", message: { role: "user", content: "not yet encrypted" } });
+			emit("sealing");
+			emit("not yet encrypted");
 			await sealing.promise;
 			const stopping = host.stop("revoked");
 			release.resolve();

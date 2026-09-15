@@ -134,11 +134,8 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 			.render(240)
 			.join("\n");
 		const interactiveModeUri = url.pathToFileURL(path.resolve(interactiveModePath)).href;
-		const interactiveModeLineUri = new URL(interactiveModeUri);
-		interactiveModeLineUri.searchParams.set("line", "12");
 		const uris = extractLinkUris(rendered);
-		expect(uris).toContain(interactiveModeUri);
-		expect(uris).toContain(interactiveModeLineUri.href);
+		expect(uris.filter(uri => uri === interactiveModeUri)).toHaveLength(2);
 		expect(uris.some(uri => uri.includes("/src/src/"))).toBe(false);
 	});
 
