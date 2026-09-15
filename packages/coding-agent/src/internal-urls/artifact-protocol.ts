@@ -12,6 +12,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { readArtifactProvenance } from "../session/artifacts";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
@@ -22,6 +23,7 @@ export interface ResolvedArtifactFile {
 	id: string;
 	path: string;
 	size: number;
+	producerSessionId?: string;
 }
 
 function parseArtifactId(url: InternalUrl): string {
@@ -38,12 +40,20 @@ function parseArtifactId(url: InternalUrl): string {
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 export async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
+	const producerScoped = context?.localProtocolOptions?.artifactResolutionScope === "producer";
+	const callerSessionId = context?.sessionId ?? context?.localProtocolOptions?.getSessionId?.() ?? null;
+	if (producerScoped && !callerSessionId) {
+		throw new Error("Producer-scoped artifact resolution requires a calling session ID");
+	}
 
 	// Artifact ids are per-session counters; in multi-session hosts the same
 	// id exists in several dirs. Pin resolution to the calling session's
 	// artifacts dir first so `artifact://3` means *this* session's #3.
-	const dirs = artifactsDirsFromRegistry();
+	let dirs = artifactsDirsFromRegistry();
 	const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
+	if (producerScoped) {
+		dirs = pinnedDir ? [pinnedDir] : [];
+	}
 	if (pinnedDir) {
 		const pinnedIndex = dirs.indexOf(pinnedDir);
 		if (pinnedIndex >= 0) dirs.splice(pinnedIndex, 1);
@@ -55,6 +65,7 @@ export async function resolveArtifactFile(url: InternalUrl, context?: ResolveCon
 	}
 
 	let foundPath: string | undefined;
+	let producerSessionId: string | undefined;
 	let anyDirExists = false;
 	const availableIds = new Set<string>();
 
@@ -69,12 +80,18 @@ export async function resolveArtifactFile(url: InternalUrl, context?: ResolveCon
 		}
 		const match = files.find(f => f.startsWith(`${id}.`));
 		if (match) {
-			foundPath = path.join(dir, match);
-			break;
+			const provenance = await readArtifactProvenance(dir, id);
+			if (!producerScoped || provenance?.producerSessionId === callerSessionId) {
+				foundPath = path.join(dir, match);
+				producerSessionId = provenance?.producerSessionId;
+				break;
+			}
 		}
-		for (const f of files) {
-			const m = f.match(/^(\d+)\./);
-			if (m) availableIds.add(m[1]);
+		if (!producerScoped) {
+			for (const f of files) {
+				const m = f.match(/^(\d+)\./);
+				if (m) availableIds.add(m[1]);
+			}
 		}
 	}
 
@@ -83,6 +100,9 @@ export async function resolveArtifactFile(url: InternalUrl, context?: ResolveCon
 	}
 
 	if (!foundPath) {
+		if (producerScoped) {
+			throw new Error(`Artifact ${id} not found`);
+		}
 		const sorted = [...availableIds].sort((a, b) => Number(a) - Number(b));
 		const availableStr = sorted.length > 0 ? sorted.join(", ") : "none";
 		throw new Error(`Artifact ${id} not found. Available: ${availableStr}`);
@@ -92,7 +112,7 @@ export async function resolveArtifactFile(url: InternalUrl, context?: ResolveCon
 	if (stat.isDirectory()) {
 		throw new Error(`Artifact ${id} resolved to a directory, not a file`);
 	}
-	return { id, path: foundPath, size: stat.size };
+	return { id, path: foundPath, size: stat.size, producerSessionId };
 }
 
 export class ArtifactProtocolHandler implements ProtocolHandler {
@@ -131,9 +151,14 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
-		for (const dir of artifactsDirsFromRegistry()) {
+		const producerScoped = context?.localProtocolOptions?.artifactResolutionScope === "producer";
+		const callerSessionId = context?.sessionId ?? context?.localProtocolOptions?.getSessionId?.() ?? null;
+		const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
+		const dirs = producerScoped ? (pinnedDir ? [pinnedDir] : []) : artifactsDirsFromRegistry();
+		if (producerScoped && !callerSessionId) return [];
+		for (const dir of dirs) {
 			let files: string[];
 			try {
 				files = await fs.readdir(dir);
@@ -143,7 +168,10 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 			}
 			for (const f of files) {
 				const m = f.match(/^(\d+)\./);
-				if (m) ids.add(m[1]!);
+				if (!m) continue;
+				if (!producerScoped || (await readArtifactProvenance(dir, m[1]!))?.producerSessionId === callerSessionId) {
+					ids.add(m[1]!);
+				}
 			}
 		}
 		return [...ids].sort((a, b) => Number(a) - Number(b)).map(value => ({ value }));

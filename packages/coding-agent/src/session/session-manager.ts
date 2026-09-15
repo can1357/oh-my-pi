@@ -2500,12 +2500,12 @@ export class SessionManager {
 	}
 
 	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
-		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
+		return (await this.#artifactManagerForSession()?.allocatePath(toolType, this.#sessionId)) ?? {};
 	}
 
 	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
 		const manager = this.#artifactManagerForSession();
-		if (manager) return manager.save(content, toolType);
+		if (manager) return manager.save(content, toolType, this.#sessionId);
 
 		// Non-persistent session: keep an in-memory copy so spill truncation works.
 		this.#inMemoryArtifacts ??= new Map();
