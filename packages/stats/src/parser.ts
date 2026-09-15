@@ -272,12 +272,15 @@ function extractStats(
 					premiumRequests: derived,
 				};
 
+	const servedModel = msg.upstreamModel ?? msg.model;
+	const provider = msg.upstreamProvider ?? msg.provider;
 	return {
 		sessionFile,
 		entryId: entry.id,
 		folder,
-		model: msg.upstreamModel ?? msg.model,
-		provider: msg.upstreamProvider ?? msg.provider,
+		model: servedModel,
+		provider,
+		...(provider !== msg.provider && { pricingIdentity: { provider: msg.provider, model: servedModel } }),
 		api: msg.api,
 		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		duration: msg.duration ?? null,
