@@ -76,6 +76,16 @@ function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp:
 	return reachesThreshold ? longContext : rates;
 }
 
+/**
+ * Resolve the rate card in effect at `timestamp` (defaults to now) for display:
+ * scheduled `effectiveRates` are honored, the long-context tier is not (the
+ * picker shows the base per-MTok list price). Returns `cost` unchanged when no
+ * scheduled rate applies.
+ */
+export function resolveEffectiveTokenCost(cost: ModelCost, timestamp?: number): TokenCost {
+	return resolveTokenCost(cost, 0, cost.timeBased ? (timestamp ?? Date.now()) : undefined);
+}
+
 function isPeakPricingPeriod(schedule: TimeBasedCost, timestamp: number): boolean {
 	// Unix epoch was Thursday. Arithmetic keeps this UTC-only without allocating a Date.
 	const day = Math.floor(timestamp / 86_400_000);

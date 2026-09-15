@@ -10,7 +10,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelsAreEqual, resolveEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	type Component,
 	fuzzyRank,
@@ -358,13 +358,15 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 /** Both token legs at zero cost — the condition {@link formatCostPair} renders as `free`. */
 function isFreeModel(model: Model): boolean {
 	const cost = model.cost;
-	return !cost || (cost.input === 0 && cost.output === 0);
+	if (!cost) return true;
+	const rates = resolveEffectiveTokenCost(cost);
+	return rates.input === 0 && rates.output === 0;
 }
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
 function formatCostPair(model: Model): string {
 	if (isFreeModel(model)) return "free";
-	const cost = model.cost;
+	const cost = resolveEffectiveTokenCost(model.cost);
 
 	const fmt = (n: number): string => {
 		if (!Number.isFinite(n) || n < 0) return "?";

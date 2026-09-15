@@ -312,18 +312,20 @@ describe("ModelBrowser native model metadata", () => {
 	}
 
 	test("detail line badges upstream flags and appends the provider blurb", () => {
+		// swe-1-7-lightning: a real devin id with no cost-fallback rule, so the
+		// zero-cost fixture stays free (swe-2* now resolves scheduled pricing).
 		const detail = renderDetail(
-			makeModel("devin", "swe-2", {
-				description: "Fast\tagentic\ncoder",
+			makeModel("devin", "swe-1-7-lightning", {
+				description: "Fast\tagentic\tcoder",
 				isNew: true,
 				isBeta: true,
 				isRecommended: true,
 			}),
 		);
 
-		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
+		expect(detail).toContain("swe-1-7-lightning · new · beta · recommended · 128k ctx · 1k out · free per M");
 		// Tabs and newlines are flattened so the blurb stays one detail row.
-		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+		expect(detail).toMatch(/free per M · Fast\s+agentic\s+coder$/);
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {

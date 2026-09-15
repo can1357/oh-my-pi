@@ -12,6 +12,7 @@ import {
 	getBundledModels,
 	getNextTimeBasedPricingTransition,
 	getTimeBasedPricingPeriod,
+	resolveEffectiveTokenCost,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost, ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -172,6 +173,28 @@ describe("time-based token pricing", () => {
 		expect(calculateUncachedInputCost(cost, 99, 1000)).toBeCloseTo(((99 * 3) / 1e6) * 0.5, 12);
 		// A later full replacement without a tier must not inherit the base/previous tier.
 		expect(calculateUncachedInputCost(cost, 101, 2000)).toBeCloseTo(((101 * 5) / 1e6) * 0.5, 12);
+	});
+
+	it("resolves the scheduled display rate without engaging the long-context tier", () => {
+		const cost: ModelCost = {
+			input: 1,
+			output: 2,
+			cacheRead: 0.1,
+			cacheWrite: 1.25,
+			longContext: { inputThreshold: 100, input: 9, output: 9, cacheRead: 9, cacheWrite: 9 },
+			timeBased: {
+				offPeakMultiplier: 1,
+				peakWindows: [],
+				effectiveRates: [{ effectiveFrom: 2000, input: 5, output: 6, cacheRead: 0.5, cacheWrite: 6.25 }],
+			},
+		};
+		// Before the scheduled rate: base card, no long-context upgrade.
+		expect(resolveEffectiveTokenCost(cost, 1000)).toMatchObject({ input: 1, output: 2 });
+		// After: the scheduled card wins even though no prompt tokens exist.
+		expect(resolveEffectiveTokenCost(cost, 3000)).toMatchObject({ input: 5, output: 6 });
+		// No schedule at all: the base card is returned as-is.
+		const plain: ModelCost = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 };
+		expect(resolveEffectiveTokenCost(plain)).toBe(plain);
 	});
 
 	it("defaults scheduled pricing to now but never consults the clock for flat cards", () => {
