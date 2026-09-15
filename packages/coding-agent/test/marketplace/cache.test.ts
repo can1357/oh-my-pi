@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { $ } from "bun";
 import {
 	cachePlugin,
 	cleanOrphanedCache,
@@ -128,6 +129,35 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 		expect(cached).toBe(path.join(cacheDir, "my-market___my-plugin___1.0.0"));
 		expect(fs.existsSync(cached)).toBe(true);
 		expect(fs.existsSync(path.join(cached, "plugin.json"))).toBe(true);
+	});
+
+	it("cachePlugin copies tracked and non-ignored files from Git sources", async () => {
+		const sourcePath = path.join(sourceDir, "git-plugin");
+		await fsp.mkdir(sourcePath, { recursive: true });
+		await fsp.writeFile(path.join(sourcePath, "tracked.txt"), "tracked");
+		await fsp.writeFile(path.join(sourcePath, "untracked.txt"), "untracked");
+		await fsp.writeFile(path.join(sourcePath, "ignored.txt"), "ignored");
+		await fsp.writeFile(path.join(sourcePath, ".gitignore"), "ignored.txt\n");
+		await $`git init --initial-branch=main`.cwd(sourcePath).quiet();
+		await $`git config user.email test@example.com`.cwd(sourcePath).quiet();
+		await $`git config user.name Tester`.cwd(sourcePath).quiet();
+		await $`git add .gitignore tracked.txt && git commit -m init`.cwd(sourcePath).quiet();
+
+		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "git-plugin", "1.0.0");
+		expect(fs.existsSync(path.join(cached, "tracked.txt"))).toBe(true);
+		expect(fs.existsSync(path.join(cached, "untracked.txt"))).toBe(true);
+		expect(fs.existsSync(path.join(cached, "ignored.txt"))).toBe(false);
+	});
+
+	it("cachePlugin keeps copying all files from non-Git sources", async () => {
+		const sourcePath = path.join(sourceDir, "plain-plugin");
+		await fsp.mkdir(sourcePath, { recursive: true });
+		await fsp.writeFile(path.join(sourcePath, ".gitignore"), "ignored.txt\n");
+		await fsp.writeFile(path.join(sourcePath, "ignored.txt"), "not ignored without Git");
+
+		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "plain-plugin", "1.0.0");
+		expect(fs.existsSync(path.join(cached, ".gitignore"))).toBe(true);
+		expect(fs.existsSync(path.join(cached, "ignored.txt"))).toBe(true);
 	});
 
 	it("isCached returns true after cachePlugin", async () => {

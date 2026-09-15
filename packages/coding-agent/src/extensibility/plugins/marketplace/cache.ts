@@ -14,9 +14,43 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 
 import { isValidNameSegment } from "./types";
+
+async function gitCopyPaths(sourcePath: string): Promise<Set<string> | null> {
+	try {
+		const repository = vcs.git(sourcePath);
+		if (!repository) return null;
+
+		const [tracked, untracked] = await Promise.all([
+			repository.lsFiles(false, false),
+			repository.lsFiles(true, true),
+		]);
+		const repoRoot = repository.info().repoRoot;
+		const sourcePrefix = path.relative(repoRoot, path.resolve(sourcePath)).replaceAll(path.sep, "/");
+		const prefix = sourcePrefix === "" ? "" : `${sourcePrefix}/`;
+		const paths = new Set<string>();
+		for (const repoPath of [...tracked, ...untracked]) {
+			const normalized = repoPath.replaceAll(path.sep, "/").replace(/^\.\//, "");
+			if (prefix && !normalized.startsWith(prefix)) continue;
+			const relative = prefix ? normalized.slice(prefix.length) : normalized;
+			if (!relative) continue;
+			paths.add(relative);
+			let parent = path.posix.dirname(relative);
+			while (parent !== ".") {
+				paths.add(parent);
+				parent = path.posix.dirname(parent);
+			}
+		}
+		return paths;
+	} catch {
+		// A missing Git backend or an incomplete checkout should retain the
+		// historical unfiltered-copy behavior.
+		return null;
+	}
+}
 
 // Reject anything that could be used for path traversal or shell injection in
 // version strings. Only printable, unambiguous characters are allowed.
@@ -76,7 +110,15 @@ export async function cachePlugin(
 	// This prevents destroying an active install if fs.cp fails mid-copy.
 	const stagingPath = `${targetPath}.staging-${Date.now()}`;
 	try {
-		await fs.cp(sourcePath, stagingPath, { recursive: true });
+		const copyPaths = await gitCopyPaths(sourcePath);
+		const filter =
+			copyPaths === null
+				? undefined
+				: (source: string): boolean => {
+						const relative = path.relative(sourcePath, source).replaceAll(path.sep, "/");
+						return relative === "" || copyPaths.has(relative);
+					};
+		await fs.cp(sourcePath, stagingPath, filter ? { recursive: true, filter } : { recursive: true });
 		await fs.rm(targetPath, { recursive: true, force: true });
 		await fs.rename(stagingPath, targetPath);
 	} catch (err) {
