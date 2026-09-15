@@ -933,6 +933,12 @@ export class UiHelpers {
 	#syncTranscriptVisibility(container: TranscriptContainer): void {
 		if (isToolActivityComponent(container)) container.setToolActivityVisible(!this.ctx.hideToolActivity);
 		if (supportsToolOutputDetails(container)) container.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
+		// Tool-result images live on the assistant message rather than on the tool
+		// card, and no container capability reaches them, so they are applied here.
+		const imagesVisible = !this.ctx.hideToolActivity && !this.ctx.hideToolOutputDetails;
+		for (const child of container.children) {
+			if (child instanceof AssistantMessageComponent) child.setToolResultImagesVisible(imagesVisible);
+		}
 	}
 
 	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {

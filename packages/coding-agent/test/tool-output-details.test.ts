@@ -316,11 +316,12 @@ describe("tool output details", () => {
 
 		group.setToolOutputDetailsHidden(true);
 
-		const rows = group.render(60);
+		// Wide enough for the usage *and* more than half the row for the target.
+		const rows = group.render(120);
 		const row = rows.join("");
 
 		expect(rows).toHaveLength(1);
-		expect(Bun.stringWidth(Bun.stripANSI(row))).toBeLessThanOrEqual(60);
+		expect(Bun.stringWidth(Bun.stripANSI(row))).toBeLessThanOrEqual(120);
 		expect(Bun.stripANSI(row)).toContain("1.1K");
 	});
 
@@ -350,6 +351,36 @@ describe("tool output details", () => {
 
 		expect(rows).toHaveLength(1);
 		expect(Bun.stringWidth(Bun.stripANSI(rows[0] ?? ""))).toBeLessThanOrEqual(24);
+	});
+
+	it("keeps the read summary on a row too narrow for its usage", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/usage.ts" }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "line 1" }] }, false, "read-0");
+		group.attachUsage(
+			["read-0"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+			new Date(2026, 0, 2, 3, 4, 5).getTime(),
+			1_234_567,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(10);
+
+		expect(rows).toHaveLength(1);
+		expect(Bun.stringWidth(Bun.stripANSI(rows[0] ?? ""))).toBeLessThanOrEqual(10);
+		// The call itself must still be identifiable.
+		expect(Bun.stripANSI(rows[0] ?? "")).toContain("Read");
 	});
 
 	it("keeps an interrupted call neutral while folded", () => {

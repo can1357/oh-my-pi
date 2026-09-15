@@ -551,6 +551,32 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		card.stopAnimation();
 	});
 
+	it("reapplies the fold to restored read images when a staged replay fails", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-restored", "read", { path: "restored.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, true);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-restored", "read", { path: "restored.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-restored", [pngImage]);
+		assistant.setToolResultImagesVisible(true);
+		chatContainer.addChild(assistant);
+		expect(hasImageComponent(chatContainer)).toBe(true);
+		ctx.pendingMessagesContainer = {
+			disposeChildren() {
+				throw new Error("replay failed");
+			},
+		} as unknown as Container;
+
+		await expect(new UiHelpers(ctx).renderInitialMessages()).rejects.toThrow("replay failed");
+
+		expect(hasImageComponent(chatContainer)).toBe(false);
+	});
+
 	it("hides read-result images while tool output details are folded", async () => {
 		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
 		setTerminalImageProtocol(ImageProtocol.Sixel);

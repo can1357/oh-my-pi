@@ -387,11 +387,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					.map((line, index) => {
 						const usage = this.#summaryUsage[index];
 						if (!usage) return truncateToWidth(line, contentWidth);
-						// A narrow terminal can make the numbers wider than the row they
-						// share; the suffix gives way first so nothing wraps.
+						// The summary identifies the call, so it keeps the larger share of
+						// the row and the optional usage takes the rest — dropped when that
+						// would squeeze the summary below half the row, or wrap it.
 						const usageWidth = visibleWidth(usage);
-						if (usageWidth >= contentWidth) return truncateToWidth(usage, contentWidth);
-						return `${truncateToWidth(line, contentWidth - usageWidth)}${usage}`;
+						const summaryWidth = contentWidth - usageWidth;
+						if (summaryWidth < Math.ceil(contentWidth / 2)) return truncateToWidth(line, contentWidth);
+						return `${truncateToWidth(line, summaryWidth)}${usage}`;
 					})
 					.join("\n");
 			},
