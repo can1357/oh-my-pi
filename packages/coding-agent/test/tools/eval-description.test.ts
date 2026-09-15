@@ -53,6 +53,8 @@ describe("eval tool description", () => {
 	it("advertises agent() when spawns are allowed", () => {
 		const text = getEvalToolDescription({ py: true, js: true, spawns: true });
 		expect(text).toContain("agent(prompt");
+		expect(text).toContain("ordered list of candidates");
+		expect(text).toContain("no outside fallback");
 	});
 
 	it("omits agent() when the session forbids spawning", () => {

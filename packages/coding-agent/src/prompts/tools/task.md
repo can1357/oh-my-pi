@@ -13,6 +13,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 
 # Task Design
 - **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Read-only research MUST run on `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
+- **Model selection:** Pass `model` as a selector string, or an ordered array of candidate selectors, on the flat task or on each batch item. Candidates are tried in order for that spawn; if none is usable, the task fails before dispatch and does not fall back outside the supplied list.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a read-only scout only when affected files are genuinely unknown.{{/if}}
 - **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
@@ -28,6 +29,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
     Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
     NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+  - `model`: Optional model selector or ordered candidate selectors for this spawn. In batch mode, set this per item; the batch container has no shared model.
 {{#if evalToolsEnabled}}  - `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
 {{/if}}
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
@@ -47,6 +49,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
   NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+- `model`: Optional model selector or ordered candidate selectors for this spawn. Candidates are tried in order; an unavailable list fails before dispatch without fallback outside the list.
 {{#if evalToolsEnabled}}- `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
 {{/if}}
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`

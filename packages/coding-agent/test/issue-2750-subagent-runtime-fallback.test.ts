@@ -258,6 +258,111 @@ describe("subagent runtime model resolution", () => {
 		expect(result.resolvedModelIsFallback).toBeFalsy();
 	});
 
+	it("closed caller selection removes inherited exact, wildcard, role, and default chains", async () => {
+		const primary = model("primary", "bad-runtime-model");
+		const fallback = model("fallback", "working-model");
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				default: ["rogue/default"],
+				"primary/*": ["rogue/wildcard"],
+				"primary/bad-runtime-model": ["rogue/exact"],
+				role: ["rogue/role"],
+			},
+		});
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "issue-2750-closed",
+			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+			modelSelectionClosed: true,
+			settings,
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childFallbackChains).toEqual({ "subagent:issue-2750-closed": ["fallback/working-model"] });
+		expect(result.resolvedModel).toBe("fallback/working-model");
+	});
+
+	it("closed single caller selection installs no runtime fallback chain", async () => {
+		const primary = model("primary", "bad-runtime-model");
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				default: ["rogue/default"],
+				"primary/bad-runtime-model": ["rogue/exact"],
+			},
+		});
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "issue-2750-single-closed",
+			modelOverride: ["primary/bad-runtime-model"],
+			modelSelectionClosed: true,
+			parentActiveModelPattern: "fallback/working-model",
+			settings,
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childFallbackChains).toEqual({});
+	});
+
+	it("closed single caller does not fall back to an authenticated parent when caller auth expires", async () => {
+		const primary = model("primary", "caller-model");
+		const parent = model("parent", "authenticated-parent");
+		let initialModel: Model<Api> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			initialModel = options.model;
+			return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		const settings = Settings.isolated({});
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "issue-2750-expired-closed",
+			modelOverride: ["primary/caller-model"],
+			modelSelectionClosed: true,
+			parentActiveModelPattern: "parent/authenticated-parent",
+			settings,
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, parent],
+				getApiKey: async (candidate: Model<Api>) => (candidate.provider === "parent" ? "parent-key" : undefined),
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(initialModel?.provider).toBe("primary");
+		expect(initialModel?.id).toBe("caller-model");
+	});
+
 	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
 		const primary = model("lm-studio", "local-reviewer");
 		const fallback = model("openai-codex", "gpt-5.6-sol");

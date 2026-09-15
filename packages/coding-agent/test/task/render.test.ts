@@ -96,13 +96,20 @@ function makeParentWithNestedResults(childCount: number): TaskToolDetails {
 	return { projectAgentsDir: null, results: [parent], totalDurationMs: 1 };
 }
 
-function renderResultText(details: TaskToolDetails, expanded: boolean, uiTheme: Theme): string {
+function renderResultText(
+	details: TaskToolDetails,
+	expanded: boolean,
+	uiTheme: Theme,
+	text = "Ran 1 agent",
+	isError = false,
+	width = 120,
+): string {
 	const component = renderResult(
-		{ content: [{ type: "text", text: "Ran 1 agent" }], details },
+		{ content: [{ type: "text", text }], details, isError },
 		{ expanded, isPartial: false },
 		uiTheme,
 	);
-	return strip(component.render(120));
+	return strip(component.render(width));
 }
 
 function renderProgressText(progress: AgentProgress, expanded: boolean, uiTheme: Theme): string {
@@ -216,6 +223,22 @@ describe("task live progress rendering", () => {
 		expect(text).toContain("key");
 		expect(text).not.toContain("\x1b[2K");
 		expect(text).not.toContain("\r");
+	});
+
+	it("renders a zero-result task error as an error frame with sanitized and bounded details", () => {
+		const details: TaskToolDetails = { projectAgentsDir: null, results: [], totalDurationMs: 0 };
+		const text = renderResultText(
+			details,
+			true,
+			uiTheme,
+			"Task failed preflight:\tRequested model candidates provider/very-long-selector-that-must-truncate",
+			true,
+			48,
+		);
+		expect(text).toContain("✘");
+		expect(text).toContain("Task failed preflight:");
+		expect(text).not.toContain("\t");
+		for (const line of text.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(48);
 	});
 
 	it("caps collapsed nested task progress at four rows plus an elision line", () => {

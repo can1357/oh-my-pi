@@ -40,6 +40,8 @@ describe("workflow notice", () => {
 		const disabled = renderWorkflowNotice({ taskBatch: true, evalTools: false });
 		expect(enabled).toContain("Default to `workpool()`");
 		expect(enabled).toContain("`@tool`");
+		expect(enabled).toContain("ordered candidate list");
+		expect(enabled).toContain("never falls back outside it");
 		expect(disabled).toContain("Default to `workpool()`");
 		expect(disabled).not.toContain("`@tool`");
 		expect(disabled).not.toContain("tools=None");
