@@ -497,7 +497,6 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
 - `session_shutdown`
-- `model_select` — `{ model, previousModel, source: "set" | "cycle" | "restore" }`, fired when the active model actually changes (explicit selection via `/model`, `/switch`, role switch (the ctrl+p role-model cycler included), a retry-fallback swap, or a prewalk hand-off → `set`; `cycleModel()` (RPC `cycle_model` / SDK; no TUI keybinding) → `cycle`; session switch/resume rebinds, the failed-switch rollback, and retry-fallback returning to the previously selected model after an aborted swap or cooldown expiry → `restore`). Notification-only and dispatched detached from the switch, so handlers never delay a model change; same-model rebinds (extended-context toggle, discovery metadata refresh) do not fire it.
 
 In the interactive TUI, an extension whose factory registers no providers,
 shortcuts, composer shapes, or file fallbacks is loaded after the composer
@@ -523,6 +522,10 @@ Cancelable pre-events:
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+### Model selection
+
+- `model_select` — `{ model, previousModel, source: "set" | "cycle" | "restore" }`, fired when the active model actually changes (explicit selection via `/model`, `/switch`, role switch (the ctrl+p role-model cycler included), a retry-fallback swap, or a prewalk hand-off → `set`; `cycleModel()` (RPC `cycle_model` / SDK; no TUI keybinding) → `cycle`; session switch/resume rebinds, the failed-switch rollback, and retry-fallback returning to the previously selected model after an aborted swap or cooldown expiry → `restore`). Notification-only and dispatched detached from the switch, so handlers never delay a model change; same-model rebinds (extended-context toggle, discovery metadata refresh) do not fire it.
 
 ### Prompt and turn lifecycle
 
