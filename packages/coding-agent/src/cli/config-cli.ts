@@ -27,7 +27,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg" | "doctor";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -78,7 +78,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg", "doctor"];
 
 /**
  * Parse config subcommand arguments.
@@ -262,6 +262,9 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		case "init-xdg":
 			await initXdg();
 			break;
+		case "doctor":
+			await handleDoctor(cmd.flags);
+			break;
 	}
 }
 
@@ -426,6 +429,213 @@ function handlePath(): void {
 }
 
 // =============================================================================
+// Doctor: cross-layer config validation
+// =============================================================================
+
+interface DoctorIssue {
+	severity: "error" | "warning" | "info";
+	check: string;
+	message: string;
+	fix?: string;
+}
+
+async function readModelsConfig(): Promise<
+	Record<string, { auth?: string; baseUrl?: string; hasModels: boolean }>
+> {
+	const agentDir = getAgentDir();
+	const modelsPath = `${agentDir}/models.yml`;
+	try {
+		const raw = await Bun.file(modelsPath).text();
+		const providers: Record<string, { auth?: string; baseUrl?: string; hasModels: boolean }> = {};
+		let currentProvider: string | undefined;
+		for (const line of raw.split("\n")) {
+			if (!line.trim() || line.trim().startsWith("#")) continue;
+			const provMatch = line.match(/^  ([\w-]+):\s*$/);
+			if (provMatch) {
+				currentProvider = provMatch[1];
+				providers[currentProvider] = { hasModels: false };
+				continue;
+			}
+			if (currentProvider) {
+				const fieldMatch = line.match(/^    (\w+):\s*(.+)/);
+				if (fieldMatch) {
+					const [, key, value] = fieldMatch;
+					if (key === "auth") providers[currentProvider].auth = value.trim();
+					if (key === "baseUrl") providers[currentProvider].baseUrl = value.trim();
+				}
+				if (line.match(/^    models:\s*$/) || line.match(/^    modelOverrides:\s*$/)) {
+					providers[currentProvider].hasModels = true;
+				}
+			}
+		}
+		return providers;
+	} catch {
+		return {};
+	}
+}
+
+async function readCatalogModelProviders(): Promise<Map<string, string[]>> {
+	const agentDir = getAgentDir();
+	const catalogPath = `${agentDir}/operator-model-catalog.json`;
+	try {
+		const raw = await Bun.file(catalogPath).text();
+		const catalog = JSON.parse(raw);
+		const map = new Map<string, string[]>();
+		for (const engine of Object.values(catalog) as Array<{ models: Array<{ provider: string; id: string }> }>) {
+			for (const m of engine.models) {
+				const selector = `${m.provider}/${m.id}`;
+				if (!map.has(selector)) map.set(selector, []);
+				const providers = map.get(selector)!;
+				if (!providers.includes(m.provider)) providers.push(m.provider);
+			}
+		}
+		return map;
+	} catch {
+		return new Map();
+	}
+}
+
+async function handleDoctor(flags: { json?: boolean }): Promise<void> {
+	const issues: DoctorIssue[] = [];
+	const modelsProviders = await readModelsConfig();
+	const disabledProviders = (settings.get("disabledProviders") as string[] | undefined) ?? [];
+	const modelRoles = (settings.get("modelRoles") as Record<string, string> | undefined) ?? {};
+	const fallbackChains =
+		(settings.get("retry.fallbackChains") as Record<string, string[]> | undefined) ?? {};
+	const disabledSet = new Set(disabledProviders);
+	const catalogModelProviders = await readCatalogModelProviders();
+
+	// Check: auth:none providers NOT in disabledProviders
+	for (const [provider, config] of Object.entries(modelsProviders)) {
+		if (config.auth === "none" && !disabledSet.has(provider)) {
+			issues.push({
+				severity: "error",
+				check: "provider-auth",
+				message: `Provider "${provider}" has auth: none but is NOT in disabledProviders — requests will fail with 401`,
+				fix: `Add "${provider}" to disabledProviders in settings.json, or add an apiKey in models.yml`,
+			});
+		}
+	}
+
+	// Check: model roles → resolved provider
+	for (const [role, selector] of Object.entries(modelRoles)) {
+		if (!selector || typeof selector !== "string") continue;
+		const bare = selector.replace(/:\w+$/, "");
+		const parts = bare.split("/");
+		if (parts.length < 2) continue;
+		const [provider] = parts;
+		if (disabledSet.has(provider)) {
+			issues.push({
+				severity: "error",
+				check: "model-role-disabled",
+				message: `Model role "${role}" → "${selector}" resolves to disabled provider "${provider}"`,
+				fix: `Change the model role or remove "${provider}" from disabledProviders`,
+			});
+		}
+		if (modelsProviders[provider]?.auth === "none") {
+			issues.push({
+				severity: "warning",
+				check: "model-role-auth-none",
+				message: `Model role "${role}" → "${selector}" uses provider "${provider}" which has auth: none`,
+			});
+		}
+	}
+
+	// Check: fallback chains → resolvable providers
+	for (const [chainKey, entries] of Object.entries(fallbackChains)) {
+		if (!Array.isArray(entries)) continue;
+		for (const entry of entries) {
+			if (typeof entry !== "string") continue;
+			const bare = entry.replace(/:\w+$/, "");
+			const parts = bare.split("/");
+			if (parts.length < 2) continue;
+			const [provider] = parts;
+			if (disabledSet.has(provider)) {
+				issues.push({
+					severity: "error",
+					check: "fallback-disabled",
+					message: `Fallback chain "${chainKey}" entry "${entry}" resolves to disabled provider "${provider}"`,
+					fix: `Remove the entry or re-enable the provider`,
+				});
+			}
+		}
+	}
+
+	// Check: catalog conflicts (same model id under multiple providers)
+	const modelIdToProviders = new Map<string, string[]>();
+	for (const [selector, providers] of catalogModelProviders) {
+		const bareId = selector.split("/").slice(1).join("/");
+		if (!modelIdToProviders.has(bareId)) modelIdToProviders.set(bareId, []);
+		for (const p of providers) {
+			if (!modelIdToProviders.get(bareId)!.includes(p)) modelIdToProviders.get(bareId)!.push(p);
+		}
+	}
+	for (const [modelId, providers] of modelIdToProviders) {
+		if (providers.length > 1) {
+			const enabled = providers.filter(p => !disabledSet.has(p));
+			if (enabled.length > 1) {
+				issues.push({
+					severity: "warning",
+					check: "catalog-conflict",
+					message: `Model "${modelId}" exists under ${providers.length} providers (${providers.join(", ")}); ${enabled.length} are enabled — first-match wins, which may not be the intended one`,
+				});
+			}
+		}
+	}
+
+	// Check: disabled providers that have models.yml config (informational)
+	for (const dp of disabledProviders) {
+		if (modelsProviders[dp]) {
+			issues.push({
+				severity: "info",
+				check: "disabled-has-config",
+				message: `Disabled provider "${dp}" still has a config entry in models.yml — harmless but can be cleaned up`,
+			});
+		}
+	}
+
+	if (flags.json) {
+		await writeStdout(
+			`${JSON.stringify(
+				{
+					issues,
+					summary: {
+						errors: issues.filter(i => i.severity === "error").length,
+						warnings: issues.filter(i => i.severity === "warning").length,
+						info: issues.filter(i => i.severity === "info").length,
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		return;
+	}
+
+	const errors = issues.filter(i => i.severity === "error");
+	const warnings = issues.filter(i => i.severity === "warning");
+	const infos = issues.filter(i => i.severity === "info");
+
+	if (issues.length === 0) {
+		console.log(chalk.green("✓ Config doctor: no issues found"));
+		return;
+	}
+
+	console.log(chalk.bold(`Config doctor: ${errors.length} errors, ${warnings.length} warnings, ${infos.length} info\n`));
+
+	for (const issue of issues) {
+		const icon =
+			issue.severity === "error" ? chalk.red("✗") : issue.severity === "warning" ? chalk.yellow("⚠") : chalk.blue("ℹ");
+		console.log(`${icon} [${issue.check}] ${issue.message}`);
+		if (issue.fix) console.log(`  ${chalk.dim("fix:")} ${issue.fix}`);
+	}
+
+	if (errors.length > 0) {
+		console.log(`\n${chalk.red(`${errors.length} error(s) will cause runtime failures`)}`);
+	}
+}
+
+// =============================================================================
 // Help
 // =============================================================================
 
@@ -439,6 +649,7 @@ ${chalk.bold("Commands:")}
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
+  doctor             Cross-layer config validation (providers, auth, roles, fallbacks)
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
