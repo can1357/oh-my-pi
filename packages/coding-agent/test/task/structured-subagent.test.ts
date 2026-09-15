@@ -33,26 +33,34 @@ const AGENT: AgentDefinition = {
 
 function session(
 	options: {
+		cwd?: string;
+		settings?: Settings;
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
 		isolationEnabled?: boolean;
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		agentServiceTierOverrides?: Record<string, string>;
 	} = {},
 ): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
-		settings: Settings.isolated({
-			"task.maxRecursionDepth": options.maxDepth ?? 2,
-			"task.isolation.enabled": options.isolationEnabled ?? false,
-			"isolation.backend": "rcopy",
-			"task.enableLsp": true,
-			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
-			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
-		}),
+		settings:
+			options.settings ??
+			Settings.isolated({
+				"task.maxRecursionDepth": options.maxDepth ?? 2,
+				"task.isolation.enabled": options.isolationEnabled ?? false,
+				"isolation.backend": "rcopy",
+				"task.enableLsp": true,
+				...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+				...(options.agentServiceTierOverrides
+					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
+					: {}),
+			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
@@ -213,6 +221,45 @@ describe("structured subagent primitive", () => {
 			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
 			expect(liveSettings.get("task.enableEffort")).toBe(false);
 			expect(liveSettings.get("retry.modelFallback")).toBe(false);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves only the exact case-sensitive service-tier override into the policy", async () => {
+		mockDiscovery({ ...AGENT, name: "scout" });
+
+		const exact = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ agentServiceTierOverrides: { scout: "priority" } }), agent: "scout" }),
+		);
+		expect(exact.serviceTierOverride).toBe("priority");
+
+		const differentCase = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ agentServiceTierOverrides: { Scout: "priority" } }), agent: "scout" }),
+		);
+		expect(differentCase.serviceTierOverride).toBeUndefined();
+	});
+
+	it("reloads persisted per-agent service-tier overrides before each launch", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-tier-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const liveSession = session({ cwd: projectDir, settings: liveSettings });
+		mockDiscovery({ ...AGENT, name: "scout" });
+		const configPath = path.join(agentDir, "config.yml");
+
+		try {
+			await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    scout: priority\n");
+			const first = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(first.serviceTierOverride).toBe("priority");
+
+			await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    scout: none\n");
+			const second = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });

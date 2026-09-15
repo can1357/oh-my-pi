@@ -835,7 +835,7 @@ impl GitRepo {
 					continue;
 				}
 				let joined = if prefix.is_empty() {
-					path.clone()
+					path
 				} else {
 					format!("{prefix}/{path}")
 				};

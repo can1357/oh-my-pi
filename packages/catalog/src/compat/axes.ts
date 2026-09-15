@@ -292,6 +292,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		set: "catalog",
 		shape: "scalar",
 	},
+	"supports-assistant-prefill": { key: "supportsAssistantPrefill", set: "catalog", shape: "scalar" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },

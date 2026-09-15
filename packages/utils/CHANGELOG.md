@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [18.2.0] - 2026-09-15
+
+### Breaking Changes
+
+- Removed the unused `globPaths`, `loadGitignorePatterns`, and `GlobPathsOptions` exports.
+- Browser helpers now manage Chrome only: removed `Browser`, `BrowserTag`, `resolveBuildId()`, `getInstalledBrowsers()`, and `browser` options/metadata; `getDownloadUrl()` now takes `(platform, buildId, baseUrl?)`.
+
+### Added
+
+- Added `relativePathWithinNormalizedRoot()` for reusing canonical paths across containment checks.
+- Added `sleepLong()` and `MAX_TIMER_DELAY_MS`: an abortable sleep that chunks delays past the signed 32-bit timer ceiling so day-scale provider waits elapse instead of overflowing the timer.
+
+### Changed
+
+- Log-retention cleanup now runs after logger construction without keeping short-lived commands alive.
+- Debugger support now loads only when SIGUSR1 requests it.
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping OpenCode Go's `Resets in …` quota window (`45min`, `2hr 15min`, `3 days`): the `reset in` pattern now accepts `Resets` phrasing, `hr`/`day` units, and compound `2hr 15min` remainders, so exhausted Go credentials block for the server-stated window instead of the 60s heuristic guess. ([#12091](https://github.com/can1357/oh-my-pi/pull/12091) by [@H4vC](https://github.com/H4vC))
+- Async file-peek callbacks now receive stable `Uint8Array` windows with copying `slice()` semantics.
+- Dotenv loading now handles multiline values and escapes consistently with Bun, preventing project values from leaking into child-shell environments.
+- SSE readers now support lone-CR line endings and CRLF split across chunks without merging or delaying events.
+
+## [18.1.22] - 2026-09-14
+
+### Fixed
+
+- Fixed `extractRetryHint` sleeping hours past the provider's stated wait when a timezone-naive `reset at` timestamp overshoots the relative retry hint: the skewed stamp is now ignored instead of winning longest-wins ([#12070](https://github.com/can1357/oh-my-pi/pull/12070) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.21] - 2026-09-14
+
+### Added
+
+- Added `getBrowserProfilesDir()` (`~/.omp/browser-profiles`; XDG: `$XDG_STATE_HOME/omp/browser-profiles`) for profiles of Chromium browsers spawned by the browser tool.
+
+### Fixed
+
+- Timed out stalled Chrome-for-Testing metadata requests after 30 seconds when looking up download metadata
+- Concurrent browser installations share one download without replacing a running browser, and stalled downloads time out with partial files cleaned up for retry.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
+
 ### Fixed
 
 - Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).

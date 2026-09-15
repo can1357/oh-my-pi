@@ -31,6 +31,7 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
+import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
@@ -485,129 +486,19 @@ export async function bindPreparedExtensions(
 	};
 }
 
-interface ExtensionManifest {
-	extensions?: string[];
-	themes?: string[];
-	skills?: string[];
-}
-
-async function readExtensionManifest(packageJsonPath: string): Promise<ExtensionManifest | null> {
-	try {
-		const pkg = (await Bun.file(packageJsonPath).json()) as { omp?: ExtensionManifest; pi?: ExtensionManifest };
-		const manifest = pkg.omp ?? pkg.pi;
-		if (manifest && typeof manifest === "object") {
-			return manifest;
-		}
-		return null;
-	} catch (error) {
-		if (isEnoent(error) || isEacces(error) || hasFsCode(error, "EPERM")) {
-			return null;
-		}
-		logger.warn("Failed to read extension manifest", { path: packageJsonPath, error: String(error) });
-		return null;
-	}
-}
-
 function isExtensionFile(name: string): boolean {
 	return name.endsWith(".ts") || name.endsWith(".js");
 }
 
-/**
- * Resolve extension entry points from a directory.
- */
-async function resolveExtensionEntries(dir: string): Promise<string[] | null> {
-	const packageJsonPath = path.join(dir, "package.json");
-	const manifest = await readExtensionManifest(packageJsonPath);
-	if (manifest?.extensions?.length) {
-		const entries: string[] = [];
-		for (const extPath of manifest.extensions) {
-			const resolvedExtPath = path.resolve(dir, extPath);
-			try {
-				await fs.stat(resolvedExtPath);
-				entries.push(resolvedExtPath);
-			} catch (err) {
-				if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM")) continue;
-				throw err;
-			}
-		}
-		if (entries.length > 0) {
-			return entries;
-		}
-	}
+const CONFIGURED_EXTENSION_DIRECTORY_OPTIONS = {
+	indexNames: ["index.ts", "index.js"],
+	isScanFile: isExtensionFile,
+	throwUnexpectedStatErrors: true,
+	onReadError: (filePath: string, error: unknown) => {
+		logger.warn("Failed to resolve extension directory", { path: filePath, error: String(error) });
+	},
+};
 
-	const indexTs = path.join(dir, "index.ts");
-	const indexJs = path.join(dir, "index.js");
-	try {
-		await fs.stat(indexTs);
-		return [indexTs];
-	} catch (err) {
-		if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM")) {
-			// Ignore
-		} else {
-			throw err;
-		}
-	}
-	try {
-		await fs.stat(indexJs);
-		return [indexJs];
-	} catch (err) {
-		if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM")) {
-			// Ignore
-		} else {
-			throw err;
-		}
-	}
-
-	return null;
-}
-
-/**
- * Discover extensions in a directory.
- *
- * Discovery rules:
- * 1. Direct files: `extensions/*.ts` or `*.js` → load
- * 2. Subdirectory with index: `extensions/<ext>/index.ts` or `index.js` → load
- * 3. Subdirectory with package.json: `extensions/<ext>/package.json` with "omp"/"pi" field → load declared paths
- *
- * No recursion beyond one level. Complex packages must use package.json manifest.
- */
-async function discoverExtensionsInDir(dir: string): Promise<string[]> {
-	const discovered: string[] = [];
-
-	// First check if this directory itself has explicit extension entries (package.json or index)
-	const rootEntries = await resolveExtensionEntries(dir);
-	if (rootEntries) {
-		return rootEntries;
-	}
-
-	// Otherwise, discover extensions from directory contents
-	let entries: fs1.Dirent[];
-	try {
-		entries = await fs.readdir(dir, { withFileTypes: true });
-	} catch (err) {
-		if (isEnoent(err)) return [];
-		logger.warn("Failed to discover extensions in directory", { path: dir, error: String(err) });
-		return [];
-	}
-
-	for (const entry of entries) {
-		const entryPath = path.join(dir, entry.name);
-
-		if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
-			discovered.push(entryPath);
-			continue;
-		}
-
-		if (entry.isDirectory() || entry.isSymbolicLink()) {
-			const resolved = await resolveExtensionEntries(entryPath);
-			if (resolved) {
-				discovered.push(...resolved);
-			}
-		}
-	}
-
-	return discovered;
-}
 async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
 	const hooks: string[] = [];
 	for (const hookType of ["pre", "post"]) {
@@ -726,16 +617,7 @@ export async function discoverExtensionPaths(
 		}
 
 		if (stat?.isDirectory()) {
-			const entries = await resolveExtensionEntries(resolved);
-			if (entries) {
-				addPaths(entries);
-				continue;
-			}
-
-			const discovered = await discoverExtensionsInDir(resolved);
-			if (discovered.length > 0) {
-				addPaths(discovered);
-			}
+			addPaths(resolveExtensionDirectory(resolved, CONFIGURED_EXTENSION_DIRECTORY_OPTIONS).files);
 			continue;
 		}
 

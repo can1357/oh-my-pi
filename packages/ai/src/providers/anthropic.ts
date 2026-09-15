@@ -122,6 +122,7 @@ import {
 	resolveGitHubCopilotBaseUrl,
 	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
+import { servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
@@ -2588,6 +2589,11 @@ const streamAnthropicOnce = (
 					if (unwrappedThinking !== undefined) {
 						block.thinking = unwrappedThinking;
 						block.thinkingSignature = undefined;
+					} else if (!output.upstreamModel && block.thinkingSignature) {
+						// The signature names the model that actually produced the
+						// block; a gateway serving a different model than requested
+						// cannot mint one that says otherwise.
+						output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
 					}
 					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 				} else if (block.type === "anthropicServerTool" && block.block.type === "server_tool_use") {
@@ -3289,6 +3295,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3318,6 +3325,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
@@ -3351,6 +3359,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3378,6 +3387,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);

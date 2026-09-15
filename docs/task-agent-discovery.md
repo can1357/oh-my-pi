@@ -208,6 +208,19 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
+Service-tier precedence is independent of model selection: an exact, case-sensitive
+`task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
+the global behavior. `inherit` snapshots the parent session's live per-family tiers (including
+`/fast` changes) for the next spawn. The child session resolves a concrete value against the model
+it finally settles on — after auth fallback and after patterns only the session can resolve, such as
+extension-registered models — and populates only that model's provider family when the family
+supports the value, so same-family retry fallbacks retain the tier and cross-family fallbacks never
+inherit it. The resolved map is persisted with the child's session, even when it is empty, so a
+parked agent revived after a restart keeps its per-agent tier instead of re-deriving
+`tier.subagent`. The entry is looked up by task/eval dispatch only; Vibe workers launched through
+the same executor keep `tier.subagent`. Service tiers are configuration-only; agent frontmatter and
+the task/eval wire formats do not expose a tier field or automatic Fast policy.
+
 Runtime output schema precedence is:
 
 1. the task item's explicit `outputSchema`

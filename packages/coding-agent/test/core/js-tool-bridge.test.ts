@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
+import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -94,6 +95,43 @@ describe("callSessionTool", () => {
 			undefined,
 			context,
 		);
+	});
+
+	it("settles an interrupted speculative wait without starting ordinary tool execution", async () => {
+		const started = Promise.withResolvers<void>();
+		const controller = new AbortController();
+		const lateClaim = Promise.withResolvers<undefined>();
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ordinary" }] });
+		const shadowCell = {
+			async claim(
+				_name: string,
+				_args: unknown,
+				_identity: { siteId: string; occurrence: number },
+				_remainingTimeoutMs: number,
+				_signal?: AbortSignal,
+			) {
+				started.resolve();
+				return await lateClaim.promise;
+			},
+		} as unknown as EvalShadowCellSession;
+		const call = callSessionTool(
+			"read",
+			{ path: "/tmp/waiting.txt" },
+			{
+				session: createSession([createTool("read", execute)]),
+				signal: controller.signal,
+				identity: { siteId: "site-1", occurrence: 0 },
+				shadowCell,
+			},
+		);
+
+		await started.promise;
+		controller.abort();
+
+		await expect(call).rejects.toThrow();
+		expect(execute).not.toHaveBeenCalled();
+		lateClaim.reject(new Error("late speculative failure"));
+		await Promise.resolve();
 	});
 
 	it("validates optional nulls before executing a real todo tool", async () => {
@@ -683,6 +721,29 @@ describe("callSessionTool", () => {
 		expect(phases).toEqual([
 			{ name: "Recovered", tasks: [{ content: "From malformed JSON", status: "in_progress" }] },
 		]);
+	});
+
+	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {
+		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist", status: "in_progress" }] }];
+		const persisted: TodoPhase[][] = [];
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			persistTodoPhases: next => persisted.push(next),
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+		const todoTool = new TodoTool(session);
+
+		await callSessionTool("todo", { op: "done", task: "Persist" }, { session });
+		expect(persisted).toEqual([[{ name: "Ship", tasks: [{ content: "Persist", status: "completed" }] }]]);
+
+		// Reads and rejected batches leave the branch untouched.
+		await callSessionTool("todo", { op: "view" }, { session });
+		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
+		expect(persisted).toHaveLength(1);
 	});
 
 	it("returns structured tool results when details or images are present", async () => {

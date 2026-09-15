@@ -6,7 +6,7 @@ import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -104,6 +104,48 @@ describe("StatusLineComponent effective settings cache", () => {
 		}
 	});
 
+	it("skips the entire segment pipeline until a visible input invalidates it", () => {
+		const session = makeSession();
+		let snapshotCalls = 0;
+		const getSnapshot = session.getAsyncJobSnapshot.bind(session);
+		session.getAsyncJobSnapshot = () => {
+			snapshotCalls++;
+			return getSnapshot();
+		};
+		const component = statusLines.track(new StatusLineComponent(session));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "mode"],
+			rightSegments: ["session_name"],
+			sessionAccent: false,
+		});
+
+		const first = component.getTopBorder(120);
+		const second = component.getTopBorder(120);
+		expect(second).toEqual(first);
+		expect(snapshotCalls).toBe(1);
+
+		component.invalidate();
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(2);
+
+		component.setPlanModeStatus({ enabled: true, paused: false });
+		const withPlan = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withPlan).toContain("Plan");
+		expect(snapshotCalls).toBe(3);
+
+		const mutableModel = session.state.model as { name: string };
+		mutableModel.name = "Renamed Model";
+		const withModel = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withModel).toContain("Renamed Model");
+		expect(snapshotCalls).toBe(4);
+
+		const mutableMessages = session.messages as unknown[];
+		mutableMessages.push({ role: "user", content: "new tail" });
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(5);
+	});
+
 	it("invalidates on updateSettings and reflects hook visibility changes", () => {
 		const component = makeComponent({
 			preset: "custom",
@@ -170,8 +212,8 @@ describe("StatusLineComponent effective settings cache", () => {
 		component.setRunningSubagents(["sub-1", "sub-2"]);
 
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(content).toContain("2 agents");
-		expect(content).not.toContain("running");
+		expect(content).toContain(`${theme.icon.agents} 2`);
+		expect(content).not.toContain("agents");
 	});
 
 	it("keeps plan and hook state dynamic without settings invalidation", () => {

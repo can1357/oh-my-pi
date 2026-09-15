@@ -1,26 +1,23 @@
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import {
-	addKeyAliases,
-	canonicalKeyId,
-	Editor,
-	type EditorTextDecorationContext,
-	type EditorTheme,
-	getKeybindings,
-	type KeyId,
-	parseKey,
-	parseKittySequence,
-	TUI,
-} from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
+import { Editor, type EditorTextDecorationContext, type EditorTheme } from "@oh-my-pi/pi-tui/components/editor";
+import { addKeyAliases, canonicalKeyId, getKeybindings } from "@oh-my-pi/pi-tui/keybindings";
+import { type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui/keys";
+import { TUI } from "@oh-my-pi/pi-tui/tui";
 import type { AppKeybinding } from "../../config/keybindings";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "../../extensibility/skill-tokens";
 import { isVideoPath, videoPreviewSource } from "../../utils/video";
 import {
 	attachmentSgr,
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
+	collapseSkillTokens,
 	renderPlaceholders,
+	skillChipLabel,
+	skillChipStyle,
+	skillToken,
 } from "../composer-attachments";
 import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
@@ -423,6 +420,18 @@ export class CustomEditor extends Editor {
 	 *  (labels key the atom table). */
 	pendingTexts: TextAttachment[] = [];
 	#textAttachmentCounter = 0;
+	#composerChipsCache:
+		| {
+				textRevision: number;
+				images: ImageContent[];
+				imageCount: number;
+				imageLinks: (string | undefined)[];
+				imageLinkCount: number;
+				texts: TextAttachment[];
+				textCount: number;
+				chips: ComposerChipDescriptor[];
+		  }
+		| undefined;
 	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
 	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
@@ -532,11 +541,57 @@ export class CustomEditor extends Editor {
 	 *  registered in the atom table (queued-message dequeue, failed-submit restore). Leaves the
 	 *  pending image/text state untouched — callers own that. */
 	setCollapsedText(text: string): void {
+		const register = (label: string, expansion: string) => this.registerAtom(label, expansion);
 		this.setText(
-			collapseImageMarkers(text, this.pendingImages.length, (label, expansion) =>
-				this.registerAtom(label, expansion),
+			collapseSkillTokens(
+				collapseImageMarkers(text, this.pendingImages.length, register),
+				name => this.skillFilePath(name) !== undefined,
+				register,
 			),
 		);
+	}
+
+	/**
+	 * Host-owned skill registry probe: the SKILL.md path for a registered skill, else
+	 * `undefined`. Only registered skills collapse into chips — an unknown `/skill:<name>`
+	 * stays literal text — and the path makes the chip a clickable link. Startup defaults
+	 * to "none known".
+	 */
+	skillFilePath: (name: string) => string | undefined = () => undefined;
+
+	/**
+	 * Late-bound OSC 8 file link renderer. Startup stays plain until the full
+	 * interactive graph supplies the settings-aware implementation.
+	 */
+	fileHyperlink: (filePath: string, text: string) => string = (_filePath, text) => text;
+
+	/** Collapse every completed `/skill:<name>` token for a known skill into an atomic chip.
+	 *  A token is complete once whitespace follows it (autocomplete appends one; so does the
+	 *  user moving on), so a half-typed name never snaps early. */
+	#collapseSkillTokens(): void {
+		// Scan lines (no buffer join) so plain typing stays O(1) allocations per keystroke.
+		const lines = this.getLines();
+		if (!lines.some(line => line.includes("/skill:")) || !allowsSkillTokens(this.getText())) return;
+		for (let i = 0; i < lines.length; i++) {
+			let line = lines[i];
+			if (!line.includes("/skill:")) continue;
+			for (;;) {
+				SKILL_TOKEN_RE.lastIndex = 0;
+				let collapsed = false;
+				for (let match = SKILL_TOKEN_RE.exec(line); match !== null; match = SKILL_TOKEN_RE.exec(line)) {
+					const name = match[2];
+					const start = match.index + match[1].length;
+					const end = match.index + match[0].length;
+					if (end === line.length && i === lines.length - 1) break;
+					if (this.skillFilePath(name) === undefined) continue;
+					this.collapseToAtom(i, start, end, skillChipLabel(name), skillToken(name));
+					collapsed = true;
+					break;
+				}
+				if (!collapsed) break;
+				line = this.getLines()[i];
+			}
+		}
 	}
 
 	/** Stage `content` as a text-attachment chip: inserts the compact token at the cursor and
@@ -555,9 +610,21 @@ export class CustomEditor extends Editor {
 		this.insertAtom(label, expansion);
 	}
 
-	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
-	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
-	composerChips(): ComposerChipDescriptor[] {
+	/** Cached read-only attachments whose chip token remains in the buffer.
+	 * Deleting a token hides its chip and drops the attachment from submission. */
+	composerChips(): readonly ComposerChipDescriptor[] {
+		const cached = this.#composerChipsCache;
+		if (
+			cached?.textRevision === this.textRevision &&
+			cached.images === this.pendingImages &&
+			cached.imageCount === this.pendingImages.length &&
+			cached.imageLinks === this.pendingImageLinks &&
+			cached.imageLinkCount === this.pendingImageLinks.length &&
+			cached.texts === this.pendingTexts &&
+			cached.textCount === this.pendingTexts.length
+		) {
+			return cached.chips;
+		}
 		const text = this.getText();
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
@@ -578,6 +645,16 @@ export class CustomEditor extends Editor {
 			if (!text.includes(entry.label)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
+		this.#composerChipsCache = {
+			textRevision: this.textRevision,
+			images: this.pendingImages,
+			imageCount: this.pendingImages.length,
+			imageLinks: this.pendingImageLinks,
+			imageLinkCount: this.pendingImageLinks.length,
+			texts: this.pendingTexts,
+			textCount: this.pendingTexts.length,
+			chips,
+		};
 		return chips;
 	}
 
@@ -666,6 +743,12 @@ export class CustomEditor extends Editor {
 					}
 				}
 				return highlighted;
+			},
+			renderSkill: (label, name) => {
+				locateSource(label);
+				const styled = skillChipStyle(label);
+				const filePath = this.skillFilePath(name);
+				return filePath === undefined ? styled : this.fileHyperlink(filePath, styled);
 			},
 			renderReference: (value, kind, index, form) => {
 				locateSource(value);
@@ -906,7 +989,7 @@ export class CustomEditor extends Editor {
 			// First space, a deliberate tap, or jittery smashing: not a steady machine cadence yet, so
 			// type a real space and reset the mechanical run.
 			this.#mechanicalRun = 0;
-			super.handleInput(data);
+			this.#forwardInput(data);
 			this.#spaceRunInserted++;
 			return true;
 		}
@@ -1030,6 +1113,7 @@ export class CustomEditor extends Editor {
 			// synchronously instead of opening a menu the submit would land in.
 			if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
 			else this.pasteText(content);
+			this.#collapseSkillTokens();
 			// No async paste was started; drain the queued trailing bytes ourselves.
 			const drained = this.#pendingInput.splice(0);
 			for (const chunk of drained) this.handleInput(chunk);
@@ -1209,7 +1293,7 @@ export class CustomEditor extends Editor {
 		}
 
 		// Pass to parent for normal handling
-		super.handleInput(data);
+		this.#forwardInput(data);
 		if (!hadBareQueuePrefix && (this.textEquals("->") || this.textEquals("=>"))) {
 			const cursor = this.getCursor();
 			if (cursor.line === 0 && cursor.col === 2) {
@@ -1242,6 +1326,12 @@ export class CustomEditor extends Editor {
 			else this.setText("");
 			return;
 		}
+		this.#forwardInput(data);
+	}
+
+	/** Base text-editing pipeline, then snap any skill token the keystroke just completed. */
+	#forwardInput(data: string): void {
 		super.handleInput(data);
+		this.#collapseSkillTokens();
 	}
 }

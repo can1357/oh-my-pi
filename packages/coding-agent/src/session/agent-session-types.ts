@@ -319,6 +319,8 @@ export interface AgentSessionConfig {
 	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
+	/** Config problems collected during WATCHDOG.yml discovery. */
+	advisorConfigWarnings?: string[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */

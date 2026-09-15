@@ -1,3 +1,4 @@
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type RegistryEvent } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
@@ -40,6 +41,7 @@ export class SessionFocusController {
 	#focusedAgentId: string | undefined;
 	/** Session currently attached while focused; undefined when unfocused. */
 	#attachedSession: AgentSession | undefined;
+	#focusAttachment: Promise<boolean> | undefined;
 	#registryUnsubscribe: (() => void) | undefined;
 	#attachGeneration = 0;
 	/** Monotonic focus-request id: a request that resolves after a newer one drops instead of clobbering the view. */
@@ -77,22 +79,29 @@ export class SessionFocusController {
 		// still reviving) wins: drop the stale completion instead of letting
 		// the slower revive replace the view.
 		if (request !== this.#focusRequestSeq) return;
-		// Doom in-flight attachments from older requests now that this one is
-		// known usable — not at request time, so a newer revival that fails
-		// leaves the current attachment undisturbed instead of half torn down.
-		++this.#attachGeneration;
-		this.#focusedAgentId = id;
-		this.#attachedSession = session;
-		this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
+		const sameSession = id === this.#focusedAgentId && session === this.#attachedSession;
+		let attachment = this.#focusAttachment;
+		// Reuse an in-flight rebuild without discarding unpersisted tool cards.
+		if (sameSession) {
+			if (!attachment) return;
+		} else {
+			++this.#attachGeneration;
+			this.#focusedAgentId = id;
+			this.#attachedSession = session;
+			this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
+			attachment = this.#attach(session);
+			this.#focusAttachment = attachment;
+		}
 		let attached = false;
 		try {
-			attached = await this.#attach(session);
+			attached = await attachment;
 		} catch (error) {
-			// Same supersede rule as the revive above: only the current
-			// request may surface attachment failures.
 			if (request !== this.#focusRequestSeq) return;
 			throw error;
+		} finally {
+			if (this.#focusAttachment === attachment) this.#focusAttachment = undefined;
 		}
+		if (request !== this.#focusRequestSeq) return;
 		if (attached && this.#focusedAgentId === id && this.#attachedSession === session) {
 			this.ctx.showStatus(`Viewing agent ${id} — Esc returns to main, ←← hops to parent`);
 		}
@@ -160,65 +169,86 @@ export class SessionFocusController {
 	/** Retarget core, both directions: swap subscription, transcript, and status line onto `target`. */
 	async #attach(target: AgentSession): Promise<boolean> {
 		const generation = ++this.#attachGeneration;
-		this.ctx.unsubscribe?.();
-		this.ctx.clearTransientSessionUi();
-		this.ctx.eventController.resetTranscriptAnchors();
-		// Orphan-delta guard: when attaching mid-turn the message_start for the
-		// in-flight assistant message predates the attach. message_update carries
-		// the full accumulating message, so synthesize the missing start before
-		// the first orphaned update; every other handler is tolerant of unknown
-		// anchors (guarded by streamingComponent/pendingTools lookups).
-		let assistantStreamSynced = false;
-		this.ctx.unsubscribe = target.subscribe(async event => {
-			if (event.type === "message_start" && event.message.role === "assistant") {
-				assistantStreamSynced = true;
-			} else if (event.type === "message_update" && event.message.role === "assistant" && !assistantStreamSynced) {
-				assistantStreamSynced = true;
-				await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
-			}
-			await this.ctx.eventController.handleEvent(event);
-		});
-		// Events emitted while another session was focused had no TUI listener,
-		// but their message_end handlers still persist authoritative transcript
-		// state asynchronously. Subscribe first, then settle the persistence
-		// already in flight at this boundary before replay: an already-emitted
-		// tool completion becomes a persisted toolResult, so the rebuild can't
-		// resurrect a result-less toolCall whose only completion was lost during
-		// the blackout (#9816). Later events reach the newly installed listener.
-		await target.settleInFlightMessagePersistence();
-		if (generation !== this.#attachGeneration) return false;
-		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
-		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-		if (generation !== this.#attachGeneration) return false;
-		// Partial tool results are display events, not persisted messages. Replay
-		// each target's latest snapshot after rebuilding so focus navigation does
-		// not collapse a live task board back to its bare call arguments (#10446).
-		for (const event of target.activeToolExecutionUpdates()) {
-			await this.ctx.eventController.handleEvent(event);
+		try {
+			this.ctx.unsubscribe?.();
+			this.ctx.clearTransientSessionUi();
+			this.ctx.eventController.resetTranscriptAnchors();
+			let assistantStreamSynced = false;
+			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
+				if (generation !== this.#attachGeneration) return;
+				if (!assistantStreamSynced) {
+					assistantStreamSynced = true;
+					await this.ctx.eventController.handleEvent({ type: "message_start", message });
+					if (generation !== this.#attachGeneration) return;
+				}
+				await this.ctx.eventController.handleEvent({
+					type: "message_update",
+					message,
+					assistantMessageEvent: { type: "start", partial: message },
+				});
+				if (generation === this.#attachGeneration) this.ctx.eventController.restorePendingToolResults();
+			};
+			this.ctx.unsubscribe = target.subscribe(async event => {
+				if (generation !== this.#attachGeneration) return;
+				if (event.type === "message_start" && event.message.role === "assistant") {
+					assistantStreamSynced = true;
+				} else if (
+					(event.type === "message_update" || event.type === "message_end") &&
+					event.message.role === "assistant" &&
+					!assistantStreamSynced
+				) {
+					if (event.type === "message_end") await restoreAssistant(event.message);
+					else {
+						assistantStreamSynced = true;
+						await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+					}
+					if (generation !== this.#attachGeneration) return;
+				}
+				if (event.type === "message_end" && event.message.role === "assistant") assistantStreamSynced = false;
+				await this.ctx.eventController.handleEvent(event);
+			});
+
+			await target.settleInFlightMessagePersistence();
 			if (generation !== this.#attachGeneration) return false;
+			this.ctx.statusLine.setSession(target, this.#focusedAgentId);
+			// Reset run bookkeeping before replay populates pending tool handles.
+			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
+			else setTerminalTitleState("idle");
+			if (generation !== this.#attachGeneration) return false;
+			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			if (generation !== this.#attachGeneration) return false;
+			this.ctx.eventController.restorePendingToolResults();
+
+			const live = target.agent.state.streamMessage;
+			if (live?.role === "assistant") await restoreAssistant(live);
+			if (generation !== this.#attachGeneration) return false;
+			for (const event of target.activeToolExecutionUpdates()) {
+				await this.ctx.eventController.handleEvent(event);
+				if (generation !== this.#attachGeneration) return false;
+			}
+			await this.ctx.reloadTodos(target);
+			if (generation !== this.#attachGeneration) return false;
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.updateEditorBorderColor();
+			this.ctx.ui.requestRender();
+			return true;
+		} catch (error) {
+			if (generation === this.#attachGeneration) {
+				this.#focusedAgentId = undefined;
+				this.#attachedSession = undefined;
+				// Keep a failed main replay subscribed; never recursively recover it.
+				if (target !== this.ctx.session) {
+					try {
+						await this.#attach(this.ctx.session);
+					} catch (recoveryError) {
+						throw new AggregateError(
+							[error, recoveryError],
+							"Focus attachment and main-session recovery both failed",
+						);
+					}
+				}
+			}
+			throw error;
 		}
-		// Retarget the sticky Todo HUD too. While a subagent is focused the main
-		// session's `todo` completions never reach this controller; returning to
-		// main must therefore reload its current state instead of retaining the
-		// pre-focus snapshot. Passing `target` also restores a focused subagent's
-		// own todos rather than overwriting them with the main session's list.
-		await this.ctx.reloadTodos(target);
-		if (generation !== this.#attachGeneration) return false;
-		// Rebuild the pending steering/follow-up block the same way. clearTransientSessionUi()
-		// disposed pendingMessagesContainer's children, but nothing re-derived them, so returning
-		// from a focused agent left the queue intact yet permanently unpainted until an unrelated
-		// caller repainted it (#11379). Reads viewSession (target ?? main), so this restores main's
-		// queue on unfocus and shows a focused subagent's own queue on focus.
-		this.ctx.updatePendingMessagesDisplay();
-		// Sync the run-state title to the attached target: a streaming target has no
-		// agent_start incoming, so arm the loader/working title manually; an idle
-		// target would otherwise inherit the previous session's stuck spinner, so
-		// reset it to idle (agent_end teardown already ran via clearTransientSessionUi).
-		if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
-		else setTerminalTitleState("idle");
-		if (generation !== this.#attachGeneration) return false;
-		this.ctx.updateEditorBorderColor();
-		this.ctx.ui.requestRender();
-		return true;
 	}
 }

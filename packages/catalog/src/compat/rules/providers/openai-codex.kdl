@@ -1,6 +1,9 @@
 // Provider-wire compat for "openai-codex"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openai-codex" {
+	default-model "gpt-5.5"
+	env "OPENAI_CODEX_OAUTH_TOKEN"
+
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	service-tier-cost {
 		flex 0.5

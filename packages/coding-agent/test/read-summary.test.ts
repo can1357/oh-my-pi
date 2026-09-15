@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { trySummarize } from "@oh-my-pi/pi-coding-agent/tools/read-summary";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 let artifactCounter = 0;
@@ -354,5 +355,20 @@ describe("read summary", () => {
 		expect(text).not.toContain("elided regions");
 		expect(text).not.toContain(":raw");
 		expect(result.details?.summary).toBeUndefined();
+	});
+	it("keys the summary cache by parser language path", async () => {
+		const fixture = path.join(tmpDir, "mod.ts");
+		const code =
+			"export function alpha(value: string): string {\n\tconst clean = value.trim();\n\tconst label = clean || 'alpha';\n\treturn label.toUpperCase();\n}\n\nexport function beta(): number {\n\tconst one = 1;\n\tconst two = 2;\n\treturn one + two;\n}\n";
+		await fs.writeFile(fixture, code);
+		const session = createSession(tmpDir);
+		const size = Buffer.byteLength(code);
+		// Same bytes requested as TypeScript, then as Python (e.g. a symlink
+		// read through a `.py` lexical path): the second call must not reuse
+		// the cached TypeScript summary.
+		const first = await trySummarize(session, fixture, size, undefined, code, fixture);
+		expect(first?.parsed && first?.elided).toBe(true);
+		const second = await trySummarize(session, fixture, size, undefined, code, path.join(tmpDir, "mod.py"));
+		expect(second).not.toBe(first);
 	});
 });

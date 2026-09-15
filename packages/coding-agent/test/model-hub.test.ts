@@ -59,15 +59,27 @@ interface RegistryOverrides {
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
+	find?: (provider: string, id: string) => Model | undefined;
 }
 
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
+	const getAll = overrides.getAll ?? models;
 	return {
 		refresh: overrides.refresh ?? (async () => {}),
 		refreshProvider: overrides.refreshProvider ?? (async () => {}),
 		getError: () => undefined,
 		getAvailable: overrides.getAvailable ?? models,
-		getAll: overrides.getAll ?? models,
+		getAll,
+		// Mirrors the production lookup's case-insensitivity (alias/variant
+		// tables live in the real resolver and need no mock here).
+		find:
+			overrides.find ??
+			((provider: string, id: string) =>
+				getAll().find(
+					model =>
+						model.provider.toLowerCase() === provider.toLowerCase() &&
+						model.id.toLowerCase() === id.toLowerCase(),
+				)),
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
 		authStorage: { hasAuth: () => false },
@@ -984,6 +996,150 @@ describe("ModelHub", () => {
 			hub.handleInput("x");
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("test/*", []);
 			expect(normalize(hub.render(220))).not.toContain("↳ test/model-a");
+		});
+
+		test("t on a fallback entry sets an explicit effort suffix", () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const selector = `${model.provider}/${model.id}`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [selector] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			expect(footerLine(hub.render(220))).toContain("t thinking");
+
+			hub.handleInput("t");
+			const strip = footerLine(hub.render(220));
+			expect(strip).toContain("inherit");
+			expect(strip).toContain("off");
+			expect(strip).not.toContain("auto");
+
+			hub.handleInput("\x1b[C"); // inherit → off
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [`${selector}:off`]);
+			expect(normalize(hub.render(220))).toContain(`↳ ${selector}:off`);
+		});
+
+		test("t on a suffixed fallback entry clears back to inherit", () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const selector = `${model.provider}/${model.id}`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [`${selector}:off`] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			expect(normalize(hub.render(220))).toContain(`↳ ${selector}:off`);
+
+			hub.handleInput("t");
+			hub.handleInput(LEFT); // off → inherit
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [selector]);
+			expect(normalize(hub.render(220))).not.toContain(`${selector}:off`);
+		});
+
+		test("t on a routed fallback entry preserves @upstream when setting effort", () => {
+			const model = makeModel("openrouter", "z-ai/glm-4.7");
+			const routed = `${model.provider}/${model.id}@fireworks`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [routed] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			expect(normalize(hub.render(220))).toContain(`↳ ${routed}`);
+
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C"); // inherit → off
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [`${routed}:off`]);
+			expect(normalize(hub.render(220))).toContain(`↳ ${routed}:off`);
+		});
+
+		test("t on a routed+suffixed entry clears back to the bare route", () => {
+			const model = makeModel("openrouter", "z-ai/glm-4.7");
+			const routed = `${model.provider}/${model.id}@fireworks`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [`${routed}:off`] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			hub.handleInput("t");
+			hub.handleInput(LEFT); // off → inherit
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [routed]);
+			expect(normalize(hub.render(220))).not.toContain(`${routed}:off`);
+		});
+
+		test("wildcard fallback rows hide the thinking hint and ignore t", () => {
+			const a = makeModel("test", "model-a");
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: ["test/*"] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [a], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its wildcard entry
+			expect(normalize(hub.render(220))).toContain("↳ test/*");
+			expect(footerLine(hub.render(220))).not.toContain("t thinking");
+
+			hub.handleInput("t"); // inert: no strip, no chain write
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+			expect(footerLine(hub.render(220))).not.toContain("inherit");
+		});
+
+		test("t on a literal @-suffixed id does not strip it as routing", () => {
+			const model = makeModel("test", "model@default");
+			const selector = `${model.provider}/${model.id}`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [selector] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			expect(normalize(hub.render(220))).toContain(`↳ ${selector}`);
+
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C"); // inherit → off
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [`${selector}:off`]);
+		});
+
+		test("t on a locked fallback entry resolves the ladder from the catalog", () => {
+			const available = makeModel("test", "model-a");
+			const locked = makeModel("locked", "model-x");
+			const selector = `${locked.provider}/${locked.id}`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [selector] } });
+			const { hub, onFallbackChainChange } = createHub({
+				models: [available],
+				scoped: true,
+				settings,
+				registry: { getAvailable: () => [available], getAll: () => [available, locked] },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			expect(footerLine(hub.render(220))).toContain("t thinking");
+
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C"); // inherit → off
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [`${selector}:off`]);
+		});
+
+		test("t on a case-variant entry resolves through the registry and saves canonically", () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const selector = `${model.provider}/${model.id}`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: ["OpenAI/GPT-5.5"] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			expect(normalize(hub.render(220))).toContain("↳ OpenAI/GPT-5.5");
+			expect(footerLine(hub.render(220))).toContain("t thinking");
+
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C"); // inherit → off
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [`${selector}:off`]);
 		});
 	});
 

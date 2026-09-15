@@ -6,29 +6,27 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
-import { createInterface } from "node:readline/promises";
-import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import {
-	$env,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
-	isBunTestRuntime,
-	logger,
 	normalizePathForComparison,
-	postmortem,
-	setInteractiveHost,
 	setProjectDir,
 	VERSION,
-} from "@oh-my-pi/pi-utils";
+} from "@oh-my-pi/pi-utils/dirs";
+import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { selectSession } from "./cli/session-picker";
+import type { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
@@ -62,7 +60,7 @@ import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketpla
 import { registerDaemonProjectPresence } from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
-import { InteractiveMode } from "./modes/interactive-mode";
+import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
@@ -99,24 +97,44 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
-import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { sanitizeDisplayWarnings } from "./tools/render-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
-type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
+type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<number>;
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	subagentEventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
 ) => Promise<never>;
+
+/** Interactive-only graph boundary; login dialogs and overlays load on first real use. */
+async function loadInteractiveModeConstructor() {
+	return (await import("./modes/interactive-mode")).InteractiveMode;
+}
+
+/** Resume/import-only graph boundary; ordinary launches never construct a picker. */
+async function loadSessionPicker(): Promise<typeof selectSession> {
+	return (await import("./cli/session-picker")).selectSession;
+}
+
+/** Join-only graph boundary; the full built-in slash-command registry is otherwise unnecessary at startup. */
+async function loadBuiltinSlashCommandExecutor() {
+	return (await import("./slash-commands/builtin-registry")).executeBuiltinSlashCommand;
+}
+
+/** Missing-session-directory prompt boundary; ordinary launches do not need node:readline. */
+async function loadReadlineInterface() {
+	return (await import("node:readline/promises")).createInterface;
+}
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
@@ -151,6 +169,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
+	"task.agentServiceTierOverrides",
 	"task.agentPrewalk",
 	"task.agentAdvisor",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
@@ -515,9 +534,10 @@ async function runInteractiveMode(
 	startBackgroundModelDiscovery?: () => Promise<void>,
 	startupLease?: ComposerLease,
 ): Promise<void> {
+	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
 	try {
-		mode = new InteractiveMode(
+		mode = new InteractiveModeConstructor(
 			session,
 			version,
 			startupChangelog,
@@ -562,60 +582,83 @@ async function runInteractiveMode(
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
+				autoStartCollab: joinLink === undefined,
 				recentSessions: startupLease?.recentSessions,
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
+
+		if (setupWizard && playStartupSplash) {
+			await setupWizard.runStartupSplash(mode);
+		}
+
+		if (setupWizard && setupScenes.length > 0) {
+			await setupWizard.runSetupWizard(mode, setupScenes);
+		}
+
+		// Consume failures immediately, but defer any banner until the transcript is stable.
+		const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
+
+		// `init` already cleared native history before painting the startup frame.
+		// Replaying resumed transcript rows and repainting the viewport is enough;
+		// another clear would only archive the startup frame. In-process session
+		// replacements still request `clearTerminalHistory` at their own callsites.
+		await logger.time("InteractiveMode.renderInitialMessages", () =>
+			mode.renderInitialMessages({ preserveExistingChat: true }),
+		);
+		// A resolved version check must not insert its banner into a partial transcript.
+		checkedVersionPromise.then(newVersion => {
+			if (!settings.get("startup.checkUpdate")) {
+				return;
+			}
+			if (newVersion) {
+				mode.showNewVersionNotification(newVersion);
+			}
+		});
+
+		const advisorConfigWarnings = session.getAdvisorConfigWarnings();
+		if (advisorConfigWarnings.length > 0) {
+			// Pulled here, not pushed from SessionAdvisors: the constructor-time
+			// `emitNotice` fired before the UI subscribed and was silently lost.
+			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
+		}
+
+		for (const notify of notifs) {
+			if (!notify) {
+				continue;
+			}
+			if (notify.kind === "warn") {
+				mode.showWarning(notify.message);
+			} else if (notify.kind === "error") {
+				mode.showError(notify.message);
+			} else if (notify.kind === "info") {
+				mode.showStatus(notify.message);
+			}
+		}
+
+		// `omp join <link>`: dispatch through the same builtin path as a typed
+		// `/join` so collab guards and error rendering stay in one place.
+		if (joinLink !== undefined) {
+			const executeBuiltinSlashCommand = await loadBuiltinSlashCommandExecutor();
+			await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
+			// Join failure returns to the local session; success still needs the
+			// controller observing its eventual restoration without hosting replicas.
+			mode.collabController.autoStart();
+		}
+		// Keep guest mutations gated through setup dialogs and transcript replay,
+		// not just init. Only a successful outer startup opens the room for input.
+		mode.collabController.startupComplete();
 	} catch (error) {
-		mode.stop();
+		// Init publishes before startup dialogs, so any later startup failure
+		// must withdraw the room before restoring the terminal.
+		try {
+			await mode.collabController.shutdown("startup failed");
+		} catch (cleanupError) {
+			logger.warn("Failed to stop collaboration after startup failure", { error: String(cleanupError) });
+		} finally {
+			mode.stop();
+		}
 		throw error;
-	}
-
-	if (setupWizard && playStartupSplash) {
-		await setupWizard.runStartupSplash(mode);
-	}
-
-	if (setupWizard && setupScenes.length > 0) {
-		await setupWizard.runSetupWizard(mode, setupScenes);
-	}
-
-	// Consume failures immediately, but defer any banner until the transcript is stable.
-	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
-
-	// `init` already cleared native history before painting the startup frame.
-	// Replaying resumed transcript rows and repainting the viewport is enough;
-	// another clear would only archive the startup frame. In-process session
-	// replacements still request `clearTerminalHistory` at their own callsites.
-	await logger.time("InteractiveMode.renderInitialMessages", () =>
-		mode.renderInitialMessages({ preserveExistingChat: true }),
-	);
-	// A resolved version check must not insert its banner into a partial transcript.
-	checkedVersionPromise.then(newVersion => {
-		if (!settings.get("startup.checkUpdate")) {
-			return;
-		}
-		if (newVersion) {
-			mode.showNewVersionNotification(newVersion);
-		}
-	});
-
-	for (const notify of notifs) {
-		if (!notify) {
-			continue;
-		}
-		if (notify.kind === "warn") {
-			mode.showWarning(notify.message);
-		} else if (notify.kind === "error") {
-			mode.showError(notify.message);
-		} else if (notify.kind === "info") {
-			mode.showStatus(notify.message);
-		}
-	}
-
-	// `omp join <link>`: dispatch through the same builtin path as a typed
-	// `/join` so collab guards and error rendering stay in one place.
-	if (joinLink !== undefined) {
-		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
 	if (initialMessage !== undefined) {
@@ -660,6 +703,7 @@ async function promptMoveSession(session: SessionInfo): Promise<SessionPromptRes
 	}
 	const message = `Session's directory no longer exists (${session.cwd}). Move (re-root) it into the current directory? [Y/n] `;
 	pauseStartupWatchdog();
+	const createInterface = await loadReadlineInterface();
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
 		const answer = (await rl.question(message)).trim().toLowerCase();
@@ -1660,19 +1704,15 @@ export async function runRootCommand(
 				pauseStartupWatchdog();
 				let selected: SessionInfo | null;
 				try {
-					selected = await logger.time(
-						`select${sourceName}Session`,
-						deps.selectSession ?? selectSession,
-						choices,
-						{
-							title: `Import ${sourceName} Session`,
-							scopeLabel: false,
-							showCwd: true,
-							allowDelete: false,
-							allowGlobalScope: false,
-							historySearch: false,
-						},
-					);
+					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+					selected = await logger.time(`select${sourceName}Session`, selectSessionImpl, choices, {
+						title: `Import ${sourceName} Session`,
+						scopeLabel: false,
+						showCwd: true,
+						allowDelete: false,
+						allowGlobalScope: false,
+						historySearch: false,
+					});
 				} finally {
 					resumeStartupWatchdog();
 				}
@@ -1772,7 +1812,8 @@ export async function runRootCommand(
 				}
 			}
 			pauseStartupWatchdog();
-			const selected = await logger.time("selectSession", deps.selectSession ?? selectSession, folderSessions, {
+			const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+			const selected = await logger.time("selectSession", selectSessionImpl, folderSessions, {
 				allSessions: preloadedAllSessions,
 			});
 			resumeStartupWatchdog();
@@ -2113,7 +2154,7 @@ export async function runRootCommand(
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
-				await runPrintMode(session, {
+				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,
 					initialMessage,
@@ -2126,7 +2167,7 @@ export async function runRootCommand(
 				}
 				await session.dispose();
 				stopThemeWatcher();
-				await postmortem.quit(0);
+				await postmortem.quit(exitCode);
 			}
 		}
 	} catch (error) {

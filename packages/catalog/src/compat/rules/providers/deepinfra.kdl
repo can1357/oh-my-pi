@@ -1,0 +1,8 @@
+// Catalog entry for "deepinfra"; no deployment-contract compat rules are needed.
+
+provider "deepinfra" {
+	default-model "deepseek-ai/DeepSeek-V4-Flash-0731"
+	env "DEEPINFRA_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="DeepInfra" allow-unauthenticated=#true
+}

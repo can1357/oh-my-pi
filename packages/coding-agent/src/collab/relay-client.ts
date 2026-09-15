@@ -49,6 +49,7 @@ export class CollabSocket {
 	#closed = false;
 	/** Serializes seal() so frames hit the wire in send() order. */
 	#sendChain: Promise<void> = Promise.resolve();
+	#sendGeneration = 0;
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
 	/** Envelopes sealed while disconnected, flushed on the next open. */
@@ -70,8 +71,10 @@ export class CollabSocket {
 	}
 
 	send(frame: CollabFrame, targetPeer = 0): void {
+		const generation = this.#sendGeneration;
 		this.#sendChain = this.#sendChain
 			.then(async () => {
+				if (generation !== this.#sendGeneration) return;
 				if (this.#closed) {
 					logger.debug("collab: dropping frame, socket closed", { t: frame.t });
 					return;
@@ -79,6 +82,7 @@ export class CollabSocket {
 				const openWs = this.#ws;
 				if (openWs && openWs.readyState === WebSocket.OPEN) this.#drainPendingSends(openWs);
 				const sealed = await seal(this.#opts.key, frame);
+				if (this.#closed || generation !== this.#sendGeneration) return;
 				const envelope = packEnvelope(targetPeer, sealed);
 				const ws = this.#ws;
 				if (ws && ws.readyState === WebSocket.OPEN) {
@@ -104,6 +108,24 @@ export class CollabSocket {
 			.catch((err: unknown) => {
 				logger.debug("collab: send failed", { error: String(err) });
 			});
+	}
+
+	/**
+	 * Resolves once prior sends have settled. Non-revoked frames are sealed
+	 * and either written to the transport or queued behind backpressure.
+	 * {@link close} hands that queue to an open socket before closing it, so
+	 * `send(final); await flush(); close()` delivers the final frame whenever
+	 * the connection is up; frames queued while reconnecting are dropped.
+	 */
+	flush(): Promise<void> {
+		return this.#sendChain;
+	}
+
+	/** Revoke unsent frames, including sealing work, before admitting a final frame. */
+	discardPendingSends(): void {
+		this.#sendGeneration++;
+		this.#pendingSends.length = 0;
+		this.#clearBackpressureDrain();
 	}
 
 	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
@@ -153,19 +175,24 @@ export class CollabSocket {
 	close(): void {
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
-		this.#clearBackpressureDrain();
 		const wasClosed = this.#closed;
 		this.#closed = true;
-		this.#pendingSends.length = 0;
 		const ws = this.#ws;
 		this.#ws = null;
 		if (ws) {
 			try {
+				// Closing is terminal, so backpressure no longer matters: everything
+				// still queued (typically a final `bye`) goes into the socket buffer
+				// ahead of the close frame instead of being discarded.
+				if (ws.readyState === WebSocket.OPEN) {
+					for (const envelope of this.#pendingSends) ws.send(envelope);
+				}
 				ws.close(1000);
 			} catch {
 				// already closing/closed
 			}
 		}
+		this.discardPendingSends();
 		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
 	}
 
@@ -231,14 +258,14 @@ export class CollabSocket {
 
 	#handleClose(code: number, reason: string): void {
 		if (this.#closed) return;
-		this.#clearBackpressureDrain();
 		const fatalReason = FATAL_CLOSE_REASONS[code];
 		if (fatalReason !== undefined) {
 			this.#closed = true;
-			this.#pendingSends.length = 0;
+			this.discardPendingSends();
 			this.onClose?.(fatalReason, false);
 			return;
 		}
+		this.#clearBackpressureDrain();
 		this.onClose?.(reason || `connection lost (code ${code})`, true);
 		this.#scheduleRetry();
 	}
@@ -248,10 +275,9 @@ export class CollabSocket {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#clearRetry();
-		this.#pendingSends.length = 0;
+		this.discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
-		this.#clearBackpressureDrain();
 		if (ws) {
 			try {
 				ws.close(1000);

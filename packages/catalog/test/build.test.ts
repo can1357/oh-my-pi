@@ -8,7 +8,7 @@ import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -450,6 +450,51 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
+	it("keeps image input for the natively multimodal DeepSeek V4.1 Flash lineage", () => {
+		// DeepSeek V4.1 Flash is image-text-to-text, but its id carries no
+		// `vision` token, so the class-wide strip rule dropped every attachment
+		// the model reads on hosts without their own carve-out.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(false);
+		// Hosts that were carved out individually must keep working without them.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "openrouter",
+					id: "deepseek/deepseek-v4.1-flash",
+					baseUrl: "https://openrouter.ai/api/v1",
+					input: ["text", "image"],
+				}),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Text-only DeepSeek SKUs keep the wire guard.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(true);
+		// The lineage glob covers dated SKUs, not just the bare id.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// A V4.1 id that also carries a `vision` token matches both exceptions at
+		// equal rank; the explicit priority keeps that resolvable instead of
+		// throwing AmbiguousOverlapError.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-vision-exp", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Non-Flash V4.1 lineages are not established as multimodal and keep the guard.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4.1-pro", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(true);
+	});
+
 	it("downgrades forced tool choice only for DeepSeek reasoning models on OpenCode gateways", () => {
 		const deepseekReasoning = {
 			id: "deepseek-v4-flash",
@@ -521,6 +566,37 @@ describe("openai-completions wire-quirk compat detection", () => {
 				responsesSpec({ id: "gpt-5", provider: "openai", name: "GPT-5", baseUrl: "https://api.openai.com/v1" }),
 			).compat.supportsForcedToolChoice,
 		).toBe(true);
+	});
+	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
+		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
+		// cannot round-trip encrypted reasoning: the upstream binds
+		// `encrypted_content` to the gateway's caller, so replaying it on a
+		// later tool-call step 400s with "reasoning `encrypted_content` was not
+		// issued to this caller". The deployment contract must stop requesting
+		// it and drop native reasoning items from replay.
+		for (const [provider, id, baseUrl] of [
+			["opencode-zen", "muse-spark-1.3-contributor-free", "https://opencode.ai/zen/v1"],
+			["opencode-go", "muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1"],
+		] as const) {
+			const compat = resolveModelPolicy(
+				responsesSpec({ id, provider, name: "Muse Spark", baseUrl, reasoning: true }),
+			).compat;
+			expect(compat.includeEncryptedReasoning).toBe(false);
+			expect(compat.filterReasoningHistory).toBe(true);
+		}
+		// A non-Muse reasoning model on the same gateway keeps the Responses
+		// default replay behavior, so the carve-out is scoped to the broken lane.
+		const other = resolveModelPolicy(
+			responsesSpec({
+				id: "big-pickle",
+				provider: "opencode-zen",
+				name: "Big Pickle",
+				baseUrl: "https://opencode.ai/zen/v1",
+				reasoning: true,
+			}),
+		).compat;
+		expect(other.includeEncryptedReasoning).toBe(true);
+		expect(other.filterReasoningHistory).toBe(false);
 	});
 
 	it("requires a synthetic assistant bridge after tool results only for Mistral hosts", () => {
@@ -891,8 +967,32 @@ describe("OpenRouter model discovery", () => {
 	});
 });
 
-describe("model cache spec round trip", () => {
-	it("persists sparse specs and rebuilds resolved models on cache reads", async () => {
+describe("model cache materialized round trip", () => {
+	it("fingerprints current static content without mutating caller arrays", () => {
+		const staticModels = [completionsSpec({ id: "fingerprint-model" })];
+		const initial = fingerprintStaticModels(staticModels);
+		staticModels[0]!.name = "Changed in place";
+		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
+
+		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
+		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+	});
+
+	it("uses generator-materialized bundled rows without rebuilding them", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-bundled-models-"));
+		const bundled = getBundledModel("anthropic", "claude-fable-5-1");
+		try {
+			const offline = await resolveProviderModels(
+				{ providerId: "anthropic", cacheDbPath: path.join(tempDir, "models.db") },
+				"offline",
+			);
+			expect(offline.models.find(model => model.id === bundled.id)).toBe(bundled);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("persists and directly restores fully resolved models", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-model-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const sparse = { supportsDeveloperRole: true } as const;
@@ -909,19 +1009,26 @@ describe("model cache spec round trip", () => {
 			);
 			expect(online.models[0]?.compat.supportsDeveloperRole).toBe(true);
 
-			// The persisted row carries the sparse spec, never the resolved record.
-			const db = new Database(dbPath, { readonly: true });
+			// The persisted row is the resolved model, while retaining the sparse
+			// authoring provenance needed by later explicit override rebuilds.
+			const db = new Database(dbPath);
 			const row = db
 				.query<{ models: string }, [string]>("SELECT models FROM model_cache WHERE provider_id = ?")
 				.get("spec-cache-test");
-			db.close();
 			expect(row).toBeDefined();
-			const persisted = JSON.parse(row?.models ?? "[]") as ModelSpec<"openai-completions">[];
-			expect(persisted[0]?.compat).toEqual(sparse);
-			expect(persisted[0]).not.toHaveProperty("compatConfig");
-			expect(persisted[0]?.compat).not.toHaveProperty("isOpenRouterHost");
-
-			// Offline reads rebuild the row into a fully-resolved model.
+			const persisted = JSON.parse(row?.models ?? "[]") as Model<"openai-completions">[];
+			expect(persisted[0]?.compat.supportsDeveloperRole).toBe(true);
+			expect(persisted[0]?.compat.isOpenRouterHost).toBe(false);
+			expect(persisted[0]?.compatConfig).toEqual(sparse);
+			expect(persisted[0]?.identity).toEqual(online.models[0]?.identity);
+			// A compatible materialized row is trusted rather than sent back
+			// through buildModel. Policy changes invalidate the whole row instead.
+			persisted[0]!.compat.supportsDeveloperRole = false;
+			db.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", [
+				JSON.stringify(persisted),
+				"spec-cache-test",
+			]);
+			db.close();
 			const offline = await resolveProviderModels<"openai-completions">(
 				{
 					providerId: "spec-cache-test",
@@ -931,7 +1038,7 @@ describe("model cache spec round trip", () => {
 				"offline",
 			);
 			const model = offline.models.find(candidate => candidate.id === spec.id);
-			expect(model?.compat.supportsDeveloperRole).toBe(true);
+			expect(model?.compat.supportsDeveloperRole).toBe(false);
 			expect(model?.compat.isOpenRouterHost).toBe(false);
 			expect(model?.compatConfig).toEqual(sparse);
 		} finally {
@@ -980,6 +1087,29 @@ describe("model cache spec round trip", () => {
 
 			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
 			expect(offline.models[0]?.cost.longContext).toEqual(staticModel.cost.longContext);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates rows materialized under a stale build or rules policy", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
+		try {
+			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
+			const db = new Database(dbPath);
+			db.run("UPDATE model_cache SET materialization_policy = ? WHERE provider_id = ?", [
+				"stale-builder:stale-rules",
+				"stale-policy-cache-test",
+			]);
+			db.close();
+
+			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
+			const verified = new Database(dbPath, { readonly: true });
+			const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
+			verified.close();
+			expect(row?.count).toBe(0);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -1063,10 +1193,10 @@ describe("model cache spec round trip", () => {
 				.get("computer-use-cache-test");
 			db.close();
 			const persisted = JSON.parse(row?.models ?? "[]") as Array<Record<string, unknown>>;
-			expect(persisted.find(model => model.id === direct.id)).not.toHaveProperty("supportsComputerUse");
-			expect(persisted.find(model => model.id === proxy.id)).not.toHaveProperty("supportsComputerUse");
-			expect(persisted.find(model => model.id === explicitTrue.id)?.supportsComputerUse).toBe(true);
-			expect(persisted.find(model => model.id === explicitFalse.id)?.supportsComputerUse).toBe(false);
+			expect(persisted.find(model => model.id === direct.id)?.supportsComputerUseConfig).toBeNull();
+			expect(persisted.find(model => model.id === proxy.id)?.supportsComputerUseConfig).toBeNull();
+			expect(persisted.find(model => model.id === explicitTrue.id)?.supportsComputerUseConfig).toBe(true);
+			expect(persisted.find(model => model.id === explicitFalse.id)?.supportsComputerUseConfig).toBe(false);
 
 			const offline = await resolveProviderModels<"openai-responses">(
 				{ providerId: "computer-use-cache-test", staticModels: [], cacheDbPath: dbPath },

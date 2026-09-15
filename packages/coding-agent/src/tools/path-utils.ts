@@ -404,13 +404,11 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 
 /**
  * Async sibling of {@link splitPathAndSel} that prefers a literal filesystem
- * path over selector interpretation. Filenames whose tail matches the selector
- * grammar (e.g. `test:1-2`, `log:raw`) are legal on POSIX; without this the
- * strict splitter peels the tail and both `read` and `grep` refuse to open the
- * real file (issue #4618). The literal wins on a confirmed `lstat`, and also
- * on `"unknown"` (`EACCES` on a parent, transient I/O), so an unreachable
- * literal is never silently reinterpreted as `path + selector`. Only a
- * definitive `ENOENT`/`ENOTDIR` falls back to the strict split.
+ * path over selector interpretation. Selector-shaped tails may be POSIX
+ * filenames or NTFS alternate data streams, so a confirmed `lstat` always
+ * preserves the literal path. Ambiguous probe errors preserve the literal on
+ * POSIX, where colon filenames are valid, but fall back to the strict split on
+ * Windows, where only a confirmed alternate data stream can be literal.
  */
 export async function splitPathAndSelPreferringLiteral(
 	rawPath: string,
@@ -419,7 +417,7 @@ export async function splitPathAndSelPreferringLiteral(
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = await probeLiteralPathExists(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
+	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
 }
 
 /**
@@ -440,16 +438,14 @@ export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exis
 }
 
 /**
- * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. Identical
- * literal-path precedence — a real file named `report:1-20` keeps its colon —
- * for callers that cannot await, such as the ACP event mapper's location
- * builder.
+ * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. It applies
+ * the same platform-specific handling for inconclusive literal-path probes.
  */
 export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: string): { path: string; sel?: string } {
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = probeLiteralPathExistsSync(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
+	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
 }
 
 /**
@@ -997,13 +993,17 @@ export async function splitDelimitedPathEntry(
 		return parts?.every(options.routedUrlPredicate) ? parts : null;
 	}
 	if (isInternalUrlPath(normalizedEntry)) return null;
-	// A real POSIX file may contain the delimiter and a selector-shaped tail
+	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
 	// resolves — or is only ambiguous — so downstream literal-preferring
-	// splitters see it before delimiter expansion peels or splits (issue #4618
-	// reviewer feedback: delimited expansion ran before the literal check).
+	// splitters see it before delimiter expansion peels or splits (issue #4618).
 	if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
-	const peeledEntry = splitPathAndSel(normalizedEntry).path;
+	const selectorSplit = splitPathAndSel(normalizedEntry);
+	const peeledEntry = selectorSplit.path;
+	// A range may instead target a literal file whose name combines delimiters
+	// with glob syntax (`a;b[1].md:1-2`). Check the exact peeled path before the
+	// search splitter interprets those characters and semicolon fan-out wins.
+	if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(peeledEntry, cwd)) !== "missing") return null;
 	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter))) {
 		return null;
 	}

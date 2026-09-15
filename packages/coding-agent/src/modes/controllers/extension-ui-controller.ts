@@ -1,6 +1,7 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
+import type { CollabHost } from "../../collab/host";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
 	CompactOptions,
@@ -226,6 +227,7 @@ export class ExtensionUiController {
 				this.ctx.showStatus("Reloaded session");
 			},
 			newSession: async options => {
+				await this.ctx.prepareSessionSwitch();
 				this.ctx.clearTransientSessionUi();
 
 				// Create new session
@@ -258,6 +260,7 @@ export class ExtensionUiController {
 				return { cancelled: false };
 			},
 			branch: async entryId => {
+				await this.ctx.prepareSessionSwitch();
 				const result = await this.ctx.session.branch(entryId);
 				if (result.cancelled) {
 					return { cancelled: true };
@@ -289,6 +292,7 @@ export class ExtensionUiController {
 			},
 			compact: async instructionsOrOptions => this.#handleInteractiveCompact(instructionsOrOptions),
 			switchSession: async sessionPath => {
+				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
 				const result = await this.ctx.session.switchSession(sessionPath);
 				if (!result) {
@@ -459,6 +463,7 @@ export class ExtensionUiController {
 				this.ctx.showStatus("Reloaded session");
 			},
 			newSession: async options => {
+				await this.ctx.prepareSessionSwitch();
 				this.ctx.clearTransientSessionUi();
 
 				// Create new session
@@ -488,6 +493,7 @@ export class ExtensionUiController {
 				return { cancelled: false };
 			},
 			branch: async entryId => {
+				await this.ctx.prepareSessionSwitch();
 				const result = await this.ctx.session.branch(entryId);
 				if (result.cancelled) {
 					return { cancelled: true };
@@ -519,6 +525,7 @@ export class ExtensionUiController {
 			},
 			compact: async instructionsOrOptions => this.#handleInteractiveCompact(instructionsOrOptions),
 			switchSession: async sessionPath => {
+				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
 				const result = await this.ctx.session.switchSession(sessionPath);
 				if (!result) {
@@ -631,7 +638,7 @@ export class ExtensionUiController {
 		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
 			(value): CollabAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(normalized, remoteSignal).then(
+		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(host, normalized, remoteSignal).then(
 			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
 		);
 		const winner = await Promise.race([localWinner, remoteWinner]);
@@ -779,12 +786,13 @@ export class ExtensionUiController {
 	}
 
 	async #runGuestAskDialog(
+		host: CollabHost,
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
 		const results: ExtensionAskDialogResultItem[] = [];
 		for (const question of questions) {
-			const result = await this.#runGuestAskQuestion(question, signal);
+			const result = await this.#runGuestAskQuestion(host, question, signal);
 			if (result === "unavailable" || result === undefined) return result;
 			if (result === "chat") return { kind: "chat" };
 			results.push(result);
@@ -793,6 +801,7 @@ export class ExtensionUiController {
 	}
 
 	async #runGuestAskQuestion(
+		host: CollabHost,
 		question: ExtensionAskDialogQuestion,
 		signal: AbortSignal,
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
@@ -835,6 +844,7 @@ export class ExtensionUiController {
 				if (hasAnswer) options.push(ASK_NEXT_OPTION);
 				options.push(ASK_CHAT_OPTION);
 				const choice = await this.#requestGuestUiString(
+					host,
 					{
 						kind: "select",
 						title: displayQuestion,
@@ -854,6 +864,7 @@ export class ExtensionUiController {
 				if (choice.value === ASK_NEXT_OPTION) break;
 				if (choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
+						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
 						signal,
 					);
@@ -876,6 +887,7 @@ export class ExtensionUiController {
 			const initialIndex = Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
 			while (true) {
 				const choice = await this.#requestGuestUiString(
+					host,
 					{
 						kind: "select",
 						title: displayQuestion,
@@ -892,6 +904,7 @@ export class ExtensionUiController {
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
+						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
 						signal,
 					);
@@ -916,9 +929,11 @@ export class ExtensionUiController {
 		};
 	}
 
-	async #requestGuestUiString(request: CollabUiRequestDraft, signal: AbortSignal): Promise<GuestUiResult> {
-		const host = this.ctx.collabHost;
-		if (!host) return { kind: "unavailable" };
+	async #requestGuestUiString(
+		host: CollabHost,
+		request: CollabUiRequestDraft,
+		signal: AbortSignal,
+	): Promise<GuestUiResult> {
 		const remote = host.requestGuestUi(request, signal);
 		if (!remote) return { kind: "unavailable" };
 		const result = await remote;

@@ -469,8 +469,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "btw",
 		icon: "question",
-		description: "Ask an ephemeral side question using the current session context",
-		inlineHint: "<question>",
+		description: "Ask a side question, or browse this session's BTW history",
+		inlineHint: "[question]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();

@@ -4,6 +4,7 @@ import { abortableSource } from "./abortable";
 import { parseStreamingJson } from "./json-parse";
 
 const LF = 0x0a;
+const CR = 0x0d;
 
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
@@ -63,6 +64,7 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 class ConcatSink {
 	#space?: Buffer;
 	#length = 0;
+	#skipLeadingLf = false;
 
 	#ensureCapacity(size: number): Buffer {
 		const space = this.#space;
@@ -133,19 +135,27 @@ class ConcatSink {
 	}
 
 	appendAndFlushText(chunk: Uint8Array, decoder: TextDecoder): string | undefined {
-		const lastNewline = chunk.lastIndexOf(LF);
-		if (lastNewline === -1) {
-			this.append(chunk);
+		let start = 0;
+		if (this.#skipLeadingLf) {
+			if (chunk.length === 0) return undefined;
+			this.#skipLeadingLf = false;
+			if (chunk[0] === LF) start = 1;
+		}
+
+		const lastLineEnd = Math.max(chunk.lastIndexOf(LF), chunk.lastIndexOf(CR));
+		if (lastLineEnd < start) {
+			if (start < chunk.length) this.append(chunk.subarray(start));
 			return undefined;
 		}
 
-		const completeEnd = lastNewline + 1;
+		const completeEnd = lastLineEnd + 1;
+		this.#skipLeadingLf = chunk[lastLineEnd] === CR && completeEnd === chunk.length;
 		let text: string;
 		if (this.isEmpty) {
-			const complete = completeEnd === chunk.length ? chunk : chunk.subarray(0, completeEnd);
+			const complete = start === 0 && completeEnd === chunk.length ? chunk : chunk.subarray(start, completeEnd);
 			text = decoder.decode(complete);
 		} else {
-			this.append(completeEnd === chunk.length ? chunk : chunk.subarray(0, completeEnd));
+			this.append(chunk.subarray(start, completeEnd));
 			text = decoder.decode(this.flush());
 			this.clear();
 		}
@@ -294,7 +304,7 @@ interface SseEventState {
 }
 
 // Complete lines are decoded in one batch per source chunk. Each batch ends on
-// LF, which cannot split a multi-byte UTF-8 sequence.
+// an ASCII line-ending byte, which cannot split a multi-byte UTF-8 sequence.
 const SSE_DECODER = new TextDecoder("utf-8");
 
 function flushSseEvent(state: SseEventState): ServerSentEvent | null {
@@ -318,11 +328,6 @@ function flushSseEvent(state: SseEventState): ServerSentEvent | null {
 }
 
 function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null {
-	// Complete-line batches split on LF only; strip a trailing CR so CRLF sources
-	// don't leak `\r` into field values.
-	if (line.charCodeAt(line.length - 1) === 0x0d /* '\r' */) {
-		line = line.slice(0, -1);
-	}
 	if (line.length === 0) return flushSseEvent(state);
 
 	// Comment line: keep in `raw` for diagnostic context, skip parsing.
@@ -398,13 +403,21 @@ export async function* readSseEvents(
 			if (text === undefined) continue;
 			let start = 0;
 			while (start < text.length) {
-				const newline = text.indexOf("\n", start);
-				const event = pushSseLine(text.slice(start, newline), state);
+				let lineEnd = start;
+				while (lineEnd < text.length) {
+					const code = text.charCodeAt(lineEnd);
+					if (code === LF || code === CR) break;
+					lineEnd++;
+				}
+				const event = pushSseLine(text.slice(start, lineEnd), state);
 				if (event) yield event;
-				start = newline + 1;
+				if (text.charCodeAt(lineEnd) === CR && text.charCodeAt(lineEnd + 1) === LF) {
+					lineEnd++;
+				}
+				start = lineEnd + 1;
 			}
 		}
-		// Treat any trailing partial line (no terminating LF) as a complete line.
+		// Treat any trailing partial line (no terminating line ending) as complete.
 		if (!lineBuffer.isEmpty) {
 			const tail = lineBuffer.flush();
 			if (tail) {

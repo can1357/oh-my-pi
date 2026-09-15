@@ -1,9 +1,46 @@
-import { replaceTabs, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
-import { expandKeyHint } from "../../tools/render-utils";
+import * as os from "node:os";
+import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { expandKeyHint, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 
 /** Indent for every row after the first, so continuations hang under the prefix. */
 const CONTINUATION_INDENT = "  ";
+
+/**
+ * Plain, bounded error text to sanitize before applying terminal styles.
+ * Match embedded home paths (including quoted names with spaces), not URL
+ * paths or home-prefix siblings. Callers retain the original error for logs.
+ */
+export function sanitizeErrorLine(
+	error: unknown,
+	maxWidth: number = TRUNCATE_LENGTHS.LINE,
+	homeDir: string = os.homedir(),
+): string {
+	const message = error instanceof Error ? error.message : String(error);
+	let text = replaceTabs(sanitizeText(message.replace(/\r\n?/g, "\n")));
+	if (homeDir) {
+		const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
+		const home = windowsStyle ? homeDir.replaceAll("/", "\\") : homeDir;
+		const homePattern = windowsStyle
+			? home
+					.split("\\")
+					.map(part => RegExp.escape(part))
+					.join("[\\\\/]")
+			: RegExp.escape(home);
+		// Consume URLs as a whole before considering any home-looking substring.
+		const paths = new RegExp(
+			`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${homePattern})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
+			windowsStyle ? "gi" : "g",
+		);
+		text = text.replace(paths, (match, boundary: string | undefined, candidate: string | undefined) =>
+			candidate === undefined
+				? match
+				: `${boundary}${shortenPath(windowsStyle ? candidate.replaceAll("/", "\\") : candidate, home)}`,
+		);
+	}
+	return truncateToWidth(text.replace(/\s+/g, " ").trim() || "Unknown error", Math.max(0, maxWidth));
+}
 
 /**
  * Format a provider error into at most `maxRows` wrapped rows for a

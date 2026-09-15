@@ -78,6 +78,7 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
+import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import {
 	applyChatCompletionsReasoningParams,
@@ -1379,6 +1380,7 @@ const streamOpenAICompletionsOnce = (
 					if (Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
 							if (!detail || typeof detail !== "object") continue;
+							if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
 							const detailObject = detail as { type?: unknown; id?: unknown; data?: unknown };
 							if (detailObject.type === "reasoning.encrypted" && detailObject.id && detailObject.data) {
 								const matchingToolCall = output.content.find(

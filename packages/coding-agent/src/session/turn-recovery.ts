@@ -1,4 +1,3 @@
-import { scheduler } from "node:timers/promises";
 import {
 	type Agent,
 	AgentBusyError,
@@ -23,7 +22,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -2467,12 +2466,15 @@ export class TurnRecovery {
 		// pattern instead of re-sampling the same stalled reasoning.
 		this.#maybeInjectThinkingLoopRedirect(id);
 
-		// Wait with exponential backoff (abortable).
+		// Day-scale provider waits (a monthly quota reset parsed from the error
+		// text) exceed the signed 32-bit timer limit; sleepLong chunks the sleep
+		// so the full wait elapses instead of overflowing the timer. `delayMs`
+		// stays exact for events and the retry deadline computation.
 		const retryAbortController = new AbortController();
 		this.#retryAbortController?.abort();
 		this.#retryAbortController = retryAbortController;
 		try {
-			await scheduler.wait(delayMs, { signal: retryAbortController.signal });
+			await sleepLong(delayMs, retryAbortController.signal);
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;

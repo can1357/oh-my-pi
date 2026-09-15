@@ -4,7 +4,7 @@ import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { $ } from "bun";
 import { getDefaultPasteImageKeys } from "../../../src/config/keybindings";
-import { chipLabel } from "../../../src/modes/composer-attachments";
+import { chipLabel, skillChipLabel } from "../../../src/modes/composer-attachments";
 import {
 	CustomEditor,
 	extractBracketedImagePastePaths,
@@ -229,6 +229,60 @@ describe("CustomEditor bracketed path paste", () => {
 
 		expect(editor.getText()).toBe(chipLabel("video", 1));
 		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
+	});
+
+	describe("skill chips", () => {
+		function makeSkillEditor() {
+			const { editor } = makeEditor();
+			editor.skillFilePath = name => (name === "reviewer" ? "/skills/reviewer/SKILL.md" : undefined);
+			return editor;
+		}
+
+		it("snaps a typed `/skill:<name>` into a chip once whitespace terminates it, keeping the cursor", () => {
+			const editor = makeSkillEditor();
+			for (const ch of "use /skill:reviewer") editor.handleInput(ch);
+			// Still typing: no snap while the name could grow.
+			expect(editor.getText()).toBe("use /skill:reviewer");
+			editor.handleInput(" ");
+			const chip = skillChipLabel("reviewer");
+			expect(editor.getText()).toBe(`use ${chip} `);
+			expect(editor.getCursor()).toEqual({ line: 0, col: `use ${chip} `.length });
+			for (const ch of "now") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`use ${chip} now`);
+		});
+
+		it("leaves an unknown skill literal", () => {
+			const editor = makeSkillEditor();
+			for (const ch of "use /skill:nope ") editor.handleInput(ch);
+			expect(editor.getText()).toBe("use /skill:nope ");
+		});
+
+		it("deletes the chip as one unit and expands it back to the token on submit", () => {
+			const editor = makeSkillEditor();
+			for (const ch of "/skill:reviewer then") editor.handleInput(ch);
+			const chip = skillChipLabel("reviewer");
+			expect(editor.getText()).toBe(`${chip} then`);
+
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("/skill:reviewer then");
+
+			for (const ch of "a /skill:reviewer ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`a ${chip} `);
+			editor.handleInput("\x7f"); // trailing space
+			editor.handleInput("\x7f"); // whole chip
+			expect(editor.getText()).toBe("a ");
+		});
+
+		it("re-collapses a restored draft so the chip survives a failed submit", () => {
+			const editor = makeSkillEditor();
+			editor.setCollapsedText("fix it /skill:reviewer please");
+			expect(editor.getText()).toBe(`fix it ${skillChipLabel("reviewer")} please`);
+			expect(editor.getExpandedText()).toBe("fix it /skill:reviewer please");
+		});
 	});
 
 	it("strips `file://` URLs to the local filesystem path before loading the image", () => {

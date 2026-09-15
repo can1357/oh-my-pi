@@ -22,6 +22,7 @@ import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking }
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 import { formatErrorBlock } from "./error-block";
+import { type ServedModelMismatch, ServedModelMarkerComponent } from "./served-model-marker";
 import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
 
@@ -185,6 +186,8 @@ export class AssistantMessageComponent extends Container {
 	readonly transcriptBlockMode = "appendOnly" as const;
 	#contentContainer: Container;
 	#markerSlot: Container;
+	#cacheMarker?: CacheInvalidationMarkerComponent;
+	#servedModelMarker?: ServedModelMarkerComponent;
 	#lastMessage?: AssistantMessage;
 	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
@@ -395,10 +398,24 @@ export class AssistantMessageComponent extends Container {
 	 * against the previous turn's cache footprint.
 	 */
 	setCacheInvalidation(info: CacheInvalidation | undefined): void {
+		this.#cacheMarker = info ? new CacheInvalidationMarkerComponent(info) : undefined;
+		this.#refreshMarkers();
+	}
+
+	/**
+	 * Show or clear the trailing served-model divider. Set once the turn's
+	 * signed thinking block (or router report) has named the model that actually
+	 * answered, when it differs from the one requested.
+	 */
+	setServedModelMismatch(info: ServedModelMismatch | undefined): void {
+		this.#servedModelMarker = info ? new ServedModelMarkerComponent(info) : undefined;
+		this.#refreshMarkers();
+	}
+
+	#refreshMarkers(): void {
 		this.#markerSlot.clear();
-		if (info) {
-			this.#markerSlot.addChild(new CacheInvalidationMarkerComponent(info));
-		}
+		if (this.#servedModelMarker) this.#markerSlot.addChild(this.#servedModelMarker);
+		if (this.#cacheMarker) this.#markerSlot.addChild(this.#cacheMarker);
 		this.#blockVersion++;
 	}
 
@@ -865,10 +882,12 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
 			} else if (content.type === "thinking") {
-				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
-				if (!display.visible) parts.push("K0");
-				else if (this.hideThinkingBlock) parts.push("KH");
-				else parts.push("KV");
+				if (this.hideThinkingBlock) {
+					// Match the pulse's empty/nonempty transition without formatting hidden text.
+					parts.push(canonicalizeMessage(content.thinking) ? "KH" : "K0");
+				} else {
+					parts.push(resolveThinkingDisplay(content, this.proseOnlyThinking).visible ? "KV" : "K0");
+				}
 			} else {
 				// Non-rendered blocks (toolCall, redactedThinking, …) still occupy a
 				// content index. Encode their position so an inserted/removed one shifts
@@ -894,7 +913,7 @@ export class AssistantMessageComponent extends Container {
 		}
 		// Extension stability: if thinking renderers exist and any tracked thinking
 		// block's text changed, extensions may produce a different child count.
-		if (this.thinkingRenderers.length > 0 && this.#fastPathItems) {
+		if (!this.hideThinkingBlock && this.thinkingRenderers.length > 0 && this.#fastPathItems) {
 			for (const item of this.#fastPathItems) {
 				if (item.blockType === "thinking") {
 					const content = message.content[item.contentIndex];
@@ -1044,12 +1063,14 @@ export class AssistantMessageComponent extends Container {
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;
-			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
-				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
+			} else if (content.type === "thinking") {
 				if (this.hideThinkingBlock) {
 					thinkingIndex += 1;
 					continue;
 				}
+				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
+				if (!display.visible) continue;
+				const thinkingText = display.text;
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
 				const hasVisibleContentAfter = message.content

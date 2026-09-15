@@ -20,7 +20,7 @@ Most runtime lookups use `$env` from `@oh-my-pi/pi-utils` (`packages/utils/src/e
 4. Active config-root `.env` (normally `~/.omp/.env`) for keys whose current value is empty/unset
 5. Home `.env` (`~/.env`) for keys whose current value is empty/unset
 
-The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Dotenv names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. OMP's parser keeps values literal; only Bun's own launch-directory dotenv autoload may perform Bun-supported expansion before this module runs.
+The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Whole dotenv files are parsed with Bun's `node:util.parseEnv`, including quoted multiline values, escaped newlines, and inline comments. Names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. Variable references remain literal in this parser; only Bun's launch-directory dotenv autoload performs variable expansion before this module runs. Child-shell filtering uses the same parser to identify project dotenv values.
 
 Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
 
@@ -79,6 +79,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `QWEN_PORTAL_API_KEY`           | Qwen Portal auth                                 | Using `qwen-portal` with API key                               | Fallback after `QWEN_OAUTH_TOKEN`                                                                   |
 | `ZENMUX_API_KEY`                | ZenMux auth                                      | Using `zenmux` provider                                        | Used for ZenMux OpenAI and Anthropic-compatible routes                                              |
 | `COMMAND_CODE_API_KEY`          | Command Code auth                                | Using `commandcode` provider                                   | `COMMANDCODE_API_KEY` is accepted as a legacy alias                                                 |
+| `CHARM_HYPER_API_KEY`           | Charm Hyper auth                                 | Using `charm-hyper` provider                                   | `HYPER_API_KEY` is accepted as a fallback alias                                                     |
 | `VLLM_API_KEY`                  | vLLM auth/discovery opt-in                       | Using `vllm` provider (local OpenAI-compatible servers)        | Any non-empty value works for no-auth local servers                                                 |
 | `CURSOR_ACCESS_TOKEN`           | Cursor provider auth                             | Using Cursor provider                                          | `CURSOR_API_KEY` is accepted as an alias                                                            |
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             | `VERCEL_AI_GATEWAY_API_KEY` is accepted as an alias                                                 |
@@ -366,6 +367,7 @@ therefore completes through the paste-code path.
 | `KAGI_API_KEY`                                      | Kagi search provider                                                      |
 | `JINA_API_KEY`                                      | Jina search provider                                                      |
 | `PARALLEL_API_KEY`                                  | Parallel search provider                                                  |
+| `OLLAMA_CLOUD_API_KEY`                              | Ollama web search provider                                                |
 | `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                                |
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                                       |
 

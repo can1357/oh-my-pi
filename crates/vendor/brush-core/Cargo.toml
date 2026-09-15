@@ -21,7 +21,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "Reusable core of a POSIX/bash shell (used by brush-shell)"
-readme = "README.md"
 keywords = [
     "cli",
     "shell",
