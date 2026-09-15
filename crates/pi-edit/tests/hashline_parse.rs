@@ -612,17 +612,15 @@ fn input_rejects_malformed_tags_and_missing_headers() {
 		.unwrap_err()
 		.to_string();
 	assert!(
-		error.contains("input must begin with \"[PATH#HASH]\"")
-			&& error.contains("[src/foo.ts#1A2B]")
+		error.contains("input must begin with `[PATH#HASH]`") && error.contains("[src/foo.ts#1A2B]")
 	);
-	assert!(!error.contains("Detected incompatible"), "{error}");
-	assert!(!error.contains("Do not merely prepend"), "{error}");
+	assert!(!error.contains("input is not Hashline syntax"), "{error}");
 
 	let error = Patch::parse("*** Begin Patch\nCUT 38.=40\n*** End Patch", &options())
 		.unwrap_err()
 		.to_string();
-	assert!(error.contains("input must begin with \"[PATH#HASH]\""), "{error}");
-	assert!(!error.contains("Detected incompatible"), "{error}");
+	assert!(error.contains("input must begin with `[PATH#HASH]`"), "{error}");
+	assert!(!error.contains("input is not Hashline syntax"), "{error}");
 }
 
 #[test]
@@ -635,17 +633,13 @@ fn input_reports_all_detected_foreign_syntax_on_first_failure() {
 	.unwrap_err()
 	.to_string();
 	assert!(
-		error.contains("Detected incompatible apply_patch, unified diff, SEARCH/REPLACE syntax"),
+		error.contains(
+			"input is not Hashline syntax; detected apply_patch, unified diff, SEARCH/REPLACE"
+		),
 		"{error}"
 	);
-	assert!(error.contains("Do not merely prepend the header"), "{error}");
-	assert!(
-		error.contains("Discard the incompatible body and rewrite existing-file changes"),
-		"{error}"
-	);
-	assert!(error.contains("[PATH#HASH]"), "{error}");
-	assert!(error.contains("PUT N.=M:"), "{error}");
-	assert!(error.contains("+TEXT"), "{error}");
+	assert!(error.contains("A `[PATH#HASH]` header will not make this body valid"), "{error}");
+	assert!(error.contains("Rewrite the whole edit in Hashline syntax"), "{error}");
 }
 
 #[test]
@@ -653,107 +647,8 @@ fn input_reports_contextual_unified_hunks_on_first_failure() {
 	let error = Patch::parse("@@ -1,3 +1,3 @@ fn main\n-old\n+new", &options())
 		.unwrap_err()
 		.to_string();
-	assert!(error.contains("Detected incompatible unified diff syntax"), "{error}");
-	assert!(
-		error.contains("Discard the incompatible body and rewrite existing-file changes"),
-		"{error}"
-	);
-}
-
-#[test]
-fn input_preserves_delete_and_move_operations_in_rewrite_guidance() {
-	let error = Patch::parse(
-		"*** Begin Patch\n*** Delete File: old.ts\n*** Update File: current.ts\n*** Move to: \
-		 renamed.ts\n*** End Patch",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("Use `REM` to delete a file"), "{error}");
-	assert!(error.contains("`MV DEST` to move or rename it"), "{error}");
-}
-
-#[test]
-fn input_routes_apply_patch_add_file_to_write() {
-	let error = Patch::parse(
-		"*** Begin Patch\n*** Add File: a.ts\n+export const value = 1;\n*** End Patch",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("Detected incompatible apply_patch syntax"), "{error}");
-	assert!(error.contains("use the `write` tool"), "{error}");
-	assert!(!error.contains("[PATH#HASH]"), "{error}");
-	assert!(!error.contains("Copy `HASH`"), "{error}");
-}
-
-#[test]
-fn input_routes_unified_diff_add_file_to_write() {
-	let error = Patch::parse(
-		"diff --git a/new.ts b/new.ts\nnew file mode 100644\n--- /dev/null\n+++ b/new.ts\n@@ -0,0 \
-		 +1 @@\n+export const value = 1;",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("Detected incompatible unified diff syntax"), "{error}");
-	assert!(error.contains("use the `write` tool"), "{error}");
-	assert!(!error.contains("[PATH#HASH]"), "{error}");
-	assert!(!error.contains("Copy `HASH`"), "{error}");
-}
-
-#[test]
-fn input_routes_empty_unified_diff_add_file_to_write() {
-	let error = Patch::parse(
-		"diff --git a/empty.ts b/empty.ts\nnew file mode 100644\nindex 0000000..e69de29",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("Detected incompatible unified diff syntax"), "{error}");
-	assert!(error.contains("use the `write` tool"), "{error}");
-	assert!(!error.contains("[PATH#HASH]"), "{error}");
-	assert!(!error.contains("Copy `HASH`"), "{error}");
-}
-
-#[test]
-fn input_reports_both_recovery_paths_for_mixed_unified_diff() {
-	let error = Patch::parse(
-		"--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1 @@\n+new\n--- a/existing.ts\n+++ b/existing.ts\n@@ \
-		 -1 +1 @@\n-old\n+new",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("use the `write` tool"), "{error}");
-	assert!(error.contains("rewrite existing-file changes as Hashline"), "{error}");
-	assert!(error.contains("Copy `HASH`"), "{error}");
-}
-
-#[test]
-fn input_preserves_metadata_only_existing_sections_with_additions() {
-	let error = Patch::parse(
-		"diff --git a/empty b/empty\nnew file mode 100644\nindex 0000000..e69de29\ndiff --git a/old \
-		 b/new\nsimilarity index 100%\nrename from old\nrename to new",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("use the `write` tool"), "{error}");
-	assert!(error.contains("rewrite existing-file changes as Hashline"), "{error}");
-	assert!(error.contains("`MV DEST` to move or rename it"), "{error}");
-}
-
-#[test]
-fn input_ignores_file_markers_inside_unified_hunks() {
-	let error = Patch::parse(
-		"diff --git a/doc b/doc\n@@ -1,2 +1,2 @@\n new file mode 100644\n--- /dev/null\n+++ b/new",
-		&options(),
-	)
-	.unwrap_err()
-	.to_string();
-	assert!(error.contains("rewrite existing-file changes as Hashline"), "{error}");
-	assert!(!error.contains("use the `write` tool"), "{error}");
+	assert!(error.contains("input is not Hashline syntax; detected unified diff"), "{error}");
+	assert!(error.contains("Rewrite the whole edit in Hashline syntax"), "{error}");
 }
 
 #[test]

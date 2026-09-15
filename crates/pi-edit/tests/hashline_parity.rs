@@ -466,7 +466,7 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 	assert!(
 		error
 			.to_string()
-			.contains("Detected incompatible unified diff syntax")
+			.contains("input is not Hashline syntax; detected unified diff")
 	);
 
 	let aborted = Patch::parse(
@@ -554,8 +554,8 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 	let missing = Patch::parse("CUT 38-40", &SplitOptions::default())
 		.expect_err("reports bracket syntax with a 4-hex example when the header is missing")
 		.to_string();
-	assert!(missing.contains("input must begin with \"[PATH#HASH]\""));
-	assert!(missing.contains("Example: \"[src/foo.ts#1A2B]\""));
+	assert!(missing.contains("input must begin with `[PATH#HASH]`"));
+	assert!(missing.contains("Example: `[src/foo.ts#1A2B]`"));
 
 	let lowercase = Patch::parse("[a.ts#1a2b]\nPUT 1-1:\n+A", &SplitOptions::default())
 		.expect("normalizes lowercase section tags while parsing");
