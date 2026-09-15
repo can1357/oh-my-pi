@@ -647,7 +647,7 @@ fn input_reports_all_detected_foreign_syntax_on_first_failure() {
 		error.contains("Possible non-Hashline syntax: apply_patch, unified diff, SEARCH/REPLACE"),
 		"{error}"
 	);
-	assert!(error.contains("Do not reuse this body with a Hashline header"), "{error}");
+	assert!(error.contains("Rewrite this body in Hashline syntax"), "{error}");
 	assert!(error.contains("review the edit tool instructions before retrying"), "{error}");
 }
 
