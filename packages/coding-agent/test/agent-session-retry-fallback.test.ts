@@ -33,6 +33,7 @@ import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import type { ModelSelectEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -42,6 +43,35 @@ type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start"
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
 const FALLBACK_TEST_RETRY_AFTER_MS = 60_000;
+
+/**
+ * Stub-runner seam mirroring the real runner's `reserveModelSelect`: slots are
+ * handed out in reservation (switch) order and delivered into `sink` in that
+ * order once committed — even when a later-reserved slot commits first (the
+ * aborted-swap path commits its rollback before the finally commits the swap).
+ */
+function stubModelSelectSlots(sink: (event: Omit<ModelSelectEvent, "type">) => void) {
+	type Slot = { event?: Omit<ModelSelectEvent, "type">; delivered: boolean };
+	const slots: Slot[] = [];
+	return {
+		reserveModelSelect: () => {
+			const slot: Slot = { delivered: false };
+			slots.push(slot);
+			return {
+				commit: (event: Omit<ModelSelectEvent, "type">) => {
+					if (slot.delivered || slot.event !== undefined) return;
+					slot.event = event;
+					while (slots.length > 0 && slots[0].event !== undefined) {
+						const head = slots.shift();
+						if (!head) break;
+						head.delivered = true;
+						sink(head.event!);
+					}
+				},
+			};
+		},
+	};
+}
 
 function trackRetryEvents(session: AgentSession): {
 	retryStartEvents: AutoRetryStartEvent[];
@@ -1050,6 +1080,7 @@ describe("AgentSession retry fallback", () => {
 			extensionRunner: {
 				emit: vi.fn().mockResolvedValue(undefined),
 				emitModelSelect,
+				...stubModelSelectSlots(emitModelSelect),
 				hasHandlers: vi.fn().mockReturnValue(false),
 				emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			} as unknown as ExtensionRunner,
@@ -1563,6 +1594,7 @@ describe("AgentSession retry fallback", () => {
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
 			emitModelSelect,
+			reserveModelSelect: () => ({ commit: (event: Omit<ModelSelectEvent, "type">) => emitModelSelect(event) }),
 			// Asserted below: the setup hand-off is a temporary (prewalk-shaped) set.
 			hasHandlers: vi.fn().mockReturnValue(false),
 			emitBeforeAgentStart: vi.fn(async () => {
@@ -3736,6 +3768,7 @@ describe("AgentSession retry fallback", () => {
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
 			emitModelSelect,
+			reserveModelSelect: () => ({ commit: (event: Omit<ModelSelectEvent, "type">) => emitModelSelect(event) }),
 			// Asserted below: same-model retries never fire model_select.
 			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
@@ -4968,6 +5001,7 @@ describe("AgentSession retry fallback", () => {
 			extensionRunner: {
 				emit: vi.fn().mockResolvedValue(undefined),
 				emitModelSelect,
+				reserveModelSelect: () => ({ commit: (event: Omit<ModelSelectEvent, "type">) => emitModelSelect(event) }),
 				hasHandlers: vi.fn().mockReturnValue(false),
 				emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			} as unknown as ExtensionRunner,
