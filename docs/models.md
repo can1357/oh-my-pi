@@ -247,8 +247,8 @@ A custom model in `models.yml` that omits `cost` inherits its reference row's ca
 For `openai-models-list` discovery, token rates are resolved using the following precedence:
 1. **Configured mapping**: If `discovery.pricing` is specified, rates are extracted from the configured paths (`unit` defaults to `per-1m`).
 2. **Auto-detection (per 1M)**: If the raw model entry's `pricing` object contains `input_per_1m_usd` or `output_per_1m_usd`, those rates are used directly (cache fields set to `0`).
-3. **Auto-detection (per token)**: If the raw model entry's `pricing` object contains `prompt` or `completion`, those values are scaled by 1,000,000 to USD per 1M tokens (cache fields set to `0`).
-4. **Catalog reference fallback**: Otherwise, pricing falls back to the matched bundled reference model's `cost` (or four `0` fields if unknown).
+3. **Auto-detection (per token)**: If the raw model entry's `pricing` object contains `prompt` or `completion`, those values and any `input_cache_read` / `input_cache_write` rates are scaled by 1,000,000 to USD per 1M tokens.
+4. **Unknown pricing**: Otherwise, all four rates remain `0`. Bundled reference models enrich capabilities and limits, but their provider-specific rate cards are not applied to a custom gateway.
 
 Explicit `modelOverrides[id].cost` retains the highest priority and overrides any discovered pricing. Discovered models from other providers (such as `lm-studio`, `ollama`, or `llama.cpp`) continue to default to zero cost.
 

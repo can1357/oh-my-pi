@@ -824,7 +824,6 @@ function sanitizePricingValue(value: unknown, unit: "per-1m" | "per-token"): num
 function resolveOpenAIModelsListCost(
 	item: Record<string, unknown>,
 	pricingConfig: NonNullable<ProviderDiscovery["pricing"]> | undefined,
-	referenceCost: ModelCost | undefined,
 ): ModelCost {
 	if (pricingConfig) {
 		const unit = pricingConfig.unit ?? "per-1m";
@@ -853,14 +852,10 @@ function resolveOpenAIModelsListCost(
 			return {
 				input: sanitizePricingValue(rawPricing.prompt, "per-token"),
 				output: sanitizePricingValue(rawPricing.completion, "per-token"),
-				cacheRead: 0,
-				cacheWrite: 0,
+				cacheRead: sanitizePricingValue(rawPricing.input_cache_read, "per-token"),
+				cacheWrite: sanitizePricingValue(rawPricing.input_cache_write, "per-token"),
 			};
 		}
-	}
-
-	if (referenceCost) {
-		return referenceCost;
 	}
 
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -969,7 +964,7 @@ export async function discoverOpenAIModelsList(
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 				cost:
 					providerConfig.discovery.type === "openai-models-list"
-						? resolveOpenAIModelsListCost(item, providerConfig.discovery.pricing, reference?.cost)
+						? resolveOpenAIModelsListCost(item, providerConfig.discovery.pricing)
 						: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
 				// Cap the reference's output limit at the discovered context

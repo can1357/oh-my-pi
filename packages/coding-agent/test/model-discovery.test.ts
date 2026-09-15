@@ -2398,7 +2398,7 @@ providers:
 		expect(fallback?.contextWindow).toBe(128000);
 	});
 
-	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {
+	test("openai-models-list enriches metadata but leaves unreported proxy pricing unknown", async () => {
 		writeRawModelsJson({
 			"openai-test": {
 				baseUrl: "http://127.0.0.1:9997",
@@ -2439,9 +2439,9 @@ providers:
 		const proxiedCompat = proxied?.compat as OpenAICompat | undefined;
 		expect(proxiedCompat?.supportsReasoningEffort).toBe(true);
 		expect(proxiedCompat?.omitReasoningEffort).toBe(false);
-		const bundledGpt5 = getBundledModel("openai", "gpt-5");
-		expect(proxied?.cost).toEqual(bundledGpt5?.cost);
-		// Unknown model ids stay on the default fallback path with zero pricing.
+		// A catalog match enriches metadata but cannot establish the custom gateway's rate card.
+		expect(proxied?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		// Unknown model ids use the same zero-cost unknown value.
 		const unknown = registry.find("openai-test", "unknown-proxy-model");
 		expect(unknown?.contextWindow).toBe(128000);
 		expect(unknown?.reasoning).toBe(false);
@@ -2722,6 +2722,8 @@ providers:
 								pricing: {
 									prompt: "0.000001",
 									completion: 0.000003,
+									input_cache_read: "0.00000025",
+									input_cache_write: 0.0000005,
 								},
 							},
 							{
@@ -2749,12 +2751,12 @@ providers:
 			cacheWrite: 0,
 		});
 
-		// prompt / completion: per-token scaled by 1,000,000, cacheRead/Write 0
+		// OpenRouter pricing is per-token, including advertised cache rates.
 		expect(registry.find("auto-pricing-proxy", "openrouter-per-token-auto")?.cost).toEqual({
 			input: 1,
 			output: 3,
-			cacheRead: 0,
-			cacheWrite: 0,
+			cacheRead: 0.25,
+			cacheWrite: 0.5,
 		});
 
 		// malformed / negative auto-detected members sanitize to 0
