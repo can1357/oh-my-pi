@@ -29,54 +29,13 @@ const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
 static UNIFIED_HUNK_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
-const APPLY_PATCH_EXISTING_FILE_MARKERS: [&str; 3] =
-	["*** Update File:", "*** Delete File:", "*** Move to:"];
-const APPLY_PATCH_ADD_FILE_MARKER: &str = "*** Add File:";
+const APPLY_PATCH_MARKERS: [&str; 4] =
+	["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"];
 
-#[derive(Default)]
-pub(super) struct ForeignSyntax {
-	apply_patch:                bool,
-	apply_patch_existing_file:  bool,
-	apply_patch_add_file:       bool,
-	unified_diff:               bool,
-	unified_diff_add_file:      bool,
-	unified_diff_existing_file: bool,
-	search_replace:             bool,
-}
-
-impl ForeignSyntax {
-	pub(super) const fn any(&self) -> bool {
-		self.apply_patch || self.unified_diff || self.search_replace
-	}
-
-	pub(super) const fn needs_hashline_rewrite(&self) -> bool {
-		self.apply_patch_existing_file || self.unified_diff_existing_file || self.search_replace
-	}
-
-	pub(super) const fn has_add_file(&self) -> bool {
-		self.apply_patch_add_file || self.unified_diff_add_file
-	}
-
-	pub(super) fn labels(&self) -> String {
-		[
-			self.apply_patch.then_some("apply_patch"),
-			self.unified_diff.then_some("unified diff"),
-			self.search_replace.then_some("SEARCH/REPLACE"),
-		]
-		.into_iter()
-		.flatten()
-		.collect::<Vec<_>>()
-		.join(", ")
-	}
-}
-
-fn apply_patch_operation_flags(line: &str) -> (bool, bool) {
-	(
-		APPLY_PATCH_EXISTING_FILE_MARKERS
-			.iter()
-			.any(|prefix| line.starts_with(prefix)),
-		line.starts_with(APPLY_PATCH_ADD_FILE_MARKER),
-	)
+fn is_apply_patch_marker(line: &str) -> bool {
+	APPLY_PATCH_MARKERS
+		.iter()
+		.any(|prefix| line.starts_with(prefix))
 }
 
 fn is_unified_hunk_line(line: &str) -> bool {
@@ -85,137 +44,32 @@ fn is_unified_hunk_line(line: &str) -> bool {
 		.is_some_and(|rest| rest.contains("@@"))
 }
 
-fn unified_header_is_dev_null(line: &str, marker: &str) -> Option<bool> {
-	let path = line.strip_prefix(marker)?.split_whitespace().next()?;
-	Some(path == "/dev/null")
-}
-
-#[derive(Clone, Copy)]
-enum UnifiedFileKind {
-	Add,
-	Existing,
-}
-
-#[derive(Default)]
-struct UnifiedGitSection {
-	kind:                   Option<UnifiedFileKind>,
-	in_hunk:                bool,
-	old_header_is_dev_null: Option<bool>,
-}
-
-const fn record_unified_section(syntax: &mut ForeignSyntax, section: UnifiedGitSection) {
-	match section.kind {
-		Some(UnifiedFileKind::Add) => syntax.unified_diff_add_file = true,
-		Some(UnifiedFileKind::Existing) | None => syntax.unified_diff_existing_file = true,
-	}
-}
-
-fn detect_git_unified_syntax(input: &str, syntax: &mut ForeignSyntax) {
-	let mut section = None;
-	for raw_line in input.lines() {
-		let line = raw_line.trim_end_matches('\r');
-		if line.starts_with("diff --git ") {
-			if let Some(previous) = section.replace(UnifiedGitSection::default()) {
-				record_unified_section(syntax, previous);
-			}
-			syntax.unified_diff = true;
-			continue;
-		}
-		let Some(current) = section.as_mut() else {
-			continue;
-		};
-		if is_unified_hunk_line(line) {
-			current.in_hunk = true;
-			continue;
-		}
-		if current.in_hunk {
-			continue;
-		}
-		if line.starts_with("new file mode ") {
-			current.kind = Some(UnifiedFileKind::Add);
-			continue;
-		}
-		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
-			current.old_header_is_dev_null = Some(old_is_dev_null);
-			continue;
-		}
-		if let Some(new_is_dev_null) = unified_header_is_dev_null(line, "+++ ")
-			&& let Some(old_is_dev_null) = current.old_header_is_dev_null.take()
-		{
-			current.kind = Some(if old_is_dev_null && !new_is_dev_null {
-				UnifiedFileKind::Add
-			} else {
-				UnifiedFileKind::Existing
-			});
-		}
-	}
-	if let Some(section) = section {
-		record_unified_section(syntax, section);
-	}
-}
-
-fn detect_plain_unified_syntax(input: &str, syntax: &mut ForeignSyntax) {
-	let mut current_kind = None;
-	let mut old_header_is_dev_null = None;
-	for raw_line in input.lines() {
-		let line = raw_line.trim_end_matches('\r');
-		if line.starts_with("new file mode ") {
-			syntax.unified_diff = true;
-			syntax.unified_diff_add_file = true;
-			current_kind = Some(UnifiedFileKind::Add);
-			continue;
-		}
-		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
-			old_header_is_dev_null = Some(old_is_dev_null);
-			current_kind = None;
-			continue;
-		}
-		if let Some(new_is_dev_null) = unified_header_is_dev_null(line, "+++ ")
-			&& let Some(old_is_dev_null) = old_header_is_dev_null.take()
-		{
-			let kind = if old_is_dev_null && !new_is_dev_null {
-				syntax.unified_diff_add_file = true;
-				UnifiedFileKind::Add
-			} else {
-				syntax.unified_diff_existing_file = true;
-				UnifiedFileKind::Existing
-			};
-			syntax.unified_diff = true;
-			current_kind = Some(kind);
-			continue;
-		}
-		if is_unified_hunk_line(line) {
-			syntax.unified_diff = true;
-			if current_kind.is_none() {
-				syntax.unified_diff_existing_file = true;
-			}
-		}
-	}
-}
-
-pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
-	let mut syntax = ForeignSyntax::default();
-	let mut saw_search_marker = false;
-	let mut saw_replace_marker = false;
+pub(super) fn detect_foreign_syntax(input: &str) -> String {
+	let mut apply_patch = false;
+	let mut unified_diff = false;
+	let mut unified_old_header = false;
+	let mut unified_new_header = false;
+	let mut search_marker = false;
+	let mut replace_marker = false;
 	for raw_line in input.lines() {
 		let line = raw_line.trim();
-		let (existing_file_op, add_file) = apply_patch_operation_flags(line);
-		syntax.apply_patch |= existing_file_op || add_file;
-		syntax.apply_patch_existing_file |= existing_file_op;
-		syntax.apply_patch_add_file |= add_file;
-		saw_search_marker |= line.starts_with("<<<<<<< SEARCH");
-		saw_replace_marker |= line.starts_with(">>>>>>> REPLACE");
+		apply_patch |= is_apply_patch_marker(line);
+		unified_diff |= line.starts_with("diff --git ") || is_unified_hunk_line(line);
+		unified_old_header |= line.starts_with("--- ");
+		unified_new_header |= line.starts_with("+++ ");
+		search_marker |= line.starts_with("<<<<<<< SEARCH");
+		replace_marker |= line.starts_with(">>>>>>> REPLACE");
 	}
-	if input
-		.lines()
-		.any(|line| line.trim_end_matches('\r').starts_with("diff --git "))
-	{
-		detect_git_unified_syntax(input, &mut syntax);
-	} else {
-		detect_plain_unified_syntax(input, &mut syntax);
-	}
-	syntax.search_replace = saw_search_marker && saw_replace_marker;
-	syntax
+	unified_diff |= unified_old_header && unified_new_header;
+	[
+		apply_patch.then_some("apply_patch"),
+		unified_diff.then_some("unified diff"),
+		(search_marker && replace_marker).then_some("SEARCH/REPLACE"),
+	]
+	.into_iter()
+	.flatten()
+	.collect::<Vec<_>>()
+	.join(", ")
 }
 
 /// Inverted concrete range with metadata for source-aware enrichment.
@@ -926,8 +780,7 @@ fn parse_bare_range(text: &str) -> Option<ParsedRange> {
 }
 fn contamination_message(text: &str) -> Option<String> {
 	let trimmed = text.trim_start();
-	let (apply_patch_existing_file, apply_patch_add_file) = apply_patch_operation_flags(trimmed);
-	if apply_patch_existing_file || apply_patch_add_file {
+	if is_apply_patch_marker(trimmed) {
 		let preview = if trimmed.chars().count() > 48 {
 			format!("{}…", trimmed.chars().take(48).collect::<String>())
 		} else {

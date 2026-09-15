@@ -16,7 +16,7 @@ use super::{
 		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
 		json_quote,
 	},
-	parser::{ForeignSyntax, detect_foreign_syntax, parse_patch},
+	parser::{detect_foreign_syntax, parse_patch},
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
@@ -24,13 +24,6 @@ use crate::error::EditError;
 
 /// Envelope and abort sentinels recognized when nested inside a header row.
 const ENVELOPE_MARKERS: [&str; 3] = [BEGIN_PATCH_MARKER, END_PATCH_MARKER, ABORT_MARKER];
-const FOREIGN_REWRITE_GUIDANCE: &str =
-	"Discard the incompatible body and rewrite existing-file changes as Hashline: `[PATH#HASH]`, \
-	 then operations such as `PUT N.=M:` followed by `+TEXT`, `CUT N.=M`, `PUT <N:`, or `PUT >N:`. \
-	 Use `REM` to delete a file and `MV DEST` to move or rename it. Copy `HASH` and the original \
-	 line numbers from the latest `read`/`search` output.";
-const ADD_FILE_GUIDANCE: &str =
-	"For new-file sections, use the `write` tool because new files have no snapshot hash.";
 
 static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(
@@ -340,25 +333,6 @@ fn strip_leading_blanks(input: &str) -> String {
 	lines.join("\n")
 }
 
-fn foreign_syntax_guidance(syntax: &ForeignSyntax) -> String {
-	if !syntax.any() {
-		return String::new();
-	}
-	let mut guidance = format!(
-		" Detected incompatible {} syntax. Do not merely prepend the header to the existing input.",
-		syntax.labels()
-	);
-	if syntax.needs_hashline_rewrite() {
-		guidance.push(' ');
-		guidance.push_str(FOREIGN_REWRITE_GUIDANCE);
-	}
-	if syntax.has_add_file() {
-		guidance.push(' ');
-		guidance.push_str(ADD_FILE_GUIDANCE);
-	}
-	guidance
-}
-
 fn split_raw_sections(
 	input: &str,
 	options: &SplitOptions<'_>,
@@ -371,15 +345,19 @@ fn split_raw_sections(
 		.collect();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		let syntax = detect_foreign_syntax(&input);
-		let guidance = foreign_syntax_guidance(&syntax);
-		if syntax.has_add_file() && !syntax.needs_hashline_rewrite() {
-			return Err(EditError::parse(guidance.trim_start()));
+		let foreign_syntax = detect_foreign_syntax(&input);
+		if !foreign_syntax.is_empty() {
+			return Err(EditError::parse(format!(
+				"input is not Hashline syntax; detected {foreign_syntax}. A `[PATH#HASH]` header will \
+				 not make this body valid. Rewrite the whole edit in Hashline syntax, or choose a \
+				 tool that supports the operation."
+			)));
 		}
 		let preview: String = first.chars().take(120).collect();
 		return Err(EditError::parse(format!(
-			"input must begin with \"[PATH#HASH]\" on the first non-blank line for anchored edits; \
-			 got: {}. Example: \"[src/foo.ts#{}]\" then edit ops.{guidance}",
+			"input must begin with `[PATH#HASH]` on the first non-blank line; got {}. Copy the exact \
+			 header and original line numbers from the latest read/search output. Example: \
+			 `[src/foo.ts#{}]`.",
 			json_quote(&preview),
 			HL_FILE_HASH_EXAMPLES[0]
 		)));
