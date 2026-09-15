@@ -50,6 +50,11 @@ export interface ActiveRetryFallbackState {
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
 	/**
+	 * Fallback selectors this walk has already routed through, including nested
+	 * chains reached after the first hop.
+	 */
+	visitedSelectors?: Array<{ role: string; selector: string }>;
+	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new
 	 * model, so no observer may report the run as having used it.

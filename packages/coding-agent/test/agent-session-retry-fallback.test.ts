@@ -6194,4 +6194,485 @@ describe("AgentSession retry fallback", () => {
 		const finalAssistant = getLastAssistantMessage(session);
 		expect(finalAssistant.content).toEqual([{ type: "text", text: "Recovered on the same model." }]);
 	});
+
+	it("waits for the soonest quota reset across an exhausted chain and resumes on that model", async () => {
+		// Contract: with retry.waitForUsageReset set, a chain whose every member
+		// hit a usage limit does not fail the turn at the delay cap — it sleeps
+		// until the soonest provider-stated reset among the exhausted
+		// candidates (here the primary's 1h window, not the fallback's 2h) and
+		// resumes on that model once its parked cooldown clears.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled quota-chain test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		// UTC stamps parsed exactly by the retry-hint extractor; the wait
+		// bounds below absorb the sub-second test time.
+		const primaryResetStamp = new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const fallbackResetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
+		const primaryQuotaError = `429 已达到 5 小时的使用上限。您的限额将在 ${primaryResetStamp} 重置。`;
+		const fallbackQuotaError = `429 已达到 5 小时的使用上限。您的限额将在 ${fallbackResetStamp} 重置。`;
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push(
+						primaryAttempts++ === 0
+							? { throw: primaryQuotaError }
+							: { content: ["recovered on the primary after its reset"] },
+					);
+				} else if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
+					mock.push({ throw: fallbackQuotaError });
+				} else {
+					throw new Error(`Unexpected model requested during quota chain test: ${model.provider}/${model.id}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Trigger a fully quota-blocked chain");
+		await session.waitForIdle();
+
+		// The primary failed, the fallback failed, and the continuation after
+		// the booked wait ran on the primary — whose 1h reset is the sooner
+		// one — instead of sleeping out the fallback's 2h window in place.
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, primarySelector]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+		const resetWaits = waitSpy.mock.calls.map(call => call[0] as number).filter(ms => ms > 3_300_000);
+		expect(resetWaits).toHaveLength(1);
+		expect(resetWaits[0]).toBeLessThanOrEqual(3_600_000);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryStartEvents[0].delayMs).toBe(0);
+		expect(retryStartEvents[1].delayMs).toBeGreaterThan(3_300_000);
+		expect(retryStartEvents[1].delayMs).toBeLessThanOrEqual(3_600_000);
+		expect(fallbackAppliedEvents).toEqual([
+			{ type: "retry_fallback_applied", from: primarySelector, to: fallbackSelector, role: "default" },
+			{ type: "retry_fallback_applied", from: fallbackSelector, to: primarySelector, role: "default" },
+		]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("keeps failing when an exhausted quota chain has no provider-stated reset", async () => {
+		// Contract: the chain-exhausted rescue only sleeps on provider-stated
+		// timing. Hintless quota errors (402 balance) leave the 30-minute
+		// heuristic as the only deadline, which must not bypass the retry cap —
+		// the turn still fails fast instead of sleeping a guess.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled hintless quota-chain test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		const balanceError = "402 Insufficient balance, please top up your account";
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ throw: balanceError });
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryEndEvents } = trackRetryEvents(session);
+
+		await session.prompt("Trigger a hintless quota-blocked chain");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false });
+		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
+		expect(retryEndEvents[0].finalError).toContain("Provider requested 1800000ms wait");
+		for (const call of waitSpy.mock.calls) {
+			expect(call[0]).toBeLessThanOrEqual(100);
+		}
+		const last = getLastAssistantMessage(session);
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toContain("Insufficient balance");
+		expect(session.isRetrying).toBe(false);
+	});
+
+
+	it("waits on the current model when its quota reset is soonest at retry exhaustion", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled current-reset test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const primaryResetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
+		const fallbackResetStamp = new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const primaryQuotaError = `429 已达到 5 小时的使用上限。您的限额将在 ${primaryResetStamp} 重置。`;
+		const fallbackQuotaError = `429 已达到 5 小时的使用上限。您的限额将在 ${fallbackResetStamp} 重置。`;
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let fallbackAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (selector === primarySelector) {
+					mock.push({ throw: primaryQuotaError });
+				} else if (selector === fallbackSelector) {
+					mock.push(
+						fallbackAttempts++ === 0
+							? { throw: fallbackQuotaError }
+							: { content: ["fallback recovered on its earlier reset"] },
+					);
+				} else {
+					throw new Error(`Unexpected model requested during current-reset test: ${selector}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 1,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger current model quota reset selection");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector]);
+		const resetWaits = waitSpy.mock.calls.map(call => call[0] as number).filter(ms => ms > 3_300_000);
+		expect(resetWaits).toHaveLength(1);
+		expect(resetWaits[0]).toBeLessThanOrEqual(3_600_000);
+		expect(getLastAssistantMessage(session).content).toEqual([
+			{ type: "text", text: "fallback recovered on its earlier reset" },
+		]);
+	});
+
+	it("does not apply a delayed quota fallback after an explicit model change", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		const selectedModel = getBundledModel("google", "gemini-2.0-flash");
+		if (!primaryModel || !fallbackModel || !selectedModel) {
+			throw new Error("Expected bundled delayed-fallback race test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const selectedSelector = `${selectedModel.provider}/${selectedModel.id}`;
+		const primaryResetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
+		const fallbackResetStamp = new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let selectedAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (selector === primarySelector) {
+					mock.push({
+						throw: `429 已达到 5 小时的使用上限。您的限额将在 ${primaryResetStamp} 重置。`,
+					});
+				} else if (selector === fallbackSelector) {
+					mock.push({
+						throw: `429 已达到 5 小时的使用上限。您的限额将在 ${fallbackResetStamp} 重置。`,
+					});
+				} else if (selector === selectedSelector) {
+					mock.push(
+						selectedAttempts++ === 0
+							? { content: ["explicit selection won the pending wait"] }
+							: { content: ["selected again"] },
+					);
+				} else {
+					throw new Error(`Unexpected model requested during delayed-fallback race test: ${selector}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 1,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockImplementation(async delayMs => {
+			if (delayMs > 3_300_000) {
+				await session?.setModelTemporary(selectedModel, undefined, { ephemeral: true });
+			}
+		});
+
+		await session.prompt("Trigger delayed fallback and change model during wait");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, selectedSelector]);
+		expect(session.model?.provider).toBe(selectedModel.provider);
+		expect(session.model?.id).toBe(selectedModel.id);
+		expect(getLastAssistantMessage(session).content).toEqual([
+			{ type: "text", text: "explicit selection won the pending wait" },
+		]);
+	});
+	it("keeps routed quota resets separate when upstream routes share provider and model id", async () => {
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) {
+			throw new Error("Expected bundled OpenRouter quota-route test model to exist");
+		}
+		const primarySelector = "openrouter/z-ai/glm-4.7@cerebras";
+		const fallbackSelector = "openrouter/z-ai/glm-4.7@fireworks";
+		const routedPrimary = parseModelPattern(primarySelector, [openRouterModel]).model;
+		if (!routedPrimary) {
+			throw new Error("Expected routed OpenRouter primary to resolve");
+		}
+
+		const primaryResetStamp = new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const fallbackResetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
+		const primaryQuotaError = `429 已达到 5 小时的使用上限。您的限额将在 ${primaryResetStamp} 重置。`;
+		const fallbackQuotaError = `429 已达到 5 小时的使用上限。您的限额将在 ${fallbackResetStamp} 重置。`;
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: routedPrimary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				const route =
+					model.provider === "openrouter" && model.compat && "openRouterRouting" in model.compat
+						? model.compat.openRouterRouting?.only?.[0]
+						: undefined;
+				const requested = `${model.provider}/${model.id}${route ? `@${route}` : ""}`;
+				requestedModels.push(requested);
+				if (requested === primarySelector) {
+					mock.push(
+						primaryAttempts++ === 0
+							? { throw: primaryQuotaError }
+							: { content: ["routed primary recovered first"] },
+					);
+				} else if (requested === fallbackSelector) {
+					mock.push({ throw: fallbackQuotaError });
+				} else {
+					throw new Error(`Unexpected routed model requested during quota reset test: ${requested}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger routed quota reset selection");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, primarySelector]);
+		const resetWaits = waitSpy.mock.calls.map(call => call[0] as number).filter(ms => ms > 3_300_000);
+		expect(resetWaits).toHaveLength(1);
+		expect(resetWaits[0]).toBeLessThanOrEqual(3_600_000);
+	});
+
+	it("includes intermediate nested-chain models when choosing the soonest quota reset", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		const thirdFallback = getBundledModel("google", "gemini-2.0-flash");
+		if (!primaryModel || !firstFallback || !secondFallback || !thirdFallback) {
+			throw new Error("Expected bundled nested quota-chain test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const thirdSelector = `${thirdFallback.provider}/${thirdFallback.id}`;
+
+		const resetStampBySelector: Record<string, string> = {
+			[primarySelector]: new Date(Date.now() + 14_400_000).toISOString().slice(0, 19).replace("T", " "),
+			[firstSelector]: new Date(Date.now() + 10_800_000).toISOString().slice(0, 19).replace("T", " "),
+			[secondSelector]: new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " "),
+			[thirdSelector]: new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " "),
+		};
+		const requestedModels: string[] = [];
+		const attemptsBySelector: Record<string, number> = {};
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				attemptsBySelector[selector] = (attemptsBySelector[selector] ?? 0) + 1;
+				if (selector === secondSelector && attemptsBySelector[selector] > 1) {
+					mock.push({ content: ["nested intermediate recovered first"] });
+				} else {
+					mock.push({
+						throw: `429 已达到 5 小时的使用上限。您的限额将在 ${resetStampBySelector[selector]} 重置。`,
+					});
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": {
+				default: [firstSelector],
+				[firstSelector]: [secondSelector],
+				[secondSelector]: [thirdSelector],
+			},
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger nested chain quota reset selection");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, firstSelector, secondSelector, thirdSelector, secondSelector]);
+		const resetWaits = waitSpy.mock.calls.map(call => call[0] as number).filter(ms => ms > 3_300_000);
+		expect(resetWaits).toHaveLength(1);
+		expect(resetWaits[0]).toBeLessThanOrEqual(3_600_000);
+	});
 });

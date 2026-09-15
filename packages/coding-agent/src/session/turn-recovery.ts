@@ -258,6 +258,19 @@ type UsageLimitOutcome = {
 	reportResetAtMs: number | undefined;
 };
 
+/** Chain candidate with the soonest provider-stated quota reset left in an exhausted walk. */
+type UsageResetFallback = {
+	role: string;
+	selector: RetryFallbackSelector;
+	waitMs: number;
+};
+
+/** Last known quota-reset deadline recorded for one model the session tried. */
+type UsageLimitResetRecord = {
+	deadlineMs: number;
+	providerTimed: boolean;
+};
+
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
@@ -269,6 +282,13 @@ export class TurnRecovery {
 	#usageReserveApprovedSelector: string | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
+	/**
+	 * Latest {@link UsageLimitResetRecord} per routed model identity for models
+	 * this session has run a usage-limit failure through. A later attempt whose
+	 * fallback walk finds every candidate parked consults these to learn which
+	 * parked model's provider-stated reset comes first.
+	 */
+	#usageLimitResetDeadlines = new Map<string, UsageLimitResetRecord>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
@@ -434,6 +454,7 @@ export class TurnRecovery {
 				},
 				sessionId: this.#host.sessionManager.getSessionId(),
 			};
+			this.#usageLimitResetDeadlines.delete(formatModelStringWithRouting(model));
 		}
 		// Independent of the retry saga below: a usage-aware fallback is applied
 		// before a request without ever incrementing `#retryAttempt`, and it still
@@ -1846,10 +1867,15 @@ export class TurnRecovery {
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				visitedSelectors: [{ role, selector: selector.raw }],
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			const visitedSelectors = this.#activeRetryFallback.visitedSelectors ?? [];
+			if (!visitedSelectors.some(entry => entry.role === role && entry.selector === selector.raw)) {
+				this.#activeRetryFallback.visitedSelectors = [...visitedSelectors, { role, selector: selector.raw }];
+			}
 		}
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
@@ -1917,6 +1943,93 @@ export class TurnRecovery {
 		}
 
 		return false;
+	}
+
+	/**
+	 * Find the chain candidate whose recorded usage-limit reset comes soonest
+	 * after the normal fallback walk found no model it can switch to now.
+	 * Wrap-around re-includes the primary the walk started from. Structural
+	 * filters still apply; selector cooldown and API-key availability are
+	 * ignored here because the recorded provider-timed reset is what makes the
+	 * route temporarily unusable. Heuristic guesses never qualify for sleeping
+	 * past the retry cap. `currentWaitMs` suppresses the rescue when staying on
+	 * the failed model recovers sooner.
+	 */
+	#findUsageResetFallback(
+		currentSelector: string,
+		failedMessage: AssistantMessage,
+		currentModel: Model,
+		options: {
+			currentWaitMs: number | undefined;
+			excludeProvider?: string;
+			preserveFailedTurn?: boolean;
+		},
+	): UsageResetFallback | undefined {
+		const ceiling = this.#host.thinkingLevelCeiling();
+		const latestAssistant = options.preserveFailedTurn
+			? failedMessage
+			: this.#host.agent.state.messages.findLast(
+					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
+				);
+		let soonest: UsageResetFallback | undefined;
+		const currentIdentity = formatModelStringWithRouting(currentModel);
+		const seenSelectors = new Set<string>();
+		const consider = (role: string, selector: RetryFallbackSelector): void => {
+			const selectorKey = `${role}\0${selector.raw}`;
+			if (seenSelectors.has(selectorKey)) return;
+			seenSelectors.add(selectorKey);
+			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+			if (!candidate) return;
+			const candidateIdentity = formatModelStringWithRouting(candidate);
+			if (candidateIdentity === currentIdentity) return;
+			if (options.excludeProvider === candidate.provider) return;
+			// Anthropic signatures and redacted blocks are model-bound —
+			// same constraints as the forward walk in
+			// #tryRetryModelFallback.
+			if (
+				candidate.api === "anthropic-messages" &&
+				latestAssistant?.api === "anthropic-messages" &&
+				latestAssistant.provider === candidate.provider &&
+				latestAssistant.model !== candidate.id &&
+				latestAssistant.content.some(
+					block =>
+						(block.type === "thinking" && Boolean(block.thinkingSignature?.trim())) ||
+						block.type === "redactedThinking",
+				)
+			) {
+				return;
+			}
+			if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) return;
+			if (!this.#host.contextFitsModel(candidate, options.preserveFailedTurn ? undefined : failedMessage)) {
+				return;
+			}
+			const record = this.#usageLimitResetDeadlines.get(candidateIdentity);
+			if (!record?.providerTimed) return;
+			if (record.deadlineMs <= Date.now()) {
+				this.#usageLimitResetDeadlines.delete(candidateIdentity);
+				return;
+			}
+			const waitMs = Math.max(0, record.deadlineMs - Date.now());
+			if (soonest === undefined || waitMs < soonest.waitMs) {
+				soonest = { role, selector, waitMs };
+			}
+		};
+		for (const role of this.retryFallbackChainKeys(currentSelector)) {
+			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, currentModel, {
+				wrapAround: true,
+			})) {
+				consider(role, selector);
+			}
+		}
+		for (const entry of this.#activeRetryFallback?.visitedSelectors ?? []) {
+			const selector = parseRetryFallbackSelector(entry.selector, this.#host.modelRegistry);
+			if (selector) consider(entry.role, selector);
+		}
+		if (soonest && options.currentWaitMs !== undefined && options.currentWaitMs <= soonest.waitMs) {
+			return undefined;
+		}
+		return soonest;
 	}
 
 	/** The active model when it is a Fireworks Fast (`-fast`) variant, else undefined. */
@@ -2093,6 +2206,73 @@ export class TurnRecovery {
 	}
 
 	/**
+	 * Merge one usage-limit failure's recorded signals into the wait that
+	 * actually clears the account, and whether provider-stated timing (rather
+	 * than the heuristic fallback) backs that wait.
+	 *
+	 * The deadline merges every independent provider signal by longest-wins
+	 * (mirroring extractRetryHint): the error-text hint (or heuristic fallback
+	 * when hintless), the credential block the mark call persisted, and — when
+	 * the usage report is a complete authority — its own reset, which replaces
+	 * the heuristic instead of sleeping a guess. The earliest moment a
+	 * temporarily blocked sibling credential frees up (e.g. a 60s post-401
+	 * block or a 5-min usage-probe block) shortens it instead: the next
+	 * attempt's getApiKey re-ranks and picks the sibling up, and without that
+	 * minimum one short-lived sibling block escalates a recoverable situation
+	 * into the provider's multi-hour wait.
+	 */
+	#usageLimitWaitFromOutcome(
+		outcome: UsageLimitOutcome,
+		parsedRetryAfterMs: number | undefined,
+	): { waitMs: number; providerTimed: boolean } {
+		let waitMs = outcome.retryAfterMs;
+		let providerTimed = parsedRetryAfterMs !== undefined || outcome.reportResetAtMs !== undefined;
+		if (outcome.reportResetAtMs !== undefined && parsedRetryAfterMs === undefined) {
+			// A hintless error can still carry an authoritative usage-report
+			// window: it replaces THIS call's 30-minute heuristic guess in
+			// both directions — sleeping the guess past a shorter reported
+			// reset overshoots, and vice versa.
+			waitMs = Math.max(0, outcome.reportResetAtMs - Date.now());
+		}
+		if (outcome.priorBlockedUntilMs !== undefined && outcome.priorBlockedUntilTimed === true) {
+			// The merged deadline below masks a pre-existing block shorter
+			// than this call's heuristic fallback (longest-wins in the mark).
+			// The prior deadline is that block's own provenance — an earlier
+			// response's provider-stated window — and must survive this
+			// call's heuristic guess: waking before it retries a
+			// still-blocked credential. A prior deadline that was itself only
+			// a heuristic guess carries no such authority and must not extend
+			// the wait past an authoritative report window.
+			const priorRemainingMs = Math.max(0, outcome.priorBlockedUntilMs - Date.now());
+			providerTimed = true;
+			if (priorRemainingMs > waitMs) waitMs = priorRemainingMs;
+		}
+		if (outcome.blockedUntilMs !== undefined) {
+			// The stored deadline merges every mark call for this credential
+			// (longest-wins). Only a deadline past what THIS call requested —
+			// a longer report window, or a longer block an earlier
+			// sibling-session response stored for the shared credential — may
+			// override the wait: retrying before the credential's actual
+			// unblock time re-hits the cap, but this call's own heuristic
+			// contribution must not re-inflate over the authoritative report
+			// window above.
+			const requestedBlockedUntilMs = Date.now() + (outcome.retryAfterMs ?? 0);
+			if (outcome.blockedUntilMs > requestedBlockedUntilMs) {
+				const blockedRemainingMs = Math.max(0, outcome.blockedUntilMs - Date.now());
+				if (blockedRemainingMs > waitMs) waitMs = blockedRemainingMs;
+			}
+		}
+		if (outcome.retryAtMs !== undefined) {
+			const siblingAvailabilityWaitMs = Math.max(0, outcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+			if (siblingAvailabilityWaitMs < waitMs) waitMs = siblingAvailabilityWaitMs;
+		}
+		return {
+			waitMs,
+			providerTimed,
+		};
+	}
+
+	/**
 	 * Handle retryable errors with exponential backoff, credential rotation, and
 	 * model-fallback chains. Also entered for NON-retryable errors when a switch
 	 * is the recovery (`fireworksFastFallback`, `hardErrorFallback`): then a
@@ -2172,6 +2352,10 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		let usageLimitProviderTimed = false;
+		// Chain candidate whose provider-stated quota reset is the soonest
+		// known wait, set once the fallback walk found nothing switchable.
+		let quotaResetWait: UsageResetFallback | undefined;
 		const siblingAvailabilityWaitMs =
 			recordedUsageLimitOutcome?.retryAtMs === undefined
 				? undefined
@@ -2193,64 +2377,11 @@ export class TurnRecovery {
 				switchedCredential = true;
 				delayMs = 0;
 			} else {
-				// No sibling credential is usable right now. Wait for whichever
-				// comes first: the current account's actual unblock deadline, or
-				// the earliest moment a temporarily blocked sibling frees up
-				// (e.g. a 60s post-401 block or a 5-min usage-probe block) — the
-				// next attempt's getApiKey re-ranks and picks it up. Without the
-				// sibling minimum, one short-lived sibling block escalates a
-				// recoverable situation into the provider's multi-hour wait and
-				// trips the fail-fast cap below.
-				// The deadline merges every independent provider signal by
-				// longest-wins (mirroring extractRetryHint): the error-text hint
-				// (or heuristic fallback when hintless), the credential block
-				// the mark call persisted, and — when the usage report is a
-				// complete authority — its own reset, which replaces the
-				// heuristic instead of sleeping a guess.
-				usageLimitWaitMs = recordedUsageLimitOutcome.retryAfterMs;
-				if (recordedUsageLimitOutcome.reportResetAtMs !== undefined && parsedRetryAfterMs === undefined) {
-					// A hintless error can still carry an authoritative
-					// usage-report window: it replaces THIS call's 30-minute
-					// heuristic guess in both directions — sleeping the guess
-					// past a shorter reported reset overshoots, and vice
-					// versa.
-					usageLimitWaitMs = Math.max(0, recordedUsageLimitOutcome.reportResetAtMs - Date.now());
-				}
-				if (
-					recordedUsageLimitOutcome.priorBlockedUntilMs !== undefined &&
-					recordedUsageLimitOutcome.priorBlockedUntilTimed === true
-				) {
-					// The merged deadline below masks a pre-existing block
-					// shorter than this call's heuristic fallback (longest-wins
-					// in the mark). The prior deadline is that block's own
-					// provenance — an earlier response's provider-stated
-					// window — and must survive this call's heuristic guess:
-					// waking before it retries a still-blocked credential. A
-					// prior deadline that was itself only a heuristic guess
-					// carries no such authority and must not extend the wait
-					// past an authoritative report window.
-					const priorRemainingMs = Math.max(0, recordedUsageLimitOutcome.priorBlockedUntilMs - Date.now());
-					if (priorRemainingMs > usageLimitWaitMs) usageLimitWaitMs = priorRemainingMs;
-				}
-				if (recordedUsageLimitOutcome.blockedUntilMs !== undefined) {
-					// The stored deadline merges every mark call for this
-					// credential (longest-wins). Only a deadline past what
-					// THIS call requested — a longer report window, or a
-					// longer block an earlier sibling-session response stored
-					// for the shared credential — may override the wait:
-					// retrying before the credential's actual unblock time
-					// re-hits the cap, but this call's own heuristic
-					// contribution must not re-inflate over the authoritative
-					// report window above.
-					const requestedBlockedUntilMs = Date.now() + (recordedUsageLimitOutcome.retryAfterMs ?? 0);
-					if (recordedUsageLimitOutcome.blockedUntilMs > requestedBlockedUntilMs) {
-						const blockedRemainingMs = Math.max(0, recordedUsageLimitOutcome.blockedUntilMs - Date.now());
-						if (blockedRemainingMs > usageLimitWaitMs) usageLimitWaitMs = blockedRemainingMs;
-					}
-				}
-				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
-					usageLimitWaitMs = siblingAvailabilityWaitMs;
-				}
+				// No sibling credential is usable right now. Wait out the
+				// merged provider deadline instead of rotating.
+				const usageLimitWait = this.#usageLimitWaitFromOutcome(recordedUsageLimitOutcome, parsedRetryAfterMs);
+				usageLimitWaitMs = usageLimitWait.waitMs;
+				usageLimitProviderTimed = usageLimitWait.providerTimed;
 				if (usageLimitWaitMs > delayMs) {
 					delayMs = usageLimitWaitMs;
 				}
@@ -2269,6 +2400,24 @@ export class TurnRecovery {
 				{ error: errorMessage, modelId: currentModel.id },
 			);
 			if (switchedCredential) delayMs = 0;
+		}
+		// Record this model's own quota wait for a later chain-exhausted
+		// attempt: the fallback walk parks the selector right below, and when
+		// every candidate ends up parked, these recorded deadlines decide
+		// which reset the turn can wait for. Nothing to record while a
+		// sibling rotation (or a redeemed Codex reset) recovered the failure
+		// without waiting.
+		if (recordedUsageLimitOutcome && currentModel && !switchedCredential) {
+			const merged = this.#usageLimitWaitFromOutcome(recordedUsageLimitOutcome, parsedRetryAfterMs);
+			if (usageLimitWaitMs === undefined) {
+				usageLimitWaitMs = merged.waitMs;
+				if (usageLimitWaitMs > delayMs) delayMs = usageLimitWaitMs;
+			}
+			usageLimitProviderTimed = usageLimitProviderTimed || merged.providerTimed;
+			this.#usageLimitResetDeadlines.set(formatModelStringWithRouting(currentModel), {
+				deadlineMs: Date.now() + merged.waitMs,
+				providerTimed: merged.providerTimed,
+			});
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard
 		// asking for a same-model resample, paired with a hidden
@@ -2311,6 +2460,9 @@ export class TurnRecovery {
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
+					if (currentModel && !AIError.is(id, AIError.Flag.UsageLimit)) {
+						this.#usageLimitResetDeadlines.delete(formatModelStringWithRouting(currentModel));
+					}
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
@@ -2326,15 +2478,43 @@ export class TurnRecovery {
 			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
+			// No fallback candidate can switch immediately. If the exhausted
+			// candidates include provider-stated quota resets, the earliest reset
+			// is the first useful continuation point, so book that wait and route
+			// the continuation onto its candidate once it elapses.
+			if (
+				!switchedModel &&
+				currentModel &&
+				retrySettings.waitForUsageReset === true &&
+				recordedUsageLimitOutcome !== undefined &&
+				allowModelFallback &&
+				retrySettings.modelFallback &&
+				!thinkingLoop &&
+				!waitForSiblingCredential
+			) {
+				quotaResetWait = this.#findUsageResetFallback(currentSelector, message, currentModel, {
+					currentWaitMs: usageLimitProviderTimed ? effectiveUsageLimitWaitMs : undefined,
+					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
+					preserveFailedTurn,
+				});
+			}
 			if (switchedModel) {
 				delayMs = 0;
+			} else if (quotaResetWait) {
+				delayMs = quotaResetWait.waitMs;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;
 			}
 		}
+		const currentUsageResetWait =
+			retrySettings.waitForUsageReset === true &&
+			recordedUsageLimitOutcome !== undefined &&
+			usageLimitProviderTimed &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			delayMs <= effectiveUsageLimitWaitMs;
 
 		if (retryBudgetExhausted) {
-			if (!switchedModel && !switchedCredential) {
+			if (!switchedModel && !switchedCredential && quotaResetWait === undefined && !currentUsageResetWait) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);
@@ -2354,7 +2534,7 @@ export class TurnRecovery {
 			// A fallback model gets a fresh retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			if (switchedModel || quotaResetWait !== undefined || currentUsageResetWait) this.#retryAttempt = 1;
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`
@@ -2421,14 +2601,11 @@ export class TurnRecovery {
 		// permanent error (402 balance, dead spend cap) would hold the session
 		// through repeated heuristic sleeps instead of surfacing it. Bounded
 		// by the stated wait so an unrelated large backoff cannot sneak
-		// through.
+		// through. A chain-exhausted quota rescue carries its own provider
+		// timing — the winning candidate's recorded reset — and authorizes
+		// the bypass on its own.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		const waitForUsageReset =
-			retrySettings.waitForUsageReset === true &&
-			recordedUsageLimitOutcome !== undefined &&
-			(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
-			effectiveUsageLimitWaitMs !== undefined &&
-			delayMs <= effectiveUsageLimitWaitMs;
+		const waitForUsageReset = quotaResetWait !== undefined || currentUsageResetWait;
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
@@ -2444,7 +2621,11 @@ export class TurnRecovery {
 			return false;
 		}
 
-		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		await this.#recordPendingRetryError(message, id, {
+			switchedCredential,
+			switchedModel: switchedModel || quotaResetWait !== undefined,
+			delayMs,
+		});
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -2506,6 +2687,34 @@ export class TurnRecovery {
 		// continue() accepts — and never once a newer prompt owns the session.
 		if (!preserveFailedTurn && this.#host.promptGeneration() === generation) {
 			this.#stripFailedAssistantTail();
+		}
+		// The booked quota reset has elapsed: lift the winning candidate's
+		// selector cooldown and route the continuation there instead of the
+		// model that exhausted the walk.
+		const postWaitModel = this.#host.model();
+		const postWaitSelector = postWaitModel
+			? formatRetryFallbackSelector(postWaitModel, this.#host.thinkingLevel())
+			: undefined;
+		if (
+			quotaResetWait &&
+			currentSelector &&
+			postWaitSelector === currentSelector &&
+			this.#activeRetryFallback !== undefined &&
+			this.#host.promptGeneration() === generation
+		) {
+			this.#host.modelRegistry.clearSuppressedSelector(quotaResetWait.selector.raw);
+			try {
+				await this.applyRetryFallbackCandidate(quotaResetWait.role, quotaResetWait.selector, currentSelector);
+			} catch (error) {
+				// A switch that cannot be applied after the wait (e.g. the
+				// reset did not actually clear the credential) degrades to
+				// continuing on the current model instead of dropping the
+				// scheduled retry.
+				logger.warn("Usage-reset fallback could not be applied after waiting", {
+					selector: quotaResetWait.selector.raw,
+					error: String(error),
+				});
+			}
 		}
 
 		// Retry via continue() outside the agent_end event callback chain. A
