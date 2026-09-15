@@ -345,22 +345,25 @@ fn split_raw_sections(
 		.collect();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		let foreign_syntax = detect_foreign_syntax(&input);
-		if !foreign_syntax.is_empty() {
-			return Err(EditError::parse(format!(
-				"input is not Hashline syntax; detected {foreign_syntax}. A `[PATH#HASH]` header will \
-				 not make this body valid. Rewrite the whole edit in Hashline syntax, or choose a \
-				 tool that supports the operation."
-			)));
-		}
 		let preview: String = first.chars().take(120).collect();
-		return Err(EditError::parse(format!(
-			"input must begin with `[PATH#HASH]` on the first non-blank line; got {}. Copy the exact \
-			 header and original line numbers from the latest read/search output. Example: \
-			 `[src/foo.ts#{}]`.",
+		let mut message = format!(
+			"Missing Hashline header: input must begin with `[PATH#HASH]` on the first non-blank \
+			 line; got {}. Copy the exact header and original line numbers from the latest \
+			 read/search output. Example: `[src/foo.ts#{}]`.",
 			json_quote(&preview),
 			HL_FILE_HASH_EXAMPLES[0]
-		)));
+		);
+		// Heuristic only: append a format hint without changing the parser's
+		// missing-header error.
+		let foreign_syntax = detect_foreign_syntax(&input);
+		if !foreign_syntax.is_empty() {
+			message.push_str("\nPossible non-Hashline syntax: ");
+			message.push_str(&foreign_syntax);
+			message.push_str(
+				". This is a best-effort hint; review the edit tool instructions before retrying.",
+			);
+		}
+		return Err(EditError::parse(message));
 	}
 	let tokenizer = Tokenizer::new();
 	let mut sections = Vec::new();

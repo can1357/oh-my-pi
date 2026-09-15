@@ -44,6 +44,10 @@ fn is_unified_hunk_line(line: &str) -> bool {
 		.is_some_and(|rest| rest.contains("@@"))
 }
 
+/// Best-effort labels used only to improve missing-header diagnostics.
+///
+/// False positives and false negatives affect wording only; parsing remains
+/// authoritative.
 pub(super) fn detect_foreign_syntax(input: &str) -> String {
 	let mut apply_patch = false;
 	let mut unified_diff = false;
