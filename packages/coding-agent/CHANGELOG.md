@@ -366,6 +366,10 @@
 
 - Retired local title models pinned before the LFM2.5 refresh (`lfm2-350m`, `lfm2-700m`, `qwen3-0.6b`, `qwen2.5-0.5b`, `gemma-270m`) now migrate to their closest current models instead of silently skipping session titles.
 
+### Fixed
+
+- Reduced repeated file-diagnostics latency with explicit TypeScript reports, Tailwind project applicability checks, and concurrent independent servers; explicit incomplete checks no longer report clean results ([#12142](https://github.com/can1357/oh-my-pi/pull/12142) by [@ukint-vs](https://github.com/ukint-vs)).
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes
