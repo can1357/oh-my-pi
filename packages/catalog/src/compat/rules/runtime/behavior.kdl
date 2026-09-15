@@ -273,11 +273,12 @@ behavior {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
 	}
 	// Kimi Code's /coding/v1/models envelope carries no pricing; mirror the
-	// public Moonshot list price for each discovered id.
+	// public Moonshot list price for each discovered id. `kimi-for-coding` is
+	// K2.8 Preview, which has no public API SKU yet — it keeps a cost-fallback
+	// literal in providers/kimi-code.kdl at the K2.7 Code line rate instead.
 	pricing-peer provider="kimi-code" peers="moonshot" {
 		alias "k3" peer-id="kimi-k3"
 		alias "k3-256k" peer-id="kimi-k3"
-		alias "kimi-for-coding" peer-id="kimi-k2.7-code"
 		alias "kimi-for-coding-highspeed" peer-id="kimi-k2.7-code-highspeed"
 		alias "kimi-k2" peer-id="kimi-k2.6"
 	}

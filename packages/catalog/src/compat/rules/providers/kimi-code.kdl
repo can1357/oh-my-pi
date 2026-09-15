@@ -42,55 +42,15 @@ provider "kimi-code" {
 
 	// /coding/v1/models carries no pricing. Bundled rows are priced at
 	// generation time via the `pricing-peer` rule (runtime/behavior.kdl);
-	// `cost-fallback` covers runtime-discovered rows that have no bundled
-	// counterpart, seeding the public Moonshot list price only when upstream
-	// reports no token price.
-	models "k3" "k3-256k" {
-		cost-fallback {
-			input 3
-			output 15
-			cache-read 0.3
-			cache-write 0
-		}
-	}
+	// runtime-discovered rows reporting $0 resolve the same peer mirror in
+	// `buildModel`, so only ids without a public Moonshot SKU need literals.
+	// `kimi-for-coding` is K2.8 Preview — no public API SKU exists yet, so it
+	// falls back to the K2.7 Code line rate ($0.95/$4, cache-read $0.19).
 	models "kimi-for-coding" {
 		cost-fallback {
 			input 0.95
-			output 4
+			output 4.0
 			cache-read 0.19
-			cache-write 0
-		}
-	}
-	models "kimi-for-coding-highspeed" {
-		cost-fallback {
-			input 1.9
-			output 8
-			cache-read 0.38
-			cache-write 0
-		}
-	}
-	models "kimi-k2" {
-		cost-fallback {
-			input 0.95
-			output 4
-			cache-read 0.16
-			cache-write 0
-		}
-	}
-	models "kimi-k2-turbo-preview" {
-		cost-fallback {
-			input 2.4
-			output 10
-			cache-read 0.6
-			cache-write 0
-		}
-	}
-	models "kimi-k2.5" {
-		cost-fallback {
-			input 0.6
-			output 3
-			cache-read 0.1
-			cache-write 0
 		}
 	}
 }

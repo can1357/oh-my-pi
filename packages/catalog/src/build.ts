@@ -7,9 +7,11 @@
  * compat per request.
  */
 
+import { pricingPeerFor } from "./compat/behavior";
 import { resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
+import { type GeneratedProvider, getBundledModels } from "./models";
 import { materializeTimeBasedCost } from "./pricing";
 import type { Api, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
@@ -186,6 +188,41 @@ export function applyCatalogCorrections(
 }
 
 /**
+ * Runtime mirror of the generator's `applyPricingPeerFallbacks`: when upstream
+ * discovery reports no token price for a provider with a `pricing-peer` rule,
+ * seed the first-party bundled list price. Credential-scoped providers
+ * (kimi-code, xai-oauth, devin) only discover at runtime, so the gen-time pass
+ * never sees their rows. Runs after `applyCatalogCorrections` so a reviewed
+ * `cost-fallback` literal still wins over a peer mirror.
+ */
+function applyPricingPeerFallback(model: Model<Api>): void {
+	const cost = model.cost;
+	if (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0) {
+		return;
+	}
+	const peer = pricingPeerFor(model.provider, model.id);
+	if (!peer) {
+		return;
+	}
+	for (const candidateId of peer.peerId !== model.id ? [peer.peerId, model.id] : [model.id]) {
+		for (const provider of peer.peers) {
+			const match = getBundledModels(provider as GeneratedProvider).find(
+				candidate =>
+					candidate.id === candidateId &&
+					(candidate.cost.input !== 0 ||
+						candidate.cost.output !== 0 ||
+						candidate.cost.cacheRead !== 0 ||
+						candidate.cost.cacheWrite !== 0),
+			);
+			if (match) {
+				model.cost = { ...match.cost };
+				return;
+			}
+		}
+	}
+}
+
+/**
  * Direct first-party OpenAI Responses endpoints (api.openai.com, Azure OpenAI
  * deployments). Gates GA computer-use detection; identity supplies the model
  * generation.
@@ -266,5 +303,6 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	applyPricingPeerFallback(model);
 	return model;
 }
