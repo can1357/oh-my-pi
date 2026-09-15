@@ -1013,6 +1013,21 @@ export class Settings {
 	}
 
 	/**
+	 * The global settings layer's configured `retry.fallbackChains`, deep-cloned.
+	 * Unlike {@link get}, this excludes project, overlay, and runtime layers —
+	 * preset capture/restore needs exactly the layer that `set` writes, so
+	 * shadowed chain values are never baked into or restored over global state.
+	 * Undefined when no chains are configured in the global layer.
+	 */
+	getGlobalRetryFallbackChains(): Record<string, string[]> | undefined {
+		const retry = this.#global["retry"];
+		if (!retry || typeof retry !== "object" || Array.isArray(retry)) return undefined;
+		const chains = (retry as Record<string, unknown>)["fallbackChains"];
+		if (!chains || typeof chains !== "object" || Array.isArray(chains)) return undefined;
+		return structuredClone(chains as Record<string, string[]>);
+	}
+
+	/**
 	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
 	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
 	 * pi `SettingsManager` shim's `getProjectSettings()`.
@@ -1337,12 +1352,29 @@ export class Settings {
 		return modelId || undefined;
 	}
 
+	/** Get all model roles from only the global settings layer. */
+	getGlobalModelRoles(): ReadOnlyDict<string> {
+		return this.#modelRolesFromLayer(this.#global);
+	}
+
+	/** Get model-role presets from only the global settings layer. */
+	getGlobalModelRolePresets(): unknown {
+		return this.#global.modelRolePresets;
+	}
+
 	/**
 	 * Get a model role from only the current project settings layer.
 	 */
 	getProjectModelRole(role: ModelRole | string): string | undefined {
 		const modelId = this.#modelRolesFromLayer(this.#project)[role];
 		return modelId || undefined;
+	}
+
+	/**
+	 * Get all model roles from only the current project settings layer.
+	 */
+	getProjectModelRoles(): ReadOnlyDict<string> {
+		return this.#modelRolesFromLayer(this.#project);
 	}
 
 	/**

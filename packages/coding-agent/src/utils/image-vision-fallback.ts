@@ -107,7 +107,7 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 	const preferences = getModelMatchPreferences(deps.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
-		const expanded = expandRoleAlias(pattern, deps.settings);
+		const expanded = expandRoleAlias(pattern, deps.settings, available);
 		const model = resolveModelFromString(expanded, available, preferences);
 		return model && sendsImageInputOnWire(model) ? model : undefined;
 	};

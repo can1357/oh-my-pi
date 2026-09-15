@@ -148,7 +148,7 @@ const mockMaxSuffixModels: Model<Api>[] = [
 		maxTokens: 8192,
 	}),
 	buildModel({
-		id: "coding-router:low",
+		id: "NanoGPT/Coding-Router:LOW",
 		name: "NanoGPT Coding Router Low",
 		api: "openai-completions",
 		provider: "nanogpt",
@@ -572,7 +572,7 @@ describe("parseModelPattern", () => {
 
 		test("fuzzy selectors preserve literal models ending in a thinking-level suffix", () => {
 			const result = parseModelPattern("router:low", mockMaxSuffixModels);
-			expect(result.model?.id).toBe("coding-router:low");
+			expect(result.model?.id).toBe("NanoGPT/Coding-Router:LOW");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.explicitThinkingLevel).toBe(false);
 		});
@@ -905,6 +905,65 @@ describe("resolveModelRoleValue", () => {
 		expect(result.warning).toBeUndefined();
 	});
 
+	test("resolves multi-hop aliases with outer thinking taking precedence over inner selectors", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				smol: "@slow:low",
+				slow: "@plan:medium",
+				plan: "anthropic/claude-sonnet-4-5:low",
+			},
+		});
+
+		const result = resolveModelRoleValue("@smol:high", allModels, { settings });
+
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test.each(["nanogpt/coding-router:low", "NanoGPT/Coding-Router:LOW", "coding-router:low", "CODING-ROUTER:LOW"])(
+		"preserves literal selector %s while applying an outer alias effort",
+		selector => {
+			const literal = buildModel({
+				id: "coding-router:low",
+				name: "Coding Router Low",
+				api: "openai-completions",
+				provider: "nanogpt",
+				baseUrl: "https://api.example.test/v1",
+				reasoning: true,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 4096,
+			});
+			const settings = Settings.isolated({ modelRoles: { smol: selector } });
+
+			const result = resolveModelRoleValue("@smol:high", [literal], { settings });
+
+			expect(result.model?.id).toBe("coding-router:low");
+			expect(result.thinkingLevel).toBe(Effort.High);
+		},
+	);
+
+	test("cyclic aliases fall back to the built-in role priority chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { smol: "@slow", slow: "@smol" },
+		});
+
+		// A misconfigured cycle must not leave the role with no model; it resolves
+		// through the built-in priority chain instead of dropping every candidate.
+		const result = resolveModelRoleValue("@smol", allModels, { settings });
+		expect(result.model).toBeDefined();
+		expect(allModels.some(model => model === result.model)).toBe(true);
+
+		// An outer thinking level applied to the alias survives the fallback.
+		const withEffort = resolveModelRoleValue("@smol:high", allModels, { settings });
+		expect(withEffort.model).toBeDefined();
+		expect(withEffort.thinkingLevel).toBe(Effort.High);
+	});
+
 	test("resolves a custom role that references another custom role (#10853)", () => {
 		// modelRoles.fast_worker = "@task" must expand through the referenced
 		// role to its concrete model at the pure resolution layer, without
@@ -1090,6 +1149,17 @@ describe("resolveAgentModelPatterns", () => {
 			}),
 		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
 	});
+	test("preserves literal effort-like IDs in agent alias expansion", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "coding-router:max" } });
+
+		expect(
+			resolveAgentModelPatterns({
+				agentModel: "@smol:high",
+				settings,
+				availableModels: mockMaxSuffixModels,
+			}),
+		).toEqual(["coding-router:max:high"]);
+	});
 
 	test("falls back to the active session model when @task is unset", () => {
 		const settings = Settings.isolated({
@@ -1155,66 +1225,6 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
-	});
-
-	test("uses configured slow for unconfigured advisor before priority defaults", () => {
-		const settings = Settings.isolated({
-			modelRoles: {
-				default: "local/default",
-				slow: "baseten/custom-slow:max",
-			},
-		});
-
-		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
-	});
-
-	test("expands nested role aliases from the configured slow fallback", () => {
-		const settings = Settings.isolated({
-			modelRoles: {
-				default: "openrouter/qwen/qwen3-coder:exacto",
-				smol: "@default",
-				slow: "@smol",
-			},
-		});
-
-		const result = resolveModelRoleValue("@advisor", allModels, { settings });
-
-		expect(result.model?.provider).toBe("openrouter");
-		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
-	});
-
-	test("outer advisor thinking level overrides the inherited slow effort", () => {
-		const settings = Settings.isolated({
-			modelRoles: { slow: "nanogpt/coding-router:max" },
-		});
-
-		const result = resolveModelRoleValue("@advisor:high", [mockMaxSuffixModels[0]], { settings });
-
-		expect(result.model?.id).toBe("coding-router");
-		expect(result.thinkingLevel).toBe(Effort.High);
-		expect(result.explicitThinkingLevel).toBe(true);
-	});
-
-	test("outer advisor thinking level preserves an inherited literal suffix model id", () => {
-		const settings = Settings.isolated({
-			modelRoles: { slow: "nanogpt/coding-router:max" },
-		});
-
-		const result = resolveModelRoleValue("@advisor:high", mockMaxSuffixModels, { settings });
-
-		expect(result.model?.id).toBe("coding-router:max");
-		expect(result.thinkingLevel).toBe(Effort.High);
-		expect(result.explicitThinkingLevel).toBe(true);
-	});
-
-	test("keeps advisor on the built-in slow chain when slow is unconfigured", () => {
-		const baseline = resolveAgentModelPatterns({ agentModel: "@advisor", settings: Settings.isolated() });
-		const settings = Settings.isolated({ modelRoles: { default: "local/default" } });
-
-		const advisor = resolveAgentModelPatterns({ agentModel: "@advisor", settings });
-
-		expect(advisor).not.toContain("local/default");
-		expect(advisor).toEqual(baseline);
 	});
 
 	test("breaks the tiny/smol fallback cycle via a default alias", () => {
@@ -1511,6 +1521,19 @@ describe("resolveCliModel", () => {
 		expect(suffixed.error).toBeUndefined();
 		expect(suffixed.model).toBe(exactModel);
 		expect(suffixed.thinkingLevel).toBe(Effort.High);
+	});
+	test("returns literal effort-like ids in the configured patterns it reports", () => {
+		// The deferred startup path prefers `configuredPatterns` over the resolved
+		// model, so a rewritten `…:high` pattern would select a different model
+		// after discovery than this call just resolved.
+		const registry = { getAll: () => mockMaxSuffixModels, getAvailable: () => mockMaxSuffixModels };
+		const settings = Settings.isolated({ modelRoles: { smol: "nanogpt/coding-router:max" } });
+
+		const result = resolveCliModel({ cliModel: "@smol:high", modelRegistry: registry, settings });
+
+		expect(result.model?.id).toBe("coding-router:max");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.configuredPatterns).toEqual(["nanogpt/coding-router:max:high"]);
 	});
 
 	test("configured role beats an unauthenticated catalog id collision (#6508)", () => {
@@ -2082,6 +2105,33 @@ describe("expandRoleAlias", () => {
 		settings.setModelRole("vision", "openai/gpt-4o");
 
 		expect(expandRoleAlias("@vision", settings)).toBe("openai/gpt-4o");
+	});
+
+	test("resolves multi-hop aliases through the public helper", () => {
+		const settings = Settings.isolated({
+			modelRoles: { vision: "@smol", smol: "@slow", slow: "openai/gpt-4o" },
+		});
+
+		expect(expandRoleAlias("@vision", settings)).toBe("openai/gpt-4o");
+	});
+
+	test("preserves literal effort-like IDs when expanding a public alias with available models", () => {
+		const literal = buildModel({
+			id: "coding-router:low",
+			name: "Coding Router Low",
+			api: "openai-completions",
+			provider: "nanogpt",
+			baseUrl: "https://api.example.test/v1",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		});
+		const settings = Settings.isolated({ modelRoles: { smol: "coding-router:low" } });
+
+		expect(expandRoleAlias("@smol:high", settings, [literal])).toBe("coding-router:low:high");
 	});
 
 	test("keeps @vision alias when vision role is unset", () => {

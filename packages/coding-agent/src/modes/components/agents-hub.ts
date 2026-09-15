@@ -404,6 +404,7 @@ export class AgentsHubComponent implements Component {
 			settings: this.#settings,
 			activeModelPattern: this.#modelContext.activeModelPattern,
 			fallbackModelPattern: this.#modelContext.defaultModelPattern,
+			availableModels: this.#modelContext.modelRegistry?.getAvailable(),
 		});
 	}
 
@@ -755,6 +756,7 @@ export class AgentsHubComponent implements Component {
 				this.#modelContext.defaultModelPattern ??
 				this.#settings.getModelRole("default"),
 			this.#settings,
+			{ availableModels: modelRegistry.getAvailable() },
 		);
 		const { model } = resolveModelOverride(modelPatterns, modelRegistry, this.#settings);
 		const selectedModel = model ?? modelRegistry.getAvailable()[0];

@@ -1269,6 +1269,11 @@ export interface Model<TApi extends Api = Api> {
 	/** Catalog-estimated output speed in tokens per second. */
 	tps?: number | null;
 	/**
+	 * Curated automatic role-preset eligibility. Lower finite nonnegative ranks
+	 * are preferred; an absent role leaves the model ineligible for that role.
+	 */
+	rolePresetPriority?: { smol?: number; slow?: number };
+	/**
 	 * Fully-resolved compatibility record, materialized once by `buildModel`.
 	 * Protocol handlers read fields; they never detect, resolve, or allocate.
 	 */
@@ -1332,6 +1337,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "requiresToolResultImageHoisting"
 	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
+	| "rolePresetPriority"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;

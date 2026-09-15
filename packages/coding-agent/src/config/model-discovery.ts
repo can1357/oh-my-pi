@@ -24,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { isLoopbackUrl } from "../utils/loopback";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -81,16 +82,7 @@ export function discoveryProbeTimeoutMs(baseUrl: string, loopbackMs: number, cus
 	if (typeof customTimeoutMs === "number" && customTimeoutMs > 0 && Number.isFinite(customTimeoutMs)) {
 		return customTimeoutMs;
 	}
-	let hostname: string;
-	try {
-		hostname = new URL(baseUrl).hostname;
-	} catch {
-		return loopbackMs;
-	}
-	hostname = hostname.replace(/^\[/, "").replace(/\]$/, "");
-	const isLoopback =
-		hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::1" || hostname.startsWith("127.");
-	return isLoopback ? loopbackMs : REMOTE_DISCOVERY_TIMEOUT_MS;
+	return isLoopbackUrl(baseUrl, true) ? loopbackMs : REMOTE_DISCOVERY_TIMEOUT_MS;
 }
 
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";

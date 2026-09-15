@@ -7,6 +7,10 @@ class "kimi" {
 	// Declared revision-possible so finished prose stays in the live viewport
 	// instead of retiring into native scrollback ahead of the turn.
 	stream-revision "possible"
+	// The k3 family also matches unreviewed suffix SKUs; keep exact candidates.
+	models "kimi-k3" "moonshotai/kimi-k3" {
+		role-preset-priority { slow 11; }
+	}
 	// Replaces the K2.6 reasoning stream-idle baseline on OpenAI-compatible routes.
 	on "baseten" "cline-pass" "cloudflare-ai-gateway" "coreweave" "deepinfra" "firepass" "fireworks" \
 		"huggingface" "moonshot" "novita" "nvidia" "opencode-go" "opencode-zen" "openrouter" \

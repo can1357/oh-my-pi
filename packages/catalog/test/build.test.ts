@@ -61,6 +61,122 @@ function openrouterSpec(overrides: Partial<ModelSpec<"openrouter">> = {}): Model
 	};
 }
 
+describe("catalog role preset eligibility", () => {
+	const candidate = (id: string, provider = "custom") => buildModel(completionsSpec({ id, provider }));
+
+	it("ranks reviewed Anthropic generations without admitting older or future siblings", () => {
+		const ordered = ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8"].map(id =>
+			candidate(id, "anthropic"),
+		);
+		for (let i = 1; i < ordered.length; i++) {
+			expect(ordered[i - 1].rolePresetPriority!.slow!).toBeLessThan(ordered[i].rolePresetPriority!.slow!);
+		}
+		expect(candidate("claude-haiku-4-5").rolePresetPriority?.smol).toBeDefined();
+		expect(candidate("claude-haiku-4.5").rolePresetPriority).toEqual(
+			candidate("claude-haiku-4-5").rolePresetPriority,
+		);
+		expect(candidate("anthropic/claude-fable-5.1", "openrouter").rolePresetPriority?.slow).toBeGreaterThan(
+			ordered[0].rolePresetPriority!.slow!,
+		);
+		for (const id of ["claude-haiku-3-5", "claude-haiku-4-6", "claude-opus-4-7", "claude-fable-5-2"]) {
+			expect(candidate(id).rolePresetPriority).toBeUndefined();
+		}
+	});
+
+	it("keeps current Flash ordering and provider preference separate from older Flash eligibility", () => {
+		const ordered = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"].map(id =>
+			candidate(id),
+		);
+		for (let i = 1; i < ordered.length; i++) {
+			expect(ordered[i - 1].rolePresetPriority!.smol!).toBeLessThan(ordered[i].rolePresetPriority!.smol!);
+		}
+		expect(candidate("gemini-3.8-flash", "google-antigravity").rolePresetPriority?.smol).toBe(0);
+		expect(candidate("gemini-3-8-flash").rolePresetPriority).toEqual(ordered[0].rolePresetPriority);
+		expect(candidate("gemini-3.1-flash-lite").rolePresetPriority?.smol).toBeGreaterThan(
+			ordered[3].rolePresetPriority!.smol!,
+		);
+		for (const id of ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-pro", "gemini-3.9-flash"]) {
+			expect(candidate(id).rolePresetPriority).toBeUndefined();
+		}
+	});
+
+	it("admits exact GPT lanes without promoting generic mini, spark, or generation substrings", () => {
+		for (const id of ["gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-5.4-mini"]) {
+			const generic = candidate(id).rolePresetPriority!;
+			const codex = candidate(id, "openai-codex").rolePresetPriority!;
+			expect(codex.smol!).toBeLessThan(generic.smol!);
+			expect(generic.slow).toBeUndefined();
+		}
+		const sol = candidate("gpt-5.6-sol", "openai-codex").rolePresetPriority!;
+		expect(sol.slow!).toBeLessThan(candidate("gpt-5.5", "openai-codex").rolePresetPriority!.slow!);
+		expect(sol.smol).toBeUndefined();
+		for (const id of ["gpt-4o-mini", "gpt-5-mini", "gpt-5.1-codex-mini", "gpt-5.5-mini", "some-spark-model"]) {
+			expect(candidate(id).rolePresetPriority).toBeUndefined();
+		}
+	});
+
+	it("preserves exact GLM, Kimi, and Cerebras candidates without generic suffix eligibility", () => {
+		expect(candidate("glm-5.3-flash", "zai").rolePresetPriority?.smol).toBeLessThan(
+			candidate("glm-5.3-flash").rolePresetPriority!.smol!,
+		);
+		expect(candidate("glm-5.3", "zai").rolePresetPriority?.slow).toBeLessThan(
+			candidate("glm-5.3").rolePresetPriority!.slow!,
+		);
+		expect(candidate("k3", "kimi-code").rolePresetPriority?.slow).toBeLessThan(
+			candidate("moonshotai/kimi-k3", "openrouter").rolePresetPriority!.slow!,
+		);
+		expect(candidate("gpt-oss-120b", "cerebras").rolePresetPriority?.smol).toBeLessThan(
+			candidate("gpt-oss-120b").rolePresetPriority!.smol!,
+		);
+		expect(candidate("zai-glm-4.7", "cerebras").rolePresetPriority?.smol).toBeLessThan(
+			candidate("zai-glm-4.6", "cerebras").rolePresetPriority!.smol!,
+		);
+		for (const id of [
+			"glm-5.2",
+			"glm-5.3-air",
+			"glm-5.3-flash-lab",
+			"kimi-k2.7-code",
+			"kimi-k3-custom",
+			"k3",
+			"custom-oss-120b",
+		]) {
+			expect(candidate(id).rolePresetPriority).toBeUndefined();
+		}
+		expect(candidate("zai-glm-4.7").rolePresetPriority).toBeUndefined();
+	});
+
+	it("does not turn a reviewed lineage into eligibility for arbitrary custom suffixes", () => {
+		for (const [provider, id] of [
+			["anthropic", "claude-haiku-4-5-custom"],
+			["anthropic", "claude-fable-5-1-custom"],
+			["anthropic", "claude-opus-5-custom"],
+			["google-antigravity", "gemini-3.8-flash-custom"],
+			["google", "gemini-3.1-flash-lite-image"],
+			["openai-codex", "gpt-5.3-codex-spark-custom"],
+		]) {
+			expect(candidate(id, provider).rolePresetPriority).toBeUndefined();
+			expect(candidate(id).rolePresetPriority).toBeUndefined();
+		}
+		expect(candidate("claude-haiku-4-5-20251001", "anthropic").rolePresetPriority).toEqual(
+			candidate("claude-haiku-4-5", "anthropic").rolePresetPriority,
+		);
+	});
+
+	it("removes stale eligibility when a built model is rebuilt with an unranked identity", () => {
+		const ranked = candidate("gpt-5.4-mini");
+		expect(ranked.rolePresetPriority?.smol).toBeDefined();
+		const rebuilt = buildModel({ ...ranked, id: "custom-mini", compat: ranked.compatConfig });
+		expect(Object.hasOwn(rebuilt, "rolePresetPriority")).toBe(false);
+	});
+
+	it("retains generated rank facts in bundled models and serialized model rows", () => {
+		const built = candidate("claude-fable-5-1", "anthropic");
+		const bundled = getBundledModel("anthropic", "claude-fable-5-1");
+		expect(bundled.rolePresetPriority?.slow).toBe(built.rolePresetPriority!.slow!);
+		expect(JSON.parse(JSON.stringify(built)).rolePresetPriority.slow).toBe(bundled.rolePresetPriority!.slow!);
+	});
+});
+
 describe("buildModel", () => {
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
