@@ -29,6 +29,106 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 /** TUI-specific runtime accepted by `executeBuiltinSlashCommand`. */
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
 
+const LOOP_UNTIL_GOAL_FLAG = "--until-goal";
+const GOAL_AWARE_LOOP_CLEANUP_INTERVAL_MS = 1_000;
+
+type GoalAwareLoopContext = TuiSlashCommandRuntime["ctx"];
+
+interface GoalAwareLoopWatcher {
+	unsubscribe: () => void;
+	cleanupTimer: NodeJS.Timeout;
+}
+
+const goalAwareLoopWatchers = new WeakMap<GoalAwareLoopContext["session"], GoalAwareLoopWatcher>();
+
+function clearGoalAwareLoopWatcher(session: GoalAwareLoopContext["session"]): void {
+	const watcher = goalAwareLoopWatchers.get(session);
+	if (!watcher) return;
+	goalAwareLoopWatchers.delete(session);
+	clearInterval(watcher.cleanupTimer);
+	watcher.unsubscribe();
+}
+
+function splitGoalAwareLoopArgs(args: string): { untilGoal: boolean; args: string } {
+	const tokens = args.match(/\S+/g) ?? [];
+	const untilGoal = tokens.includes(LOOP_UNTIL_GOAL_FLAG);
+	if (!untilGoal) return { untilGoal: false, args };
+	return {
+		untilGoal: true,
+		args: tokens.filter(token => token !== LOOP_UNTIL_GOAL_FLAG).join(" "),
+	};
+}
+
+function watchGoalAwareLoop(ctx: GoalAwareLoopContext, goalId: string): void {
+	clearGoalAwareLoopWatcher(ctx.session);
+	const stopLoop = (message: string) => {
+		if (ctx.loopModeEnabled) {
+			(ctx.disableLoopMode as (message?: string) => void)(message);
+		}
+		clearGoalAwareLoopWatcher(ctx.session);
+	};
+	const unsubscribe = ctx.session.subscribe(event => {
+		if (!ctx.loopModeEnabled) {
+			clearGoalAwareLoopWatcher(ctx.session);
+			return;
+		}
+		if (event.type !== "goal_updated") return;
+		const goal = event.goal ?? event.state?.goal;
+		if (!goal) {
+			stopLoop("Goal ended. Loop mode disabled.");
+			return;
+		}
+		if (goal.id !== goalId) {
+			stopLoop("Active goal changed. Loop mode disabled.");
+			return;
+		}
+		if (goal.status === "complete") {
+			stopLoop("Goal completed. Loop mode disabled.");
+			return;
+		}
+		if (goal.status !== "active") {
+			stopLoop(`Goal is ${goal.status}. Loop mode disabled.`);
+		}
+	});
+	const cleanupTimer = setInterval(() => {
+		if (!ctx.loopModeEnabled || ctx.isShuttingDown) {
+			clearGoalAwareLoopWatcher(ctx.session);
+		}
+	}, GOAL_AWARE_LOOP_CLEANUP_INTERVAL_MS);
+	cleanupTimer.unref();
+	goalAwareLoopWatchers.set(ctx.session, { unsubscribe, cleanupTimer });
+}
+
+async function executeGoalAwareLoop(
+	parsed: ParsedSlashCommand,
+	runtime: TuiSlashCommandRuntime,
+): Promise<string | true | undefined> {
+	clearGoalAwareLoopWatcher(runtime.ctx.session);
+	if (runtime.ctx.loopModeEnabled) return undefined;
+
+	const parsedArgs = splitGoalAwareLoopArgs(parsed.args);
+	if (!parsedArgs.untilGoal) return undefined;
+
+	const state = runtime.ctx.session.getGoalModeState();
+	if (!state || !state.enabled || state.goal.status !== "active") {
+		runtime.ctx.showWarning("/loop --until-goal requires an active goal.");
+		runtime.ctx.editor.setText("");
+		return true;
+	}
+	const continuation = runtime.ctx.session.goalRuntime.buildContinuationPrompt();
+	if (!continuation) {
+		runtime.ctx.showWarning("Could not build a continuation prompt for the active goal.");
+		runtime.ctx.editor.setText("");
+		return true;
+	}
+
+	const loopArgs = [parsedArgs.args, continuation].filter(Boolean).join(" ");
+	const prompt = await runtime.ctx.handleLoopCommand(loopArgs);
+	if (runtime.ctx.loopModeEnabled) watchGoalAwareLoop(runtime.ctx, state.goal.id);
+	runtime.ctx.editor.setText("");
+	return prompt ?? true;
+}
+
 export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 	getInlineHint?: (argumentText: string) => string | null;
@@ -60,10 +160,13 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		name: command.name,
 		aliases: command.aliases,
 		allowArgs: command.allowArgs === true,
-		description: command.description,
+		description:
+			command.name === "loop"
+				? "Toggle loop mode. Add --until-goal to keep an active goal running until it reaches a terminal state."
+				: command.description,
 		icon: command.icon,
 		subcommands: command.subcommands,
-		inlineHint: command.inlineHint,
+		inlineHint: command.name === "loop" ? "[count|duration] [--until-goal] [prompt]" : command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
 	}),
 );
@@ -138,6 +241,10 @@ export async function executeBuiltinSlashCommand(
 		runtime.ctx.showStatus(`/${command.name} is host-only during a collab session`);
 		runtime.ctx.editor.setText("");
 		return true;
+	}
+	if (command.name === "loop") {
+		const goalAwareResult = await executeGoalAwareLoop(parsed, runtime);
+		if (goalAwareResult !== undefined) return goalAwareResult;
 	}
 	if (command.handleTui) {
 		const result = await command.handleTui(parsed, runtime);
