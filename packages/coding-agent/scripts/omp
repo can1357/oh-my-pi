@@ -34,6 +34,10 @@ scripts_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
 # not by omp.ts (both layouts intentionally carry the same canonical preload).
 if [ -r "$scripts_dir/cli.js" ]; then
 	cli=$scripts_dir/cli.js
+	# Relocated bundles have no package.json for package-root discovery.
+	# Preserve explicit overrides while keeping legacy resource lookups out of cwd.
+	PI_PACKAGE_DIR=${PI_PACKAGE_DIR:-$scripts_dir}
+	export PI_PACKAGE_DIR
 	if [ -r "$scripts_dir/omp.ts" ]; then
 		preload=$scripts_dir/omp.ts
 	else
