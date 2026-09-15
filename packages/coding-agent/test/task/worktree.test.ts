@@ -1065,6 +1065,10 @@ describe("commitToBranch preserves agent commits", () => {
 		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
+		// Copying this fixture in beforeEach races with git's background
+		// maintenance (ENOENT on objects/maintenance.lock). Pin housekeeping off.
+		await runGit(fixtureRepo, ["config", "gc.auto", "0"]);
+		await runGit(fixtureRepo, ["config", "maintenance.auto", "false"]);
 		await fs.writeFile(
 			path.join(fixtureRepo, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
