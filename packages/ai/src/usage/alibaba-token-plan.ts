@@ -16,6 +16,9 @@ import { HOUR_MS, parsePositiveTimestamp, WEEK_MS } from "./shared";
 
 const PROVIDER = "alibaba-token-plan";
 const USAGE_API = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage";
+const ADDON_LIST_API = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/addon/list";
+/** Limit id for purchased add-on credits (Credit Pack / extra bundle). */
+const ADDON_LIMIT_ID = "credits:addon";
 const BROWSER_USER_AGENT =
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 const INTERNATIONAL_CONSOLE = {
@@ -24,7 +27,8 @@ const INTERNATIONAL_CONSOLE = {
 	sessionUrl: "https://home.qwencloud.com/tool/user/info.json",
 	gatewayAction: "IntlBroadScopeAspnGateway",
 	region: "ap-southeast-1",
-	usageUrl: `https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=${encodeURIComponent(USAGE_API)}`,
+	usageUrlBase:
+		"https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=",
 	cornerstoneParam: {
 		domain: "home.qwencloud.com",
 		consoleSite: "QWENCLOUD",
@@ -40,7 +44,8 @@ const CHINA_CONSOLE = {
 	sessionUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan",
 	gatewayAction: "BroadScopeAspnGateway",
 	region: "cn-beijing",
-	usageUrl: `https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=${encodeURIComponent(USAGE_API)}`,
+	usageUrlBase:
+		"https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=",
 	cornerstoneParam: {
 		feURL: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/token-plan/personal",
 		protocol: "V2",
@@ -93,6 +98,13 @@ function usageStatus(usedFraction: number): UsageLimit["status"] {
 	return "ok";
 }
 
+/** Mirrors the store's exhaustion test so a strategy can reason about its own limits. */
+function limitExhausted(limit: UsageLimit): boolean {
+	if (limit.status !== undefined && limit.status !== "unknown") return limit.status === "exhausted";
+	const usedFraction = limit.amount.usedFraction;
+	return usedFraction !== undefined && usedFraction >= 1;
+}
+
 function buildLimit(
 	id: "5h" | "7d",
 	label: string,
@@ -110,6 +122,48 @@ function buildLimit(
 		amount: { used: usedFraction * 100, usedFraction, unit: "percent" },
 		status: usageStatus(usedFraction),
 	};
+}
+
+/**
+ * Purchased add-on credits (Credit Pack / extra bundle) are a separate pool
+ * from the plan's 5-hour and weekly windows: the plan can read 100% while the
+ * add-on still serves traffic. Reported as its own limit so the store can see
+ * the headroom, and deliberately without `resetsAt` — an add-on expires rather
+ * than resets, and letting its expiry drive a block deadline would sideline a
+ * recovered account for weeks.
+ */
+function buildAddonLimit(
+	remainingCredits: number,
+	totalCredits: number,
+	accountId: string | undefined,
+): UsageLimit | undefined {
+	if (!(totalCredits > 0) || remainingCredits < 0) return undefined;
+	const usedFraction = Math.min(1, Math.max(0, (totalCredits - remainingCredits) / totalCredits));
+	return {
+		id: ADDON_LIMIT_ID,
+		label: "Credit Pack",
+		scope: { provider: PROVIDER, ...(accountId ? { accountId } : {}), windowId: "addon" },
+		window: { id: "addon", label: "Credit Pack", durationMs: WEEK_MS },
+		amount: { used: usedFraction * 100, usedFraction, unit: "percent" },
+		status: usageStatus(usedFraction),
+	};
+}
+
+/** Sum the active add-on bundles into one pool; a missing list means "no add-on". */
+function buildAddonLimitFromList(data: Record<string, unknown>, accountId: string | undefined): UsageLimit | undefined {
+	const items = data.items;
+	if (!Array.isArray(items)) return undefined;
+	let remaining = 0;
+	let total = 0;
+	for (const item of items) {
+		if (!isRecord(item) || item.status !== "ACTIVE") continue;
+		const itemRemaining = toNumber(item.remainingCredits);
+		const itemTotal = toNumber(item.totalCredits);
+		if (itemRemaining === undefined || itemTotal === undefined) continue;
+		remaining += itemRemaining;
+		total += itemTotal;
+	}
+	return buildAddonLimit(remaining, total, accountId);
 }
 
 function accountIdFromUserData(value: Record<string, unknown>): string | undefined {
@@ -186,42 +240,48 @@ async function fetchAlibabaTokenPlanUsage(
 			headers["x-xsrf-token"] = csrf;
 			headers["x-csrf-token"] = csrf;
 		}
-		const body = new URLSearchParams({
-			product: "sfm_bailian",
-			action: consoleConfig.gatewayAction,
-			region: consoleConfig.region,
-			sec_token: secToken,
-			params: JSON.stringify({
-				Api: USAGE_API,
-				Data: {
-					cornerstoneParam: {
-						...(isChina ? { feTraceId: crypto.randomUUID() } : {}),
-						...consoleConfig.cornerstoneParam,
+		const callConsoleApi = async (api: string): Promise<Record<string, unknown> | null> => {
+			const body = new URLSearchParams({
+				product: "sfm_bailian",
+				action: consoleConfig.gatewayAction,
+				region: consoleConfig.region,
+				sec_token: secToken,
+				params: JSON.stringify({
+					Api: api,
+					Data: {
+						cornerstoneParam: {
+							...(isChina ? { feTraceId: crypto.randomUUID() } : {}),
+							...consoleConfig.cornerstoneParam,
+						},
 					},
-				},
-				V: "1.0",
-			}),
-		});
-		const usageResponse = await ctx.fetch(consoleConfig.usageUrl, {
-			method: "POST",
-			headers,
-			body,
-			redirect: "manual",
-			signal: params.signal,
-		});
-		if (!usageResponse.ok) {
-			ctx.logger?.warn("Alibaba Token Plan usage fetch failed", {
-				provider: PROVIDER,
-				status: usageResponse.status,
+					V: "1.0",
+				}),
 			});
-			return null;
-		}
-		const payload: unknown = await usageResponse.json();
-		if (!isRecord(payload) || payload.successResponse === false || !isRecord(payload.data)) {
-			ctx.logger?.warn("Alibaba Token Plan usage response invalid", { provider: PROVIDER });
-			return null;
-		}
-		const responseData = unwrapGatewayData(payload.data);
+			const response = await ctx.fetch(`${consoleConfig.usageUrlBase}${encodeURIComponent(api)}`, {
+				method: "POST",
+				headers,
+				body,
+				redirect: "manual",
+				signal: params.signal,
+			});
+			if (!response.ok) {
+				ctx.logger?.warn("Alibaba Token Plan console call failed", {
+					provider: PROVIDER,
+					api,
+					status: response.status,
+				});
+				return null;
+			}
+			const payload: unknown = await response.json();
+			if (!isRecord(payload) || payload.successResponse === false || !isRecord(payload.data)) {
+				ctx.logger?.warn("Alibaba Token Plan console response invalid", { provider: PROVIDER, api });
+				return null;
+			}
+			return unwrapGatewayData(payload.data);
+		};
+
+		const responseData = await callConsoleApi(USAGE_API);
+		if (!responseData) return null;
 		const limits = [
 			buildLimit(
 				"5h",
@@ -241,6 +301,14 @@ async function fetchAlibabaTokenPlanUsage(
 			),
 		].filter((limit): limit is UsageLimit => limit !== undefined);
 		if (limits.length === 0) return null;
+
+		// Add-on credits live in their own pool and are reported separately. A
+		// failure here must not cost the plan windows, so it degrades to "no
+		// add-on reported" and the plan windows keep gating the credential.
+		const addonData = await callConsoleApi(ADDON_LIST_API);
+		const addonLimit = addonData ? buildAddonLimitFromList(addonData, accountId) : undefined;
+		if (addonLimit) limits.push(addonLimit);
+
 		return {
 			provider: PROVIDER,
 			fetchedAt: Date.now(),
@@ -266,11 +334,36 @@ export const alibabaTokenPlanUsageProvider: UsageProvider = {
 		Boolean(params.credential.apiKey && parseAlibabaTokenPlanCredential(params.credential.apiKey)?.cookie),
 };
 
+/**
+ * Limits that gate a hard block for this provider.
+ *
+ * Add-on credits are a shared overflow pool: while any remain, an exhausted
+ * plan window does not make the credential unusable, so the plan windows must
+ * not gate a hard block. The add-on limit itself never gates one — it expires
+ * rather than resets, so its deadline would sideline a recovered account for
+ * weeks — hence it is dropped once it is spent and the plan windows take over
+ * again.
+ */
+function tokenPlanGatingLimits(report: UsageReport): UsageLimit[] {
+	const addon = report.limits.find(limit => limit.id === ADDON_LIMIT_ID);
+	if (addon && !limitExhausted(addon)) return [addon];
+	return report.limits.filter(limit => limit.id !== ADDON_LIMIT_ID);
+}
+
 export const alibabaTokenPlanRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits: report => ({
 		primary: report.limits.find(limit => limit.id === "credits:5h"),
 		secondary: report.limits.find(limit => limit.id === "credits:7d"),
 	}),
+	scopeLimits: tokenPlanGatingLimits,
+	/**
+	 * A live report can lift a stale block. The add-on list is a second console
+	 * call, so a transient failure there can block a funded account; without
+	 * healing, an API-key block is never re-probed and would stand until the
+	 * plan reset. Judging the block against the same gating limits selection
+	 * uses lets the next healthy report clear it.
+	 */
+	healableBlockScopes: report => [{ blockScope: "", limits: tokenPlanGatingLimits(report) }],
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,
 		secondaryMs: WEEK_MS,

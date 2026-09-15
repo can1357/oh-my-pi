@@ -28,6 +28,29 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 					Response.json({ code: "200", data: { secToken: "sec-token", accountId: "account-1" } }),
 				);
 			}
+			if (requests.length === 3) {
+				return Promise.resolve(
+					Response.json({
+						data: {
+							DataV2: {
+								data: {
+									data: {
+										total: 1,
+										items: [
+											{
+												addonTier: "extrabundle",
+												remainingCredits: 19_999.62,
+												totalCredits: 20_000,
+												status: "ACTIVE",
+											},
+										],
+									},
+								},
+							},
+						},
+					}),
+				);
+			}
 			return Promise.resolve(
 				Response.json({
 					data: {
@@ -50,7 +73,7 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 
 		const report = await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock });
 
-		expect(requests).toHaveLength(2);
+		expect(requests).toHaveLength(3);
 		expect(requests[0]?.url).toBe("https://home.qwencloud.com/tool/user/info.json");
 		expect(new Headers(requests[0]?.init?.headers).get("Cookie")).toBe(cookie);
 		expect(requests[0]?.init?.redirect).toBe("manual");
@@ -65,6 +88,14 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 		expect(usageHeaders.get("x-xsrf-token")).toBe("csrf-token");
 		expect(usageHeaders.get("x-csrf-token")).toBe("csrf-token");
 		expect(requests[1]?.init?.redirect).toBe("manual");
+		expect(requests[2]?.url).toBe(
+			"https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=zeldaHttp.apikeyMgr.%2Ftokenplan%2Fpersonal%2Fapi%2Fv2%2Faddon%2Flist",
+		);
+		expect(new Headers(requests[2]?.init?.headers).get("Cookie")).toBe(cookie);
+		const addonBody = new URLSearchParams(String(requests[2]?.init?.body));
+		expect(JSON.parse(addonBody.get("params") ?? "null")).toMatchObject({
+			Api: "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/addon/list",
+		});
 		const body = new URLSearchParams(String(requests[1]?.init?.body));
 		expect(body.get("sec_token")).toBe("sec-token");
 		expect(body.get("params")).toBe(
@@ -97,9 +128,18 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 					window: { id: "7d", durationMs: 604_800_000, resetsAt: 1_800_100_000_000 },
 					amount: { used: 50, usedFraction: 0.5, unit: "percent" },
 				},
+				{
+					id: "credits:addon",
+					label: "Credit Pack",
+					window: { id: "addon", durationMs: 604_800_000 },
+					amount: { unit: "percent" },
+				},
 			],
 		});
 		if (!report) throw new Error("expected QwenCloud usage report");
+		const addon = report.limits.find(limit => limit.id === "credits:addon");
+		expect(addon?.amount.usedFraction).toBeCloseTo(0.000019, 6);
+		expect(addon?.status).toBe("ok");
 		const windows = alibabaTokenPlanRankingStrategy.findWindowLimits(report, { modelId: "qwen3.7-plus" });
 		expect(windows.primary?.id).toBe("credits:5h");
 		expect(windows.secondary?.id).toBe("credits:7d");
@@ -113,6 +153,9 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 				return Promise.resolve(
 					new Response('<script>window.ALIYUN_CONSOLE_CONFIG = { SEC_TOKEN: "cn-sec-token" };</script>'),
 				);
+			}
+			if (requests.length === 3) {
+				return Promise.resolve(Response.json({ data: { DataV2: { data: { data: { total: 0, items: [] } } } } }));
 			}
 			return Promise.resolve(
 				Response.json({
@@ -136,7 +179,7 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 
 		const report = await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock });
 
-		expect(requests).toHaveLength(2);
+		expect(requests).toHaveLength(3);
 		expect(requests[0]?.url).toBe("https://bailian.console.aliyun.com/cn-beijing?tab=plan");
 		expect(new Headers(requests[0]?.init?.headers).get("Cookie")).toBe(cookie);
 		expect(requests[1]?.url).toBe(
@@ -210,5 +253,64 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 
 		expect(await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock })).toBeNull();
 		expect(requestCount).toBe(2);
+	});
+
+	test("add-on credits keep an exhausted plan from hard-blocking the credential", () => {
+		const exhaustedPlan = (addon: { remainingCredits: number; totalCredits: number } | undefined) => ({
+			provider: "alibaba-token-plan" as const,
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "credits:7d",
+					label: "7 Day Credits",
+					scope: { provider: "alibaba-token-plan" as const, windowId: "7d" },
+					window: { id: "7d", label: "7 Day Credits", durationMs: 604_800_000, resetsAt: Date.now() + 86_400_000 },
+					amount: { used: 100, usedFraction: 1, unit: "percent" as const },
+					status: "exhausted" as const,
+				},
+				...(addon
+					? [
+							{
+								id: "credits:addon",
+								label: "Credit Pack",
+								scope: { provider: "alibaba-token-plan" as const, windowId: "addon" },
+								window: { id: "addon", label: "Credit Pack", durationMs: 604_800_000 },
+								amount: {
+									used: ((addon.totalCredits - addon.remainingCredits) / addon.totalCredits) * 100,
+									usedFraction: (addon.totalCredits - addon.remainingCredits) / addon.totalCredits,
+									unit: "percent" as const,
+								},
+								status: (addon.remainingCredits > 0 ? "ok" : "exhausted") as "ok" | "exhausted",
+							},
+						]
+					: []),
+			],
+		});
+
+		// Plan spent, add-on funded: the plan window must not gate a hard block.
+		const funded = alibabaTokenPlanRankingStrategy.scopeLimits?.(
+			exhaustedPlan({ remainingCredits: 19_999.62, totalCredits: 20_000 }),
+		);
+		expect(funded?.map(limit => limit.id)).toEqual(["credits:addon"]);
+
+		// …and a live report in that state must be able to lift a stale block, or
+		// a transient add-on fetch failure would sideline the account until the
+		// plan reset.
+		const healable = alibabaTokenPlanRankingStrategy.healableBlockScopes?.(
+			exhaustedPlan({ remainingCredits: 19_999.62, totalCredits: 20_000 }),
+		);
+		expect(healable?.map(entry => entry.blockScope)).toEqual([""]);
+		expect(healable?.[0]?.limits.map(limit => limit.id)).toEqual(["credits:addon"]);
+
+		// Plan spent, add-on spent: the plan window gates again, and the add-on
+		// never contributes its own (expiry-based) deadline.
+		const spent = alibabaTokenPlanRankingStrategy.scopeLimits?.(
+			exhaustedPlan({ remainingCredits: 0, totalCredits: 20_000 }),
+		);
+		expect(spent?.map(limit => limit.id)).toEqual(["credits:7d"]);
+
+		// No add-on purchased: unchanged behavior.
+		const none = alibabaTokenPlanRankingStrategy.scopeLimits?.(exhaustedPlan(undefined));
+		expect(none?.map(limit => limit.id)).toEqual(["credits:7d"]);
 	});
 });
