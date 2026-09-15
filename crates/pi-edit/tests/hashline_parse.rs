@@ -703,6 +703,20 @@ fn input_routes_unified_diff_add_file_to_write() {
 }
 
 #[test]
+fn input_routes_empty_unified_diff_add_file_to_write() {
+	let error = Patch::parse(
+		"diff --git a/empty.ts b/empty.ts\nnew file mode 100644\nindex 0000000..e69de29",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("Detected incompatible unified diff syntax"), "{error}");
+	assert!(error.contains("use the `write` tool"), "{error}");
+	assert!(!error.contains("[PATH#HASH]"), "{error}");
+	assert!(!error.contains("Copy `HASH`"), "{error}");
+}
+
+#[test]
 fn input_reports_both_recovery_paths_for_mixed_unified_diff() {
 	let error = Patch::parse(
 		"--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1 @@\n+new\n--- a/existing.ts\n+++ b/existing.ts\n@@ \

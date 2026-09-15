@@ -102,7 +102,10 @@ pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
 		syntax.apply_patch |= existing_file_op || add_file;
 		syntax.apply_patch_existing_file |= existing_file_op;
 		syntax.apply_patch_add_file |= add_file;
-		syntax.unified_diff |= is_unified_hunk_line(line) || line.starts_with("diff --git ");
+		let new_file_mode = line.starts_with("new file mode ");
+		syntax.unified_diff |=
+			is_unified_hunk_line(line) || line.starts_with("diff --git ") || new_file_mode;
+		syntax.unified_diff_add_file |= new_file_mode;
 		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
 			pending_unified_old = Some(old_is_dev_null);
 		}
@@ -120,7 +123,7 @@ pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
 		saw_search_marker |= line.starts_with("<<<<<<< SEARCH");
 		saw_replace_marker |= line.starts_with(">>>>>>> REPLACE");
 	}
-	if syntax.unified_diff && !saw_unified_file_pair {
+	if syntax.unified_diff && !saw_unified_file_pair && !syntax.unified_diff_add_file {
 		syntax.unified_diff_existing_file = true;
 	}
 	syntax.search_replace = saw_search_marker && saw_replace_marker;
