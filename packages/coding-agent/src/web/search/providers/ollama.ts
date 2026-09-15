@@ -12,7 +12,7 @@ import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, readLimitedText, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, readLimitedText, withHardTimeout } from "./utils";
 
 type SearchParamsWithFetch = SearchParams & { fetch?: FetchImpl };
 
@@ -33,9 +33,7 @@ interface OllamaSearchResponse {
 }
 
 /** Extract a string field from a loosely-typed result object. */
-function asString(value: unknown): string | undefined {
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
+const asString = normalizeSearchText;
 
 /** Call the Ollama web search API. */
 async function callOllamaSearch(
