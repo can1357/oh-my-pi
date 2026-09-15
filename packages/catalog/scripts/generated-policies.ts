@@ -257,6 +257,32 @@ export function applyCodexRemoteCompactionFallback(models: ModelSpec<Api>[]): vo
 	}
 }
 
+/**
+ * Complete Codex seed rows from the previous bundle: seeds cannot carry
+ * row-specific discovery metadata (priority, websocket preference, max
+ * context window), so fill fields the seed leaves absent from the previous
+ * snapshot's same-id row. Live discovery rows are complete and pass through
+ * untouched.
+ */
+export function backfillCodexSeedGaps(
+	models: ModelSpec<Api>[],
+	previous: Record<
+		string,
+		Record<string, { priority?: number; preferWebsockets?: boolean; maxContextWindow?: number }>
+	>,
+): void {
+	const prevCodex = previous["openai-codex"];
+	if (!prevCodex) return;
+	for (const model of models) {
+		if (model.provider !== "openai-codex") continue;
+		const prev = prevCodex[model.id];
+		if (!prev) continue;
+		model.priority ??= prev.priority;
+		model.preferWebsockets ??= prev.preferWebsockets;
+		model.maxContextWindow ??= prev.maxContextWindow;
+	}
+}
+
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 	if (model.provider === "cursor") {
 		model.input = resolveCursorInput(model.id, model.input);

@@ -4,6 +4,7 @@ import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types
 import {
 	applyPricingPeerFallbacks,
 	applyCodexRemoteCompactionFallback,
+	backfillCodexSeedGaps,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
@@ -940,5 +941,45 @@ describe("applyCodexRemoteCompactionFallback", () => {
 
 		expect(codex.remoteCompaction).toBe(existing);
 		expect(other.remoteCompaction).toBeUndefined();
+	});
+});
+
+describe("backfillCodexSeedGaps", () => {
+	const previous = {
+		"openai-codex": {
+			"gpt-5.3-codex-spark": { priority: 26, preferWebsockets: true, maxContextWindow: 128000 },
+		},
+	};
+
+	it("completes seed rows missing discovery metadata from the previous bundle", () => {
+		const models: ModelSpec<Api>[] = [
+			createSpec({ id: "gpt-5.3-codex-spark", api: "openai-codex-responses", provider: "openai-codex" }),
+		];
+
+		backfillCodexSeedGaps(models, previous);
+
+		expect(models[0]?.priority).toBe(26);
+		expect(models[0]?.preferWebsockets).toBe(true);
+		expect(models[0]?.maxContextWindow).toBe(128000);
+	});
+
+	it("leaves carried values, unknown ids, and other providers untouched", () => {
+		const models: ModelSpec<Api>[] = [
+			{
+				...createSpec({ id: "gpt-5.5", api: "openai-codex-responses", provider: "openai-codex", priority: 12 }),
+				preferWebsockets: false,
+				maxContextWindow: 272000,
+			},
+			createSpec({ id: "gpt-5.6-sol", api: "openai-codex-responses", provider: "openai-codex" }),
+			createSpec({ id: "deepseek-v4-flash", api: "openai-completions", provider: "deepseek" }),
+		];
+
+		backfillCodexSeedGaps(models, previous);
+
+		expect(models[0]?.priority).toBe(12);
+		expect(models[0]?.preferWebsockets).toBe(false);
+		expect(models[0]?.maxContextWindow).toBe(272000);
+		expect(models[1]?.priority).toBeUndefined();
+		expect(models[2]?.priority).toBeUndefined();
 	});
 });

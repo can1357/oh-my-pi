@@ -59,6 +59,7 @@ import {
 	applyOllamaCloudOutputCap,
 	hasBillableCost,
 	linkOpenAIPromotionTargets,
+	backfillCodexSeedGaps,
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
@@ -597,12 +598,6 @@ async function generateModels() {
 		modelsDevModels,
 	);
 
-	// Authored seed rows (`rules/providers/<id>.kdl`) whose upstream rows win
-	// dedup. Pushed before the previous-snapshot merge so the current seed, not
-	// a stale snapshot copy, is the fallback row.
-	for (const entry of seededProviders("upstream")) {
-		allModels.push(...bundledSeedRows(entry, allModels, authoritativeCatalogProviders));
-	}
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -632,6 +627,15 @@ async function generateModels() {
 		}
 	}
 
+	// Authored seed rows (`rules/providers/<id>.kdl`) whose upstream rows win
+	// dedup. Pushed after special discovery but before the previous-snapshot
+	// merge: live discovery rows win, the current seed (not a stale snapshot
+	// copy) is the fallback row, and snapshot rows fill only unfetched ids.
+	// Keep this order: pushing seeds earlier lets them shadow live discovery.
+	for (const entry of seededProviders("upstream")) {
+		allModels.push(...bundledSeedRows(entry, allModels, authoritativeCatalogProviders));
+	}
+
 	const modelsDevSnapshotExcludedProviders = new Set<string>();
 	for (const model of modelsDevModels) {
 		if (model.provider === "google-vertex") {
@@ -658,6 +662,7 @@ async function generateModels() {
 		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
 		previousSnapshotExcludedProviders,
 	);
+	backfillCodexSeedGaps(allModels, prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>);
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.
