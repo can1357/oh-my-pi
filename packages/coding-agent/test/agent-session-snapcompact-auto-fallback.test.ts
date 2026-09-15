@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -34,7 +35,9 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		initialState: { model: activeModel, systemPrompt: ["Test"], tools: [], messages: [] },
 	});
 	const sessionManager = SessionManager.inMemory();
-	const seed = options.seedMessages ?? [{ role: "user", content: "hello", timestamp: Date.now() }];
+	const seed = options.seedMessages ?? [
+		{ role: "user", content: "archived context ".repeat(256), timestamp: Date.now() },
+	];
 	for (const message of seed) sessionManager.appendMessage(message);
 	const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
 	if (!firstKeptEntryId) throw new Error("Expected seeded branch entry");
@@ -65,6 +68,12 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		tokensBefore: 123,
 		details: {},
 	});
+	vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => ({
+		summary: "Reduced local snapcompact history.",
+		shortSummary: "Reduced history.",
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+	}));
 	const end = Promise.withResolvers<{ action: string; errorMessage?: string }>();
 	const notices: string[] = [];
 	session.subscribe(event => {
