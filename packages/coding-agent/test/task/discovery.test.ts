@@ -194,4 +194,34 @@ describe("discoverAgents", () => {
 
 		expect(names).toContain("plugin-dir-agent");
 	});
+
+	test("keeps role aliases and drops non-role selectors from plugin roots", async () => {
+		const pluginDir = path.join(tempHome, "model-plugin");
+		await fs.mkdir(path.join(pluginDir, "agents"), { recursive: true });
+		for (const [name, model] of [
+			["plugin-role-agent", "@plan"],
+			["plugin-provider-agent", "anthropic/claude-x"],
+			["plugin-claude-agent", "sonnet"],
+		] as const) {
+			await fs.writeFile(
+				path.join(pluginDir, "agents", `${name}.md`),
+				[
+					"---",
+					`name: ${name}`,
+					`description: ${name}`,
+					`model: "${model}"`,
+					"---",
+					"body",
+				].join("\n"),
+			);
+		}
+		await injectPluginDirRoots(tempHome, [pluginDir], projectDir);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const byName = new Map(agents.map(agent => [agent.name, agent]));
+
+		expect(byName.get("plugin-role-agent")?.model).toEqual(["@plan"]);
+		expect(byName.get("plugin-provider-agent")?.model).toBeUndefined();
+		expect(byName.get("plugin-claude-agent")?.model).toBeUndefined();
+	});
 });

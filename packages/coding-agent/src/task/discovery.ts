@@ -40,7 +40,7 @@ export interface DiscoveryResult {
 interface AgentDirectory {
 	dir: string;
 	source: AgentSource;
-	ignoreModel?: boolean;
+	ignoreModel?: boolean | ((model: string[] | undefined) => boolean);
 }
 
 /**
@@ -57,7 +57,7 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
 				.readFile(filePath, "utf-8")
 				.then(content => {
 					const agent = parseAgent(filePath, content, source, "warn");
-					if (ignoreModel) agent.model = undefined;
+					if (typeof ignoreModel === "function" ? ignoreModel(agent.model) : ignoreModel) agent.model = undefined;
 					return agent;
 				})
 				.catch(error => {
@@ -132,13 +132,13 @@ export async function discoverAgents(
 		return a.scope === "project" ? -1 : 1;
 	});
 	for (const plugin of sortedPluginRoots) {
-		// Claude aliases such as "sonnet" and "opus" are not OMP model selectors.
+		// Non-OMP selectors are not OMP role aliases.
 		// Leave the model unset so settings overrides or the parent session choose it.
 		const agentsDir = path.join(plugin.path, "agents");
 		orderedDirs.push({
 			dir: agentsDir,
 			source: plugin.scope === "project" ? "project" : "user",
-			ignoreModel: true,
+			ignoreModel: model => !model?.every(selector => selector.startsWith("@")),
 		});
 	}
 
