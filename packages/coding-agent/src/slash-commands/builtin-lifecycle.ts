@@ -463,7 +463,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return;
 			}
 			if (!runtime.ctx.session.continueInterrupted()) {
-				runtime.ctx.showStatus("Nothing to continue");
+				runtime.ctx.showError("Nothing to continue — /continue resumes only an interrupted (aborted) turn.");
 			}
 		},
 	},
