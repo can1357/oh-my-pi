@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- `hub wait` on a process now reports what it was actually blocked on when it times out (process exit, the `pattern`, or readiness) instead of always citing the start readiness log pattern.
 - Isolated settings no longer share mutable array and record defaults.
 - Ask timeouts above 1,000 seconds now retain their configured duration.
 - Configured extension directories no longer load fallback index files when declared entries are missing.
