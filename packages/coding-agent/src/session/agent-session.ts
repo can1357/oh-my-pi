@@ -2123,7 +2123,6 @@ export class AgentSession implements SettingsScope {
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
 				return result;
 			},
-			notifyModelSelect: (previousModel, model, source) => this.#notifyModelSelect(previousModel, model, source),
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
@@ -2186,7 +2185,6 @@ export class AgentSession implements SettingsScope {
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
-			notifyModelSelect: (previousModel, model, source) => this.#notifyModelSelect(previousModel, model, source),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: (previousEditMode, options) =>
 				this.#tools.syncAfterModelChange(previousEditMode, options),
@@ -12329,9 +12327,10 @@ export class AgentSession implements SettingsScope {
 			// still reconciles once even though the refit already moved the row.
 			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
 			if (updated && updated.contextWindow !== baseline.contextWindow) {
-				// Same model, so the switch result's `changed` is always false and no
-				// `model_select` fires; the call exists purely for the provider reset.
-				await this.#setModelWithProviderSessionReset(updated);
+				// Same model, so no slot was reserved and `commit` is a no-op; the
+				// call exists purely for the provider reset — but keep the
+				// "every result is committed" invariant.
+				(await this.#setModelWithProviderSessionReset(updated)).commit("set");
 			}
 		} catch (error) {
 			logger.warn("context-window policy reapply failed", { error: String(error) });
@@ -12361,34 +12360,28 @@ export class AgentSession implements SettingsScope {
 		// never maps it), so routing it through `#emitSessionEvent` would only
 		// add an extension-delivery await inside every model switch — including
 		// retry-fallback on the error path. The pi-compatible `model_select`
-		// notification keeps that contract but is NOT dispatched here: this
-		// method returns mid-transaction, before the caller has appended the
-		// model-change entry, re-applied the thinking level, and synced the
-		// prompt/tools. Callers fire `notifyModelSelect` detached as the LAST
-		// step of their switch transaction, so handlers observe the committed
-		// switch (`model_changed` above still fires synchronously here).
+		// notification keeps that contract: its FIFO slot is reserved below at
+		// reset time, but the handler pass only runs once the caller commits
+		// the slot as the LAST step of its switch transaction, so handlers
+		// observe the committed switch (`model_changed` above still fires
+		// synchronously here).
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
 		}
+		// Reserve the `model_select` FIFO slot at reset time — right next to
+		// `model_changed` — so slot order == switch order even when two
+		// overlapping switch transactions finish in reverse order. Delivery
+		// still waits for the caller's `commit(source)` as the LAST step of
+		// its transaction, so handlers observe the committed switch (see
+		// `ModelSwitchResult`).
+		const slot = isChanging ? this.#extensionRunner?.reserveModelSelect() : undefined;
 
 		await this.#reconcileModelDependentState(model);
-		return { changed: isChanging, previousModel: currentModel };
-	}
-
-	/**
-	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`)
-	 * as the last step of a committed switch transaction — model-change entry
-	 * appended, thinking level re-applied, prompt/tools synced — so handlers
-	 * observe the fully applied switch, never a state a later step can still
-	 * overwrite. Still deliberately detached: the reasoning on `model_changed`
-	 * above applies unchanged — a model switch, including retry-fallback on
-	 * the error path, must not wait on extension handlers.
-	 * `ExtensionRunner.emitModelSelect` serializes deliveries FIFO (rapid
-	 * switches cannot overtake each other) while keeping them fire-and-forget;
-	 * it also skips entirely when no extension registered a handler.
-	 */
-	#notifyModelSelect(previousModel: Model | undefined, model: Model, source: ModelSelectSource): void {
-		this.#extensionRunner?.emitModelSelect({ model, previousModel, source });
+		return {
+			changed: isChanging,
+			previousModel: currentModel,
+			commit: source => slot?.commit({ model, previousModel: currentModel, source }),
+		};
 	}
 
 	async #reconcileModelDependentState(model: Model): Promise<void> {
@@ -13225,6 +13218,9 @@ export class AgentSession implements SettingsScope {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
+		// The attempted model restore's result must outlive the try block: the
+		// catch commits its slot when the switch fails mid-tail.
+		let restoreResult: ModelSwitchResult | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -13327,7 +13323,6 @@ export class AgentSession implements SettingsScope {
 			}
 
 			let restoreResult: ModelSwitchResult | undefined;
-			let restoredModel: Model | undefined;
 			if (targetModel) {
 				const currentModel = this.model;
 				const shouldResetProviderState =
@@ -13337,11 +13332,10 @@ export class AgentSession implements SettingsScope {
 							currentModel.id !== targetModel.id ||
 							currentModel.api !== targetModel.api));
 				if (shouldResetProviderState) {
-					// Same-session reloads rebind the same model (`changed` false → no
-					// notification); a real restore defers its `model_select` to the end
-					// of the switch — see the success tail below.
+					// Same-session reloads rebind the same model (`changed` false →
+					// `commit` is a no-op); a real restore reserves its slot here and
+					// commits it at the end of the switch (success tail or catch).
 					restoreResult = await this.#setModelWithProviderSessionReset(targetModel);
-					restoredModel = targetModel;
 				} else {
 					this.agent.setModel(targetModel);
 				}
@@ -13353,6 +13347,7 @@ export class AgentSession implements SettingsScope {
 				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
 					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
 				}
+			}
 
 			const model = this.model;
 			if (model) {
@@ -13447,16 +13442,20 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
-			// First point the restore notification may fire: the target session's
-			// model-dependent state (thinking/service tiers above) is applied AND
-			// every step that could still throw into the rollback below has run.
-			// A failed switch emits its own corrective `restore` in the catch
-			// block instead, so handlers never see a switch that was unwound.
-			if (restoreResult?.changed && restoredModel) {
-				this.#notifyModelSelect(restoreResult.previousModel, restoredModel, "restore");
-			}
+			// The switch is fully committed: every step that could still throw
+			// into the rollback below has run. A failed switch instead commits
+			// the attempted restore in the catch block and follows it with the
+			// rollback restore — one event per actual change, in switch order.
+			restoreResult?.commit("restore");
 			return true;
 		} catch (error) {
+			// The model already changed, so the attempted restore's slot must
+			// release even though the switch failed (see ModelSwitchResult) —
+			// one `model_select` per actual change, in switch order. The
+			// rollback below reserves its own later slot, so delivery order is
+			// attempted restore, then rollback restore, regardless of when the
+			// commits happen relative to each other.
+			restoreResult?.commit("restore");
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -13507,7 +13506,11 @@ export class AgentSession implements SettingsScope {
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
 			if (modelRolledBack && previousModel) {
 				this.#emit({ type: "model_changed" });
-				this.#notifyModelSelect(rolledBackModel, previousModel, "restore");
+				this.#extensionRunner?.emitModelSelect({
+					model: previousModel,
+					previousModel: rolledBackModel,
+					source: "restore",
+				});
 			}
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();

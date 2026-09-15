@@ -101,8 +101,7 @@ function createHost(
 		waitForSessionMessagePersistence: async () => {},
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,
-		setModelWithProviderSessionReset: async () => ({ changed: false, previousModel: undefined }),
-		notifyModelSelect: () => {},
+		setModelWithProviderSessionReset: async () => ({ changed: false, previousModel: undefined, commit() {} }),
 		resolveActiveEditMode: () => "hashline",
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
@@ -157,7 +156,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				fallbackApplied.resolve();
 				await releaseReconciliation.promise;
 			}
-			return { changed: true, previousModel: previous };
+			return { changed: true, previousModel: previous, commit() {} };
 		};
 		host.emitSessionEvent = async event => {
 			emittedEvents.push(event.type);
@@ -211,7 +210,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				fallbackApplied.resolve();
 				await releaseReconciliation.promise;
 			}
-			return { changed: true, previousModel: previous };
+			return { changed: true, previousModel: previous, commit() {} };
 		};
 		host.emitSessionEvent = async event => {
 			emittedEvents.push(event.type);
@@ -255,7 +254,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
 			activeModel = nextModel;
-			return { changed: true, previousModel: model };
+			return { changed: true, previousModel: model, commit() {} };
 		};
 		host.emitSessionEvent = async event => {
 			if (event.type !== "retry_fallback_applied") return;

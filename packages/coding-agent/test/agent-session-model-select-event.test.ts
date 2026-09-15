@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -6,8 +6,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
+	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
@@ -55,11 +57,13 @@ async function drainMicrotasks(): Promise<void> {
 	}
 }
 
+// Module-scoped so the file-level buildSwitchPair helper can reach them.
+let tempDir: TempDir;
+let authStorage: AuthStorage;
+let modelRegistry: ModelRegistry;
+
 describe("AgentSession model_select extension event", () => {
-	let tempDir: TempDir;
 	let session: AgentSession;
-	let authStorage: AuthStorage;
-	let modelRegistry: ModelRegistry;
 	let events: ModelSelectEvent[];
 	let modelChangedCount: number;
 
@@ -297,6 +301,7 @@ describe("AgentSession model_select extension event", () => {
 			await waitForDeliveries();
 			await drainMicrotasks();
 			expect(events).toHaveLength(1);
+			// Post-shutdown emits are no-ops: nothing is delivered after the
 			// session (and its extension host) is gone.
 			runner.emitModelSelect({
 				model: bundledAnthropicModel("claude-opus-4-5"),
@@ -311,63 +316,70 @@ describe("AgentSession model_select extension event", () => {
 	});
 
 	it("delivers an in-flight model_select before session_shutdown handlers", async () => {
+		// Park the handler mid-delivery with a short wall sleep so delivery is
+		// REALLY in flight when dispose starts — a microtask-only chain would
+		// settle before dispose's first await and the test could not
+		// discriminate (the shutdown drain is what guarantees the order).
+		(globalThis as GateGlobal).__ompModelSelectAction = async () => {
+			await Bun.sleep(5);
+		};
 		await session.setModel(bundledAnthropicModel("claude-sonnet-4-6"));
-		// Delivery is queued (microtask chain) but has not run when dispose
-		// starts; the shutdown drain must settle it BEFORE session_shutdown.
 		await session.dispose();
 		expect(order).toEqual(["model_select", "session_shutdown"]);
 	});
 
-	it("labels a session-switch model restore as restore", async () => {
-		// The shared session's in-memory manager cannot load another session's
-		// file, so build a file-backed switch pair here (the beforeEach session
-		// stays untouched; this test disposes its own).
-		const target = bundledAnthropicModel("claude-sonnet-4-6");
-		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
-		// A message entry is required for flush() to materialize the file; the
-		// model_change entry is what switchSession restores the model from.
-		targetManager.appendMessage({ role: "user", content: "target session", timestamp: 1 });
-		targetManager.appendModelChange(`${target.provider}/${target.id}`, "default");
-		await targetManager.ensureOnDisk();
-		await targetManager.flush();
-		const targetFile = targetManager.getSessionFile();
-		await targetManager.close();
-		if (!targetFile) throw new Error("Expected target session file");
+	it("delivers reserved slots in reservation order regardless of commit order", async () => {
+		armDelivery(2);
+		const first = runner.reserveModelSelect();
+		const second = runner.reserveModelSelect();
+		if (!first || !second) throw new Error("Expected reserved model_select slots");
 
-		const runtime = new ExtensionRuntime();
-		const delivered = Promise.withResolvers<void>();
-		const restoreEvents: ModelSelectEvent[] = [];
-		const extension = await loadExtensionFromFactory(
-			pi => {
-				pi.on("model_select", event => {
-					restoreEvents.push(event);
-					delivered.resolve();
-				});
-			},
-			tempDir.path(),
-			new EventBus(),
-			runtime,
-			"model-select-restore-recorder",
-		);
-		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		const restoreRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
-		const switcher = new AgentSession({
-			agent: new Agent({
-				initialState: {
-					model: bundledAnthropicModel("claude-sonnet-4-5"),
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-				},
-			}),
-			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			extensionRunner: restoreRunner,
+		// The later-reserved slot commits first: overlapping switch
+		// transactions whose tails finish in reverse order. Delivery must
+		// still follow reservation (switch) order.
+		second.commit({
+			model: bundledAnthropicModel("claude-opus-4-5"),
+			previousModel: bundledAnthropicModel("claude-sonnet-4-6"),
+			source: "set",
 		});
+		first.commit({
+			model: bundledAnthropicModel("claude-sonnet-4-6"),
+			previousModel: undefined,
+			source: "set",
+		});
+		await waitForDeliveries();
+
+		expect(events.map(event => event.model.id)).toEqual(["claude-sonnet-4-6", "claude-opus-4-5"]);
+	});
+
+	it("abandons a never-committed slot without wedging the chain", async () => {
+		testSetExtensionHandlerTimeoutMs(25);
+		try {
+			// Never committed — simulates a caller bug that loses the
+			// ModelSwitchResult; the runner must drop the slot after the
+			// handler budget instead of blocking later deliveries.
+			runner.reserveModelSelect();
+			armDelivery();
+			const slot = runner.reserveModelSelect();
+			slot?.commit({
+				model: bundledAnthropicModel("claude-sonnet-4-6"),
+				previousModel: undefined,
+				source: "set",
+			});
+			await waitForDeliveries();
+
+			expect(events.map(event => event.model.id)).toEqual(["claude-sonnet-4-6"]);
+		} finally {
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
+	});
+
+	it("labels a session-switch model restore as restore", async () => {
+		const target = bundledAnthropicModel("claude-sonnet-4-6");
+		const { switcher, restoreEvents, delivered, targetFile } = await buildSwitchPair(target);
 		try {
 			expect(await switcher.switchSession(targetFile)).toBe(true);
-			await delivered.promise;
+			await delivered;
 
 			expect(restoreEvents).toHaveLength(1);
 			expect(restoreEvents[0]?.source).toBe("restore");
@@ -375,6 +387,39 @@ describe("AgentSession model_select extension event", () => {
 			expect(restoreEvents[0]?.previousModel?.id).toBe("claude-sonnet-4-5");
 			expect(switcher.model?.id).toBe(target.id);
 		} finally {
+			await switcher.dispose();
+		}
+	});
+
+	it("reports the attempted restore then the rollback restore when a switch fails mid-tail", async () => {
+		const target = bundledAnthropicModel("claude-sonnet-4-6");
+		const { switcher, restoreEvents, targetFile, settings } = await buildSwitchPair(target);
+		// Cheapest injectable failure AFTER the model-restore block: the first
+		// `defaultThinkingLevel` read of the switch tail (`parseConfiguredThinkingLevel`
+		// below the restore) — every later seam is either wrapped in try/catch or
+		// internal. Throwing there lands in the rollback catch with the restore
+		// already committed.
+		const getSpy = vi.spyOn(settings, "get").mockImplementation((key: string) => {
+			if (key === "defaultThinkingLevel") throw new Error("injected post-restore failure");
+			return Settings.isolated().get(key as Parameters<Settings["get"]>[0]);
+		});
+		try {
+			await expect(switcher.switchSession(targetFile)).rejects.toThrow("injected post-restore failure");
+
+			expect(
+				restoreEvents.map(event => ({
+					source: event.source,
+					model: event.model.id,
+					previousModel: event.previousModel?.id,
+				})),
+			).toEqual([
+				// The attempted restore (committed by the catch), then the rollback.
+				{ source: "restore", model: target.id, previousModel: "claude-sonnet-4-5" },
+				{ source: "restore", model: "claude-sonnet-4-5", previousModel: target.id },
+			]);
+			expect(switcher.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			getSpy.mockRestore();
 			await switcher.dispose();
 		}
 	});
@@ -399,6 +444,61 @@ describe("AgentSession model_select extension event", () => {
 	});
 });
 
+async function buildSwitchPair(target: Model<Api>): Promise<{
+	switcher: AgentSession;
+	restoreEvents: ModelSelectEvent[];
+	delivered: Promise<void>;
+	targetFile: string;
+	settings: Settings;
+}> {
+	// The shared session's in-memory manager cannot load another session's
+	// file, so build a file-backed switch pair (the beforeEach session stays
+	// untouched; callers dispose the switcher themselves).
+	const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+	// A message entry is required for flush() to materialize the file; the
+	// model_change entry is what switchSession restores the model from.
+	targetManager.appendMessage({ role: "user", content: "target session", timestamp: 1 });
+	targetManager.appendModelChange(`${target.provider}/${target.id}`, "default");
+	await targetManager.ensureOnDisk();
+	await targetManager.flush();
+	const targetFile = targetManager.getSessionFile();
+	await targetManager.close();
+	if (!targetFile) throw new Error("Expected target session file");
+
+	const runtime = new ExtensionRuntime();
+	const delivered = Promise.withResolvers<void>();
+	const restoreEvents: ModelSelectEvent[] = [];
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("model_select", event => {
+				restoreEvents.push(event);
+				delivered.resolve();
+			});
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"model-select-restore-recorder",
+	);
+	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	const restoreRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+	const settings = Settings.isolated({ "compaction.enabled": false });
+	const switcher = new AgentSession({
+		agent: new Agent({
+			initialState: {
+				model: bundledAnthropicModel("claude-sonnet-4-5"),
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+		}),
+		sessionManager,
+		settings,
+		modelRegistry: modelRegistry,
+		extensionRunner: restoreRunner,
+	});
+	return { switcher, restoreEvents, delivered: delivered.promise, targetFile, settings };
+}
 function bundledAnthropicModel(id: string): Model<Api> {
 	const model = getBundledModel("anthropic", id);
 	if (!model) throw new Error(`Expected anthropic model ${id} to exist`);
