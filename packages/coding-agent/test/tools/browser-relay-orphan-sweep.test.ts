@@ -9,6 +9,7 @@ import {
 	seedOrphanSweepDeadline,
 	serializeOrphanReconciliation,
 	serializeOrphanSweepDeadlineUpdate,
+	shouldClearOrphanSweepDeadlineAfterHello,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "../../../browser-relay/extension/orphan-sweep";
@@ -137,6 +138,25 @@ describe("browser relay orphan sweep scheduling", () => {
 		expect(
 			orphanSweepSeesRelayDisconnected({
 				socketReadyState: 1,
+				openReadyState: 1,
+			}),
+		).toBe(false);
+	});
+
+	it("fences hello deadline clears to the live initialized socket", () => {
+		expect(
+			shouldClearOrphanSweepDeadlineAfterHello({
+				isCurrentSocket: true,
+				isHelloDeliveredSocket: true,
+				socketReadyState: 1,
+				openReadyState: 1,
+			}),
+		).toBe(true);
+		expect(
+			shouldClearOrphanSweepDeadlineAfterHello({
+				isCurrentSocket: false,
+				isHelloDeliveredSocket: false,
+				socketReadyState: 3,
 				openReadyState: 1,
 			}),
 		).toBe(false);

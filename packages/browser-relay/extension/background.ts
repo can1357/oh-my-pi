@@ -47,6 +47,7 @@ import {
 	seedOrphanSweepDeadline,
 	serializeOrphanReconciliation,
 	serializeOrphanSweepDeadlineUpdate,
+	shouldClearOrphanSweepDeadlineAfterHello,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
@@ -430,12 +431,18 @@ async function setOrphanSweepDeadline(
  * behind for a future worker restart to interpret as an already-expired sweep.
  */
 function clearOrphanSweepDeadlineAfterHello(socket: WebSocket): void {
+	const isCurrent = (): boolean =>
+		shouldClearOrphanSweepDeadlineAfterHello({
+			isCurrentSocket: ws === socket,
+			isHelloDeliveredSocket: helloDeliveredSocket === socket,
+			socketReadyState: socket.readyState,
+			openReadyState: WebSocket.OPEN,
+		});
+	// A retry belongs only to the hello socket that scheduled it. Its onclose may
+	// already have armed the next disconnect cycle before this timer runs.
+	if (!isCurrent()) return;
 	void setOrphanSweepDeadline(null).catch(() => {
-		if (
-			ws === socket &&
-			helloDeliveredSocket === socket &&
-			socket.readyState === WebSocket.OPEN
-		) {
+		if (isCurrent()) {
 			setTimeout(() => clearOrphanSweepDeadlineAfterHello(socket), 1_000);
 		}
 	});

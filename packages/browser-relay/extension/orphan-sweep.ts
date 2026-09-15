@@ -14,6 +14,23 @@ export interface OrphanSweepConnectionState {
 	forceDisconnected?: boolean;
 }
 
+export interface OrphanSweepHelloSocketState {
+	isCurrentSocket: boolean;
+	isHelloDeliveredSocket: boolean;
+	socketReadyState: number;
+	openReadyState: number;
+}
+
+export function shouldClearOrphanSweepDeadlineAfterHello(
+	state: OrphanSweepHelloSocketState,
+): boolean {
+	return (
+		state.isCurrentSocket &&
+		state.isHelloDeliveredSocket &&
+		state.socketReadyState === state.openReadyState
+	);
+}
+
 export function orphanSweepSeesRelayDisconnected(
 	state: OrphanSweepConnectionState,
 ): boolean {
