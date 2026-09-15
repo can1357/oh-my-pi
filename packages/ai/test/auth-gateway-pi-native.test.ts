@@ -312,6 +312,52 @@ describe("pi-native gateway cache controls", () => {
 	});
 });
 
+describe("pi-native gateway forwarded request policy", () => {
+	// Request policy the client's process owns but the gateway cannot recompute —
+	// `commandcode`'s `CMD_ZDR=1` retention opt-in, forwarded by
+	// `ProviderDefinition.preparePiNativeHeaders` — arrives as a plain option
+	// header. If the gateway dropped option headers, the client would believe
+	// the conversation was not retained while the provider kept it.
+	it("delivers a client option header to the provider stream", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-headers-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-headers" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			mock.push({ content: ["ok"] });
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "pi-native-headers",
+					context: baseContext,
+					options: { headers: { "x-cmd-zdr": "1" } },
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(mock.calls).toHaveLength(1);
+			expect(mock.calls[0]?.options?.headers).toMatchObject({ "x-cmd-zdr": "1" });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+
 describe("pi-native gateway usage attribution", () => {
 	it("records observed usage under the caller's x-omp-* identity, host-fallback when absent", async () => {
 		registerMockApi();
