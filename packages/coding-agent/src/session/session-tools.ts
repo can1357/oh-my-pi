@@ -312,6 +312,17 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	/**
+	 * Snapshot of the skill-URI hint visibility taken at the last system-prompt
+	 * rebuild. The provider-visible system prompt is deliberately byte-stable
+	 * across mid-session `/skillful` toggles (a notice rides the next turn
+	 * instead), so the provider-side hint in `BashTool.description` and
+	 * `ReadTool.parameters` must freeze to the same state — reading the live
+	 * setting per request would mutate the provider tool prefix without the
+	 * intended prompt refresh. The setters below carry the snapshot into the
+	 * tools; the refresh lifecycle updates it.
+	 */
+	#skillHintVisible = false;
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -352,6 +363,7 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		this.#refreshSkillHintVisibility();
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
 		// so an early reconcile (think/Code Mode after the startup model
@@ -418,6 +430,22 @@ export class SessionTools {
 		return this.#skillsSettings;
 	}
 
+	/**
+	 * Frozen skill-URI hint visibility (see {@link #skillHintVisible}). Tools
+	 * read this instead of the live `skillful` setting so the provider tool
+	 * prefix stays byte-stable between system-prompt rebuilds.
+	 */
+	get skillHintVisible(): boolean {
+		return this.#skillHintVisible;
+	}
+
+	/**
+	 * Re-snapshots hint visibility from the current setting; called by the
+	 * prompt-rebuild lifecycle (see {@link #refreshSkillHintVisibility}).
+	 */
+	#refreshSkillHintVisibility(): void {
+		this.#skillHintVisible = this.#host.settings.get("skillful") === true && (this.#skills?.length ?? 0) > 0;
+	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
 	clearAcpPermissionDecisions(): void {
 		this.#acpPermissionDecisions.clear();
@@ -1142,6 +1170,7 @@ export class SessionTools {
 				// tracking any later frozen changes that must follow a delivered base.
 				this.#basePromptReflectsRosterDelta = true;
 				this.#pendingToolRosterDeltaAfterBase = undefined;
+				this.#refreshSkillHintVisibility();
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1678,13 +1707,20 @@ export class SessionTools {
 		const directToolNames = this.#codeModeDirectWireSignature === undefined ? undefined : activeToolNames;
 		this.#setActiveToolNames?.(this.#toolPredicateNames ?? activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		// Stage the hint snapshot BEFORE rendering: `#rebuildSystemPrompt` reads
+		// the skill gates inside `BashTool.description` and `ReadTool.parameters`,
+		// so those getters must see the new visibility while the prompt renders.
+		// The staged value commits atomically with the prompt (rolled back with
+		// it) so a declined preparation leaves the previous state untouched.
+		const previousSkillHintVisible = this.#skillHintVisible;
+		this.#refreshSkillHintVisibility();
 		const built = await this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames });
-		if (this.#host.isDisposed() || isCurrent?.() === false) return;
 		return {
 			systemPrompt: built.systemPrompt,
 			commit: () => {
-				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
-				// A handler may have rebuilt policy while this preparation was awaiting its final commit.
+				// A handler may have rebuilt policy while this preparation was
+				// awaiting its final commit: its own lifecycle already re-snapshotted
+				// hint visibility, so only carry the prompt forward.
 				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);

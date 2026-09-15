@@ -701,10 +701,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasGrep: isToolActive("grep", this.session.settings.get("grep.enabled")),
 			hasGlob: isToolActive("glob", this.session.settings.get("glob.enabled")),
 			hasRead: isToolActive("read", true),
+			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
+			// building a bare ToolSession lack the rebuild lifecycle, so fall back
+			// to the derived form (skillful && skills) instead of dropping the hint.
 			hasSkills:
-				// `skillful: false` removes the system-prompt catalog and must also
-				// strip the provider-side `skill://` hint, matching sdk.ts:3186.
-				this.session.settings.get("skillful") && (this.session.skills?.length ?? 0) > 0,
+				(this.session.skillHintVisible ??
+					(this.session.settings.get("skillful") && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: isToolActive("hub", this.session.settings.get("launch.enabled")),
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),

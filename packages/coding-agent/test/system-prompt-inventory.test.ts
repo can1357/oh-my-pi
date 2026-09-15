@@ -787,6 +787,10 @@ describe("system prompt tool inventory", () => {
 	it("advertises loaded skills through real provider tool definitions", async () => {
 		const session = {
 			...makeToolSession(Settings.isolated()),
+			// The wire hint visibility belongs to the session's rebuild lifecycle;
+			// this fixture asserts the descriptor presentation, so it opts in the
+			// same way `SessionTools` does after a rebuild with loaded skills.
+			skillHintVisible: true,
 			skills: [
 				{
 					name: "provider-skill",
