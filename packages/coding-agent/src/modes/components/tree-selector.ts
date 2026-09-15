@@ -20,6 +20,7 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
+import { isUserRequestEntry } from "../../session/session-context";
 import type { SessionTreeNode } from "../../session/session-entries";
 import { toPathList } from "../../tools/path-utils";
 import { shortenPath } from "../../tools/render-utils";
@@ -389,8 +390,8 @@ class TreeList implements Component {
 
 			switch (this.#filterMode) {
 				case "user-only":
-					// Just user messages
-					passesFilter = entry.type === "message" && entry.message.role === "user";
+					// Just user requests (plain prompts and user-invoked skill/collab prompts)
+					passesFilter = isUserRequestEntry(entry);
 					break;
 				case "no-tools":
 					// Default minus tool results

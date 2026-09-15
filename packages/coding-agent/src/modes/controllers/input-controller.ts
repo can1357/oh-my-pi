@@ -1390,7 +1390,6 @@ export class InputController {
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
 		const restoreDraft = () => {
-			this.ctx.editor.setText(text);
 			if (draftImages && draftImages.length > 0) {
 				this.ctx.editor.pendingImages = [...draftImages];
 				this.ctx.editor.pendingImageLinks = draftImageLinks
@@ -1398,6 +1397,8 @@ export class InputController {
 					: draftImages.map(() => undefined);
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
+			// Images first: collapsing reads `pendingImages.length` to decide which markers become chips.
+			this.ctx.editor.setCollapsedText(text);
 		};
 
 		this.ctx.editor.clearDraft(text);
