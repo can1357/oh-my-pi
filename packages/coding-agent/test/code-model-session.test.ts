@@ -45,6 +45,7 @@ function harness(
 		role?: string;
 		setModelAllowed?: boolean;
 		initialEffort?: ConfiguredThinkingLevel;
+		dropEphemeral?: boolean;
 	} = {},
 ) {
 	const main = model("main", "reviewer");
@@ -63,6 +64,7 @@ function harness(
 	let effectiveEffort: ThinkingLevel | undefined = effort === AUTO_THINKING ? ThinkingLevel.Medium : effort;
 	let sessionId = "session-1";
 	let setModelAllowed = options.setModelAllowed ?? true;
+	let dropEphemeral = options.dropEphemeral ?? false;
 	let setModelGate: Promise<void> | undefined;
 	const branch: Array<Record<string, unknown>> = [];
 	const notifications: Array<{ message: string; level: string }> = [];
@@ -96,7 +98,7 @@ function harness(
 			branch.push({
 				type: "model_change",
 				model: formatModelStringWithRouting(next),
-				role: options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : (options?.role ?? "default"),
+				role: options?.ephemeral && !dropEphemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : (options?.role ?? "default"),
 			});
 			return true;
 		},
@@ -722,6 +724,20 @@ describe("code-model session phase", () => {
 		await session.run("start", state.ctx);
 		await session.run("finish", state.ctx);
 		expect(state.effort()).toBe("auto");
+	});
+
+	it("restores when the host serializes the ephemeral switch without the ephemeral role", async () => {
+		const state = harness({ dropEphemeral: true });
+		const session = installCodeModelSession(state.pi, state.settings);
+		const started = await session.run("start", state.ctx);
+		expect(started.changed).toBe(true);
+		expect(state.current()).toBe(state.coding);
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(finished.message).toContain("Restored main conversation model");
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
 	it("runs the registered tool through the built-in extension lifecycle", async () => {

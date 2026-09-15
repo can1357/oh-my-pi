@@ -138,6 +138,7 @@ export function installCodeModelSession(
 	let state: PhaseState | undefined;
 	let busy = false;
 	let inFlight: Promise<unknown> | undefined;
+	let phaseSwitchEntry: ModelChangeEntry | undefined;
 	let reviewPending = false;
 	const usesInternalFinalizer = hooks.registerBeforeIdle !== undefined;
 
@@ -190,6 +191,7 @@ export function installCodeModelSession(
 	function save(next: PhaseState | undefined): void {
 		pi.appendEntry(CODE_MODEL_STATE_TYPE, next);
 		state = next;
+		if (!next) phaseSwitchEntry = undefined;
 	}
 
 	async function guarded<T>(operation: () => Promise<T>): Promise<T> {
@@ -251,8 +253,14 @@ export function installCodeModelSession(
 		const fallbackEffort =
 			retryFallback && "fallbackEffort" in retryFallback ? retryFallback.fallbackEffort : previous.coding.effort;
 		const latest = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
-		// Legacy phase snapshots predate explicit role attribution.
-		const codingRoleMatches = previous.original.role === undefined || latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE;
+		// Legacy phase snapshots predate explicit role attribution. Hosts whose
+		// extension setModel action drops the ephemeral option serialize the
+		// phase's own switch as a plain role change; while that exact entry is
+		// still the newest model change, no user switch has superseded it and
+		// the phase keeps ownership.
+		const latestMatchesCoding = phaseSwitchEntry !== undefined && latest === phaseSwitchEntry;
+		const codingRoleMatches =
+			previous.original.role === undefined || latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE || latestMatchesCoding;
 		const retryPrimaryMatchesCoding =
 			retryFallback === undefined || matchesRetryPrimary(retryFallback.selector, previous.coding, ctx);
 		const codingStateMatches =
@@ -308,6 +316,7 @@ export function installCodeModelSession(
 			if (sessionId(ctx) !== id) throw new Error("The session changed during the model switch.");
 			if (!state) throw new Error("The coding phase state was cleared during the model switch.");
 			save({ ...state, phase: "coding" });
+			phaseSwitchEntry = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
 		} catch (error) {
 			if (sessionId(ctx) === id) {
 				try {
