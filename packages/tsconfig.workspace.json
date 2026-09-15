@@ -1,16 +1,5 @@
 {
 	"extends": "../tsconfig.base.json",
-	"include": [
-		"*/src",
-		"*/test",
-		"*/tests",
-		"*/scripts",
-		"*/bench",
-		"*/bin",
-		"*/native"
-	],
-	"exclude": [
-		"*/node_modules",
-		"*/dist"
-	]
+	"include": ["*/src", "*/test", "*/tests", "*/scripts", "*/bench", "*/bin", "*/native"],
+	"exclude": ["*/node_modules", "*/dist"]
 }

@@ -6,15 +6,8 @@ description = "Compact uv sync/pip install output — strip downloads, short-cir
 match_command = "^uv$"
 match_subcommand = "^(sync|pip)$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^\\s+Downloading ",
-  "^\\s+Using cached ",
-  "^\\s+Preparing ",
-]
-match_output = [
-  { pattern = "Audited \\d+ package", message = "ok (up to date)" },
-]
+strip_lines_matching = ["^\\s*$", "^\\s+Downloading ", "^\\s+Using cached ", "^\\s+Preparing "]
+match_output = [{ pattern = "Audited \\d+ package", message = "ok (up to date)" }]
 max_lines = 20
 
 [[tests.uv-sync]]

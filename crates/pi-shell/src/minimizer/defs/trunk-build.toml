@@ -7,12 +7,12 @@ match_command = "^trunk$"
 match_subcommand = "^build$"
 strip_ansi = true
 strip_lines_matching = [
-  "^\\s*$",
-  "^\\s*Compiling\\s",
-  "^\\s*Downloading\\s",
-  "^\\s*Fetching\\s",
-  "^\\s*Fresh\\s",
-  "^\\s*Checking\\s",
+	"^\\s*$",
+	"^\\s*Compiling\\s",
+	"^\\s*Downloading\\s",
+	"^\\s*Fetching\\s",
+	"^\\s*Fresh\\s",
+	"^\\s*Checking\\s",
 ]
 tail_lines = 10
 max_lines = 30

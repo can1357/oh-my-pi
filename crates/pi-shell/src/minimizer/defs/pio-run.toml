@@ -7,15 +7,15 @@ match_command = "^pio$"
 match_subcommand = "^run$"
 strip_ansi = true
 strip_lines_matching = [
-  "^\\s*$",
-  "^Verbose mode",
-  "^CONFIGURATION:",
-  "^LDF:",
-  "^Library Manager:",
-  "^Compiling\\s",
-  "^Linking\\s",
-  "^Building\\s",
-  "^Checking size",
+	"^\\s*$",
+	"^Verbose mode",
+	"^CONFIGURATION:",
+	"^LDF:",
+	"^Library Manager:",
+	"^Compiling\\s",
+	"^Linking\\s",
+	"^Building\\s",
+	"^Checking size",
 ]
 max_lines = 30
 on_empty = "pio run: ok"

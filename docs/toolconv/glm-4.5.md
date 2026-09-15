@@ -8,29 +8,30 @@ This document was verified against the authoritative `chat_template.jinja` from 
 
 Token IDs are from `tokenizer_config.json` (`added_tokens_decoder`). Note the split: the turn/role markers are registered as **special** tokens, whereas the structural tool-call and thinking tags are each a single dedicated vocabulary token but flagged **`special: false`** (they are emitted/printed as ordinary text, not stripped as control tokens).
 
-| Token (verbatim) | ID | `special` | Purpose |
-|---|---|---|---|
-| `[gMASK]` | 151331 | true | GLM prefix / blank-infilling sentinel; first token of every prompt |
-| `<sop>` | 151333 | true | "Start of piece" — immediately follows `[gMASK]` to open the sequence |
-| `<eop>` | 151334 | true | "End of piece" (not emitted by the chat template) |
-| `<\|system\|>` | 151335 | true | Opens a system turn (and the injected tools turn) |
-| `<\|user\|>` | 151336 | true | Opens a user turn (also an EOS id — see below) |
-| `<\|assistant\|>` | 151337 | true | Opens an assistant turn / generation prompt |
-| `<\|observation\|>` | 151338 | true | Opens a tool-result (observation) turn (also an EOS id) |
-| `<\|endoftext\|>` | 151329 | true | End-of-text; `eos_token` and `pad_token` |
-| `<think>` | 151350 | false | Opens the reasoning span inside an assistant turn |
-| `</think>` | 151351 | false | Closes the reasoning span |
-| `<tool_call>` | 151352 | false | Opens one tool call; function name follows on the same line |
-| `</tool_call>` | 151353 | false | Closes one tool call |
-| `<arg_key>` | 151356 | false | Opens an argument-name element |
-| `</arg_key>` | 151357 | false | Closes an argument-name element |
-| `<arg_value>` | 151358 | false | Opens an argument-value element |
-| `</arg_value>` | 151359 | false | Closes an argument-value element |
-| `<tool_response>` | 151354 | false | Wraps one tool result inside an observation turn |
-| `</tool_response>` | 151355 | false | Closes a tool result |
-| `/nothink` | 151360 | true | Soft switch appended to user text to suppress thinking |
+| Token (verbatim)    | ID     | `special` | Purpose                                                               |
+| ------------------- | ------ | --------- | --------------------------------------------------------------------- |
+| `[gMASK]`           | 151331 | true      | GLM prefix / blank-infilling sentinel; first token of every prompt    |
+| `<sop>`             | 151333 | true      | "Start of piece" — immediately follows `[gMASK]` to open the sequence |
+| `<eop>`             | 151334 | true      | "End of piece" (not emitted by the chat template)                     |
+| `<\|system\|>`      | 151335 | true      | Opens a system turn (and the injected tools turn)                     |
+| `<\|user\|>`        | 151336 | true      | Opens a user turn (also an EOS id — see below)                        |
+| `<\|assistant\|>`   | 151337 | true      | Opens an assistant turn / generation prompt                           |
+| `<\|observation\|>` | 151338 | true      | Opens a tool-result (observation) turn (also an EOS id)               |
+| `<\|endoftext\|>`   | 151329 | true      | End-of-text; `eos_token` and `pad_token`                              |
+| `<think>`           | 151350 | false     | Opens the reasoning span inside an assistant turn                     |
+| `</think>`          | 151351 | false     | Closes the reasoning span                                             |
+| `<tool_call>`       | 151352 | false     | Opens one tool call; function name follows on the same line           |
+| `</tool_call>`      | 151353 | false     | Closes one tool call                                                  |
+| `<arg_key>`         | 151356 | false     | Opens an argument-name element                                        |
+| `</arg_key>`        | 151357 | false     | Closes an argument-name element                                       |
+| `<arg_value>`       | 151358 | false     | Opens an argument-value element                                       |
+| `</arg_value>`      | 151359 | false     | Closes an argument-value element                                      |
+| `<tool_response>`   | 151354 | false     | Wraps one tool result inside an observation turn                      |
+| `</tool_response>`  | 151355 | false     | Closes a tool result                                                  |
+| `/nothink`          | 151360 | true      | Soft switch appended to user text to suppress thinking                |
 
 Notes on exactness:
+
 - All pipes are ASCII `|` (U+007C); GLM uses no fullwidth `｜` (U+FF5C) or `▁` (U+2581) variants (unlike DeepSeek). Reproduce `<|system|>`, `<|user|>`, `<|assistant|>`, `<|observation|>` exactly, and `[gMASK]` with literal square brackets.
 - Because `<tool_call>`, `<arg_key>`, `<arg_value>`, `<tool_response>`, `<think>` (and their closers) each map to exactly **one** token ID, they cost one token apiece in the stream — but being `special: false` they round-trip through detokenization as plain text. Parsers therefore match them as literal substrings in the decoded text, not as control-token ids.
 - `eos_token_id` is a **list**: `[151329, 151336, 151338]` = `<|endoftext|>`, `<|user|>`, `<|observation|>` (from `generation_config.json`). This is how a tool-call turn ends: after `</tool_call>` the model emits `<|observation|>`, which is an EOS id, so generation halts and the server reports a tool call (see Turn structure).
@@ -45,11 +46,13 @@ Every prompt begins with the literal two-token prefix `[gMASK]<sop>` (no followi
 - **Tool result** (`<|observation|>`): role marker introducing one or more `<tool_response>…</tool_response>` blocks (see Tool-result format).
 
 Thinking / reasoning channel:
+
 - Reasoning lives in `<think>…</think>` inside the assistant turn. The `--reasoning-parser glm45` extracts it into a separate `reasoning_content` field; the visible answer is whatever follows `</think>`.
 - **Only the reasoning of assistant turns after the last user message is kept.** The template renders every earlier assistant turn with an empty `<think></think>` and drops its `reasoning_content` (or any inline `<think>…</think>` embedded in `content`). This keeps stale chains of thought out of the context on later turns.
 - An assistant turn with neither preserved reasoning nor an explicit chain renders `\n<think></think>` (empty), then content/tool calls.
 
 Generation prompt (`add_generation_prompt=True`):
+
 - **Thinking mode (default):** the prompt ends with a bare `<|assistant|>`; the model continues with `\n<think>…</think>` then its answer or tool calls.
 - **Non-thinking mode** (`enable_thinking=false`): the prompt ends with `<|assistant|>\n<think></think>`, pre-filling an empty reasoning span so the model goes straight to the answer.
 
@@ -101,8 +104,8 @@ Anatomy and value encoding (this is the single most error-prone part):
 - The function name is the text between `<tool_call>` and the first newline — there is **no** wrapping tag around it and **no** space after `<tool_call>`.
 - Each argument is two adjacent elements: `<arg_key>name</arg_key>` then `<arg_value>value</arg_value>`, conventionally one pair per line.
 - **Argument values are NOT uniformly JSON.** The template renders each value as `value | tojson(ensure_ascii=False) if value is not string else value`:
-  - **string** values are emitted **raw, without surrounding quotes** → `<arg_value>Beijing</arg_value>` (not `"Beijing"`).
-  - **non-string** values (number, boolean, null, object, array) are JSON-encoded → `<arg_value>3</arg_value>`, `<arg_value>true</arg_value>`, `<arg_value>{"k": 1}</arg_value>`.
+   - **string** values are emitted **raw, without surrounding quotes** → `<arg_value>Beijing</arg_value>` (not `"Beijing"`).
+   - **non-string** values (number, boolean, null, object, array) are JSON-encoded → `<arg_value>3</arg_value>`, `<arg_value>true</arg_value>`, `<arg_value>{"k": 1}</arg_value>`.
 - A **zero-argument** call has no pairs: the name is followed by a newline and the closer — `<tool_call>get_time\n</tool_call>`.
 
 Because string values lose their quotes, a parser must decide per argument whether to JSON-decode or treat the value as a literal string. Both reference parsers do this by consulting the tool's JSON Schema: if the parameter's type is `string`, the raw text is taken as-is; otherwise the value is JSON-decoded (with `ast.literal_eval` and raw-string fallbacks). The model is trained to follow the schema, so it emits a bare string exactly when the parameter is string-typed.
@@ -256,23 +259,28 @@ With a server parser active (`--tool-call-parser glm45 --reasoning-parser glm45`
 - `choices[].finish_reason` = `"tool_calls"` when the output contained at least one `<tool_call>` (otherwise `"stop"`).
 - `choices[].message.content` = the text **before** the first `<tool_call>` (normalized to `null` if empty/whitespace). The `<think>…</think>` reasoning is removed by the reasoning parser and surfaced separately as `message.reasoning_content`.
 - `choices[].message.tool_calls[]` — one entry per `<tool_call>…</tool_call>` block:
-  - `.id` = a **server-generated** id (e.g. vLLM's `make_tool_call_id()`), **not** present in the model output. GLM emits no per-call id in the stream.
-  - `.type` = `"function"`.
-  - `.function.name` = the text after `<tool_call>` up to the first newline.
-  - `.function.arguments` = a **JSON string** (an object), reconstructed from the `<arg_key>`/`<arg_value>` pairs with per-argument typing from the tool schema. vLLM returns `json.dumps(arg_dct, ensure_ascii=False)`, e.g. `"{\"location\": \"Beijing\", \"unit\": \"celsius\"}"`. Clients `json.loads()` it before use.
+   - `.id` = a **server-generated** id (e.g. vLLM's `make_tool_call_id()`), **not** present in the model output. GLM emits no per-call id in the stream.
+   - `.type` = `"function"`.
+   - `.function.name` = the text after `<tool_call>` up to the first newline.
+   - `.function.arguments` = a **JSON string** (an object), reconstructed from the `<arg_key>`/`<arg_value>` pairs with per-argument typing from the tool schema. vLLM returns `json.dumps(arg_dct, ensure_ascii=False)`, e.g. `"{\"location\": \"Beijing\", \"unit\": \"celsius\"}"`. Clients `json.loads()` it before use.
 - **Request side — tool results** are sent back as `role: "tool"` messages, e.g.:
 
-  ```json
-  {"role": "tool", "tool_call_id": "call_abc123", "content": "{\"temperature\": 26, \"unit\": \"celsius\", \"condition\": \"Sunny\"}"}
-  ```
+   ```json
+   {
+   	"role": "tool",
+   	"tool_call_id": "call_abc123",
+   	"content": "{\"temperature\": 26, \"unit\": \"celsius\", \"condition\": \"Sunny\"}"
+   }
+   ```
 
-  The chat template renders only `content` (inside `<tool_response>`); `tool_call_id` is **ignored by the template** and matters only for the client's own bookkeeping. Order results to match the calls.
+   The chat template renders only `content` (inside `<tool_response>`); `tool_call_id` is **ignored by the template** and matters only for the client's own bookkeeping. Order results to match the calls.
+
 - **Request side — assistant tool-call history**: the OpenAI shape carries `function.arguments` as a JSON **string**, but the chat template iterates `arguments.items()` and therefore needs an **object**. vLLM/SGLang parse the string back into a dict before rendering; if you call `tokenizer.apply_chat_template` directly, pass `arguments` as a dict (and optionally `reasoning_content` as a string) or the template will raise.
 - Disable thinking via `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (OpenAI Python client) — this flips the template to the `/nothink` + pre-filled `<think></think>` path.
 
 ## Parsing notes & gotchas
 
-- **String values are unquoted; typing needs the schema.** The decisive rule: a `<arg_value>` is a literal string iff the parameter is string-typed in the tool's JSON Schema; otherwise it is JSON. vLLM's `_is_string_type` and SGLang's `get_argument_type` both walk `properties[arg].type` (handling `anyOf`/`oneOf`/`enum`/`allOf`/type-arrays). If the schema is missing/loose, they fall back to "try `json.loads`, then `ast.literal_eval`, then treat as string" — so a bare word like `celsius` survives as a string, while `26` becomes a number. A string value that *looks* like JSON (e.g. a parameter typed `string` whose value is `{"a":1}`) is correctly kept as the literal string only because the schema says `string`.
+- **String values are unquoted; typing needs the schema.** The decisive rule: a `<arg_value>` is a literal string iff the parameter is string-typed in the tool's JSON Schema; otherwise it is JSON. vLLM's `_is_string_type` and SGLang's `get_argument_type` both walk `properties[arg].type` (handling `anyOf`/`oneOf`/`enum`/`allOf`/type-arrays). If the schema is missing/loose, they fall back to "try `json.loads`, then `ast.literal_eval`, then treat as string" — so a bare word like `celsius` survives as a string, while `26` becomes a number. A string value that _looks_ like JSON (e.g. a parameter typed `string` whose value is `{"a":1}`) is correctly kept as the literal string only because the schema says `string`.
 - **Extraction regexes (GLM-4.5/4.6).** vLLM: calls via `<tool_call>.*?</tool_call>` (DOTALL); name/body via `<tool_call>([^\n]*)\n(.*)</tool_call>`; pairs via `<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`. The name regex **requires a newline** after the name — matching the 4.5/4.6 template. SGLang uses an equivalent `(?:\\n|\n)` form so it also tolerates literal escaped `\n`.
 - **`</arg_value>` in a value breaks parsing.** Values are captured non-greedily up to the next `</arg_value>`; a value whose text contains `</arg_value>` (or `</tool_call>`) truncates early. There is no escaping mechanism in the wire format.
 - **Tool calls are parsed from `content` only, not from reasoning.** A `<tool_call>` emitted inside `<think>…</think>` is ignored by the tool parser (vLLM's reasoning/tool parsers cooperate so only post-`</think>` content is scanned). Don't expect calls made "while thinking" to fire.

@@ -11,15 +11,15 @@ Local observability dashboard for AI usage statistics.
 
 ## Metrics Tracked
 
-| Metric | Calculation |
-|--------|-------------|
-| Tokens/s | `output_tokens / (duration / 1000)` |
-| Cache Rate | `cache_read / (input + cache_read) * 100` |
-| Cache Savings | `(uncached prompt cost - actual prompt cost) / uncached prompt cost * 100` |
-| Error Rate | `count(stopReason=error) / total_calls * 100` |
-| API-equivalent estimate | Sum of token usage priced with the matching public API rate card |
-| Avg Latency | Mean of `duration` |
-| TTFT | Mean of `ttft` (time to first token) |
+| Metric                  | Calculation                                                                |
+| ----------------------- | -------------------------------------------------------------------------- |
+| Tokens/s                | `output_tokens / (duration / 1000)`                                        |
+| Cache Rate              | `cache_read / (input + cache_read) * 100`                                  |
+| Cache Savings           | `(uncached prompt cost - actual prompt cost) / uncached prompt cost * 100` |
+| Error Rate              | `count(stopReason=error) / total_calls * 100`                              |
+| API-equivalent estimate | Sum of token usage priced with the matching public API rate card           |
+| Avg Latency             | Mean of `duration`                                                         |
+| TTFT                    | Mean of `ttft` (time to first token)                                       |
 
 Subscription-backed models use matching public API prices when an exact public model exists; these values estimate API-equivalent usage rather than the user's bill. Subscription-only models without a public price are reported as N/A and excluded from dollar totals.
 
@@ -57,13 +57,13 @@ console.log(stats.byModel[0].avgTokensPerSecond);
 
 ## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/stats` | Overall stats with all breakdowns |
-| `GET /api/stats/models` | Per-model statistics |
-| `GET /api/stats/folders` | Per-folder/project statistics |
-| `GET /api/stats/timeseries` | Hourly time series data |
-| `GET /api/sync` | Trigger sync and return counts |
+| Endpoint                    | Description                       |
+| --------------------------- | --------------------------------- |
+| `GET /api/stats`            | Overall stats with all breakdowns |
+| `GET /api/stats/models`     | Per-model statistics              |
+| `GET /api/stats/folders`    | Per-folder/project statistics     |
+| `GET /api/stats/timeseries` | Hourly time series data           |
+| `GET /api/sync`             | Trigger sync and return counts    |
 
 ## Data Storage
 

@@ -4,10 +4,7 @@
 description = "Compact fail2ban-client output"
 match_command = "^fail2ban-client$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^[\\s`|\\-]+$",
-]
+strip_lines_matching = ["^\\s*$", "^[\\s`|\\-]+$"]
 truncate_lines_at = 200
 max_lines = 80
 on_empty = "fail2ban: ok"

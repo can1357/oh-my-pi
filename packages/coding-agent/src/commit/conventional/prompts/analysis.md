@@ -8,6 +8,7 @@ Classify the git diff into conventional commit format. Ground every choice in di
 ## 1. Scope
 
 Apply only when one component clearly dominates the semantic change or roughly 60%+ of line changes:
+
 - 150 lines in src/api/, 30 in src/lib.rs -> `api`
 - 50 lines in src/api/, 50 in src/types/ -> (none)
 
@@ -24,6 +25,7 @@ Unsure → omit rather than weak or misleading.
 ## 2. Summary
 
 Description after `type(scope):`:
+
 1. lowercase past-tense verb first
 2. umbrella headline for the whole changeset
 3. synthesizes shared behavior/outcome across diff and details
@@ -34,6 +36,7 @@ Description after `type(scope):`:
 ## 3. Details (0-6)
 
 Highest-signal 0-6 only. Each:
+
 1. past-tense verb, ends with period
 2. impact/rationale (skip trivial what-changed)
 3. precise names (modules, APIs, files)
@@ -57,10 +60,11 @@ Highest-signal 0-6 only. Each:
 - `summary`: umbrella headline, past-tense verb, no prefix or period
 - `details`: complete, grounded, ≤6
 - `issue_refs`: only supported by diff/context
-</instructions>
+ </instructions>
 
 <output_format>
 You MUST return the result in this format WITHOUT the fences:
+
 ```
 # type(scope): summary
 
@@ -70,9 +74,11 @@ You MUST return the result in this format WITHOUT the fences:
 
 Fixes: #123, #456
 ```
+
 </output_format>
 
 <!-- USER -->
+
 {{#if project_context}}
 <project_context>
 {{ project_context }}

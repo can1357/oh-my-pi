@@ -56,11 +56,11 @@ The capability type defines this manifest shape:
 
 ```ts
 interface ExtensionManifest {
-  name?: string;
-  description?: string;
-  mcpServers?: Record<string, Omit<MCPServer, "name" | "_source">>;
-  tools?: unknown[];
-  context?: unknown;
+	name?: string;
+	description?: string;
+	mcpServers?: Record<string, Omit<MCPServer, "name" | "_source">>;
+	tools?: unknown[];
+	context?: unknown;
 }
 ```
 
@@ -116,7 +116,7 @@ Notes:
 
 - Invalid JSON, or a syntactically valid falsy JSON literal, in a non-empty
   manifest file:
-  - warning format: `Invalid JSON in <manifestPath>`
+   - warning format: `Invalid JSON in <manifestPath>`
 
 ### Not warned (silent skip)
 

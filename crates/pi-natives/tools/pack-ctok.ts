@@ -10,15 +10,13 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 
 const root = path.resolve(import.meta.dir, "..");
-const candidates = [process.env.CTOK_SRC, path.join(root, "tools/cache")].filter(
-	(d): d is string => !!d,
-);
+const candidates = [process.env.CTOK_SRC, path.join(root, "tools/cache")].filter((d): d is string => !!d);
 
 const MAGIC = "CTOK"; // container magic written by gen-ctok-vocab.ts
 const VERSION = 2; // format version byte (compact C0 marker alphabet)
 
 for (const name of ["ctok_v3.bin", "ctok_v4_7.bin"]) {
-	const dir = candidates.find((d) => existsSync(path.join(d, name)));
+	const dir = candidates.find(d => existsSync(path.join(d, name)));
 	if (!dir) throw new Error(`${name}: not found in ${candidates.join(", ")}`);
 	const raw = new Uint8Array(await Bun.file(path.join(dir, name)).arrayBuffer());
 	const head = new TextDecoder().decode(raw.subarray(0, MAGIC.length));

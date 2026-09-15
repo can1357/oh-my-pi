@@ -4,11 +4,7 @@
 description = "Compact iptables rule listings"
 match_command = "^(ip6?tables|iptables-save|ip6tables-save)$"
 strip_ansi = true
-strip_lines_matching = [
-	"^Chain DOCKER",
-	"^Chain BR-",
-	"^\\s*$",
-]
+strip_lines_matching = ["^Chain DOCKER", "^Chain BR-", "^\\s*$"]
 truncate_lines_at = 250
 head_lines = 40
 tail_lines = 20

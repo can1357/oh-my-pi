@@ -4,11 +4,7 @@
 [filters.make]
 description = "Compact make output"
 match_command = "^make$"
-strip_lines_matching = [
-  "^make\\[\\d+\\]:",
-  "^\\s*$",
-  "^Nothing to be done",
-]
+strip_lines_matching = ["^make\\[\\d+\\]:", "^\\s*$", "^Nothing to be done"]
 max_lines = 50
 on_empty = "make: ok"
 

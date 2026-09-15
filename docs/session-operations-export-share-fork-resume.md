@@ -13,23 +13,23 @@ This document describes operator-visible behavior for session export, sharing, c
 
 ## Operation matrix
 
-| Operation                               | Entry path                   | Session mutation                              | Session file creation/switch                                                               | Output artifact                                                                     |
-| --------------------------------------- | ---------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `/dump`                                 | Slash command (TUI/headless) | No                                            | No                                                                                         | Clipboard/command text plus best-effort temporary JSON sidecar                      |
-| `/export [--themes] [path]`             | Slash command (TUI/headless) | No                                            | No                                                                                         | HTML file                                                                           |
-| `--export <session.jsonl> [outputPath]` | CLI startup fast-path        | No runtime session mutation                   | No active session; reads target file                                                       | HTML file                                                                           |
-| `/share`                                | Slash command (TUI/headless) | No                                            | No                                                                                         | Encrypted share link (gist or share server); temp HTML only for TUI custom handlers |
-| `/new`                                  | Interactive slash command    | Yes (starts an empty conversation)            | Switches identity; assigns a new transcript path in persistent mode                        | None                                                                                |
-| `/fresh`                                | Slash command (TUI/headless) | Yes (provider-facing in-memory id/state only) | No; keeps current session file/header                                                      | None                                                                                |
-| `/clear`                                | Interactive slash command    | Yes (clears live/model conversation context)  | No; retains session identity, metadata, transcript file, and full on-disk history          | Appends a durable `reset_boundary`                                                  |
-| `/delete`                               | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one | None                                                                                |
-| `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
-| `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | None                                                                                |
-| `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
-| `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                |
-| `--resume <id\|path>`                   | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory | None                                                                                |
-| `/restart`                              | Interactive slash command    | Yes (process relaunches)                      | Relaunches omp with the original launch flags and resumes the current session in place     | None                                                                                |
-| `--continue`                            | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists           | None                                                                                |
+| Operation                               | Entry path                   | Session mutation                              | Session file creation/switch                                                                                                                                                 | Output artifact                                                                     |
+| --------------------------------------- | ---------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `/dump`                                 | Slash command (TUI/headless) | No                                            | No                                                                                                                                                                           | Clipboard/command text plus best-effort temporary JSON sidecar                      |
+| `/export [--themes] [path]`             | Slash command (TUI/headless) | No                                            | No                                                                                                                                                                           | HTML file                                                                           |
+| `--export <session.jsonl> [outputPath]` | CLI startup fast-path        | No runtime session mutation                   | No active session; reads target file                                                                                                                                         | HTML file                                                                           |
+| `/share`                                | Slash command (TUI/headless) | No                                            | No                                                                                                                                                                           | Encrypted share link (gist or share server); temp HTML only for TUI custom handlers |
+| `/new`                                  | Interactive slash command    | Yes (starts an empty conversation)            | Switches identity; assigns a new transcript path in persistent mode                                                                                                          | None                                                                                |
+| `/fresh`                                | Slash command (TUI/headless) | Yes (provider-facing in-memory id/state only) | No; keeps current session file/header                                                                                                                                        | None                                                                                |
+| `/clear`                                | Interactive slash command    | Yes (clears live/model conversation context)  | No; retains session identity, metadata, transcript file, and full on-disk history                                                                                            | Appends a durable `reset_boundary`                                                  |
+| `/delete`                               | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one                                                                                   | None                                                                                |
+| `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)                                                                                           | Copies artifact directory to new session namespace when present                     |
+| `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir                                                                                             | None                                                                                |
+| `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
+| `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
+| `--resume <id\|path>`                   | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
+| `/restart`                              | Interactive slash command    | Yes (process relaunches)                      | Relaunches omp with the original launch flags and resumes the current session in place                                                                                       | None                                                                                |
+| `--continue`                            | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
 ## Export and dump
 
@@ -245,11 +245,11 @@ Interactive `/fork` creates a new session from the current one and switches the 
 - Requires persistent mode and existing session file.
 - Creates new session id and new JSONL file path.
 - Rewrites header with:
-  - new `id`
-  - new timestamp
-  - `cwd` unchanged
-  - `parentSession` set to previous session id
-  - `providerPromptCacheKey` set to the previous header's inherited key, or the previous session id when none was pinned
+   - new `id`
+   - new timestamp
+   - `cwd` unchanged
+   - `parentSession` set to previous session id
+   - `providerPromptCacheKey` set to the previous header's inherited key, or the previous session id when none was pinned
 - Keeps all non-header entries unchanged in the new file.
 
 ### Non-persistent behavior
@@ -306,8 +306,8 @@ With an argument:
 Cross-project id match behavior:
 
 - If the matched session's recorded directory no longer exists, CLI asks `Session's directory no longer exists (...). Move (re-root) it into the current directory? [Y/n]`.
-  - On yes (default), `SessionManager.open(match.path)` followed by `manager.moveTo(cwd)` re-roots the existing session into the current directory without duplicating it.
-  - On no, startup is cancelled. In non-TTY mode, startup fails with an error directing the user to run interactively.
+   - On yes (default), `SessionManager.open(match.path)` followed by `manager.moveTo(cwd)` re-roots the existing session into the current directory without duplicating it.
+   - On no, startup is cancelled. In non-TTY mode, startup fails with an error directing the user to run interactively.
 - If the recorded directory still exists, the matched session is opened directly. Startup later changes the process/project scope to the resumed session's cwd and reloads cwd-scoped settings and plugin caches. It is not implicitly forked.
 
 ## CLI `--continue`
@@ -337,10 +337,10 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 7. Replace agent messages, reset advisor state, and synchronize todos. Close cached provider sessions for a different file, or for a same-file reload whose replay messages changed.
 8. Restore an available persisted model. If the loaded branch ended with an interrupted turn, append its synthetic abort message and rebuild context.
 9. Restore configured/effective thinking and per-family service tiers, falling back to current settings when the target branch has no corresponding entries.
-10. For a different transcript, reset memory context; for any conversation rewrite, clear session-scoped tool state.
-11. Reconnect agent events, run the optional session-switch reconciler (interactive mode uses it to re-enter persisted modes such as plan), and best-effort refresh the workspace-root system-prompt block. Reconciler/prompt-refresh errors are logged rather than rolling back the committed switch.
-12. Restore target advisor cost state, finish the bash transition, notify session-change callbacks when the session id changed, and return `true`.
-`switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation. The interactive selector checks this result and leaves the existing session/UI unchanged.
+10.   For a different transcript, reset memory context; for any conversation rewrite, clear session-scoped tool state.
+11.   Reconnect agent events, run the optional session-switch reconciler (interactive mode uses it to re-enter persisted modes such as plan), and best-effort refresh the workspace-root system-prompt block. Reconciler/prompt-refresh errors are logged rather than rolling back the committed switch.
+12.   Restore target advisor cost state, finish the bash transition, notify session-change callbacks when the session id changed, and return `true`.
+      `switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation. The interactive selector checks this result and leaves the existing session/UI unchanged.
 
 If a throwing step in the guarded transition fails, `switchSession()` restores the captured session, agent queues/messages, tools/prompts, model/thinking/service-tier, provider/cache, memory, and checkpoint state; it reconnects the prior agent subscription and re-runs mode reconciliation before rethrowing.
 
@@ -353,11 +353,11 @@ No new session file is created by `switchSession()` itself.
 For `newSession`, `fork`, and `switchSession`:
 
 - Before event: `session_before_switch`
-  - reasons: `new`, `fork`, `resume`
-  - cancellable by returning `{ cancel: true }`
+   - reasons: `new`, `fork`, `resume`
+   - cancellable by returning `{ cancel: true }`
 - After event: `session_switch`
-  - same reason set
-  - includes `previousSessionFile`
+   - same reason set
+   - includes `previousSessionFile`
 
 `ExtensionRunner.emit()` returns early on the first cancelling before-event result.
 When a before-switch hook cancels, `switchSession()` returns `false` and does not emit the after-switch event.

@@ -6,17 +6,8 @@ description = "Compact brew install/upgrade output — strip downloads, short-ci
 match_command = "^brew$"
 match_subcommand = "^(install|upgrade)$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^==> Downloading",
-  "^==> Pouring",
-  "^Already downloaded:",
-  "^###",
-  "^==> Fetching",
-]
-match_output = [
-  { pattern = "already installed", message = "ok (already installed)" },
-]
+strip_lines_matching = ["^\\s*$", "^==> Downloading", "^==> Pouring", "^Already downloaded:", "^###", "^==> Fetching"]
+match_output = [{ pattern = "already installed", message = "ok (already installed)" }]
 max_lines = 20
 
 [[tests.brew-install]]

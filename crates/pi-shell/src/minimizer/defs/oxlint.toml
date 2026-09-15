@@ -5,11 +5,7 @@
 description = "Compact oxlint output — strip blank lines, keep diagnostics"
 match_command = "^oxlint$"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^Finished in \\d+",
-  "^Found \\d+ warning",
-]
+strip_lines_matching = ["^\\s*$", "^Finished in \\d+", "^Found \\d+ warning"]
 max_lines = 50
 on_empty = "oxlint: ok"
 

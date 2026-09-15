@@ -3,6 +3,7 @@ The user is frustrated about recurring agent behavior.
 Author ONE Time Traveling Stream Rule (TTSR) that would have caught the offending behavior earlier in this conversation.
 
 TTSR mechanics:
+
 - A rule is a markdown file with YAML frontmatter.
 - `condition` is one or more JavaScript regex patterns tested against assistant streamed output.
 - `scope` is a comma-separated allowlist. If present, only listed streams are checked.
@@ -13,6 +14,7 @@ TTSR mechanics:
 - When `condition` matches within `scope`, the stream is interrupted and the markdown body is injected as correction guidance.
 
 Output contract:
+
 - Emit exactly one JSON object and nothing else.
 - JSON fields: `name`, `description`, `condition`, `scope`, `body`.
 - `name` MUST be kebab-case.
@@ -28,11 +30,11 @@ Output contract:
 
 Example shape:
 {
-  "name": "ts-no-any",
-  "description": "Never use `any` in TypeScript — use `unknown`, a generic, or the real type",
-  "condition": ": any|as any",
-  "scope": ["tool:edit(*.ts)", "tool:edit(*.tsx)", "tool:write(*.ts)", "tool:write(*.tsx)"],
-  "body": "Never use `: any` or `as any`. Use `unknown`, a domain type, a generic, or a type guard."
+"name": "ts-no-any",
+"description": "Never use `any` in TypeScript — use `unknown`, a generic, or the real type",
+"condition": ": any|as any",
+"scope": ["tool:edit(_.ts)", "tool:edit(_.tsx)", "tool:write(_.ts)", "tool:write(_.tsx)"],
+"body": "Never use `: any` or `as any`. Use `unknown`, a domain type, a generic, or a type guard."
 }
 
 Complaint:

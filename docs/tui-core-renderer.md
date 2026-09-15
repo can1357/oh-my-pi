@@ -24,14 +24,14 @@ each render the provider receives the current `ViewportSize` and returns a
 
 ```ts
 interface HistoryBatch {
-  id: number;
-  rows: string[];
-  kind?: "append" | "replay";
+	id: number;
+	rows: string[];
+	kind?: "append" | "replay";
 }
 
 interface TerminalFramePlan {
-  history?: HistoryBatch;
-  viewport: string[];
+	history?: HistoryBatch;
+	viewport: string[];
 }
 ```
 

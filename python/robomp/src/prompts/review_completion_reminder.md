@@ -5,6 +5,7 @@ Review workspace: `{{workspace.branch}}`
 
 Review started; terminal action not reached.
 Incoming PR review terminal action: exactly one:
+
 1. `submit_pr_review` — submit batched review summary plus staged inline comments.
 2. `abort_task` — unrecoverable environment failure.
 

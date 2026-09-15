@@ -40,10 +40,7 @@ describe("overview token metrics", () => {
 		expect(html).toContain("cache writes can make this negative");
 
 		const expectedTotal = formatCompact(
-			stats.totalInputTokens +
-				stats.totalOutputTokens +
-				stats.totalCacheReadTokens +
-				stats.totalCacheWriteTokens,
+			stats.totalInputTokens + stats.totalOutputTokens + stats.totalCacheReadTokens + stats.totalCacheWriteTokens,
 		);
 		expect(html).toContain(`<div class="stats-metric-value">${expectedTotal}</div>`);
 	});

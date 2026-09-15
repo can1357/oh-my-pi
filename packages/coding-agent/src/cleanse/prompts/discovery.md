@@ -20,37 +20,37 @@ Identify project command(s) surfacing exactly these diagnostics for orchestrator
 
 ## Known parsers
 
-|id|expected output|
-|---|---|
-|`rust`|`cargo … --message-format=json`|
-|`rust-test`|`cargo test … --message-format=json`|
-|`go`|`go vet -json`|
-|`go-test`|`go test -json`|
-|`staticcheck`|`staticcheck -f json`|
-|`golangci`|golangci-lint default text output|
-|`ruff`|`ruff check --output-format=json`|
-|`pyright`|`pyright`/`basedpyright` `--outputjson`|
-|`mypy`|mypy default text output|
-|`pylint`|`pylint --output-format=json`|
-|`flake8`|flake8 default text output|
-|`ty`|`ty check --output-format concise`|
-|`eslint`|`eslint --format=json`|
-|`biome`|`biome check --reporter=json`|
-|`oxlint`|unix-format lines `file:line:col: message [Error/rule]` (`--format=unix`)|
-|`deno-lint`|`deno lint --json`|
-|`stylelint`|`stylelint --formatter json`|
-|`rubocop`|`rubocop --format json`|
-|`phpstan`|`phpstan analyse --error-format=json`|
-|`psalm`|`psalm --output-format=json`|
-|`swiftlint`|`swiftlint lint --reporter json`|
-|`dart`|`dart analyze --format machine`|
-|`credo`|`mix credo --format=json`|
-|`shellcheck`|`shellcheck --format=json1`|
-|`hlint`|`hlint --json`|
-|`terraform`|`terraform validate -json`|
-|`tflint`|`tflint --format=json`|
-|`actionlint`|actionlint with its JSON `-format` template|
-|`generic`|gcc-style `file:line:col: severity: message` lines (tsc/tsgo `--pretty false`, mypy, clang, zig, MSVC-style)|
+| id            | expected output                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------ |
+| `rust`        | `cargo … --message-format=json`                                                                              |
+| `rust-test`   | `cargo test … --message-format=json`                                                                         |
+| `go`          | `go vet -json`                                                                                               |
+| `go-test`     | `go test -json`                                                                                              |
+| `staticcheck` | `staticcheck -f json`                                                                                        |
+| `golangci`    | golangci-lint default text output                                                                            |
+| `ruff`        | `ruff check --output-format=json`                                                                            |
+| `pyright`     | `pyright`/`basedpyright` `--outputjson`                                                                      |
+| `mypy`        | mypy default text output                                                                                     |
+| `pylint`      | `pylint --output-format=json`                                                                                |
+| `flake8`      | flake8 default text output                                                                                   |
+| `ty`          | `ty check --output-format concise`                                                                           |
+| `eslint`      | `eslint --format=json`                                                                                       |
+| `biome`       | `biome check --reporter=json`                                                                                |
+| `oxlint`      | unix-format lines `file:line:col: message [Error/rule]` (`--format=unix`)                                    |
+| `deno-lint`   | `deno lint --json`                                                                                           |
+| `stylelint`   | `stylelint --formatter json`                                                                                 |
+| `rubocop`     | `rubocop --format json`                                                                                      |
+| `phpstan`     | `phpstan analyse --error-format=json`                                                                        |
+| `psalm`       | `psalm --output-format=json`                                                                                 |
+| `swiftlint`   | `swiftlint lint --reporter json`                                                                             |
+| `dart`        | `dart analyze --format machine`                                                                              |
+| `credo`       | `mix credo --format=json`                                                                                    |
+| `shellcheck`  | `shellcheck --format=json1`                                                                                  |
+| `hlint`       | `hlint --json`                                                                                               |
+| `terraform`   | `terraform validate -json`                                                                                   |
+| `tflint`      | `tflint --format=json`                                                                                       |
+| `actionlint`  | actionlint with its JSON `-format` template                                                                  |
+| `generic`     | gcc-style `file:line:col: severity: message` lines (tsc/tsgo `--pretty false`, mypy, clang, zig, MSVC-style) |
 
 ## Output schema
 

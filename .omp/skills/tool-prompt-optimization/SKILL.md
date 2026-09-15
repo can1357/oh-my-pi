@@ -5,7 +5,7 @@ description: Optimize the description prompts an AI agent reads to learn its bui
 
 # Tool Prompt Optimization
 
-Prompt/schema overlap: content reconstructible from `(name, JSON schema, blank outline)` is a *prune candidate*, never an automatic delete. Probe this overlap for evidence, not vibes: predict the prompt body from those inputs. Reliably recovered lines: candidates; no-model recovery: load-bearing — keep.
+Prompt/schema overlap: content reconstructible from `(name, JSON schema, blank outline)` is a _prune candidate_, never an automatic delete. Probe this overlap for evidence, not vibes: predict the prompt body from those inputs. Reliably recovered lines: candidates; no-model recovery: load-bearing — keep.
 
 ## Run probe
 

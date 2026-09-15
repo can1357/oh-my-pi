@@ -10,7 +10,7 @@ Set the format explicitly in `~/.omp/agent/config.yml` or a project/overlay conf
 
 ```yaml
 tools:
-  format: minimax
+   format: minimax
 ```
 
 `tools.format: minimax` forces this owned dialect for the session. In `auto` mode, OMP keeps provider-native tool calling unless the selected model explicitly has `supportsTools: false`; for a MiniMax-family model id, that fallback resolves to `minimax`. See [`tools.format`](../settings.md#tools-and-approvals).
@@ -46,11 +46,11 @@ A single call is:
 
 Exact structure:
 
-| Element | Meaning |
-| --- | --- |
-| `<minimax:tool_call>…</minimax:tool_call>` | Required model-output envelope in the prompt contract. |
-| `<invoke name="TOOL">…</invoke>` | One call. `name` must be a listed tool. |
-| `<parameter name="ARG">VALUE</parameter>` | One named argument. Arguments occur directly inside the invoke. |
+| Element                                    | Meaning                                                         |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| `<minimax:tool_call>…</minimax:tool_call>` | Required model-output envelope in the prompt contract.          |
+| `<invoke name="TOOL">…</invoke>`           | One call. `name` must be a listed tool.                         |
+| `<parameter name="ARG">VALUE</parameter>`  | One named argument. Arguments occur directly inside the invoke. |
 
 The renderer XML-escapes tool and argument names in attributes. Parameter bodies are deliberately **not** XML-escaped: this protocol is delimiter-matched rather than parsed as XML. For example, a string body is `a & b < c`, not `a &amp; b &lt; c`. A literal `</parameter>` is the one reserved sequence because it closes that argument.
 
@@ -60,11 +60,11 @@ The scanner is more tolerant than the prompt contract. It accepts the namespaced
 
 Encoding uses the selected tool's schema:
 
-| Declared/value kind | Rendered parameter body | Parsed value |
-| --- | --- | --- |
-| Schema-declared string whose runtime value is a string | Verbatim text, including leading/trailing spaces and newlines | Verbatim string |
-| Number, boolean, `null`, array, or object | JSON | Parsed JSON value |
-| Value without a matching string schema | JSON, including quotes around a string | Parsed JSON when valid |
+| Declared/value kind                                    | Rendered parameter body                                       | Parsed value           |
+| ------------------------------------------------------ | ------------------------------------------------------------- | ---------------------- |
+| Schema-declared string whose runtime value is a string | Verbatim text, including leading/trailing spaces and newlines | Verbatim string        |
+| Number, boolean, `null`, array, or object              | JSON                                                          | Parsed JSON value      |
+| Value without a matching string schema                 | JSON, including quotes around a string                        | Parsed JSON when valid |
 
 Example:
 

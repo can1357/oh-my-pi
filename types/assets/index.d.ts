@@ -60,4 +60,3 @@ declare module "*.generated.js" {
 	const content: string;
 	export default content;
 }
-

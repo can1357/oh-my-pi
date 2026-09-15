@@ -489,7 +489,21 @@ jobs:
          needs.test_coding_agent_native.result == 'success' &&
          needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
          needs.install_methods.result == 'success' }}
-      needs: [release_metadata, check, rust_validate, native_addons, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+      needs:
+         [
+            release_metadata,
+            check,
+            rust_validate,
+            native_addons,
+            test_workspace,
+            test_coding_agent_singleton,
+            test_ts_native,
+            test_coding_agent_ui,
+            test_coding_agent_runtime,
+            test_coding_agent_native,
+            test_smoke,
+            install_methods,
+         ]
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4

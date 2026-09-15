@@ -29,14 +29,11 @@ A hook module must default-export a factory:
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function hook(pi: HookAPI): void {
-  pi.on("tool_call", async (event, ctx) => {
-    if (
-      event.toolName === "bash" &&
-      String(event.input.command ?? "").includes("rm -rf")
-    ) {
-      return { block: true, reason: "blocked by policy" };
-    }
-  });
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName === "bash" && String(event.input.command ?? "").includes("rm -rf")) {
+			return { block: true, reason: "blocked by policy" };
+		}
+	});
 }
 ```
 
@@ -269,15 +266,15 @@ Hook status text set via `ctx.ui.setStatus(key, text)` is:
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") return;
-    const cmd = String(event.input.command ?? "");
-    if (!cmd.includes("rm -rf")) return;
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "bash") return;
+		const cmd = String(event.input.command ?? "");
+		if (!cmd.includes("rm -rf")) return;
 
-    if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
-    const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
-    if (!ok) return { block: true, reason: "user denied command" };
-  });
+		if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
+		const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
+		if (!ok) return { block: true, reason: "user denied command" };
+	});
 }
 ```
 
@@ -287,19 +284,19 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("tool_result", async (event) => {
-    if (event.toolName !== "read" || event.isError) return;
+	pi.on("tool_result", async event => {
+		if (event.toolName !== "read" || event.isError) return;
 
-    const redacted = event.content.map((chunk) => {
-      if (chunk.type !== "text") return chunk;
-      return {
-        ...chunk,
-        text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
-      };
-    });
+		const redacted = event.content.map(chunk => {
+			if (chunk.type !== "text") return chunk;
+			return {
+				...chunk,
+				text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
+			};
+		});
 
-    return { content: redacted };
-  });
+		return { content: redacted };
+	});
 }
 ```
 
@@ -309,12 +306,10 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("context", async (event) => {
-    const filtered = event.messages.filter(
-      (msg) => !(msg.role === "custom" && msg.customType === "debug-only"),
-    );
-    return { messages: filtered };
-  });
+	pi.on("context", async event => {
+		const filtered = event.messages.filter(msg => !(msg.role === "custom" && msg.customType === "debug-only"));
+		return { messages: filtered };
+	});
 }
 ```
 
@@ -324,24 +319,22 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.registerCommand("handoff", {
-    description: "Create a new session with setup message",
-    handler: async (_args, ctx) => {
-      await ctx.waitForIdle();
-      await ctx.newSession({
-        parentSession: ctx.sessionManager.getSessionFile(),
-        setup: async (sm) => {
-          sm.appendMessage({
-            role: "user",
-            content: [
-              { type: "text", text: "Continue from prior session summary." },
-            ],
-            timestamp: Date.now(),
-          });
-        },
-      });
-    },
-  });
+	pi.registerCommand("handoff", {
+		description: "Create a new session with setup message",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			await ctx.newSession({
+				parentSession: ctx.sessionManager.getSessionFile(),
+				setup: async sm => {
+					sm.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: "Continue from prior session summary." }],
+						timestamp: Date.now(),
+					});
+				},
+			});
+		},
+	});
 }
 ```
 

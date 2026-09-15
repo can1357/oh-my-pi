@@ -3,6 +3,7 @@
 > Applies source edits. The default `hashline` mode consumes one line-anchored patch string and edits existing files directly.
 
 ## Source
+
 - Entry and mode registration: `packages/coding-agent/src/edit/index.ts`
 - Hashline schema: `packages/coding-agent/src/edit/hashline/params.ts`
 - Model-facing hashline prompt: `packages/hashline/src/prompt.md`
@@ -25,9 +26,9 @@ Supported modes are `hashline`, `apply_patch`, `patch`, and `replace`. Unless `P
 
 ## Input
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `input` | `string` | Yes | One or more `[PATH#TAG]` sections containing hashline operations. The strict custom-tool grammar wraps the sections in `*** Begin Patch` / `*** End Patch`; the normal parser also accepts an unwrapped payload. |
+| Field   | Type     | Required | Description                                                                                                                                                                                                      |
+| ------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input` | `string` | Yes      | One or more `[PATH#TAG]` sections containing hashline operations. The strict custom-tool grammar wraps the sections in `*** Begin Patch` / `*** End Patch`; the normal parser also accepts an unwrapped payload. |
 
 Each section edits one existing file and MUST copy the four-uppercase-hex snapshot tag from the latest anchored `read`, `grep`, or successful `edit` result:
 
@@ -43,19 +44,19 @@ Use `write` to create or wholly overwrite a file. Hashline rejects untagged anch
 
 All line numbers refer to the original tagged snapshot, not to earlier hunks in the same call.
 
-| Form | Effect |
-| --- | --- |
-| `PUT N.=M:` | Replace inclusive original lines `N..M` with the following `+TEXT` rows. |
-| `PUT N*:` | Replace the multi-line syntactic block beginning on line `N`. |
-| `PUT <N:` / `PUT >N:` | Insert body rows immediately before / after line `N`. `PUT <1:` is file head. |
-| `PUT >$:` | Append body rows at file tail. |
-| `PUT >N*:` | Insert after the syntactic block beginning on line `N`. |
-| `CUT N.=M` / `CUT N*` | Delete and capture an inclusive range or resolved block. Add `@name` to write a named register. |
-| `PUT <N` / `PUT >N` / `PUT >$` | Paste the anonymous register into a gap. |
-| `PUT <N @name` / `PUT >N @name` / `PUT >$ @name` | Paste a named register into a gap. |
-| `PUT N.=M @name` / `PUT N* @name` | Replace a range or block with a named register. Named registers are required for span/block paste. |
-| `REM` | Delete the section file. |
-| `MV DEST` | Move/rename the section file after any preceding edits in that section. Quote destinations containing spaces. |
+| Form                                             | Effect                                                                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `PUT N.=M:`                                      | Replace inclusive original lines `N..M` with the following `+TEXT` rows.                                      |
+| `PUT N*:`                                        | Replace the multi-line syntactic block beginning on line `N`.                                                 |
+| `PUT <N:` / `PUT >N:`                            | Insert body rows immediately before / after line `N`. `PUT <1:` is file head.                                 |
+| `PUT >$:`                                        | Append body rows at file tail.                                                                                |
+| `PUT >N*:`                                       | Insert after the syntactic block beginning on line `N`.                                                       |
+| `CUT N.=M` / `CUT N*`                            | Delete and capture an inclusive range or resolved block. Add `@name` to write a named register.               |
+| `PUT <N` / `PUT >N` / `PUT >$`                   | Paste the anonymous register into a gap.                                                                      |
+| `PUT <N @name` / `PUT >N @name` / `PUT >$ @name` | Paste a named register into a gap.                                                                            |
+| `PUT N.=M @name` / `PUT N* @name`                | Replace a range or block with a named register. Named registers are required for span/block paste.            |
+| `REM`                                            | Delete the section file.                                                                                      |
+| `MV DEST`                                        | Move/rename the section file after any preceding edits in that section. Quote destinations containing spaces. |
 
 Register names contain ASCII letters, digits, `_`, or `-`. The anonymous register is batch-local and starts empty on every call. Named registers persist for the session and are published only after their writes land. Operations run top-to-bottom across sections, so a cut in an earlier section can feed a later paste. Repeating a paste does not consume its register.
 

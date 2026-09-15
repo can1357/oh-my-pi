@@ -73,9 +73,6 @@ describe("ErrorsRoute range", () => {
 		await act(async () => {
 			root?.render(<ErrorsRoute active range="7d" refreshTrigger={0} onRequestClick={() => {}} />);
 		});
-		expect(requestedUrls).toEqual([
-			"/api/stats/errors?range=24h&limit=50",
-			"/api/stats/errors?range=7d&limit=50",
-		]);
+		expect(requestedUrls).toEqual(["/api/stats/errors?range=24h&limit=50", "/api/stats/errors?range=7d&limit=50"]);
 	});
 });

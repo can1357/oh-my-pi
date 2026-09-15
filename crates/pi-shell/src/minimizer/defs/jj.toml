@@ -4,10 +4,7 @@
 description = "Compact jj (jujutsu) output"
 match_command = "^jj$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^Hint:",
-]
+strip_lines_matching = ["^\\s*$", "^Hint:"]
 truncate_lines_at = 200
 max_lines = 80
 on_empty = "jj: ok"

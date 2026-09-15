@@ -4,18 +4,18 @@
 # because an ignored file stayed behind) is a hard error that fails the whole
 # workspace, not a skipped entry.
 members = [
-   "crates/pi-ast",
-   "crates/pi-builtins",
-   "crates/pi-diff",
-   "crates/pi-edit",
-   "crates/pi-iso",
-   "crates/pi-natives",
-   "crates/pi-shell",
-   "crates/pi-vcs",
-   "crates/pi-voice",
-   "crates/pi-walker",
-   "crates/vendor/brush-core",
-   "crates/vendor/cfg_aliases",
+	"crates/pi-ast",
+	"crates/pi-builtins",
+	"crates/pi-diff",
+	"crates/pi-edit",
+	"crates/pi-iso",
+	"crates/pi-natives",
+	"crates/pi-shell",
+	"crates/pi-vcs",
+	"crates/pi-voice",
+	"crates/pi-walker",
+	"crates/vendor/brush-core",
+	"crates/vendor/cfg_aliases",
 ]
 resolver = "3"
 
@@ -132,12 +132,12 @@ unsafe_derive_deserialize = "allow"
 # ──────────────────────────────────────────────────────────────────────────────
 # Numeric Casts & Conversions
 # ──────────────────────────────────────────────────────────────────────────────
-cast_lossless = "allow"            # u32 as u64 - 'as' is cleaner than From
+cast_lossless = "allow" # u32 as u64 - 'as' is cleaner than From
 cast_possible_truncation = "allow" # u64 as u32 - often intentional
-cast_possible_wrap = "allow"       # u32 as i32 - can be intentional
-cast_precision_loss = "allow"      # f64 as f32 - sometimes acceptable
-cast_sign_loss = "allow"           # i32 as u32 - sometimes needed
-tuple_array_conversions = "allow"  # Non-Into conversion is more clear
+cast_possible_wrap = "allow" # u32 as i32 - can be intentional
+cast_precision_loss = "allow" # f64 as f32 - sometimes acceptable
+cast_sign_loss = "allow" # i32 as u32 - sometimes needed
+tuple_array_conversions = "allow" # Non-Into conversion is more clear
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Floating Point
@@ -147,50 +147,50 @@ float_cmp = "allow" # Tests mostly do this + we know what we're doing
 # ──────────────────────────────────────────────────────────────────────────────
 # Functions & Closures
 # ──────────────────────────────────────────────────────────────────────────────
-inline_always = "allow"                      # Needed for performance-critical code
-must_use_candidate = "allow"                 # Not every function needs #[must_use]
+inline_always = "allow" # Needed for performance-critical code
+must_use_candidate = "allow" # Not every function needs #[must_use]
 needless_pass_by_value = "allow"
 redundant_closure_for_method_calls = "allow" # .map(ToString::to_string) can be clearer
-return_self_not_must_use = "allow"           # Builder pattern methods
+return_self_not_must_use = "allow" # Builder pattern methods
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Structs & Types
 # ──────────────────────────────────────────────────────────────────────────────
 inconsistent_struct_constructor = "allow"
-missing_fields_in_debug = "allow"         # Not every field needs to be in Debug output
-struct_excessive_bools = "allow"          # Usually with builders
+missing_fields_in_debug = "allow" # Not every field needs to be in Debug output
+struct_excessive_bools = "allow" # Usually with builders
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Pattern Matching
 # ──────────────────────────────────────────────────────────────────────────────
-match_same_arms = "allow"                    # Can be intentional for clarity
+match_same_arms = "allow" # Can be intentional for clarity
 match_wildcard_for_single_variants = "allow" # _ can be clearer than listing variants
-option_if_let_else = "allow"                 # match/if-let-else often clearer
+option_if_let_else = "allow" # match/if-let-else often clearer
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Imports & Module Organization
 # ──────────────────────────────────────────────────────────────────────────────
 enum_glob_use = "allow"
 items_after_statements = "allow" # Sometimes more readable
-wildcard_imports = "allow"       # Cleaner for preludes and test modules
+wildcard_imports = "allow" # Cleaner for preludes and test modules
 redundant_pub_crate = "allow"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Variables & Type Inference
 # ──────────────────────────────────────────────────────────────────────────────
 let_underscore_untyped = "allow" # Type obvious from context
-similar_names = "allow"          # 'req' and 'res' together are fine
+similar_names = "allow" # 'req' and 'res' together are fine
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Literals & Formatting
 # ──────────────────────────────────────────────────────────────────────────────
 unreadable_literal = "allow" # 10_000_000 vs 0xDEADBEEF is context dependent
-verbose_bit_mask = "allow"   # Explicit bit patterns can be clearer than hex
+verbose_bit_mask = "allow" # Explicit bit patterns can be clearer than hex
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Code Style
 # ──────────────────────────────────────────────────────────────────────────────
-default_trait_access = "allow"        # Default::default() sometimes clearer
+default_trait_access = "allow" # Default::default() sometimes clearer
 significant_drop_tightening = "allow" # We pay attention to this already
 # ──────────────────────────────────────────────────────────────────────────────
 # Tests & Assertions
@@ -207,7 +207,7 @@ missing_panics_doc = "allow" # Not every panic needs docs, especially assert!
 # Complexity
 # ──────────────────────────────────────────────────────────────────────────────
 too_many_arguments = "allow" # Argument count is rarely the real complexity signal
-too_many_lines = "allow"     # Arbitrary limits don't account for necessary complexity
+too_many_lines = "allow" # Arbitrary limits don't account for necessary complexity
 
 [workspace.dependencies]
 
@@ -270,12 +270,7 @@ fontdue = { version = "0.9", default-features = false }
 # ──────────────────────────────────────────────────────────────────────────────
 phf = { version = "0.14", features = ["macros"] }
 heapless = "0.9"
-smallvec = { version = "1.16.1", features = [
-   "serde",
-   "write",
-   "union",
-   "const_new",
-] }
+smallvec = { version = "1.16.1", features = ["serde", "write", "union", "const_new"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Hashing
@@ -294,18 +289,18 @@ webrtc = "0.17.2"
 libc = "0.2"
 os_pipe = "1"
 windows-sys = { version = "0.61", features = [
-   "Win32_Foundation",
-   "Win32_Globalization",
-   "Win32_Media_Audio",
-   "Win32_Media_Multimedia",
-   "Win32_Security",
-   "Win32_Storage_FileSystem",
-   "Win32_Storage_ProjectedFileSystem",
-   "Win32_System_Com",
-   "Win32_System_LibraryLoader",
-   "Win32_System_IO",
-   "Win32_System_Ioctl",
-   "Win32_System_Threading",
+	"Win32_Foundation",
+	"Win32_Globalization",
+	"Win32_Media_Audio",
+	"Win32_Media_Multimedia",
+	"Win32_Security",
+	"Win32_Storage_FileSystem",
+	"Win32_Storage_ProjectedFileSystem",
+	"Win32_System_Com",
+	"Win32_System_LibraryLoader",
+	"Win32_System_IO",
+	"Win32_System_Ioctl",
+	"Win32_System_Threading",
 ] }
 winreg = "0.56"
 
@@ -338,12 +333,7 @@ ignore = "0.4"
 # ──────────────────────────────────────────────────────────────────────────────
 # Image Processing & Syntax Highlighting
 # ──────────────────────────────────────────────────────────────────────────────
-image = { version = "0.25", default-features = false, features = [
-   "png",
-   "jpeg",
-   "gif",
-   "webp",
-] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 resvg = "0.48"
 # Not used directly: activates zune-jpeg's non-default `log` feature so image's
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
@@ -355,10 +345,10 @@ tinyvec = "=1.13.3"
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
 syntect = { version = "5.3", default-features = false, features = [
-   "default-syntaxes",
-   "default-themes",
-   "regex-fancy",
-   "yaml-load",
+	"default-syntaxes",
+	"default-themes",
+	"regex-fancy",
+	"yaml-load",
 ] }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -385,29 +375,27 @@ brush-parser = "0.4"
 # gitoxide stack in the binary. No transport/credential features: network ops
 # (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
 gix = { version = "0.85", default-features = false, features = [
-   "attributes",
-   "blob-diff",
-   "dirwalk",
-   "excludes",
-   "index",
-   "max-performance-safe",
-   "merge",
-   "revision",
-   "sha1",
-   "sha256",
-   "status",
-   "tree-editor",
-   "worktree-mutation",
-   "zlib-rs",
+	"attributes",
+	"blob-diff",
+	"dirwalk",
+	"excludes",
+	"index",
+	"max-performance-safe",
+	"merge",
+	"revision",
+	"sha1",
+	"sha256",
+	"status",
+	"tree-editor",
+	"worktree-mutation",
+	"zlib-rs",
 ] }
 jj-lib = { version = "0.44", default-features = false, features = ["git"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AST & Tree-Sitter
 # ──────────────────────────────────────────────────────────────────────────────
-ast-grep-core = { version = "0.39", default-features = false, features = [
-   "tree-sitter",
-] }
+ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
 tree-sitter = "0.25"
 tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
 tree-sitter-bash = "0.25"

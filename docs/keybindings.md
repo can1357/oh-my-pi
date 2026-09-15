@@ -31,7 +31,7 @@ app.history.search: []
 | `app.model.selectTemporary`  | `Alt+P`                                                               | Pick a model temporarily for this session                                                                                                                                            |
 | `app.model.select`           | `Alt+M`                                                               | Open the model selector and set roles                                                                                                                                                |
 | `app.plan.toggle`            | `Alt+Shift+P`                                                         | Toggle plan mode                                                                                                                                                                     |
-| `app.history.search`         | `Ctrl+R`                                                              | Search prompt history. `Tab`/`Shift+Tab` cycle the search scope while the panel is open (the hint names the next one) |
+| `app.history.search`         | `Ctrl+R`                                                              | Search prompt history. `Tab`/`Shift+Tab` cycle the search scope while the panel is open (the hint names the next one)                                                                |
 | `app.tools.expand`           | `Ctrl+O`                                                              | Toggle tool-output expansion                                                                                                                                                         |
 | `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                                                           |
 | `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                                                     |
@@ -77,43 +77,43 @@ tui.vimMode: true
 
 The prompt then starts in Insert mode and behaves exactly as it always has. `Escape` switches to Normal mode; the prompt border changes color so the current mode is visible at a glance. While Vim mode is on, Insert draws a bar cursor and Normal/Visual a block — the software cursor always, the real terminal cursor via DECSCUSR under `PI_HARDWARE_CURSOR` — overriding the terminal's configured shape until the session restores it on exit. This is a useful subset of Vim, not a full implementation — enough for keyboard-only navigation and selection without adding more `Ctrl` chords that terminals, shells, and tmux already claim.
 
-| Mode        | Enter with              | Leave with                                              |
-| ----------- | ----------------------- | ------------------------------------------------------- |
-| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                                                |
-| Normal      | `Escape` from Insert    | any Insert-mode key                                     |
-| Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`)                  |
-| Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`)                  |
+| Mode        | Enter with              | Leave with                             |
+| ----------- | ----------------------- | -------------------------------------- |
+| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                               |
+| Normal      | `Escape` from Insert    | any Insert-mode key                    |
+| Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`) |
+| Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`) |
 
 ### Normal mode
 
-| Keys                          | Meaning                                                        |
-| ----------------------------- | -------------------------------------------------------------- |
-| `h` `j` `k` `l`               | Move by character and line (arrow keys work too)               |
-| `0` `^` `$`                   | Line start / first non-blank / line end                        |
-| `w` `b` `e`                   | Next word, previous word, end of word                          |
-| `gg` `G`                      | First line, last line (`5gg` and `5G` jump to line 5)          |
-| `1`–`9` prefix                | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`            |
-| `i` `a` `I` `A`               | Insert before / after cursor, at line start / line end         |
-| `o` `O`                       | Open a line below / above and insert                           |
-| `x` `D` `C`                   | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise) |
-| `d` `y` `c` + motion          | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`             |
-| `dd` `yy` `cc`                | Linewise delete / yank / change                                |
-| `d` `y` `c` + text object     | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`    |
-| `p` `P`                       | Put the last yank or delete after / before the cursor          |
-| `u`                           | Undo                                                            |
+| Keys                      | Meaning                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                    |
+| `0` `^` `$`               | Line start / first non-blank / line end                                                             |
+| `w` `b` `e`               | Next word, previous word, end of word                                                               |
+| `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                               |
+| `1`–`9` prefix            | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                 |
+| `i` `a` `I` `A`           | Insert before / after cursor, at line start / line end                                              |
+| `o` `O`                   | Open a line below / above and insert                                                                |
+| `x` `D` `C`               | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise) |
+| `d` `y` `c` + motion      | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`                                                  |
+| `dd` `yy` `cc`            | Linewise delete / yank / change                                                                     |
+| `d` `y` `c` + text object | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`                                         |
+| `p` `P`                   | Put the last yank or delete after / before the cursor                                               |
+| `u`                       | Undo                                                                                                |
 
 ### Text objects
 
 A text object follows an operator (`diw`) or extends a Visual selection (`viw`). `i` takes the inside, `a` takes the surroundings; counts apply, e.g. `d2aw`.
 
-| Object            | Covers                                                                     |
-| ----------------- | -------------------------------------------------------------------------- |
-| `iw` `aw`         | Word; `aw` also takes the adjoining whitespace                             |
-| `iW` `aW`         | Whitespace-delimited WORD                                                  |
-| `i"` `i'` `` i` `` | Inside the quotes on the current line (`a"` takes the quotes too)          |
-| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines         |
-| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`)     |
-| `ip` `ap`         | Paragraph — the run of non-blank (or blank) lines, linewise                |
+| Object              | Covers                                                                 |
+| ------------------- | ---------------------------------------------------------------------- |
+| `iw` `aw`           | Word; `aw` also takes the adjoining whitespace                         |
+| `iW` `aW`           | Whitespace-delimited WORD                                              |
+| `i"` `i'` `` i` ``  | Inside the quotes on the current line (`a"` takes the quotes too)      |
+| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines     |
+| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`) |
+| `ip` `ap`           | Paragraph — the run of non-blank (or blank) lines, linewise            |
 
 ### Visual mode
 

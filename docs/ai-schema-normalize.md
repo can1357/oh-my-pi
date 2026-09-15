@@ -51,18 +51,18 @@ Removed in the unified-flow refactor:
 
 ## Dispatcher mapping
 
-| Provider transport(s)                                              | Dispatcher                                                                   |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `openai-completions`                                               | `adaptSchemaForStrict` (sanitize + enforce when strict mode is enabled)      |
-| `openai-responses`, `openai-codex-responses`                       | `sanitizeSchemaForOpenAIResponses` before strict-mode adaptation             |
-| `azure-openai-responses`                                           | `sanitizeSchemaForOpenAIResponses`; emits `strict: false` without adaptation |
-| Moonshot/Kimi native hosts using MFJS (`toolSchemaFlavor: "moonshot-mfjs"`) | `normalizeSchemaForMoonshot`                                |
-| Grammar-flavored OpenAI-compatible hosts (`toolSchemaFlavor: "grammar"`) | `sanitizeSchemaForGrammar`                                     |
-| `ollama` / `ollama-cloud` tool parameters                          | `toolWireSchema` → `sanitizeSchemaForOllama`                                 |
-| `google-generative-ai`, `google-vertex`, Gemini CLI                | `normalizeSchemaForGoogle`                                                   |
-| Cloud Code Assist Claude (Antigravity + GCA, `claude-*` model ids) | `normalizeSchemaForCCA`                                                      |
-| MCP `inputSchema` ingestion                                        | `normalizeSchemaForMCP`                                                      |
-| `anthropic-messages` (native, not CCA)                             | per-provider whitelist in `anthropic.ts`                                     |
+| Provider transport(s)                                                       | Dispatcher                                                                   |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `openai-completions`                                                        | `adaptSchemaForStrict` (sanitize + enforce when strict mode is enabled)      |
+| `openai-responses`, `openai-codex-responses`                                | `sanitizeSchemaForOpenAIResponses` before strict-mode adaptation             |
+| `azure-openai-responses`                                                    | `sanitizeSchemaForOpenAIResponses`; emits `strict: false` without adaptation |
+| Moonshot/Kimi native hosts using MFJS (`toolSchemaFlavor: "moonshot-mfjs"`) | `normalizeSchemaForMoonshot`                                                 |
+| Grammar-flavored OpenAI-compatible hosts (`toolSchemaFlavor: "grammar"`)    | `sanitizeSchemaForGrammar`                                                   |
+| `ollama` / `ollama-cloud` tool parameters                                   | `toolWireSchema` → `sanitizeSchemaForOllama`                                 |
+| `google-generative-ai`, `google-vertex`, Gemini CLI                         | `normalizeSchemaForGoogle`                                                   |
+| Cloud Code Assist Claude (Antigravity + GCA, `claude-*` model ids)          | `normalizeSchemaForCCA`                                                      |
+| MCP `inputSchema` ingestion                                                 | `normalizeSchemaForMCP`                                                      |
+| `anthropic-messages` (native, not CCA)                                      | per-provider whitelist in `anthropic.ts`                                     |
 
 Gemini CLI / Antigravity CCA MUST run the full `normalizeSchemaForCCA`
 pipeline (not just the first keyword-stripping pass) to keep parity with the

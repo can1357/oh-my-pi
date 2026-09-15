@@ -1,8 +1,4 @@
 {
 	"extends": "../tsconfig.workspace.json",
-	"include": [
-		"native",
-		"scripts",
-		"test"
-	]
+	"include": ["native", "scripts", "test"]
 }

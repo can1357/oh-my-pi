@@ -7,18 +7,16 @@ match_command = "^quarto$"
 match_subcommand = "^render$"
 strip_ansi = true
 strip_lines_matching = [
-  "^\\s*$",
-  "^\\s*processing file:",
-  "^\\s*\\d+/\\d+\\s",
-  "^\\s*running",
-  "^\\s*Rendering",
-  "^pandoc ",
-  "^  Validating",
-  "^  Resolving",
+	"^\\s*$",
+	"^\\s*processing file:",
+	"^\\s*\\d+/\\d+\\s",
+	"^\\s*running",
+	"^\\s*Rendering",
+	"^pandoc ",
+	"^  Validating",
+	"^  Resolving",
 ]
-match_output = [
-  { pattern = "Output created:", message = "ok (output created)" },
-]
+match_output = [{ pattern = "Output created:", message = "ok (output created)" }]
 max_lines = 20
 
 [[tests.quarto-render]]

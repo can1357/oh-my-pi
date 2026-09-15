@@ -52,10 +52,10 @@ The same minimum-content guard exists inside `SessionMaintenance.handoff()` and 
 
 - Requires a selected model and an API key/resolver for that model.
 - Builds the handoff request through the **same side-request pipeline a live turn uses**, shared with ephemeral turns:
-  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
-  2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext`, LLM conversion, and obfuscation).
-  3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
-  4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
+   1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
+   2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext`, LLM conversion, and obfuscation).
+   3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
+   4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
 - Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.
 - Deobfuscates the returned handoff text.
 - For auto-triggered generations with `compaction.handoffSaveToDisk`, writes a timestamped `handoff-*.md` artifact under the session's artifacts directory.
@@ -66,10 +66,10 @@ If a provider rejects explicit `toolChoice: "none"` because it supports only aut
 
 ```ts
 await generateHandoffFromContext(context, model, {
-  streamOptions,
-  completeImpl,
-  telemetry,
-  thinkingLevel,
+	streamOptions,
+	completeImpl,
+	telemetry,
+	thinkingLevel,
 });
 ```
 
@@ -125,14 +125,14 @@ If auto generation returns no document, maintenance advances to the next configu
 - Calls `await session.handoff(customInstructions)`.
 - If result is `undefined`: `showError("Handoff cancelled")`.
 - On success:
-  - clears transient session UI and re-renders the session, which now shows the handoff compaction divider
-  - invalidates status line and editor border
-  - reloads todos
-  - appends `Context handed off and compacted in place`
-  - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
+   - clears transient session UI and re-renders the session, which now shows the handoff compaction divider
+   - invalidates status line and editor border
+   - reloads todos
+   - appends `Context handed off and compacted in place`
+   - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
 - On exception:
-  - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
-  - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
+   - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
+   - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
 - Stops the loader, clears the status container, and requests render at end.
 
 Manual `/handoff` does not stream the generated document into chat. A cancellable loader remains visible while the oneshot request runs, and the chat is rebuilt after the commit completes.
@@ -157,12 +157,12 @@ Direct `abortHandoff()` passes an unreasoned abort signal to `completeSimple(...
 Current UI classification:
 
 - **Aborted/cancelled**
-  - direct `abortHandoff()` (interactive Esc) triggers `"Handoff cancelled"`
-  - an unreasoned caller signal also triggers `"Handoff cancelled"`
-  - UI shows `Handoff cancelled`
+   - direct `abortHandoff()` (interactive Esc) triggers `"Handoff cancelled"`
+   - an unreasoned caller signal also triggers `"Handoff cancelled"`
+   - UI shows `Handoff cancelled`
 - **Failed**
-  - a harness abort reason, an empty manual generation, or any thrown provider error
-  - UI logs the error and shows `Handoff failed: ...`
+   - a harness abort reason, an empty manual generation, or any thrown provider error
+   - UI logs the error and shows `Handoff failed: ...`
 
 Empty generation on the manual path throws; auto-handoff returns `undefined` only for its next-method fallback.
 

@@ -38,9 +38,9 @@ Tree APIs:
 
 - `getBranch(fromId?)` walks parent links to root and returns root→node path
 - `getTree()` returns `SessionTreeNode[]` (`entry`, `children`, `label`)
-  - parent links become children arrays
-  - entries with missing parents are treated as roots
-  - children are sorted oldest→newest by timestamp
+   - parent links become children arrays
+   - entries with missing parents are treated as roots
+   - children are sorted oldest→newest by timestamp
 - `getChildren(parentId)` returns direct children
 - `getLabel(id)` resolves current label from the index's `#labels` map
 
@@ -117,9 +117,9 @@ Configuration caveat: when `doubleEscapeAction=tree`, the `/branch` registry ent
 
 - Tracks latest configured/effective thinking, role-model, per-family service-tier, mode/data, and injected-TTSR state on the path.
 - Handles latest compaction on the path:
-  - emits compaction summary first
-  - replays kept messages from `firstKeptEntryId` to compaction point
-  - then replays post-compaction messages
+   - emits compaction summary first
+   - replays kept messages from `firstKeptEntryId` to compaction point
+   - then replays post-compaction messages
 - Includes `branch_summary` and `custom_message` entries as `AgentMessage` objects.
 
 `session/messages.ts` then maps these message types for model input:
@@ -141,7 +141,7 @@ Tree selector behavior (`tree-selector.ts`):
 
 - Flattens tree for navigation, keeps active-path highlighting, and prioritizes displaying the active branch first.
 - Supports filter modes: `default`, `no-tools`, `user-only`, `labeled-only`, `all`.
-  - `default` suppresses `label`, `custom`, `model_change`, and `thinking_level_change`; it is not a complete "hide all internal entries" filter.
+   - `default` suppresses `label`, `custom`, `model_change`, and `thinking_level_change`; it is not a complete "hide all internal entries" filter.
 - Supports free-text search over rendered semantic content.
 - `Shift+L` opens inline label editing and writes via `appendLabelChange`.
 
@@ -161,19 +161,19 @@ Command-time extension API (`ExtensionCommandContext`):
 Events around tree navigation:
 
 - `session_before_tree`
-  - receives `TreePreparation`:
-    - `targetId`
-    - `oldLeafId`
-    - `commonAncestorId`
-    - `entriesToSummarize`
-    - `userWantsSummary`
-  - may cancel navigation
-  - may provide summary payload used instead of built-in summarizer
-  - receives abort `signal` (Escape cancellation path)
+   - receives `TreePreparation`:
+      - `targetId`
+      - `oldLeafId`
+      - `commonAncestorId`
+      - `entriesToSummarize`
+      - `userWantsSummary`
+   - may cancel navigation
+   - may provide summary payload used instead of built-in summarizer
+   - receives abort `signal` (Escape cancellation path)
 - `session_tree`
-  - emits `newLeafId`, `oldLeafId`
-  - includes `summaryEntry` when a summary was created
-  - `fromExtension` indicates summary origin
+   - emits `newLeafId`, `oldLeafId`
+   - includes `summaryEntry` when a summary was created
+   - `fromExtension` indicates summary origin
 
 Adjacent but related lifecycle hooks:
 
@@ -202,10 +202,10 @@ Trigger:
 Naming source:
 
 - The normalized plan title is humanized via `humanizePlanTitle(title)` (`packages/coding-agent/src/plan-mode/approved-plan.ts`):
-  - replaces runs of `-`/`_` with a single space
-  - trims whitespace
-  - capitalizes the first character
-  - returns `""` for whitespace-only / separator-only input
+   - replaces runs of `-`/`_` with a single space
+   - trims whitespace
+   - capitalizes the first character
+   - returns `""` for whitespace-only / separator-only input
 - The humanized name is applied only when the current session has no name (`!sessionManager.getSessionName()`). It then calls `sessionManager.setSessionName(name, "auto")`, which also refuses to overwrite user-named sessions.
 - On successful apply, the terminal title (`setSessionTerminalTitle`) and the editor border color are refreshed to reflect the new name.
 

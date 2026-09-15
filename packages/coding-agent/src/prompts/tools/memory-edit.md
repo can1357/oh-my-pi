@@ -1,6 +1,7 @@
 Edit Mnemopi long-term memories by id. Only ids returned by `recall`.
 
 Operations:
+
 - `update`: working memory; replace content and/or importance.
 - `forget`: permanently delete working memory.
 - `invalidate`: softly supersede working or episodic memory; optional `replacement_id`.

@@ -166,9 +166,7 @@
 					"input": "PUT 2-4:\n+line one\n3:line two",
 					"expect": {
 						"editCount": 5,
-						"warnings": [
-							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
-						]
+						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
 					}
 				}
 			],

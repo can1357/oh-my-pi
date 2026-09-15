@@ -96,13 +96,13 @@ The `capabilities` object enables optional server-specific features that OMP sup
 
 ```json
 {
-  "capabilities": {
-    "flycheck": true,
-    "ssr": true,
-    "expandMacro": true,
-    "runnables": true,
-    "relatedTests": true
-  }
+	"capabilities": {
+		"flycheck": true,
+		"ssr": true,
+		"expandMacro": true,
+		"runnables": true,
+		"relatedTests": true
+	}
 }
 ```
 
@@ -114,16 +114,16 @@ All fields are boolean and optional. They are currently used by `rust-analyzer`.
 
 ```json
 {
-  "servers": {
-    "rust-analyzer": {
-      "workspaceReadyTimings": {
-        "timeoutMs": 30000,
-        "pollMs": 250,
-        "settleMs": 2000,
-        "statusRequestTimeoutMs": 2000
-      }
-    }
-  }
+	"servers": {
+		"rust-analyzer": {
+			"workspaceReadyTimings": {
+				"timeoutMs": 30000,
+				"pollMs": 250,
+				"settleMs": 2000,
+				"statusRequestTimeoutMs": 2000
+			}
+		}
+	}
 }
 ```
 
@@ -137,32 +137,32 @@ Partial overrides are merged onto the built-in defaults. You only need to specif
 
 ```json
 {
-  "servers": {
-    "typescript-language-server": {
-      "args": ["--stdio", "--log-level", "4"]
-    }
-  }
+	"servers": {
+		"typescript-language-server": {
+			"args": ["--stdio", "--log-level", "4"]
+		}
+	}
 }
 ```
 
 ```yaml
 servers:
-  gopls:
-    settings:
-      gopls:
-        gofumpt: false
-        staticcheck: false
+   gopls:
+      settings:
+         gopls:
+            gofumpt: false
+            staticcheck: false
 ```
 
 ### Disable a built-in server
 
 ```json
 {
-  "servers": {
-    "eslint": {
-      "disabled": true
-    }
-  }
+	"servers": {
+		"eslint": {
+			"disabled": true
+		}
+	}
 }
 ```
 
@@ -172,14 +172,14 @@ New servers require non-empty `command`, `fileTypes`, and `rootMarkers`. Invalid
 
 ```json
 {
-  "servers": {
-    "my-lsp": {
-      "command": "my-lsp-server",
-      "args": ["--stdio"],
-      "fileTypes": [".xyz"],
-      "rootMarkers": [".xyz-project", ".git"]
-    }
-  }
+	"servers": {
+		"my-lsp": {
+			"command": "my-lsp-server",
+			"args": ["--stdio"],
+			"fileTypes": [".xyz"],
+			"rootMarkers": [".xyz-project", ".git"]
+		}
+	}
 }
 ```
 
@@ -189,7 +189,7 @@ Shut down language servers that have been inactive for more than five minutes:
 
 ```json
 {
-  "idleTimeoutMs": 300000
+	"idleTimeoutMs": 300000
 }
 ```
 
@@ -199,11 +199,11 @@ Place the override in `<project>/.omp/lsp.json`:
 
 ```json
 {
-  "servers": {
-    "pylsp": {
-      "disabled": true
-    }
-  }
+	"servers": {
+		"pylsp": {
+			"disabled": true
+		}
+	}
 }
 ```
 

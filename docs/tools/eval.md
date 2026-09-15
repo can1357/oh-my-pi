@@ -5,6 +5,7 @@
 > **Notice:** Do not shell out to `python -c`, `bun -e`, or `node -e` through `bash` for ad-hoc code. `eval` provides retained state, structured `display()` capture, tool/subagent bridges, streaming, cancellation, and artifact-backed truncation.
 
 ## Source
+
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
@@ -20,36 +21,36 @@
 
 The params object is one cell. There is no `cells` array, header parser, language sniffing, or implicit fallback. Run incremental steps as separate tool calls; each language keeps its own state.
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `language` | `"py" \| "js"` | Yes | Explicit backend token. Normally the live schema includes only enabled runtimes. |
-| `code` | `string` | Yes | Cell body, verbatim. |
-| `title` | `string` | No | Short transcript label. |
-| `timeout` | `number` | No | Runtime-work timeout in seconds. Default 30; `0` disables the cell timeout. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. |
-| `reset` | `boolean` | No | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`. |
+| Field      | Type           | Required | Description                                                                                                                                                                                |
+| ---------- | -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `language` | `"py" \| "js"` | Yes      | Explicit backend token. Normally the live schema includes only enabled runtimes.                                                                                                           |
+| `code`     | `string`       | Yes      | Cell body, verbatim.                                                                                                                                                                       |
+| `title`    | `string`       | No       | Short transcript label.                                                                                                                                                                    |
+| `timeout`  | `number`       | No       | Runtime-work timeout in seconds. Default 30; `0` disables the cell timeout. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. |
+| `reset`    | `boolean`      | No       | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`.                                                                        |
 
 Example across three calls:
 
 ```json
-{"language":"py","title":"imports","code":"import json\nfrom pathlib import Path"}
+{ "language": "py", "title": "imports", "code": "import json\nfrom pathlib import Path" }
 ```
 
 ```json
-{"language":"py","title":"load config","code":"data = json.loads(read('package.json'))\ndisplay(data)"}
+{ "language": "py", "title": "load config", "code": "data = json.loads(read('package.json'))\ndisplay(data)" }
 ```
 
 ```json
-{"language":"py","title":"reuse state","code":"display(sorted(data['dependencies']))"}
+{ "language": "py", "title": "reuse state", "code": "display(sorted(data['dependencies']))" }
 ```
 
 ## Backend availability
 
 `resolveEvalBackends(...)` combines settings with environment overrides:
 
-| Token | Runtime | Setting/default | Environment override | Additional prerequisite |
-| --- | --- | --- | --- | --- |
-| `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | usable configured Python interpreter/kernel |
-| `js` | retained Bun worker VM | `eval.js=true` | `PI_JS` | bundled JS runtime |
+| Token | Runtime                              | Setting/default | Environment override | Additional prerequisite                     |
+| ----- | ------------------------------------ | --------------- | -------------------- | ------------------------------------------- |
+| `py`  | retained IPython-style Python kernel | `eval.py=true`  | `PI_PY`              | usable configured Python interpreter/kernel |
+| `js`  | retained Bun worker VM               | `eval.js=true`  | `PI_JS`              | bundled JS runtime                          |
 
 When at least one runtime is enabled, disabled runtimes are removed from the session-scoped wire schema and model prompt. A requested unavailable runtime raises `ToolError`; the tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 

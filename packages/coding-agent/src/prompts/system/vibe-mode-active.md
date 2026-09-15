@@ -16,9 +16,9 @@ Sessions: persistent worker conversations; remember instructions and work. One s
 2. `vibe_spawn` each with a complete self-contained brief: files, constraints, acceptance criteria. Workers start blank; never see this conversation.
 3. Sends/spawns return immediately; results arrive when a worker finishes its turn. Direct other sessions meanwhile; call `vibe_wait` only when unable to proceed without a result.
 4. On each result, `read` touched files to verify claims before building on them; `vibe_send` corrections, next step, or review request.
-{{#if todoAvailable}}
-After reading and verifying a result, use `todo` for the parent session list; workers do not own this bookkeeping.
-{{/if}}
+   {{#if todoAvailable}}
+   After reading and verifying a result, use `todo` for the parent session list; workers do not own this bookkeeping.
+   {{/if}}
 5. Route by difficulty: draft with `fast`; escalate to `good` if `fast` stalls or judgment is needed. `good` designs; `fast` executes mechanical parts.
 6. `vibe_kill` stuck sessions or sessions whose workstream is done; `vibe_list` if roster lost.
 

@@ -221,19 +221,19 @@ When the destination artifact directory already exists — a session returning t
 
 ## Failure handling and fallback paths
 
-| Case                                                      | Behavior                                                                               |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Blob file missing during image-block rehydration          | Warn and keep `blob:sha256:` ref string in memory                                      |
-| Blob file missing during provider `image_url` rehydration | Warn and keep `blob:sha256:` ref string in memory                                      |
-| Blob read ENOENT via `BlobStore.get`                      | Returns `null`                                                                         |
-| Artifact directory missing (`ArtifactManager.listFiles`)  | Returns empty list (allocation can start fresh)                                        |
-| No registered artifact dirs (`artifact://`)               | Throws `No session - artifacts unavailable`                                            |
-| No registered artifact dirs (`agent://`)                  | Throws `No session - agent outputs unavailable`                                        |
-| Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                                         |
-| Artifact ID not found                                     | Throws with available IDs listing                                                      |
-| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; bounded selectors/path-only workflows remain available |
-| OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                                           |
-| Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data                   |
+| Case                                                      | Behavior                                                                                                 |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Blob file missing during image-block rehydration          | Warn and keep `blob:sha256:` ref string in memory                                                        |
+| Blob file missing during provider `image_url` rehydration | Warn and keep `blob:sha256:` ref string in memory                                                        |
+| Blob read ENOENT via `BlobStore.get`                      | Returns `null`                                                                                           |
+| Artifact directory missing (`ArtifactManager.listFiles`)  | Returns empty list (allocation can start fresh)                                                          |
+| No registered artifact dirs (`artifact://`)               | Throws `No session - artifacts unavailable`                                                              |
+| No registered artifact dirs (`agent://`)                  | Throws `No session - agent outputs unavailable`                                                          |
+| Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                                                           |
+| Artifact ID not found                                     | Throws with available IDs listing                                                                        |
+| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; bounded selectors/path-only workflows remain available                   |
+| OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                                                             |
+| Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data                                     |
 | Artifact directory already exists at the move destination | Directories merged; an entry whose name or artifact id is taken stays at the source and is logged (warn) |
 
 ## Binary blob externalization vs text-output artifacts

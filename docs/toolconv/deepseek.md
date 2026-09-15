@@ -7,7 +7,7 @@ of dedicated special tokens (`<｜tool▁calls▁begin｜>` … `<｜tool▁call
 JSON-in-text or XML. This document centers on **DeepSeek-V3.1** (the current hybrid
 thinking/non-thinking model) and documents the older **DeepSeek-V3-0324** and
 **DeepSeek-R1-0528** format as an explicit version difference, because their on-the-wire
-tool syntax is *not* the same as V3.1's.
+tool syntax is _not_ the same as V3.1's.
 
 An inference server enables it with a chat template plus a tool-call parser:
 
@@ -28,7 +28,7 @@ DeepSeek's markers do **not** use the ASCII vertical bar `|` (U+007C) or ASCII u
 
 - `｜` — **U+FF5C FULLWIDTH VERTICAL LINE**, as the delimiter just inside the angle brackets.
 - `▁` — **U+2581 LOWER ONE EIGHTH BLOCK** (the SentencePiece word-boundary glyph), as the
-  separator *between words* inside a token, e.g. `begin▁of▁sentence`, `tool▁calls▁begin`.
+  separator _between words_ inside a token, e.g. `begin▁of▁sentence`, `tool▁calls▁begin`.
 
 So `<｜tool▁calls▁begin｜>` is `<` + `｜`(FF5C) + `tool` + `▁`(2581) + `calls` + `▁`(2581) +
 `begin` + `｜`(FF5C) + `>`. Copying these tokens as `<|tool_calls_begin|>` (ASCII pipe +
@@ -42,28 +42,28 @@ Token IDs are from DeepSeek-V3.1 `tokenizer.json` (`added_tokens`); `vocab_size`
 The `special` column reflects the tokenizer's `"special"` flag (it governs
 `skip_special_tokens`); note that the role/think/tool markers are `special: false`.
 
-| Token (verbatim) | ID | `special` | Purpose |
-| --- | --- | --- | --- |
-| `<｜begin▁of▁sentence｜>` | 0 | true | BOS; prepended once at the very start of the prompt. |
-| `<｜end▁of▁sentence｜>` | 1 | true | EOS; ends every assistant/tool turn and is the stop token. |
-| `<｜▁pad▁｜>` | 2 | true | Padding (`pad_token`; the model card/config also reuse EOS as pad). |
-| `<｜search▁begin｜>` | 128796 | false | Search-agent query open (thinking-mode search tool). |
-| `<｜search▁end｜>` | 128797 | false | Search-agent query close. |
-| `<think>` | 128798 | false | Opens the reasoning/thinking span. ASCII brackets. |
-| `</think>` | 128799 | false | Closes the reasoning span; **also emitted in non-thinking mode** (see below). |
-| `<｜fim▁hole｜>` / `<｜fim▁begin｜>` / `<｜fim▁end｜>` | 128800–128802 | false | Fill-in-the-middle (not chat). |
-| `<｜User｜>` | 128803 | false | User role marker. |
-| `<｜Assistant｜>` | 128804 | false | Assistant role marker. |
-| `<\|EOT\|>` | 128805 | true | End-of-turn (legacy; ASCII pipes, rarely used in chat). |
-| `<｜tool▁calls▁begin｜>` | 128806 | false | Opens the assistant's batch of tool calls. |
-| `<｜tool▁calls▁end｜>` | 128807 | false | Closes the batch of tool calls. |
-| `<｜tool▁call▁begin｜>` | 128808 | false | Opens a single tool call inside the batch. |
-| `<｜tool▁call▁end｜>` | 128809 | false | Closes a single tool call. |
-| `<｜tool▁outputs▁begin｜>` | 128810 | false | Opens a batch of tool results (**R1-0528 / V3-0324 only**). |
-| `<｜tool▁outputs▁end｜>` | 128811 | false | Closes a batch of tool results (**R1-0528 / V3-0324 only**). |
-| `<｜tool▁output▁begin｜>` | 128812 | false | Opens a single tool result. |
-| `<｜tool▁output▁end｜>` | 128813 | false | Closes a single tool result. |
-| `<｜tool▁sep｜>` | 128814 | false | Separator inside a tool call (between name and arguments). |
+| Token (verbatim)                                       | ID            | `special` | Purpose                                                                       |
+| ------------------------------------------------------ | ------------- | --------- | ----------------------------------------------------------------------------- |
+| `<｜begin▁of▁sentence｜>`                              | 0             | true      | BOS; prepended once at the very start of the prompt.                          |
+| `<｜end▁of▁sentence｜>`                                | 1             | true      | EOS; ends every assistant/tool turn and is the stop token.                    |
+| `<｜▁pad▁｜>`                                          | 2             | true      | Padding (`pad_token`; the model card/config also reuse EOS as pad).           |
+| `<｜search▁begin｜>`                                   | 128796        | false     | Search-agent query open (thinking-mode search tool).                          |
+| `<｜search▁end｜>`                                     | 128797        | false     | Search-agent query close.                                                     |
+| `<think>`                                              | 128798        | false     | Opens the reasoning/thinking span. ASCII brackets.                            |
+| `</think>`                                             | 128799        | false     | Closes the reasoning span; **also emitted in non-thinking mode** (see below). |
+| `<｜fim▁hole｜>` / `<｜fim▁begin｜>` / `<｜fim▁end｜>` | 128800–128802 | false     | Fill-in-the-middle (not chat).                                                |
+| `<｜User｜>`                                           | 128803        | false     | User role marker.                                                             |
+| `<｜Assistant｜>`                                      | 128804        | false     | Assistant role marker.                                                        |
+| `<\|EOT\|>`                                            | 128805        | true      | End-of-turn (legacy; ASCII pipes, rarely used in chat).                       |
+| `<｜tool▁calls▁begin｜>`                               | 128806        | false     | Opens the assistant's batch of tool calls.                                    |
+| `<｜tool▁calls▁end｜>`                                 | 128807        | false     | Closes the batch of tool calls.                                               |
+| `<｜tool▁call▁begin｜>`                                | 128808        | false     | Opens a single tool call inside the batch.                                    |
+| `<｜tool▁call▁end｜>`                                  | 128809        | false     | Closes a single tool call.                                                    |
+| `<｜tool▁outputs▁begin｜>`                             | 128810        | false     | Opens a batch of tool results (**R1-0528 / V3-0324 only**).                   |
+| `<｜tool▁outputs▁end｜>`                               | 128811        | false     | Closes a batch of tool results (**R1-0528 / V3-0324 only**).                  |
+| `<｜tool▁output▁begin｜>`                              | 128812        | false     | Opens a single tool result.                                                   |
+| `<｜tool▁output▁end｜>`                                | 128813        | false     | Closes a single tool result.                                                  |
+| `<｜tool▁sep｜>`                                       | 128814        | false     | Separator inside a tool call (between name and arguments).                    |
 
 `config.json` confirms `bos_token_id: 0`, `eos_token_id: 1`.
 
@@ -85,14 +85,14 @@ the prompt is one flat string:
 - **Assistant turn**: opens with `<｜Assistant｜>`, then a thinking tag, then content, then
   `<｜end▁of▁sentence｜>`.
 - **Thinking vs non-thinking (V3.1 hybrid)** — selected by the template, not by the model:
-  - Non-thinking generation prefix: `…<｜Assistant｜></think>` — the model starts *after* a
-    `</think>` it never had to open. Unlike DeepSeek-V3, V3.1 always injects this `</think>`.
-  - Thinking generation prefix: `…<｜Assistant｜><think>` — the model emits its chain of
-    thought, closes with `</think>`, then the answer.
-  - In multi-turn context, **every** stored assistant turn keeps a `</think>`; only the last
-    turn's leading thinking tag reflects the requested mode. When rendering a stored
-    assistant message, any text up to and including `</think>` is stripped from `content`
-    before re-emitting (the template does `content.split('</think>', 1)[1]`).
+   - Non-thinking generation prefix: `…<｜Assistant｜></think>` — the model starts _after_ a
+     `</think>` it never had to open. Unlike DeepSeek-V3, V3.1 always injects this `</think>`.
+   - Thinking generation prefix: `…<｜Assistant｜><think>` — the model emits its chain of
+     thought, closes with `</think>`, then the answer.
+   - In multi-turn context, **every** stored assistant turn keeps a `</think>`; only the last
+     turn's leading thinking tag reflects the requested mode. When rendering a stored
+     assistant message, any text up to and including `</think>` is stripped from `content`
+     before re-emitting (the template does `content.split('</think>', 1)[1]`).
 - **Tool calling runs in non-thinking mode.** The model card states "Toolcall is supported
   in non-thinking mode," and the V3.1 tool template opens the tool-call turn with
   `<｜Assistant｜></think>`. With vLLM, V3.1 reasoning is disabled by default; enable it via
@@ -241,13 +241,13 @@ deepseek_v31`):
 - **`finish_reason`**: `"tool_calls"` when the model emitted a `<｜tool▁calls▁begin｜>…`
   batch; otherwise `"stop"`.
 - **`message.tool_calls[]`**: one element per `<｜tool▁call▁begin｜>…<｜tool▁call▁end｜>`.
-  - `.type` = `"function"`.
-  - `.function.name` = the text between `<｜tool▁call▁begin｜>` and `<｜tool▁sep｜>`.
-  - `.function.arguments` = the text between `<｜tool▁sep｜>` and `<｜tool▁call▁end｜>`, returned
-    as a **JSON string** (per the OpenAI spec), not a nested object. The model already emits
-    raw JSON there, so it is passed through.
-  - `.id` = **synthesized by the server** (e.g. `chatcmpl-tool-…`). DeepSeek's wire format
-    carries no call ID.
+   - `.type` = `"function"`.
+   - `.function.name` = the text between `<｜tool▁call▁begin｜>` and `<｜tool▁sep｜>`.
+   - `.function.arguments` = the text between `<｜tool▁sep｜>` and `<｜tool▁call▁end｜>`, returned
+     as a **JSON string** (per the OpenAI spec), not a nested object. The model already emits
+     raw JSON there, so it is passed through.
+   - `.id` = **synthesized by the server** (e.g. `chatcmpl-tool-…`). DeepSeek's wire format
+     carries no call ID.
 - **Tool result messages**: `{"role": "tool", "tool_call_id": "<id>", "content": "<result>"}`.
   The server renders `content` into `<｜tool▁output▁begin｜>…<｜tool▁output▁end｜>`. Because the
   prompt has no IDs, `tool_call_id` is used only for client-side bookkeeping; **the model
@@ -313,15 +313,15 @@ encoding, served in vLLM with `--tool-call-parser deepseek_v3`. The per-call bod
 
 Differences from V3.1:
 
-| Aspect | V3.1 (`deepseek_v31`) | V3-0324 / R1-0528 (`deepseek_v3`) |
-| --- | --- | --- |
-| Field order in a call | `{name}<｜tool▁sep｜>{args}` | `function<｜tool▁sep｜>{name}` (the literal `type`, then name) |
-| Arguments wrapping | raw JSON, inline | fenced ` ```json … ``` ` block (name and args separated by `\n`) |
-| Chaining of calls | abut directly, **no separator** | each subsequent call prefixed with `\n` |
-| Tool results | `<｜tool▁output▁begin｜>…<｜tool▁output▁end｜>` per message, no batch wrapper | wrapped in `<｜tool▁outputs▁begin｜>…<｜tool▁outputs▁end｜>`, results newline-separated |
-| User→assistant boundary | user turn = `<｜User｜>{q}`; `<｜Assistant｜></think>` added at generation | user turn = `<｜User｜>{q}<｜Assistant｜>` (assistant marker appended in the user branch) |
-| Thinking | hybrid; `thinking` kwarg toggles `<think>` vs `</think>` prefix | R1-0528 always reasoning (bare `<｜Assistant｜>` generation prefix, model opens `<think>` itself); V3-0324 non-reasoning |
-| vLLM parser | `--tool-call-parser deepseek_v31` | `--tool-call-parser deepseek_v3` |
+| Aspect                  | V3.1 (`deepseek_v31`)                                                         | V3-0324 / R1-0528 (`deepseek_v3`)                                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Field order in a call   | `{name}<｜tool▁sep｜>{args}`                                                  | `function<｜tool▁sep｜>{name}` (the literal `type`, then name)                                                           |
+| Arguments wrapping      | raw JSON, inline                                                              | fenced ` ```json … ``` ` block (name and args separated by `\n`)                                                         |
+| Chaining of calls       | abut directly, **no separator**                                               | each subsequent call prefixed with `\n`                                                                                  |
+| Tool results            | `<｜tool▁output▁begin｜>…<｜tool▁output▁end｜>` per message, no batch wrapper | wrapped in `<｜tool▁outputs▁begin｜>…<｜tool▁outputs▁end｜>`, results newline-separated                                  |
+| User→assistant boundary | user turn = `<｜User｜>{q}`; `<｜Assistant｜></think>` added at generation    | user turn = `<｜User｜>{q}<｜Assistant｜>` (assistant marker appended in the user branch)                                |
+| Thinking                | hybrid; `thinking` kwarg toggles `<think>` vs `</think>` prefix               | R1-0528 always reasoning (bare `<｜Assistant｜>` generation prefix, model opens `<think>` itself); V3-0324 non-reasoning |
+| vLLM parser             | `--tool-call-parser deepseek_v31`                                             | `--tool-call-parser deepseek_v3`                                                                                         |
 
 Example R1-0528 / V3-0324 parallel call with its result batch:
 

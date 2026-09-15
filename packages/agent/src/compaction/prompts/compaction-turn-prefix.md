@@ -7,9 +7,11 @@ MUST summarize prefix for retained suffix:
 [What did the user ask for in this turn?]
 
 ## Early Progress
+
 - [Key decisions and work done in the prefix]
 
 ## Context for Suffix
+
 - [Information needed to understand the retained recent work]
 
 MUST output only the structured summary; NEVER extra text.

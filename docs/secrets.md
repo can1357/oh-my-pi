@@ -8,7 +8,7 @@ Disabled by default. Toggle via `/settings` UI or directly in `config.yml`:
 
 ```yaml
 secrets:
-  enabled: true
+   enabled: true
 ```
 
 ## How it works

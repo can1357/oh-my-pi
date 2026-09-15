@@ -19,6 +19,7 @@ bun scripts/release.ts $ARGUMENTS
 ```
 
 Script automatically:
+
 1. Pre-flight: clean working dir; main branch.
 2. Update all `package.json` versions.
 3. Regenerate `bun.lock`.

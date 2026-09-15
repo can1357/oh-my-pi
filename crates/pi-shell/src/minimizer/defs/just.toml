@@ -5,9 +5,7 @@
 description = "Compact just task runner output"
 match_command = "^just$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-]
+strip_lines_matching = ["^\\s*$"]
 truncate_lines_at = 250
 max_lines = 80
 on_empty = "just: ok"

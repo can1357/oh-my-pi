@@ -51,7 +51,10 @@ describe("Composer host UI requests", () => {
 
 	it("renders a submit field for custom ask responses", () => {
 		const html = renderToStaticMarkup(
-			<Composer client={client} snapshot={snapshot({ reqId: 2, kind: "editor", title: "Other", prefill: "draft" })} />,
+			<Composer
+				client={client}
+				snapshot={snapshot({ reqId: 2, kind: "editor", title: "Other", prefill: "draft" })}
+			/>,
 		);
 
 		expect(html).toContain("Other");

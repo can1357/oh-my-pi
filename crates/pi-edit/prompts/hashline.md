@@ -48,6 +48,7 @@ Only below `:` headers. Row: verbatim `+TEXT` (leading whitespace preserved); `+
 ```
 
 Edit, then move:
+
 ```
 [greet.py#A1B2]
 PUT 1.=3:
@@ -57,6 +58,7 @@ MV lib/greet.py
 ```
 
 Markdown bullets — file receives `- task`:
+
 ```
 [PLAN.md#A1B2]
 PUT >2:
@@ -65,6 +67,7 @@ PUT >2:
 ```
 
 Move `greet` to sibling file via named register; flows across sections:
+
 ```
 [greet.py#A1B2]
 CUT 1* @fn
@@ -73,6 +76,7 @@ PUT <1 @fn
 ```
 
 `PUT 1*:` resolves lines 1–3 (`def` through `print(msg)`); line 4 separate, remains:
+
 ```
 [greet.py#A1B2]
 PUT 1*:
@@ -81,6 +85,7 @@ PUT 1*:
 ```
 
 Decorator/doc-comment separate block: point N at decorator to include both; anchoring `def` line 2 orphans `@cache`:
+
 ```
 [svc.py#C3D4]
 PUT 1*:
@@ -88,6 +93,7 @@ PUT 1*:
 +def load(key):
 +    return store[key]
 ```
+
 </example>
 
 <anti-patterns>
@@ -95,35 +101,51 @@ PUT 1*:
 PUT 4.=4:
 
 # WRONG — range sized to the post-edit content. RIGHT: `PUT 1.=1:` (body length irrelevant)
+
 PUT 1.=2:
 +def greet(name):
 
 # WRONG — `-` rows / bare context lines do not exist; the range deletes, the body is only new content.
+
 PUT 3.=3:
-    msg = "Hello, " + name
--   print(msg)
-+   return msg
+msg = "Hello, " + name
+
+- print(msg)
+
+* return msg
+
 # RIGHT
+
 PUT 3.=3:
-+   return msg
+
+- return msg
 
 # WRONG — pure insertion as a widened `PUT`: retyped keepers get dropped (here line 4).
+
 PUT 2.=4:
-+    msg = "Hello, " + name
-+    extra = compute(name)
-+    print(msg)
+
+- msg = "Hello, " + name
+- extra = compute(name)
+- print(msg)
+
 # RIGHT — touch nothing you keep.
+
 PUT >2:
-+    extra = compute(name)
+
+- extra = compute(name)
 
 # WRONG — `PUT >N*:` anchored on the closing delimiter / last visible line. RIGHT: plain `PUT >M:`
+
 PUT >3*:
 +after()
+
 # RIGHT
+
 PUT >3:
 +after()
 
 # WRONG — body rows under register PUT; register pastes take no body. RIGHT: bodyless `PUT >20 @fn`.
+
 PUT >20 @fn:
 +function f() {}
 </anti-patterns>

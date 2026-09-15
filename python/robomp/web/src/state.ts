@@ -30,31 +30,31 @@ export { isFetching, lastTickAt, lastTickError };
 let pollHandle: number | null = null;
 
 async function tick(): Promise<void> {
-  setIsFetching(true);
-  try {
-    await Promise.all([refetchStatus(), refetchLogs()]);
-    setLastTickAt(Date.now());
-    setLastTickError(null);
-  } catch (err) {
-    setLastTickError(err instanceof Error ? err.message : String(err));
-  } finally {
-    setIsFetching(false);
-  }
+	setIsFetching(true);
+	try {
+		await Promise.all([refetchStatus(), refetchLogs()]);
+		setLastTickAt(Date.now());
+		setLastTickError(null);
+	} catch (err) {
+		setLastTickError(err instanceof Error ? err.message : String(err));
+	} finally {
+		setIsFetching(false);
+	}
 }
 
 export function startPolling(): void {
-  if (pollHandle != null) return;
-  void tick();
-  pollHandle = window.setInterval(() => {
-    void tick();
-  }, POLL_INTERVAL_MS);
+	if (pollHandle != null) return;
+	void tick();
+	pollHandle = window.setInterval(() => {
+		void tick();
+	}, POLL_INTERVAL_MS);
 }
 
 export function stopPolling(): void {
-  if (pollHandle != null) {
-    window.clearInterval(pollHandle);
-    pollHandle = null;
-  }
+	if (pollHandle != null) {
+		window.clearInterval(pollHandle);
+		pollHandle = null;
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -65,51 +65,51 @@ export function stopPolling(): void {
 export type TriggerStatusKind = "idle" | "pending" | "ok" | "err";
 
 export interface TriggerStatus {
-  kind: TriggerStatusKind;
-  text: string;
+	kind: TriggerStatusKind;
+	text: string;
 }
 
 const [triggerStatus, setTriggerStatus] = createSignal<TriggerStatus>({
-  kind: "idle",
-  text: "",
+	kind: "idle",
+	text: "",
 });
 
 export { triggerStatus };
 
 export interface TriggerInput {
-  mode: "triage" | "retry";
-  issue?: string;
-  delivery_id?: string;
+	mode: "triage" | "retry";
+	issue?: string;
+	delivery_id?: string;
 }
 
 export async function runTrigger(input: TriggerInput): Promise<void> {
-  setTriggerStatus({ kind: "pending", text: "queuing…" });
-  try {
-    const data = await api.trigger(input);
-    setTriggerStatus({
-      kind: "ok",
-      text: `queued ${data.mode ?? input.mode}: ${data.delivery}`,
-    });
-  } catch (err) {
-    const detail = err instanceof ApiError ? err.message : String(err);
-    const status = err instanceof ApiError ? `error ${err.status}` : "error";
-    setTriggerStatus({ kind: "err", text: `${status}: ${detail}` });
-  }
-  void tick();
+	setTriggerStatus({ kind: "pending", text: "queuing…" });
+	try {
+		const data = await api.trigger(input);
+		setTriggerStatus({
+			kind: "ok",
+			text: `queued ${data.mode ?? input.mode}: ${data.delivery}`,
+		});
+	} catch (err) {
+		const detail = err instanceof ApiError ? err.message : String(err);
+		const status = err instanceof ApiError ? `error ${err.status}` : "error";
+		setTriggerStatus({ kind: "err", text: `${status}: ${detail}` });
+	}
+	void tick();
 }
 
 export async function runCancel(deliveryId: string): Promise<void> {
-  setTriggerStatus({ kind: "pending", text: `cancelling ${deliveryId.slice(0, 8)}…` });
-  try {
-    const data = await api.cancel(deliveryId);
-    setTriggerStatus({
-      kind: "ok",
-      text: `cancel signaled: ${deliveryId.slice(0, 8)} (fired=${data.fired})`,
-    });
-  } catch (err) {
-    const detail = err instanceof ApiError ? err.message : String(err);
-    const status = err instanceof ApiError ? `cancel ${err.status}` : "cancel";
-    setTriggerStatus({ kind: "err", text: `${status}: ${detail}` });
-  }
-  void tick();
+	setTriggerStatus({ kind: "pending", text: `cancelling ${deliveryId.slice(0, 8)}…` });
+	try {
+		const data = await api.cancel(deliveryId);
+		setTriggerStatus({
+			kind: "ok",
+			text: `cancel signaled: ${deliveryId.slice(0, 8)} (fired=${data.fired})`,
+		});
+	} catch (err) {
+		const detail = err instanceof ApiError ? err.message : String(err);
+		const status = err instanceof ApiError ? `cancel ${err.status}` : "cancel";
+		setTriggerStatus({ kind: "err", text: `${status}: ${detail}` });
+	}
+	void tick();
 }

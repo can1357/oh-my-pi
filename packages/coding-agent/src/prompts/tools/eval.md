@@ -43,12 +43,14 @@ budget → {{#if py}}`budget.total` (ceiling or None), `budget.spent()`, `budget
 {{#if spawns}}
 <dag>
 Acyclic waves of handles:
+
 - **Name nodes.** `h = agent(…)` returns at once; `h.handle` is `agent://<id>`.
 - **Wire edges.** Put an upstream `.wait()` result or `.handle` in the downstream prompt. Bulk: `write("local://<name>.md", …)`.
 - **`wait(hs)`** = wave barrier. Open-ended item streams → `workpool()`.
 - **Isolate failure.** `wait(hs, raise_errors=False)` keeps a failure in its slot; only that subtree degrades.
 - **Acyclic only.** No node waits on its own descendant.
-</dag>
+ </dag>
+
 {{/if}}
 
 <critical>

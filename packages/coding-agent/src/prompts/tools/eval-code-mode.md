@@ -6,6 +6,7 @@ spawn independent calls without awaiting, then `await Promise.all([…])`. Prefe
 Reserve separate cells for steps that must inspect earlier results.
 
 exec tool declarations:
+
 ```ts
 declare const tool: {
 {{declarations}}

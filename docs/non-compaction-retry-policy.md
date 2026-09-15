@@ -42,9 +42,9 @@ This is not context-overflow or payload-rejection handling and does not establis
 - assistant `stopReason === "error"`
 - message is **not** context overflow
 - one of:
-  - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
-  - the error is a stale OpenAI Responses replay failure
-  - the normalized `AIError` classification is retryable (including transient transport/provider failures and usage limits)
+   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
+   - the error is a stale OpenAI Responses replay failure
+   - the normalized `AIError` classification is retryable (including transient transport/provider failures and usage limits)
 
 Retry classification runs through `AIError.classifyMessage(...)`, using the persisted `errorId`/status when present and augmenting it from provider-aware message classification. It is not solely a regex policy, although legacy/string-only provider failures still use text classification.
 
@@ -81,7 +81,7 @@ Flow (`#handleRetryableError`):
 7. If the current model's retry budget is exhausted, stop unless a fallback model was found. A fallback receives a fresh retry budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping.
 9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless this is a resolved interrupted tool turn.
-10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
+10.   Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
 ### What resets retry counters
 

@@ -8,15 +8,15 @@ Verified against the OMP `gemma` dialect (`packages/ai/src/dialect/gemma.ts`): t
 
 Gemma 4 wraps each structural element in a paired token. Note the **asymmetric pipe placement** — an opener carries the pipe on the left (`<|x>`) and its closer carries it on the right (`<x|>`):
 
-| Open | Close | Purpose |
-|---|---|---|
-| `<bos>` | — | Beginning of sequence |
-| `<\|turn>` | `<turn\|>` | One conversation turn; the role name is the first line of the body |
-| `<\|tool_call>` | `<tool_call\|>` | One tool **call** emitted by the model |
-| `<\|tool_response>` | `<tool_response\|>` | One tool **result** fed back to the model |
-| `<\|channel>` | `<channel\|>` | Reasoning channel; `<\|channel>thought` opens the model's chain-of-thought (closed by `<channel\|>`) before the visible reply |
-| `<\|"\|>` | `<\|"\|>` | String-literal delimiter (same token on both ends) |
-| `<eos>` | — | End of sequence |
+| Open                | Close               | Purpose                                                                                                                       |
+| ------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `<bos>`             | —                   | Beginning of sequence                                                                                                         |
+| `<\|turn>`          | `<turn\|>`          | One conversation turn; the role name is the first line of the body                                                            |
+| `<\|tool_call>`     | `<tool_call\|>`     | One tool **call** emitted by the model                                                                                        |
+| `<\|tool_response>` | `<tool_response\|>` | One tool **result** fed back to the model                                                                                     |
+| `<\|channel>`       | `<channel\|>`       | Reasoning channel; `<\|channel>thought` opens the model's chain-of-thought (closed by `<channel\|>`) before the visible reply |
+| `<\|"\|>`           | `<\|"\|>`           | String-literal delimiter (same token on both ends)                                                                            |
+| `<eos>`             | —                   | End of sequence                                                                                                               |
 
 Because the string delimiter is a token (`<|"|>`), values may contain raw ASCII quotes and commas without escaping — only a literal `<|"|>` token sequence cannot appear inside a string.
 
@@ -48,21 +48,21 @@ The model emits one call per `<|tool_call>…<tool_call|>` block. The body is `c
 
 Value grammar inside `{…}`:
 
-| Value kind | Encoding | Example |
-|---|---|---|
-| string | `<\|"\|>text<\|"\|>` | `location:<\|"\|>London<\|"\|>` |
-| int / float | bare | `count:42` |
-| bool | bare | `flag:true` |
-| null | bare | `unit:null` |
-| list | `[v,v,…]` | `tags:[<\|"\|>a<\|"\|>,<\|"\|>b<\|"\|>]` |
-| nested object | `{k:v,…}` | `config:{theme:<\|"\|>dark<\|"\|>}` |
+| Value kind    | Encoding             | Example                                  |
+| ------------- | -------------------- | ---------------------------------------- |
+| string        | `<\|"\|>text<\|"\|>` | `location:<\|"\|>London<\|"\|>`          |
+| int / float   | bare                 | `count:42`                               |
+| bool          | bare                 | `flag:true`                              |
+| null          | bare                 | `unit:null`                              |
+| list          | `[v,v,…]`            | `tags:[<\|"\|>a<\|"\|>,<\|"\|>b<\|"\|>]` |
+| nested object | `{k:v,…}`            | `config:{theme:<\|"\|>dark<\|"\|>}`      |
 
 The OMP parser is the streaming `GemmaInbandScanner` (`packages/ai/src/dialect/gemma.ts`), not a flat regex. For each `<|tool_call>` block it:
 
 1. finds the matching `<tool_call|>` close, skipping any `<|"|>…<|"|>` string span so a `<tool_call|>` sequence that appears inside a string value does not end the block early;
 2. matches the `call:NAME{` head, then takes the brace body up to its depth-matched `}`;
 3. splits that body into `key:value` pairs at top-level commas — bracket depth (`[]`, `{}`) and `<|"|>` string spans are skipped — and decodes each value per the grammar above, so nested lists and objects parse correctly (a single-level regex would not).
-Calls are emitted only after the complete close marker arrives; there are no partial-argument events. If the stream is flushed with an unterminated tool block, OMP drops that incomplete block. A syntactically closed block with a missing final argument brace is still parsed from the available body.
+   Calls are emitted only after the complete close marker arrives; there are no partial-argument events. If the stream is flushed with an unterminated tool block, OMP drops that incomplete block. A syntactically closed block with a missing final argument brace is still parsed from the available body.
 
 ## Multiple / parallel tool calls
 
@@ -81,7 +81,7 @@ The Gemma wire form has no dedicated success/error field. OMP renders `isError` 
 
 ## End-to-end example
 
-`renderTranscript` output for a weather query. The system turn also carries the `<tools>` catalog and format guide (see *Tool definitions*, abbreviated here); the model's call merges with its tool response into one `model` turn (response right after the call), and the final answer is the next `model` turn. Turns are emitted back-to-back with no separator — only the `\n` after each role is literal:
+`renderTranscript` output for a weather query. The system turn also carries the `<tools>` catalog and format guide (see _Tool definitions_, abbreviated here); the model's call merges with its tool response into one `model` turn (response right after the call), and the final answer is the next `model` turn. Turns are emitted back-to-back with no separator — only the `\n` after each role is literal:
 
 ```text
 <bos><|turn>system

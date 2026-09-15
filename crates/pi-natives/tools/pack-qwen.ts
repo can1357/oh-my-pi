@@ -107,4 +107,6 @@ const raw = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
 
 const packed = Bun.zstdCompressSync(raw, { level: 19 });
 await Bun.write(OUT, packed);
-console.log(`qwen3: ${entries.length} entries (${dead} dead slots emptied), raw ${raw.length} B -> ${packed.length} B zstd`);
+console.log(
+	`qwen3: ${entries.length} entries (${dead} dead slots emptied), raw ${raw.length} B -> ${packed.length} B zstd`,
+);

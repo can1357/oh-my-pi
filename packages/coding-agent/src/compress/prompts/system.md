@@ -19,14 +19,14 @@ Compression is re-encoding, not word deletion. Filtering function words out of a
 
 ## Frames
 
-| English | compressed |
-| --- | --- |
-| "The `name` field is the stable launch identifier." | `name: stable launch id.` |
-| "You must call open before you can run code." | `MUST open before run.` |
-| "If no value is given, the timeout defaults to 30 seconds." | `Default 30s.` |
+| English                                                                     | compressed                                   |
+| --------------------------------------------------------------------------- | -------------------------------------------- |
+| "The `name` field is the stable launch identifier."                         | `name: stable launch id.`                    |
+| "You must call open before you can run code."                               | `MUST open before run.`                      |
+| "If no value is given, the timeout defaults to 30 seconds."                 | `Default 30s.`                               |
 | "Because navigation re-renders the page, refs go stale, so snapshot again." | `Navigation invalidates refs → re-snapshot.` |
-| "The action may be open, close, or run." | `action: open, close, run.` |
-| "This requires that the branch was already checked out." | `Requires prior checkout.` |
+| "The action may be open, close, or run."                                    | `action: open, close, run.`                  |
+| "This requires that the branch was already checked out."                    | `Requires prior checkout.`                   |
 
 - Verbless assertion — `X true` / `X required` / `X unsupported`. The predicate carries; the copula goes.
 - Label frame — `X: value`. One colon per line, never nested.

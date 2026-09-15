@@ -10,7 +10,7 @@ Select the dialect in `~/.omp/agent/config.yml`, project config, or an overlay:
 
 ```yaml
 tools:
-  format: xml
+   format: xml
 ```
 
 `tools.format: xml` forces the generic XML owned dialect for the session. `auto` does **not** choose generic XML as its unknown-family fallback: when a model has `supportsTools: false`, the resolver chooses the known model-family dialect or GLM if there is no specific affinity. Use `xml` explicitly when this grammar is required. See [`tools.format`](../settings.md#tools-and-approvals).
@@ -37,11 +37,11 @@ One call is one invoke:
 <invoke name="read"><parameter name="path">src/main.ts</parameter><parameter name="count">40</parameter></invoke>
 ```
 
-| Element | Meaning |
-| --- | --- |
-| `<invoke name="TOOL">…</invoke>` | One tool call. The prompt contract requires a listed tool name. |
-| `<parameter name="ARG">VALUE</parameter>` | One named argument. |
-| `<tool_calls>…</tool_calls>` | Optional model-emitted wrapper accepted by the guide/scanner; OMP's renderer does not add it. |
+| Element                                   | Meaning                                                                                       |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `<invoke name="TOOL">…</invoke>`          | One tool call. The prompt contract requires a listed tool name.                               |
+| `<parameter name="ARG">VALUE</parameter>` | One named argument.                                                                           |
+| `<tool_calls>…</tool_calls>`              | Optional model-emitted wrapper accepted by the guide/scanner; OMP's renderer does not add it. |
 
 `renderAssistantToolCalls` emits consecutive invokes separated by newlines, with no outer wrapper. The default scanner also accepts `<function_calls>` as a wrapper alias, `antml:`-prefixed variants of the Anthropic tags, and a bare invoke. Its accepted input is deliberately wider than the canonical renderer output.
 
@@ -51,11 +51,11 @@ Tool and parameter names are XML-escaped when OMP renders attributes. Parameter 
 
 The renderer uses the supplied tool schema to decide whether a value is a literal string:
 
-| Declared/value kind | Rendered body | Default scanner result |
-| --- | --- | --- |
-| Schema-declared string whose runtime value is a string | Verbatim, whitespace preserved | Verbatim string |
-| Number, boolean, `null`, array, or object | JSON | Parsed JSON value |
-| Runtime string not identified as a string argument | JSON string, including quotes | Parsed string |
+| Declared/value kind                                    | Rendered body                  | Default scanner result |
+| ------------------------------------------------------ | ------------------------------ | ---------------------- |
+| Schema-declared string whose runtime value is a string | Verbatim, whitespace preserved | Verbatim string        |
+| Number, boolean, `null`, array, or object              | JSON                           | Parsed JSON value      |
+| Runtime string not identified as a string argument     | JSON string, including quotes  | Parsed string          |
 
 Example:
 
@@ -125,10 +125,10 @@ Visible prose may appear before or between unwrapped invokes. Inside a recognize
 
 `XmlInbandScanner` delegates to one of two scanners according to `InbandScannerOptions.xmlTagset`:
 
-| `xmlTagset` | Scanner | Accepted call grammar | Argument rule |
-| --- | --- | --- | --- |
-| omitted or `anthropic` | `AnthropicInbandScanner` | Plain/`antml:` `<invoke>/<parameter>`, optionally inside `<tool_calls>` or `<function_calls>` | Tool schema determines strings; `string` attribute can override |
-| `dsml` | `DeepSeekInbandScanner` | Pipe-wrapped DSML envelope and invokes (plus that scanner's DeepSeek token grammar) | Parameters default to strings; only `string="false"` requests JSON coercion |
+| `xmlTagset`            | Scanner                  | Accepted call grammar                                                                         | Argument rule                                                               |
+| ---------------------- | ------------------------ | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| omitted or `anthropic` | `AnthropicInbandScanner` | Plain/`antml:` `<invoke>/<parameter>`, optionally inside `<tool_calls>` or `<function_calls>` | Tool schema determines strings; `string` attribute can override             |
+| `dsml`                 | `DeepSeekInbandScanner`  | Pipe-wrapped DSML envelope and invokes (plus that scanner's DeepSeek token grammar)           | Parameters default to strings; only `string="false"` requests JSON coercion |
 
 A direct API consumer can request DSML parsing:
 
@@ -136,8 +136,8 @@ A direct API consumer can request DSML parsing:
 import { createInbandScanner } from "@oh-my-pi/pi-ai/dialect";
 
 const scanner = createInbandScanner("xml", {
-  xmlTagset: "dsml",
-  parseThinking: true,
+	xmlTagset: "dsml",
+	parseThinking: true,
 });
 ```
 

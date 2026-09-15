@@ -29,9 +29,7 @@ description = "Strip spinner residue from ollama run, keep the full response"
 match_command = "^ollama$"
 match_subcommand = "^run$"
 strip_ansi = true
-strip_lines_matching = [
-	"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\\s]*$",
-]
+strip_lines_matching = ["^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\\s]*$"]
 
 [[tests.ollama]]
 name = "strips pull progress keeps success"

@@ -31,23 +31,23 @@ fallback is used when that role is unset.
   adopts the winner. `ping` returns a launch tag (`<omp version>|onnx|<device>|<dtype>` or
   `mlx|<mlx-lm version>|<script crc>`), so an omp upgrade or a changed
   `providers.tinyModelDevice`/`Dtype` tells the running worker to shut down and respawns it.
-  Two concurrent instances with *conflicting* device settings would keep replacing each other's
+  Two concurrent instances with _conflicting_ device settings would keep replacing each other's
   worker, so agree on one. The protocol is message-level (`load`, `chat` with messages / prefill /
   stop / max tokens); prompt construction and title extraction live in the client so both worker
   kinds are interchangeable.
 - **Device policy**: local tiny models default to CPU-only inference and retry once on CPU if an
   explicit accelerated provider cannot initialize.
-  - Pick a provider persistently with the `providers.tinyModelDevice` setting (`default` keeps CPU),
-    or per-run with the `PI_TINY_DEVICE` env var (which overrides the setting).
-  - Accepted values are `cpu`, `gpu`, `mlx`/`metal`, `webgpu`, `auto`, `cuda`, `dml`, `coreml`,
-    `wasm`, `webnn`, `webnn-gpu`, `webnn-cpu`, and `webnn-npu`.
-  - Direct `coreml` remains opt-in via `PI_TINY_DEVICE=coreml`; it is not part of the default because
-    cached decoder-LLM ONNX loads can fail during session initialization.
-  - WebGPU/Metal works for the single-process eval harness, but the production worker forces
-    Darwin `gpu`/`webgpu`/`auto` requests back to CPU because ONNX Runtime/Bun currently
-    hard-crashes on worker teardown after WebGPU inference.
-  - Use `providers.tinyModelDevice` or `PI_TINY_DEVICE` only when explicitly opting out of the CPU
-    default.
+   - Pick a provider persistently with the `providers.tinyModelDevice` setting (`default` keeps CPU),
+     or per-run with the `PI_TINY_DEVICE` env var (which overrides the setting).
+   - Accepted values are `cpu`, `gpu`, `mlx`/`metal`, `webgpu`, `auto`, `cuda`, `dml`, `coreml`,
+     `wasm`, `webnn`, `webnn-gpu`, `webnn-cpu`, and `webnn-npu`.
+   - Direct `coreml` remains opt-in via `PI_TINY_DEVICE=coreml`; it is not part of the default because
+     cached decoder-LLM ONNX loads can fail during session initialization.
+   - WebGPU/Metal works for the single-process eval harness, but the production worker forces
+     Darwin `gpu`/`webgpu`/`auto` requests back to CPU because ONNX Runtime/Bun currently
+     hard-crashes on worker teardown after WebGPU inference.
+   - Use `providers.tinyModelDevice` or `PI_TINY_DEVICE` only when explicitly opting out of the CPU
+     default.
 - **MLX backend (Apple silicon)**: `PI_TINY_DEVICE=mlx` (or `metal`) swaps the worker itself, not
   the ONNX provider: the per-model worker is `mlx-server.py` running from a pinned `mlx-lm` venv
   that omp installs under `~/.omp/agent/cache/tiny-mlx-runtime/` on first use (via `uv`, else
@@ -70,13 +70,13 @@ fallback is used when that role is unset.
 - **Load-time correction (important).** An earlier belief that "q4 >=1B models take minutes to load"
   was a **measurement artifact** caused by running ~5 multi-GB HuggingFace downloads in parallel
   (I/O saturation). Clean, isolated **warm** loads are all sub-3s:
-  - TinyLlama-1.1B q4: ~0.5s
-  - Llama-3.2-1B q4: ~2.8s (`graphOpt=all`) / ~0.5s (`disabled`)
-  - LFM2-1.2B q4: ~0.36s
-  - Qwen2.5-1.5B q4: ~1.5s
-  - Qwen3-1.7B q4: ~1.6s
-  - gemma-3-1b q4: ~1.1s
-  - Conclusion: **1B–1.7B models are viable on CPU.**
+   - TinyLlama-1.1B q4: ~0.5s
+   - Llama-3.2-1B q4: ~2.8s (`graphOpt=all`) / ~0.5s (`disabled`)
+   - LFM2-1.2B q4: ~0.36s
+   - Qwen2.5-1.5B q4: ~1.5s
+   - Qwen3-1.7B q4: ~1.6s
+   - gemma-3-1b q4: ~1.1s
+   - Conclusion: **1B–1.7B models are viable on CPU.**
 - **`session_options.graphOptimizationLevel`** trades load vs inference speed: `disabled` = fastest
   load, slightly slower inference; `all` = default.
 - **First run** downloads weights from the HF Hub to a cache dir (q4 weights ~150MB–1.1GB depending
@@ -105,10 +105,10 @@ fallback is used when that role is unset.
 **Replacement benchmark** (30 recent first-session prompts, q4 CPU, no examples):
 
 | Model              | Cache | Warm mean / p95 | 3–7 words | Observed tradeoff                               |
-| ------------------ | ----: | --------------: | ----------: | ----------------------------------------------- |
-| LFM2.5-230M        | 214MB |      93 / 194ms |       21/28 | Best semantic balance; occasional generic title |
-| Falcon-H1-Tiny-90M | 147MB |     117 / 174ms |       17/29 | Smallest; lower fidelity on complex inputs       |
-| LFM2.5-350M        | 292MB |     166 / 266ms |        4/30 | Aggressively terse, often a one-word label       |
+| ------------------ | ----: | --------------: | --------: | ----------------------------------------------- |
+| LFM2.5-230M        | 214MB |      93 / 194ms |     21/28 | Best semantic balance; occasional generic title |
+| Falcon-H1-Tiny-90M | 147MB |     117 / 174ms |     17/29 | Smallest; lower fidelity on complex inputs      |
+| LFM2.5-350M        | 292MB |     166 / 266ms |      4/30 | Aggressively terse, often a one-word label      |
 
 **Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`.
 **Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2.5-230m`.

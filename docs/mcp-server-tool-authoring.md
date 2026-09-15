@@ -236,21 +236,21 @@ After changes, controller calls `#reloadMCP()`:
 Common error strings users/operators see:
 
 - add/update validation failures:
-  - `Invalid server config: ...`
-  - `Server "<name>" already exists in <path>`
+   - `Invalid server config: ...`
+   - `Server "<name>" already exists in <path>`
 - quick-add argument issues:
-  - `Use either --url or -- <command...>, not both.`
-  - `--token requires --url (HTTP/SSE transport).`
+   - `Use either --url or -- <command...>, not both.`
+   - `--token requires --url (HTTP/SSE transport).`
 - connect/test failures:
-  - `Failed to connect to "<name>": <message>`
-  - timeout help text suggests increasing timeout
-  - auth help text for `401/403`
+   - `Failed to connect to "<name>": <message>`
+   - timeout help text suggests increasing timeout
+   - auth help text for `401/403`
 - auth/OAuth flows:
-  - `Authentication required ... OAuth endpoints could not be discovered`
-  - `OAuth flow timed out. Please try again.`
-  - `OAuth authentication failed: ...`
+   - `Authentication required ... OAuth endpoints could not be discovered`
+   - `OAuth flow timed out. Please try again.`
+   - `OAuth authentication failed: ...`
 - disabled server usage:
-  - `Server "<name>" is disabled. Run /mcp enable <name> first.`
+   - `Server "<name>" is disabled. Run /mcp enable <name> first.`
 
 Bad source JSON in discovery is generally handled as warnings/logs; config-writer paths throw explicit errors.
 

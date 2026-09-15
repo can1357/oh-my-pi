@@ -20,9 +20,9 @@ The critical distinction: **notebook support is file conversion/editing, not not
 
 - `read` treats `.ipynb` files as notebooks unless the selector is `:raw`.
 - The default notebook view is editable text with markers:
-  - `# %% [code] cell:N`
-  - `# %% [markdown] cell:N`
-  - `# %% [raw] cell:N`
+   - `# %% [code] cell:N`
+   - `# %% [markdown] cell:N`
+   - `# %% [raw] cell:N`
 - Line selectors and multi-range selectors operate on that virtual text.
 - The edit pipeline round-trips virtual text back to notebook JSON through `serialize_edited_notebook_text(...)`.
 - Existing notebook metadata is preserved when a marker references an existing unused `cell:N`; new cells get fresh empty metadata.
@@ -90,14 +90,14 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 `PythonKernelMode`:
 
 - `session` (default)
-  - kernels are cached by `(session id, cwd, interpreter)`
-  - multiple owners can share a retained kernel for the same key
-  - execution is serialized by the tool's exclusive concurrency and backend execution path
-  - dead kernels are replaced before execution
+   - kernels are cached by `(session id, cwd, interpreter)`
+   - multiple owners can share a retained kernel for the same key
+   - execution is serialized by the tool's exclusive concurrency and backend execution path
+   - dead kernels are replaced before execution
 - `per-call`
-  - creates a subprocess for the request
-  - executes
-  - always shuts down the subprocess in `finally`
+   - creates a subprocess for the request
+   - executes
+   - always shuts down the subprocess in `finally`
 
 ## Reset behavior
 

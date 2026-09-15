@@ -192,8 +192,8 @@ Broker clients can restrict their visible OAuth accounts by setting `OMP_AUTH_BR
 
 ```json
 {
-  "anthropic": ["email:alice@example.com|org:org-team"],
-  "openai-codex": []
+	"anthropic": ["email:alice@example.com|org:org-team"],
+	"openai-codex": []
 }
 ```
 

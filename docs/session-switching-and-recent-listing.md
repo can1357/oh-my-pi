@@ -176,11 +176,11 @@ Lifecycle/state transition:
 7. emit `session_switch`, replace messages, reset advisor session state, and sync todos
 8. close provider sessions for a different session, or for a same-session reload whose replay changed
 9. restore the first available recorded model in role/default fallback order
-10. if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
-11. restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
-12. reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
-13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
-`switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
+10.   if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
+11.   restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
+12.   reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
+13.   restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
+      `switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
 
 Any failure after the snapshot restores the previous manager and runtime state, reconnects/reconciles it, marks the bash transition failed, then rethrows.
 

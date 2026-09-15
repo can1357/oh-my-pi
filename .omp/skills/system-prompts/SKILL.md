@@ -13,27 +13,27 @@ Small models (≤2B; tiny/on-device, e.g. LFM2): MUST read [small-models.md](sma
 
 Tags: authoritative, literal structural markers; meaning exactly matches name. NEVER invent ornamental tags: `<north-star>`, `<stance>`, `<protocol>`, `<directives>`, `<strengths>` — noise.
 
-|Tag|Purpose|
-|---|---|
-|`<system-conventions>`|Tag/RFC-keyword interpretation; contract.|
-|`<stakes>`|Correctness importance; domain framing.|
-|`<communication>`|Voice, tone, response shape.|
-|`<critical>`|Inviolable rules; place at START and END.|
-|`<completeness>`|Done definition; anti-shrink rules.|
-|`<yielding>`|Pre-yield checklist; block conditions.|
-|`<workflow>`|Numbered phases: scope → edit → decompose → work → verify.|
+| Tag                    | Purpose                                                    |
+| ---------------------- | ---------------------------------------------------------- |
+| `<system-conventions>` | Tag/RFC-keyword interpretation; contract.                  |
+| `<stakes>`             | Correctness importance; domain framing.                    |
+| `<communication>`      | Voice, tone, response shape.                               |
+| `<critical>`           | Inviolable rules; place at START and END.                  |
+| `<completeness>`       | Done definition; anti-shrink rules.                        |
+| `<yielding>`           | Pre-yield checklist; block conditions.                     |
+| `<workflow>`           | Numbered phases: scope → edit → decompose → work → verify. |
 
 ## Normative Language
 
 RFC 2119: full caps, no bold; all-caps form is the marker.
 
-|Keyword|Meaning|Replaces|
-|---|---|---|
-|MUST / REQUIRED|Absolute requirement|"always", "make sure", "ensure"|
-|NEVER (= MUST NOT)|Absolute prohibition|"do not", "don't"|
-|SHOULD / RECOMMENDED|Strong preference; known-tradeoff deviation allowed|"prefer", "it's best to"|
-|AVOID (= SHOULD NOT)|Strong discouragement|"try not to"|
-|MAY / OPTIONAL|Truly optional|"can", "you could"|
+| Keyword              | Meaning                                             | Replaces                        |
+| -------------------- | --------------------------------------------------- | ------------------------------- |
+| MUST / REQUIRED      | Absolute requirement                                | "always", "make sure", "ensure" |
+| NEVER (= MUST NOT)   | Absolute prohibition                                | "do not", "don't"               |
+| SHOULD / RECOMMENDED | Strong preference; known-tradeoff deviation allowed | "prefer", "it's best to"        |
+| AVOID (= SHOULD NOT) | Strong discouragement                               | "try not to"                    |
+| MAY / OPTIONAL       | Truly optional                                      | "can", "you could"              |
 
 Aliases: prefer `NEVER` to `MUST NOT`; `AVOID` to `SHOULD NOT`. Both: single-token in cl100k/o200k; identical authority.
 
@@ -88,6 +88,7 @@ Negation: pair positive alternative when non-obvious; otherwise `NEVER X.` alone
 “Lost in the Middle”: start/end retain; middle degrades ~20%. Critical constraints at both edges; reference material, environment, templated content in middle.
 
 Front matter:
+
 1. Role + agency one-liner (`You are THE staff engineer…`).
 2. `<system-conventions>` — RFC contract, tag semantics.
 3. `<stakes>` — importance.
@@ -95,6 +96,7 @@ Front matter:
 5. `<critical>` — top-priority rules.
 
 Back matter:
+
 1. Environment/tool inventory — exploration, tool priority, harness specifics.
 2. Contract — completeness, yielding, workflow.
 3. Prompt >~150 lines: repeat most important `<critical>` rule.
@@ -111,19 +113,19 @@ Live-system-prompt patterns:
 
 ## Anti-Patterns
 
-|Pattern|Problem|
-|---|---|
-|Politeness padding (`"Would you be so kind…"`)|+perplexity, −accuracy|
-|Bribes (`"I'll tip $2000"`)|No improvement; sometimes worse|
-|Few-shot on advanced models + clear task|Noise/bias|
-|Explicit CoT on reasoning models (o1/o3)|Conflicts with internal reasoning|
-|`"Be efficient with tokens"`|Premature task abandonment|
-|`"Don't do X"` without alternative|`"Always do Y"` processes better|
-|Self-critique without external feedback|Detection bottleneck, not correction|
-|Critical instructions only in middle|20%+ degradation vs edges|
-|Restating bold lead in body|Token waste; AI-padding signal|
-|Inventing emphasis tags|Tags have semantics; ornament dilutes|
-|Lowercase RFC keywords|All-caps is marker; lowercase ordinary prose|
+| Pattern                                        | Problem                                      |
+| ---------------------------------------------- | -------------------------------------------- |
+| Politeness padding (`"Would you be so kind…"`) | +perplexity, −accuracy                       |
+| Bribes (`"I'll tip $2000"`)                    | No improvement; sometimes worse              |
+| Few-shot on advanced models + clear task       | Noise/bias                                   |
+| Explicit CoT on reasoning models (o1/o3)       | Conflicts with internal reasoning            |
+| `"Be efficient with tokens"`                   | Premature task abandonment                   |
+| `"Don't do X"` without alternative             | `"Always do Y"` processes better             |
+| Self-critique without external feedback        | Detection bottleneck, not correction         |
+| Critical instructions only in middle           | 20%+ degradation vs edges                    |
+| Restating bold lead in body                    | Token waste; AI-padding signal               |
+| Inventing emphasis tags                        | Tags have semantics; ornament dilutes        |
+| Lowercase RFC keywords                         | All-caps is marker; lowercase ordinary prose |
 
 ## Checklist
 

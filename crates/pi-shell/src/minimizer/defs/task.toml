@@ -5,10 +5,7 @@
 description = "Compact go-task task runner output"
 match_command = "^task$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^task: Task \".*\" is up to date$",
-]
+strip_lines_matching = ["^\\s*$", "^task: Task \".*\" is up to date$"]
 truncate_lines_at = 250
 max_lines = 80
 on_empty = "task: ok"

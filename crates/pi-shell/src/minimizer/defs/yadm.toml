@@ -4,10 +4,7 @@
 description = "Compact yadm output"
 match_command = "^yadm$"
 strip_ansi = true
-strip_lines_matching = [
-	"^\\s*$",
-	"^\\s*\\(use \"",
-]
+strip_lines_matching = ["^\\s*$", "^\\s*\\(use \""]
 truncate_lines_at = 200
 max_lines = 80
 on_empty = "yadm: clean"
