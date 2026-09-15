@@ -13,16 +13,24 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-type GateGlobal = typeof globalThis & { __ompModelSelectGate?: Promise<void> };
-
+type GateGlobal = typeof globalThis & {
+	__ompModelSelectGate?: Promise<void>;
+	/** Park only the handler for this model id; other events pass through. */
+	__ompModelSelectParkFor?: string;
+};
 /**
- * Deterministic delivery signal: resolved by the handler itself, so positive
- * assertions await the real emit instead of a guessed delay.
+ * Deterministic delivery signals: one resolver per expected event, resolved
+ * by the handler itself, so positive assertions await the real emits instead
+ * of a guessed delay.
  */
-let delivery: PromiseWithResolvers<void>;
+let deliveries: Array<PromiseWithResolvers<void>> = [];
 
-function armDelivery(): void {
-	delivery = Promise.withResolvers<void>();
+function armDelivery(count = 1): void {
+	deliveries = Array.from({ length: count }, () => Promise.withResolvers<void>());
+}
+
+async function waitForDeliveries(): Promise<void> {
+	await Promise.all(deliveries.map(d => d.promise));
 }
 
 /** Drain the microtask queue so a wrongly-fired event would land; no wall-clock wait. */
@@ -52,11 +60,15 @@ describe("AgentSession model_select extension event", () => {
 		const extension = await loadExtensionFromFactory(
 			pi => {
 				pi.on("model_select", async event => {
-					// Park on an optional gate: proves the switch never waits on us.
-					const gate = (globalThis as GateGlobal).__ompModelSelectGate;
-					if (gate) await gate;
+					// Park on the optional gate — either unconditionally (detached
+					// test) or only for a chosen model id (FIFO test) — proving
+					// switches never wait on handlers.
+					const gateGlobal = globalThis as GateGlobal;
+					const park = gateGlobal.__ompModelSelectParkFor;
+					const gate = gateGlobal.__ompModelSelectGate;
+					if (gate && (park === undefined || park === event.model.id)) await gate;
 					events.push(event);
-					delivery.resolve();
+					deliveries[events.length - 1]?.resolve();
 				});
 			},
 			tempDir.path(),
@@ -97,7 +109,9 @@ describe("AgentSession model_select extension event", () => {
 		try {
 			await session.dispose();
 		} finally {
-			(globalThis as GateGlobal).__ompModelSelectGate = undefined;
+			const gateGlobal = globalThis as GateGlobal;
+			gateGlobal.__ompModelSelectGate = undefined;
+			gateGlobal.__ompModelSelectParkFor = undefined;
 		}
 	});
 
@@ -111,7 +125,7 @@ describe("AgentSession model_select extension event", () => {
 		const nextModel = bundledAnthropicModel("claude-sonnet-4-6");
 
 		await session.setModel(nextModel);
-		await delivery.promise;
+		await waitForDeliveries();
 
 		expect(events).toHaveLength(1);
 		expect(events[0]?.source).toBe("set");
@@ -127,7 +141,7 @@ describe("AgentSession model_select extension event", () => {
 		const nextModel = bundledAnthropicModel("claude-sonnet-4-6");
 
 		await session.setModel(nextModel);
-		await delivery.promise;
+		await waitForDeliveries();
 
 		await session.setModel(nextModel);
 		await drainMicrotasks();
@@ -139,7 +153,7 @@ describe("AgentSession model_select extension event", () => {
 	it("labels cycleModel() (RPC cycle_model / SDK) as cycle", async () => {
 		const result = await session.cycleModel("forward");
 		if (!result) throw new Error("cycleModel returned no result");
-		await delivery.promise;
+		await waitForDeliveries();
 
 		expect(events).toHaveLength(1);
 		expect(events[0]?.source).toBe("cycle");
@@ -155,10 +169,35 @@ describe("AgentSession model_select extension event", () => {
 		await session.setModel(bundledAnthropicModel("claude-sonnet-4-6"));
 
 		gate.resolve();
-		await delivery.promise;
+		await waitForDeliveries();
 
 		expect(events).toHaveLength(1);
 		expect(events[0]?.source).toBe("set");
+	});
+
+	it("delivers rapid successive switches in FIFO order", async () => {
+		armDelivery(2);
+		const second = bundledAnthropicModel("claude-sonnet-4-6");
+		const third = bundledAnthropicModel("claude-opus-4-5");
+		const gate = Promise.withResolvers<void>();
+		const gateGlobal = globalThis as GateGlobal;
+		gateGlobal.__ompModelSelectGate = gate.promise;
+		gateGlobal.__ompModelSelectParkFor = second.id;
+
+		// Two switches complete while the first handler is still parked. The
+		// second notification must queue behind the first (FIFO): without
+		// serialization the second event's handler starts while the first
+		// handler is still parked, and the first event's delivery order is
+		// no longer observable.
+		await session.setModel(second);
+		await session.setModel(third);
+
+		gate.resolve();
+		await waitForDeliveries();
+
+		expect(events.map(e => e.model.id)).toEqual([second.id, third.id]);
+		expect(events[0]?.previousModel?.id).toBe("claude-sonnet-4-5");
+		expect(events[1]?.previousModel?.id).toBe(second.id);
 	});
 });
 
