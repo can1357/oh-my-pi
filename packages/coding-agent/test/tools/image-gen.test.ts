@@ -941,4 +941,452 @@ describe("imageGenTool", () => {
 		// DeepInfra was credentialed but must not receive the edit request.
 		expect(requestUrls).toEqual([]);
 	});
+	it("routes MiniMax image generation through the global image endpoint with Token Plan credentials", async () => {
+		setImageProviderOrder(["minimax"]);
+		let requestUrl: string | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		const captured: { authorization: string | null } = { authorization: null };
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestUrl = input.toString();
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			captured.authorization = new Headers(init?.headers).get("authorization");
+			return new Response(
+				JSON.stringify({
+					data: { image_base64: [Buffer.from("fake-jpeg").toString("base64")] },
+					base_resp: { status_code: 0, status_msg: "" },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "minimax-code" ? "test-minimax-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-minimax-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-minimax-t2i",
+			{ subject: "a cat", aspect_ratio: "3:2" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toBe("https://api.minimax.io/v1/image_generation");
+		expect(captured.authorization).toBe("Bearer test-minimax-key");
+		expect(requestBody).toMatchObject({
+			model: "image-01",
+			prompt: "a cat.",
+			n: 1,
+			response_format: "base64",
+			aspect_ratio: "3:2",
+		});
+		expect(requestBody).not.toHaveProperty("subject_reference");
+		expect(result.details?.provider).toBe("minimax");
+		expect(result.details?.model).toBe("image-01");
+		expect(result.details?.imageCount).toBe(1);
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(savedPath.endsWith(".jpg")).toBe(true);
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-jpeg"));
+	});
+
+	it("sends exactly one character subject_reference for MiniMax edit requests", async () => {
+		setImageProviderOrder(["minimax"]);
+		let requestBody: Record<string, unknown> | undefined;
+
+		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				JSON.stringify({
+					data: { image_base64: [Buffer.from("fake-jpeg").toString("base64")] },
+					base_resp: { status_code: 0, status_msg: "" },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "minimax-code" ? "test-minimax-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-minimax-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const referenceData = Buffer.from("reference").toString("base64");
+		const result = await imageGenTool.execute(
+			"call-minimax-i2i",
+			{
+				subject: "the cat",
+				changes: ["make it noir"],
+				input: [{ data: referenceData, mime_type: "image/jpeg" }],
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		const references = requestBody?.subject_reference as Array<Record<string, unknown>> | undefined;
+		expect(references).toHaveLength(1);
+		expect(references?.[0]).toEqual({
+			type: "character",
+			image_file: `data:image/jpeg;base64,${referenceData}`,
+		});
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	it("routes China Token Plan credentials to the canonical China host", async () => {
+		setImageProviderOrder(["minimax"]);
+		let requestUrl: string | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			requestUrl = input.toString();
+			return new Response(
+				JSON.stringify({
+					data: { image_base64: [Buffer.from("fake-jpeg").toString("base64")] },
+					base_resp: { status_code: 0, status_msg: "" },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "minimax-code-cn" ? "test-minimax-cn-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-minimax-cn-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-minimax-cn", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl?.startsWith("https://api.minimaxi.com/")).toBe(true);
+		expect(result.details?.provider).toBe("minimax");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	it("treats HTTP 200 base_resp failures as provider failures and falls through", async () => {
+		setImageProviderOrder(["minimax"]);
+		const fetchMock: typeof fetch = (async () =>
+			new Response(JSON.stringify({ base_resp: { status_code: 1004, status_msg: "login fail" } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			})) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "minimax-code" ? "test-minimax-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "test-minimax-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const error: unknown = await imageGenTool
+			.execute("call-minimax-error", { subject: "a cat" }, undefined, ctx)
+			.then(
+				() => null,
+				err => err,
+			);
+
+		// A plain Error would propagate unwrapped; landing in the AggregateError
+		// proves the base_resp envelope maps to ProviderHttpError.
+		expect(error).toBeInstanceOf(AggregateError);
+		const aggregate = error as AggregateError;
+		expect(aggregate.message).toContain("minimax");
+		expect(aggregate.errors).toHaveLength(1);
+		expect(aggregate.errors[0].message).toContain("status_code 1004");
+	});
+
+	it("rejects more than one reference image before contacting MiniMax", async () => {
+		setImageProviderOrder(["minimax"]);
+		const requestUrls: string[] = [];
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			requestUrls.push(input.toString());
+			throw new Error(`Unexpected provider request: ${input.toString()}`);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "minimax-code" ? "test-minimax-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "test-minimax-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await expect(
+			imageGenTool.execute(
+				"call-minimax-cap",
+				{
+					subject: "the cat",
+					changes: ["make it noir"],
+					input: [
+						{ data: Buffer.from("a").toString("base64"), mime_type: "image/png" },
+						{ data: Buffer.from("b").toString("base64"), mime_type: "image/png" },
+					],
+				},
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow("MiniMax image edits accept a single reference image; got 2.");
+		expect(requestUrls).toEqual([]);
+	});
+	it("maps image_size to explicit dimensions and omits aspect_ratio", async () => {
+		setImageProviderOrder(["minimax"]);
+		let requestBody: Record<string, unknown> | undefined;
+
+		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				JSON.stringify({
+					data: { image_base64: [Buffer.from("fake-jpeg").toString("base64")] },
+					base_resp: { status_code: 0, status_msg: "" },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "minimax-code" ? "test-minimax-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-minimax-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-minimax-size",
+			{ subject: "a cat", image_size: "1536x1024" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		// aspect_ratio wins server-side, so an explicit image_size must not
+		// ship a default aspect ratio alongside the pixel dimensions.
+		expect(requestBody?.width).toBe(1536);
+		expect(requestBody?.height).toBe(1024);
+		expect(requestBody).not.toHaveProperty("aspect_ratio");
+		expect(result.details?.imageCount).toBe(1);
+	});
+	it("continues past MiniMax to an edit-capable provider for multi-image edits", async () => {
+		setImageProviderOrder(["minimax", "gemini"]);
+		const requestUrls: string[] = [];
+		const geminiImage = Buffer.from("gemini-noir-edit").toString("base64");
+
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.includes("generativelanguage.googleapis.com")) {
+				return new Response(
+					JSON.stringify({
+						candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: geminiImage } }] } }],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected provider request: ${url}`);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) => {
+					if (provider === "minimax-code") return "test-minimax-key";
+					if (provider === "google") return "test-gemini-token";
+					return undefined;
+				},
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: (provider: string) => async () =>
+					provider === "minimax-code" ? "test-minimax-key" : "test-gemini-token",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-minimax-multiref-fallback",
+			{
+				subject: "the cat",
+				changes: ["make it noir"],
+				input: [
+					{ data: Buffer.from("a").toString("base64"), mime_type: "image/png" },
+					{ data: Buffer.from("b").toString("base64"), mime_type: "image/png" },
+				],
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		// MiniMax must never see a multi-reference edit; Gemini serves it instead.
+		expect(requestUrls.every(url => !url.includes("minimax"))).toBe(true);
+		expect(result.details?.provider).toBe("gemini");
+		expect(result.details?.imageCount).toBe(1);
+	});
+	it("keeps the MiniMax edit limit visible when a later provider also fails", async () => {
+		setImageProviderOrder(["minimax", "gemini"]);
+
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			if (url.includes("generativelanguage.googleapis.com")) {
+				return new Response("boom", { status: 500 });
+			}
+			throw new Error(`Unexpected provider request: ${url}`);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) => {
+					if (provider === "minimax-code") return "test-minimax-key";
+					if (provider === "google") return "test-gemini-token";
+					return undefined;
+				},
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: (provider: string) => async () =>
+					provider === "minimax-code" ? "test-minimax-key" : "test-gemini-token",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const error: unknown = await imageGenTool
+			.execute(
+				"call-minimax-limit-aggregate",
+				{
+					subject: "the cat",
+					changes: ["make it noir"],
+					input: [
+						{ data: Buffer.from("a").toString("base64"), mime_type: "image/png" },
+						{ data: Buffer.from("b").toString("base64"), mime_type: "image/png" },
+					],
+				},
+				undefined,
+				ctx,
+			)
+			.then(
+				() => null,
+				err => err,
+			);
+
+		// The Gemini failure must not bury why MiniMax skipped the request.
+		expect(error).toBeInstanceOf(AggregateError);
+		const aggregate = error as AggregateError;
+		expect(aggregate.message).toContain("gemini");
+		expect(
+			aggregate.errors.some(
+				cause =>
+					cause instanceof Error && cause.message.includes("MiniMax image edits accept a single reference image"),
+			),
+		).toBe(true);
+	});
 });

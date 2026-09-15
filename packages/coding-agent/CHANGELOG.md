@@ -56,6 +56,7 @@
 
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
+- Added MiniMax image generation for `generate_image` (global and China hosts, pay-as-you-go and Token Plan keys) ([#12073](https://github.com/can1357/oh-my-pi/pull/12073) by [@abcfy2](https://github.com/abcfy2)).
 
 ### Changed
 
