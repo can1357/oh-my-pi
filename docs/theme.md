@@ -38,7 +38,7 @@ Color values accept:
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`.
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset/empty keeps the terminal default foreground).
 
 ### Core text and borders (11)
 
@@ -48,9 +48,11 @@ All tokens below are required in `colors` except `thinkingMax`, which is optiona
 
 `selectedBg`, `userMessageBg`, `customMessageBg`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`, `statusLineBg`
 
-### Message/tool text (5)
+### Message/tool text (5 required, 1 optional)
 
-`userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`
+`userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`, optional `assistantMessageText`
+
+`assistantMessageText` colors the assistant reply's plain paragraph prose (markdown sub-elements keep their own `md*` tokens). It is the token that governs assistant prose — `text` does not: `text` is applied at explicit `theme.fg("text", …)` callsites (editor/dialog surfaces), never to assistant message bodies. When `assistantMessageText` is omitted or set to `""`, prose renders in the terminal default foreground exactly as before the token existed. An explicitly installed prose color transform (live-command output) still wins over the token.
 
 ### Markdown (10)
 
@@ -351,7 +353,7 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax`, which falls back to `thinkingXhigh`.
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset keeps the terminal default foreground).
 - `export` and `symbols` are optional.
 - `$schema` in theme JSON is informational; runtime validation is enforced by the ArkType-compatible schema in code (`themeJsonSchema` in `src/modes/theme/schema.ts`).
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
