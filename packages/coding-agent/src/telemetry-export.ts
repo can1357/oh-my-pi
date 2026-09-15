@@ -121,9 +121,16 @@ function signalEnabled(
 	protocolSelection: string | undefined,
 ): boolean {
 	if (exporterSelection) {
+		let hasSelection = false;
+		let hasOtlp = false;
 		for (const entry of exporterSelection.split(",")) {
-			if (entry.trim().toLowerCase() === "none") return false;
+			const selection = entry.trim().toLowerCase();
+			if (!selection) continue;
+			hasSelection = true;
+			if (selection === "none") return false;
+			if (selection === "otlp") hasOtlp = true;
 		}
+		if (hasSelection && !hasOtlp) return false;
 	}
 	if (!endpoint) return false;
 

@@ -180,6 +180,24 @@ const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fro
 ) as unknown as Record<SettingPath, readonly string[]>;
 
 /**
+ * Schema members for each typed group, computed once. `getGroup` is hot during
+ * startup and status rendering; it must not walk the full schema on every
+ * settings instance or effective-layer revision.
+ */
+const SETTING_GROUP_MEMBERS: Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]> = (() => {
+	const members: Partial<Record<GroupPrefix, [suffix: string, path: SettingPath][]>> = {};
+	for (const rawPath in SETTINGS_SCHEMA) {
+		const path = rawPath as SettingPath;
+		const dot = path.indexOf(".");
+		if (dot === -1) continue;
+		const prefix = path.slice(0, dot) as GroupPrefix;
+		const group = members[prefix] ?? (members[prefix] = []);
+		group.push([path.slice(dot + 1), path]);
+	}
+	return members as Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]>;
+})();
+
+/**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
  */
@@ -499,8 +517,12 @@ export class Settings {
 	#overrides: RawSettings = {};
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
+	/** Monotonic revision of merged layers and cwd-scoped resolution. */
+	#revision = 0;
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	/** Typed group snapshots for the current merged layers and cwd scope. */
+	#groupCache = new Map<GroupPrefix, unknown>();
 	#effectiveChangeListeners = new Set<(path: SettingPath, value: unknown, previous: unknown) => void>();
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
@@ -944,6 +966,15 @@ export class Settings {
 	}
 
 	/**
+	 * Monotonic revision for consumers caching derived effective settings.
+	 * Changes after every merged-layer or cwd-scope rebuild, including overlays
+	 * and path-scoped array re-resolution.
+	 */
+	get revision(): number {
+		return this.#revision;
+	}
+
+	/**
 	 * Raw global settings layer (`config.yml`/`config.yaml`), deep-cloned.
 	 *
 	 * Exposes arbitrary namespaced keys (e.g. an extension's own `piVim` block)
@@ -1004,16 +1035,22 @@ export class Settings {
 
 	/**
 	 * Get all settings in a group with full type safety.
+	 *
+	 * The returned snapshot is stable until any effective settings layer or cwd
+	 * scope is rebuilt. Defaults remain instance-local because each member still
+	 * resolves through {@link get}, which clones array/record defaults.
 	 */
 	getGroup<G extends GroupPrefix>(prefix: G): GroupTypeMap[G] {
+		const cached = this.#groupCache.get(prefix);
+		if (cached !== undefined) return cached as GroupTypeMap[G];
+
 		const result: Record<string, unknown> = {};
-		for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
-			if (key.startsWith(`${prefix}.`)) {
-				const suffix = key.slice(prefix.length + 1);
-				result[suffix] = this.get(key);
-			}
+		for (const [suffix, path] of SETTING_GROUP_MEMBERS[prefix] ?? []) {
+			result[suffix] = this.get(path);
 		}
-		return result as unknown as GroupTypeMap[G];
+		const snapshot = Object.freeze(result);
+		this.#groupCache.set(prefix, snapshot);
+		return snapshot as unknown as GroupTypeMap[G];
 	}
 
 	/**
@@ -2008,14 +2045,6 @@ export class Settings {
 		delete raw.collapseChangelog;
 		delete raw["startup.changelogMode"];
 
-		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
-		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {
-			const oldValue = (raw.ask as Record<string, unknown>).timeout as number;
-			if (oldValue > 1000) {
-				(raw.ask as Record<string, unknown>).timeout = Math.round(oldValue / 1000);
-			}
-		}
-
 		// Migrate old flat "theme" string to nested theme.dark/theme.light
 		if (typeof raw.theme === "string") {
 			const oldTheme = raw.theme;
@@ -2985,10 +3014,12 @@ export class Settings {
 	}
 
 	#rebuildMerged(): void {
+		this.#revision++;
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 		this.#resolvedCache.clear();
+		this.#groupCache.clear();
 		this.#editVariantCache = undefined;
 	}
 

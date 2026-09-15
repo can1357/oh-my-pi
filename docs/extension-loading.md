@@ -15,6 +15,7 @@ Extension loading builds a list of module entry files, imports each module with 
 ## Primary implementation files
 
 - `src/extensibility/extensions/loader.ts` — path discovery + import/execution
+- `src/extensibility/extensions/directory-resolution.ts` — shared configured/plugin manifest and directory precedence
 - `src/extensibility/extensions/index.ts` — public exports
 - `src/extensibility/extensions/runner.ts` — runtime/event execution after load
 - `src/discovery/builtin.ts` — native auto-discovery provider for extension modules
@@ -172,7 +173,7 @@ It is used directly as a module entry candidate. Explicit `.ts`, `.js`, `.mjs`, 
 
 Resolution order:
 
-1. `package.json` in that directory with `omp.extensions` (or legacy `pi.extensions`) -> use declared entries
+1. `package.json` in that directory with a non-empty `omp.extensions` (or legacy `pi.extensions`) array -> use declared entries
 2. `index.ts`
 3. `index.js`
 4. Otherwise scan one level for extension entries:
@@ -184,7 +185,8 @@ Rules and constraints:
 
 - no recursive discovery beyond one subdirectory level
 - declared `extensions` manifest entries are resolved relative to that package directory
-- declared entries are included only if file exists/access is allowed
+- a non-empty declared array is authoritative: convention-based index/scan fallback stays suppressed even when every declared entry is missing
+- missing or inaccessible declared entries are skipped individually, so existing entries in a partially missing manifest still load
 - in `*/index.{ts,js}` pairs, TypeScript is preferred over JavaScript
 - symlinks are treated as eligible files/directories
 

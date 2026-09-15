@@ -1,4 +1,5 @@
-import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -630,6 +631,7 @@ export class Editor implements Component, Focusable {
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
+	#textRevision = 0;
 	/** Called for a "marker-sized" paste — the point where the editor would otherwise collapse it
 	 *  into a `[Paste #N]` token (> 10 lines or > 1000 characters). Return `true` to intercept:
 	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
@@ -962,9 +964,7 @@ export class Editor implements Component, Focusable {
 			this.#state.cursorLine = this.#state.lines.length - 1;
 			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
 		}
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 	}
 
 	invalidate(): void {
@@ -1661,9 +1661,7 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 						this.onAutocompleteUpdate?.();
 
-						if (this.onChange) {
-							this.onChange(this.getText());
-						}
+						this.#notifyChange();
 
 						result.onApplied?.();
 
@@ -1737,9 +1735,7 @@ export class Editor implements Component, Focusable {
 							this.#cancelAutocomplete();
 							this.onAutocompleteUpdate?.();
 
-							if (this.onChange) {
-								this.onChange(this.getText());
-							}
+							this.#notifyChange();
 
 							result.onApplied?.();
 							if (shouldChainDirectoryCompletion) {
@@ -2168,7 +2164,7 @@ export class Editor implements Component, Focusable {
 	#afterVimEdit(): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
-		this.onChange?.(this.getText());
+		this.#notifyChange();
 	}
 
 	/**
@@ -2389,6 +2385,16 @@ export class Editor implements Component, Focusable {
 		return this.#state.lines.join("\n");
 	}
 
+	/** Monotonic buffer-content revision for render caches. Cursor-only movement does not advance it. */
+	get textRevision(): number {
+		return this.#textRevision;
+	}
+
+	#notifyChange(text?: string): void {
+		this.#textRevision++;
+		this.onChange?.(text ?? this.getText());
+	}
+
 	/** Whether the buffer text equals `value`, without `getText()`'s full join —
 	 *  O(1) for the hot per-keystroke probes against short single-line values. */
 	textEquals(value: string): boolean {
@@ -2452,7 +2458,7 @@ export class Editor implements Component, Focusable {
 			this.#setCursorCol(col >= end ? col - (end - start) + label.length : start + label.length);
 		}
 		this.#lastAction = null;
-		this.onChange?.(this.getText());
+		this.#notifyChange();
 	}
 
 	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
@@ -2535,9 +2541,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		if (this.#undoStack.length === 0) {
-			if (this.onChange) {
-				this.onChange(this.getText());
-			}
+			this.#notifyChange();
 			return;
 		}
 
@@ -2584,9 +2588,7 @@ export class Editor implements Component, Focusable {
 			line.slice(0, this.#state.cursorCol - removable) + line.slice(this.#state.cursorCol);
 		this.#setCursorCol(this.#state.cursorCol - removable);
 		this.#lastAction = null;
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 	}
 
 	/** Code units of the current volatile speech-to-text preview (see {@link setVolatileText}). */
@@ -2603,7 +2605,7 @@ export class Editor implements Component, Focusable {
 			if (text) this.#insertTextAtCursor(text);
 		});
 		this.#volatileTextLen = text.length;
-		if (!text && this.onChange) this.onChange(this.getText());
+		if (!text) this.#notifyChange();
 	}
 
 	/** Remove the current volatile preview without committing it. */
@@ -2611,7 +2613,7 @@ export class Editor implements Component, Focusable {
 		if (this.#volatileTextLen === 0) return;
 		this.#withUndoSuspended(() => this.#deleteCharsBeforeCursor(this.#volatileTextLen));
 		this.#volatileTextLen = 0;
-		if (this.onChange) this.onChange(this.getText());
+		this.#notifyChange();
 	}
 
 	/** Drop any volatile preview, then insert `text` as a single undoable edit. */
@@ -2620,7 +2622,7 @@ export class Editor implements Component, Focusable {
 		this.#withUndoSuspended(() => this.#deleteCharsBeforeCursor(this.#volatileTextLen));
 		this.#volatileTextLen = 0;
 		if (text) this.#insertTextAtCursor(text);
-		else if (this.onChange) this.onChange(this.getText());
+		else this.#notifyChange();
 	}
 
 	/** Delete `count` UTF-16 code units immediately before the cursor, crossing line
@@ -2680,7 +2682,7 @@ export class Editor implements Component, Focusable {
 		const after = line.slice(this.#state.cursorCol);
 		this.#state.lines[this.#state.cursorLine] = before + replacement.insert + after;
 		this.#setCursorCol(before.length + replacement.insert.length);
-		this.onChange?.(this.getText());
+		this.#notifyChange();
 		if (this.#autocompleteState) {
 			this.#cancelAutocomplete();
 			this.onAutocompleteUpdate?.();
@@ -2706,9 +2708,7 @@ export class Editor implements Component, Focusable {
 		this.#state.lines[this.#state.cursorLine] = before + char + after;
 		this.#setCursorCol(this.#state.cursorCol + char.length);
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 
 		// Synchronous inline replacement (e.g. emoji shortcodes `:joy:` → 😂).
 		// Runs before autocomplete trigger so the popup doesn't briefly chase a
@@ -2917,9 +2917,7 @@ export class Editor implements Component, Focusable {
 		this.#state.cursorLine++;
 		this.#setCursorCol(0);
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 	}
 
 	#shouldSubmitOnBackslashEnter(data: string, kb: KeybindingsManager): boolean {
@@ -2944,7 +2942,7 @@ export class Editor implements Component, Focusable {
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
 
-		if (this.onChange) this.onChange("");
+		this.#notifyChange("");
 		if (this.onSubmit) this.onSubmit(result);
 	}
 
@@ -3047,9 +3045,7 @@ export class Editor implements Component, Focusable {
 			this.#setCursorCol(previousLine.length);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 
 		// Update or re-trigger autocomplete after backspace
 		if (this.#autocompleteState) {
@@ -3223,9 +3219,7 @@ export class Editor implements Component, Focusable {
 		this.#preferredVisualCol = null;
 		Object.assign(this.#state, snapshot);
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 
 		if (this.#autocompleteState) {
 			this.#debouncedUpdateAutocomplete();
@@ -3313,9 +3307,7 @@ export class Editor implements Component, Focusable {
 			this.#setCursorCol((lines[lines.length - 1] || "").length);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 		this.#retriggerAutocompleteAtCursor();
 	}
 
@@ -3420,9 +3412,7 @@ export class Editor implements Component, Focusable {
 
 		this.#recordKill(deletedText, "backward");
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 		this.#retriggerAutocompleteAtCursor();
 	}
 
@@ -3452,9 +3442,7 @@ export class Editor implements Component, Focusable {
 
 		this.#recordKill(deletedText, "forward");
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 		this.#retriggerAutocompleteAtCursor();
 	}
 
@@ -3487,9 +3475,7 @@ export class Editor implements Component, Focusable {
 			this.#recordKill(deletedText, "backward");
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 		this.#retriggerAutocompleteAtCursor();
 	}
 
@@ -3519,9 +3505,7 @@ export class Editor implements Component, Focusable {
 			this.#recordKill(deletedText, "forward");
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 		this.#retriggerAutocompleteAtCursor();
 	}
 
@@ -3559,9 +3543,7 @@ export class Editor implements Component, Focusable {
 			this.#state.lines.splice(this.#state.cursorLine + 1, 1);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.#notifyChange();
 
 		// Update or re-trigger autocomplete after forward delete
 		if (this.#autocompleteState) {
@@ -4041,7 +4023,7 @@ export class Editor implements Component, Focusable {
 		this.#lastAction = null;
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
-		this.onChange?.(this.getText());
+		this.#notifyChange();
 	}
 	async #handleSlashCommandCompletion(): Promise<void> {
 		await this.#tryTriggerAutocomplete();

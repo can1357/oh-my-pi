@@ -3725,9 +3725,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.12.4"
+version = "3.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b23a554b38b32ad84fb055c794ca2e36824a15a43efda8e549766e3a99c80a9b"
+checksum = "6d7a15d966d18c9e245708eb4aa10d2c395dd7a1eae5776d83b0f31a82fb2ecc"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -6055,7 +6055,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6125,7 +6125,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6210,11 +6210,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.1.22"
+version = "18.2.0"
 
 [[package]]
 name = "pi-edit"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6233,7 +6233,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6245,7 +6245,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6328,7 +6328,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6356,7 +6356,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6371,7 +6371,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "bytes",
  "flume",
@@ -6385,7 +6385,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.22"
+version = "18.2.0"
 dependencies = [
  "dashmap",
  "globset",

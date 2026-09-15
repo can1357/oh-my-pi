@@ -8,7 +8,8 @@ import {
 	formatNumber,
 	getActiveProfile,
 	getProjectDir,
-	pathIsWithin,
+	normalizePathForComparison,
+	relativePathWithinNormalizedRoot,
 	relativePathWithinRoot,
 } from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
@@ -127,7 +128,7 @@ function formatAdvisorSpendPlaceholder(usingSubscription: boolean, uiTheme: Them
 	return `${spend} (adv)`;
 }
 
-const SCRATCH_ROOTS: readonly string[] = (() => {
+const NORMALIZED_SCRATCH_ROOTS: readonly string[] = (() => {
 	const roots = new Set<string>([os.tmpdir(), path.join(os.homedir(), "tmp")]);
 	if (process.platform === "win32") {
 		const { TEMP, TMP, SystemRoot } = process.env;
@@ -142,16 +143,31 @@ const SCRATCH_ROOTS: readonly string[] = (() => {
 			roots.add("/private/var/tmp");
 		}
 	}
-	return [...roots];
+	return [...new Set(Array.from(roots, normalizePathForComparison))];
 })();
 
-function classifyProjectDir(pwd: string): { scratch: boolean; relative: string | null } {
-	for (const root of SCRATCH_ROOTS) {
-		if (pathIsWithin(root, pwd)) {
-			return { scratch: true, relative: relativePathWithinRoot(root, pwd) };
+interface ProjectDirClassification {
+	scratch: boolean;
+	relative: string | null;
+}
+
+const PROJECT_DIR_CLASSIFICATIONS = new Map<string, ProjectDirClassification>();
+
+function classifyProjectDir(projectDir: string): ProjectDirClassification {
+	const cached = PROJECT_DIR_CLASSIFICATIONS.get(projectDir);
+	if (cached) return cached;
+
+	const normalizedProjectDir = normalizePathForComparison(projectDir);
+	let classification: ProjectDirClassification = { scratch: false, relative: null };
+	for (const normalizedRoot of NORMALIZED_SCRATCH_ROOTS) {
+		const relative = relativePathWithinNormalizedRoot(normalizedRoot, normalizedProjectDir);
+		if (relative !== null) {
+			classification = { scratch: true, relative: relative || null };
+			break;
 		}
 	}
-	return { scratch: false, relative: null };
+	PROJECT_DIR_CLASSIFICATIONS.set(projectDir, classification);
+	return classification;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
