@@ -112,7 +112,8 @@ export function createAssistantMessageComponent(
 		linkTargets,
 	);
 	component.setImagesVisible(ctx.settings.get("terminal.showImages"));
-	component.setToolResultImagesVisible(!ctx.hideToolActivity);
+	// Read-result images are part of the tool output body, so both switches gate them.
+	component.setToolResultImagesVisible(!ctx.hideToolActivity && !ctx.hideToolOutputDetails);
 	component.setExpanded(ctx.toolOutputExpanded);
 	return component;
 }

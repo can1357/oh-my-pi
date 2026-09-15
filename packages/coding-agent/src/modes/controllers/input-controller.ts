@@ -2300,7 +2300,8 @@ export class InputController {
 			) {
 				child.setExpanded(false);
 			} else if (child instanceof AssistantMessageComponent) {
-				child.setToolResultImagesVisible(!this.ctx.hideToolActivity);
+				// Folding tool output takes its images with it, so visibility needs both flags.
+				child.setToolResultImagesVisible(!this.ctx.hideToolActivity && !this.ctx.hideToolOutputDetails);
 			}
 		}
 		this.ctx.chatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
@@ -2392,6 +2393,14 @@ export class InputController {
 		this.ctx.hideToolOutputDetails = hidden;
 		this.ctx.settings.set("display.hideToolOutputDetails", hidden);
 		this.ctx.chatContainer.setToolOutputDetailsHidden(hidden);
+
+		// Read-result images belong to the assistant message, not the tool card, so
+		// the fold has to reach them separately; they stay hidden while tool
+		// activity itself is off.
+		const imagesVisible = !hidden && !this.ctx.hideToolActivity;
+		for (const child of this.ctx.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) child.setToolResultImagesVisible(imagesVisible);
+		}
 	}
 
 	/**

@@ -149,6 +149,7 @@ function makeRenderCtx(
 	transcript: SessionContext,
 	showImages = true,
 	hideToolActivity = false,
+	hideToolOutputDetails = false,
 ): { ctx: InteractiveModeContext; chatContainer: TranscriptContainer } {
 	const chatContainer = new TranscriptContainer();
 	chatContainer.setToolActivityVisible(!hideToolActivity);
@@ -177,11 +178,13 @@ function makeRenderCtx(
 			get: (key: string) => {
 				if (key === "terminal.showImages") return showImages;
 				if (key === "display.hideToolActivity") return hideToolActivity;
+				if (key === "display.hideToolOutputDetails") return hideToolOutputDetails;
 				return false;
 			},
 		},
 		toolOutputExpanded: false,
 		hideToolActivity,
+		hideToolOutputDetails,
 		hideThinkingBlock: false,
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
@@ -485,6 +488,27 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		expect(assistant).toBeDefined();
 		assistant?.setToolResultImagesVisible(true);
 		expect(hasImageComponent(chatContainer)).toBe(true);
+	});
+
+	it("hides read-result images while tool output details are folded", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([
+			assistantToolCall("read-tool-folded", "read", { path: "folded.png" }),
+			{
+				role: "toolResult",
+				toolCallId: "read-tool-folded",
+				toolName: "read",
+				content: [{ type: "text", text: "Read image: folded.png" }, pngImage],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, true);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		expect(hasImageComponent(chatContainer)).toBe(false);
 	});
 
 	it("replays reopened session image blocks through the cold-start rebuild path", async () => {

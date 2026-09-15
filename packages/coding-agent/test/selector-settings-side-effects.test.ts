@@ -217,7 +217,8 @@ describe("selector setting side effects", () => {
 			const resetDisplay = vi.fn();
 			const ctx = {
 				hideToolOutputDetails: !hidden,
-				chatContainer: { setToolOutputDetailsHidden, resetStableEmission },
+				hideToolActivity: false,
+				chatContainer: { children: [], setToolOutputDetailsHidden, resetStableEmission },
 				ui: { resetDisplay },
 			};
 			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);

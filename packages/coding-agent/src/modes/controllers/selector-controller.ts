@@ -660,7 +660,8 @@ export class SelectorController {
 					if (!hidden && (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)) {
 						child.setExpanded(false);
 					} else if (child instanceof AssistantMessageComponent) {
-						child.setToolResultImagesVisible(!hidden);
+						// Folding tool output takes its images with it, so visibility needs both flags.
+						child.setToolResultImagesVisible(!hidden && !this.ctx.hideToolOutputDetails);
 					}
 				}
 				this.ctx.chatContainer.setToolActivityVisible(!hidden);
@@ -672,6 +673,12 @@ export class SelectorController {
 			case "display.hideToolOutputDetails": {
 				this.ctx.hideToolOutputDetails = value as boolean;
 				this.ctx.chatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
+				// Read-result images live on the assistant message, so the fold has to
+				// reach them too, and only while tool activity itself is on.
+				const imagesVisible = !this.ctx.hideToolOutputDetails && !this.ctx.hideToolActivity;
+				for (const child of this.ctx.chatContainer.children) {
+					if (child instanceof AssistantMessageComponent) child.setToolResultImagesVisible(imagesVisible);
+				}
 				// Match the shortcut path: rows already retired to terminal history
 				// re-render only after the emission ledger is dropped and the
 				// scrollback is cleared, not on a viewport repaint.

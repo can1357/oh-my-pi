@@ -3,7 +3,8 @@ import * as os from "node:os";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { formatStatusIcon } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 const uiStub = { requestRender() {}, requestComponentRender() {}, clearInlineImages() {} } as unknown as TUI;
@@ -104,6 +105,48 @@ describe("tool output details", () => {
 			expect(folded).not.toContain(home);
 		} finally {
 			card.stopAnimation();
+		}
+	});
+
+	it("strips terminal control bytes out of a folded summary", () => {
+		const card = new ToolExecutionComponent(
+			"custom-thing",
+			{ command: "echo \u0007banner\u001b[2J" },
+			{},
+			undefined,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const row = card.render(120).join("");
+
+			expect(row).not.toContain("\u0007");
+			expect(row).not.toContain("\u001b[2J");
+			expect(Bun.stripANSI(row)).toContain("echo banner");
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
+	it("keeps a failed call distinguishable from a successful one while folded", () => {
+		const failed = new ToolExecutionComponent("custom-thing", { command: "exit 1" }, {}, undefined, uiStub);
+		failed.updateResult({ content: [{ type: "text", text: "boom" }], isError: true }, false);
+		const succeeded = new ToolExecutionComponent("custom-thing", { command: "exit 1" }, {}, undefined, uiStub);
+		succeeded.updateResult({ content: [{ type: "text", text: "fine" }], isError: false }, false);
+		try {
+			failed.setToolOutputDetailsHidden(true);
+			succeeded.setToolOutputDetailsHidden(true);
+
+			const failedRow = plain(failed.render(120));
+			const succeededRow = plain(succeeded.render(120));
+			const errorGlyph = Bun.stripANSI(formatStatusIcon("error", theme));
+
+			expect(failedRow.startsWith(errorGlyph)).toBe(true);
+			expect(succeededRow.startsWith(errorGlyph)).toBe(false);
+		} finally {
+			failed.stopAnimation();
+			succeeded.stopAnimation();
 		}
 	});
 });

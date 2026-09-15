@@ -902,8 +902,15 @@ export class ToolExecutionComponent extends Container {
 			Math.max(1, width - 4),
 		);
 		if (singleRow) {
-			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
-			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
+			// A folded card is the whole row, so a settled failure has to stay
+			// legible here: the neutral bullet would read as success. The spinner
+			// keeps its own frames while the call is still running.
+			const failed = !this.#isRunning() && this.#result?.isError === true;
+			const styledGlyph = failed
+				? formatStatusIcon("error", theme)
+				: this.#spinnerFrame === undefined
+					? theme.fg("dim", "•")
+					: theme.fg("muted", theme.spinnerFrames[this.#spinnerFrame] ?? "•");
 			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
 		}
 		return [truncateToWidth(`${theme.fg("dim", "╭─")} ${text}`, width), theme.fg("dim", "╰")];
@@ -928,10 +935,11 @@ export class ToolExecutionComponent extends Container {
 			for (const key of ["command", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
-					const line = value.split("\n", 1)[0] ?? "";
-					// The compact row is the entire card under
-					// `display.hideToolOutputDetails`, so a path argument must not put
-					// the home directory into the transcript there.
+					// These arguments come straight from the model and the compact row
+					// is the entire card under `display.hideToolOutputDetails`, so strip
+					// terminal control bytes and shorten a path before the line reaches
+					// the transcript.
+					const line = sanitizeText(value.split("\n", 1)[0] ?? "");
 					return { label: this.#toolLabel, detail: key === "path" ? shortenPath(line) : line };
 				}
 			}
