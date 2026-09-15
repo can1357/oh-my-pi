@@ -19,7 +19,12 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 
 import { isValidNameSegment } from "./types";
 
-async function gitCopyPaths(sourcePath: string): Promise<Set<string> | null> {
+type GitCopyPaths = {
+	listed: Set<string>;
+	directories: Set<string>;
+};
+
+async function gitCopyPaths(sourcePath: string): Promise<GitCopyPaths | null> {
 	try {
 		const repository = vcs.git(sourcePath);
 		if (!repository) return null;
@@ -28,29 +33,41 @@ async function gitCopyPaths(sourcePath: string): Promise<Set<string> | null> {
 		const sourcePrefix = path.relative(repoRoot, path.resolve(sourcePath)).replaceAll(path.sep, "/");
 		const prefix = sourcePrefix === "" ? "" : `${sourcePrefix}/`;
 		const pathspecs = sourcePrefix === "" ? [] : [sourcePrefix];
-		const [tracked, status] = await Promise.all([
+		const [tracked, status, submodules] = await Promise.all([
 			repository.lsTree("HEAD", pathspecs).catch(() => []),
 			repository.statusPorcelain({ untracked: "all", pathspecs, nulTerminated: true }),
+			repository.submodulePaths().catch(() => []),
 		]);
-		const paths = new Set<string>();
-		const addPath = (repoPath: string): void => {
+		const listed = new Set<string>();
+		const directories = new Set<string>();
+		const addPath = async (repoPath: string, directory = false): Promise<void> => {
 			const normalized = repoPath.replaceAll(path.sep, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 			if (prefix && !normalized.startsWith(prefix)) return;
 			const relative = prefix ? normalized.slice(prefix.length) : normalized;
 			if (!relative) return;
-			paths.add(relative);
+			listed.add(relative);
+			if (
+				directory ||
+				(await fs
+					.stat(path.join(repoRoot, normalized))
+					.then(stat => stat.isDirectory())
+					.catch(() => false))
+			) {
+				directories.add(relative);
+			}
 			let parent = path.posix.dirname(relative);
 			while (parent !== ".") {
-				paths.add(parent);
+				listed.add(parent);
 				parent = path.posix.dirname(parent);
 			}
 		};
-		for (const repoPath of tracked) addPath(repoPath);
+		await Promise.all(tracked.map(repoPath => addPath(repoPath)));
 		for (const entry of status.split("\0")) {
 			if (entry.length < 4 || entry[2] !== " ") continue;
-			addPath(entry.slice(3));
+			await addPath(entry.slice(3));
 		}
-		return paths;
+		await Promise.all(submodules.map(repoPath => addPath(repoPath, true)));
+		return { listed, directories };
 	} catch {
 		// A missing Git backend or an incomplete checkout should retain the
 		// historical unfiltered-copy behavior.
@@ -123,10 +140,11 @@ export async function cachePlugin(
 				: (source: string): boolean => {
 						const relative = path.relative(sourcePath, source).replaceAll(path.sep, "/");
 						if (relative === "") return true;
-						let candidate = relative;
-						while (candidate !== ".") {
-							if (copyPaths.has(candidate)) return true;
-							candidate = path.posix.dirname(candidate);
+						if (copyPaths.listed.has(relative) || copyPaths.directories.has(relative)) return true;
+						let parent = path.posix.dirname(relative);
+						while (parent !== ".") {
+							if (copyPaths.directories.has(parent)) return true;
+							parent = path.posix.dirname(parent);
 						}
 						return false;
 					};
