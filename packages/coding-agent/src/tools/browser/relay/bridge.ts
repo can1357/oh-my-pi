@@ -3054,7 +3054,7 @@ export class RelayBridge {
 		tab.attachingExt = null;
 		tab.forceFreshRootBeforeReplay = false;
 		tab.refreshDetachInFlight = false;
-			this.#discardDetachedRootCleanup(tab);
+		this.#discardDetachedRootCleanup(tab);
 		this.#resetRuntime(tab);
 		tab.restoreRootRuntime = false;
 		tab.banned = true;
