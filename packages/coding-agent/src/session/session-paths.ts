@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
-import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
+import { getSessionsDir, getTerminalSessionsDir, resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();

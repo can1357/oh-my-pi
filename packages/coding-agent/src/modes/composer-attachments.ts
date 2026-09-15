@@ -1,4 +1,4 @@
-import { allowsSkillTokens, SKILL_TOKEN_RE } from "../extensibility/skills";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "../extensibility/skill-tokens";
 import { SYMBOL_PRESETS } from "./theme/symbols";
 import { theme } from "./theme/theme";
 

@@ -22,6 +22,7 @@ import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking }
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 import { formatErrorBlock } from "./error-block";
+import { type ServedModelMismatch, ServedModelMarkerComponent } from "./served-model-marker";
 import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
 
@@ -185,6 +186,8 @@ export class AssistantMessageComponent extends Container {
 	readonly transcriptBlockMode = "appendOnly" as const;
 	#contentContainer: Container;
 	#markerSlot: Container;
+	#cacheMarker?: CacheInvalidationMarkerComponent;
+	#servedModelMarker?: ServedModelMarkerComponent;
 	#lastMessage?: AssistantMessage;
 	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
@@ -395,10 +398,24 @@ export class AssistantMessageComponent extends Container {
 	 * against the previous turn's cache footprint.
 	 */
 	setCacheInvalidation(info: CacheInvalidation | undefined): void {
+		this.#cacheMarker = info ? new CacheInvalidationMarkerComponent(info) : undefined;
+		this.#refreshMarkers();
+	}
+
+	/**
+	 * Show or clear the trailing served-model divider. Set once the turn's
+	 * signed thinking block (or router report) has named the model that actually
+	 * answered, when it differs from the one requested.
+	 */
+	setServedModelMismatch(info: ServedModelMismatch | undefined): void {
+		this.#servedModelMarker = info ? new ServedModelMarkerComponent(info) : undefined;
+		this.#refreshMarkers();
+	}
+
+	#refreshMarkers(): void {
 		this.#markerSlot.clear();
-		if (info) {
-			this.#markerSlot.addChild(new CacheInvalidationMarkerComponent(info));
-		}
+		if (this.#servedModelMarker) this.#markerSlot.addChild(this.#servedModelMarker);
+		if (this.#cacheMarker) this.#markerSlot.addChild(this.#cacheMarker);
 		this.#blockVersion++;
 	}
 

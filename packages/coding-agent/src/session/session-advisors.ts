@@ -1614,7 +1614,7 @@ export class SessionAdvisors {
 		const providerContextTokens = this.#estimateAdvisorContextTokens(messages, agent.tokenizer) + incomingTokens;
 		const localContextTokens =
 			agent.tokenizer.countTokens(agent.state.systemPrompt) +
-			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer) +
+			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer, this.#host.settings.revision) +
 			storedConversationTokens +
 			incomingTokens;
 		const contextTokens = compactionContextTokens(providerContextTokens, localContextTokens);

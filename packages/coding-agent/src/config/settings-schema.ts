@@ -6304,7 +6304,11 @@ export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boo
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
-	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
+	const definition = SETTINGS_SCHEMA[path];
+	if (definition.type === "array" || definition.type === "record") {
+		return structuredClone(definition.default) as SettingValue<P>;
+	}
+	return definition.default as SettingValue<P>;
 }
 
 /** Check if a path has UI metadata (should appear in settings panel) */

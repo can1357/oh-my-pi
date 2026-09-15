@@ -1,20 +1,12 @@
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import {
-	addKeyAliases,
-	canonicalKeyId,
-	Editor,
-	type EditorTextDecorationContext,
-	type EditorTheme,
-	getKeybindings,
-	type KeyId,
-	parseKey,
-	parseKittySequence,
-	TUI,
-} from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
+import { Editor, type EditorTextDecorationContext, type EditorTheme } from "@oh-my-pi/pi-tui/components/editor";
+import { addKeyAliases, canonicalKeyId, getKeybindings } from "@oh-my-pi/pi-tui/keybindings";
+import { type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui/keys";
+import { TUI } from "@oh-my-pi/pi-tui/tui";
 import type { AppKeybinding } from "../../config/keybindings";
-import { allowsSkillTokens, SKILL_TOKEN_RE } from "../../extensibility/skills";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "../../extensibility/skill-tokens";
 import { isVideoPath, videoPreviewSource } from "../../utils/video";
 import {
 	attachmentSgr,
@@ -426,6 +418,18 @@ export class CustomEditor extends Editor {
 	 *  (labels key the atom table). */
 	pendingTexts: TextAttachment[] = [];
 	#textAttachmentCounter = 0;
+	#composerChipsCache:
+		| {
+				textRevision: number;
+				images: ImageContent[];
+				imageCount: number;
+				imageLinks: (string | undefined)[];
+				imageLinkCount: number;
+				texts: TextAttachment[];
+				textCount: number;
+				chips: ComposerChipDescriptor[];
+		  }
+		| undefined;
 	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
 	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
@@ -604,9 +608,21 @@ export class CustomEditor extends Editor {
 		this.insertAtom(label, expansion);
 	}
 
-	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
-	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
-	composerChips(): ComposerChipDescriptor[] {
+	/** Cached read-only attachments whose chip token remains in the buffer.
+	 * Deleting a token hides its chip and drops the attachment from submission. */
+	composerChips(): readonly ComposerChipDescriptor[] {
+		const cached = this.#composerChipsCache;
+		if (
+			cached?.textRevision === this.textRevision &&
+			cached.images === this.pendingImages &&
+			cached.imageCount === this.pendingImages.length &&
+			cached.imageLinks === this.pendingImageLinks &&
+			cached.imageLinkCount === this.pendingImageLinks.length &&
+			cached.texts === this.pendingTexts &&
+			cached.textCount === this.pendingTexts.length
+		) {
+			return cached.chips;
+		}
 		const text = this.getText();
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
@@ -627,6 +643,16 @@ export class CustomEditor extends Editor {
 			if (!text.includes(entry.label)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
+		this.#composerChipsCache = {
+			textRevision: this.textRevision,
+			images: this.pendingImages,
+			imageCount: this.pendingImages.length,
+			imageLinks: this.pendingImageLinks,
+			imageLinkCount: this.pendingImageLinks.length,
+			texts: this.pendingTexts,
+			textCount: this.pendingTexts.length,
+			chips,
+		};
 		return chips;
 	}
 

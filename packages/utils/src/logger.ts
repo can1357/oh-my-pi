@@ -152,6 +152,19 @@ function pruneStaleProcessLogs(dir: string): void {
 	}
 }
 
+const scheduledPruneDirs = new Set<string>();
+
+/** Run shared retention only after logger construction has returned to the event loop. */
+function schedulePruneStaleProcessLogs(dir: string): void {
+	if (scheduledPruneDirs.has(dir)) return;
+	scheduledPruneDirs.add(dir);
+	const immediate = setImmediate(() => {
+		scheduledPruneDirs.delete(dir);
+		pruneStaleProcessLogs(dir);
+	});
+	immediate.unref();
+}
+
 /** Ensure a logs directory exists; return the resolved path. */
 function ensureDir(dir: string): string {
 	if (!fs.existsSync(dir)) {
@@ -237,7 +250,7 @@ function formatLogInfo(info: NormalizedLogInfo): string {
 /** Build a rotating file sink with process-local rotation and shared retention. */
 function makeFileTransport(dir?: string): RotatingFileSink {
 	const logsDir = ensureDir(dir ?? getLogsDir());
-	pruneStaleProcessLogs(logsDir);
+	schedulePruneStaleProcessLogs(logsDir);
 	return new RotatingFileSink({
 		directory: logsDir,
 		filenamePrefix: "omp",

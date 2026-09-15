@@ -994,7 +994,7 @@ export class ModelRegistry {
 			if (cache.fresh && cache.authoritative) {
 				authoritativeFreshProviders.add(providerId);
 			}
-			// The v10 model cache never persists request headers (#5780): restore
+			// The model cache never persists request headers (#5780): restore
 			// them from the bundled static catalog, and drop cached rows whose
 			// headers cannot be rebuilt so the bundled fallback (which still
 			// carries its headers) wins the startup merge instead of a cached
@@ -1019,41 +1019,45 @@ export class ModelRegistry {
 			const bundledById = bundledModels
 				? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
 				: undefined;
-			const models: ModelSpec<Api>[] = [];
+			const models: Model<Api>[] = [];
 			for (const cachedModel of cache.models) {
-				const spec = cachedModel.provider === providerId ? cachedModel : { ...cachedModel, provider: providerId };
-				if (additiveCacheStaticMismatch && bundledById?.has(spec.id)) continue;
-				if (!omittedHeaderIds.has(spec.id)) {
-					models.push(spec);
+				// Shared catalog rows can be projected under another provider id.
+				// That changes policy inputs, so only this projection is rebuilt;
+				// same-provider materialized cache rows stay on the zero-build path.
+				const model =
+					cachedModel.provider === providerId
+						? cachedModel
+						: buildModel({ ...toModelSpec(cachedModel), provider: providerId });
+				if (additiveCacheStaticMismatch && bundledById?.has(model.id)) continue;
+				if (!omittedHeaderIds.has(model.id)) {
+					models.push(model);
 					continue;
 				}
 				// Current unrestorable markers prove that neither same-id nor
 				// request-model bundled headers matched the live model. Only markers
 				// from the old id-only writer may recover through `requestModelId`.
-				const unrestorable = unrestorableHeaderIds.has(spec.id);
+				const unrestorable = unrestorableHeaderIds.has(model.id);
 				const bundledHeaders = (
 					unrestorable
-						? cache.legacyHeaderRestoreMarkers && spec.requestModelId
-							? bundledById?.get(spec.requestModelId)
+						? cache.legacyHeaderRestoreMarkers && model.requestModelId
+							? bundledById?.get(model.requestModelId)
 							: undefined
-						: (bundledById?.get(spec.id) ??
-							(spec.requestModelId ? bundledById?.get(spec.requestModelId) : undefined))
+						: (bundledById?.get(model.id) ??
+							(model.requestModelId ? bundledById?.get(model.requestModelId) : undefined))
 				)?.headers;
 				if (!bundledHeaders) continue;
-				models.push({ ...spec, headers: bundledHeaders });
+				models.push({ ...model, headers: bundledHeaders });
 			}
 			const providerOverride = this.#providerOverrides.get(providerId);
-			const withTransport = providerOverride
-				? models.map(model => this.#applyProviderTransportOverride(model, providerOverride))
+			const withCompat = providerOverride
+				? models.map(model => {
+						const spec = this.#applyProviderTransportOverride(toModelSpec(model), providerOverride);
+						return buildModel({
+							...spec,
+							compat: mergeCompat(model.compatConfig, providerOverride.compat),
+						});
+					})
 				: models;
-			const withCompat = providerOverride?.compat
-				? withTransport.map(model =>
-						buildModel({
-							...model,
-							compat: mergeCompat(model.compat, providerOverride.compat),
-						} as ModelSpec<Api>),
-					)
-				: withTransport.map(model => buildModel(model));
 			const resolved = this.#applyProviderModelOverrides(providerId, withCompat);
 			const cachedModels = this.#applyHardcodedModelPolicies(resolved);
 			modelsByProvider.set(providerId, cachedModels);
@@ -1063,8 +1067,9 @@ export class ModelRegistry {
 					(cache.staticFingerprint === bundledFingerprint ||
 						cache.staticFingerprint.startsWith(`${bundledFingerprint}:drop:`));
 				const cachedSnapshotMatchesBundled =
-					bundledFingerprint !== undefined &&
-					fingerprintStaticModels(cache.models, !additiveSharedCatalogProvider) === bundledFingerprint;
+					bundledModels !== undefined &&
+					fingerprintStaticModels(cache.models, !additiveSharedCatalogProvider) ===
+						fingerprintStaticModels(bundledModels, !additiveSharedCatalogProvider);
 				const cacheContributed = additiveSharedCatalogProvider
 					? cachedModels.some(model => bundledById?.has(model.id) !== true)
 					: !(cacheMatchesBundledFingerprint && cachedSnapshotMatchesBundled);
@@ -1165,7 +1170,7 @@ export class ModelRegistry {
 				writeModelCache(
 					cacheProviderId,
 					cache.updatedAt,
-					usableCacheModels.map(model => buildModel(model)),
+					usableCacheModels,
 					cache.authoritative,
 					cache.staticFingerprint,
 					this.#cacheDbPath,
@@ -1177,10 +1182,7 @@ export class ModelRegistry {
 				providerConfig.provider,
 				this.#normalizeDiscoverableModels(
 					providerConfig,
-					this.#applyProviderCompat(
-						providerConfig.compat,
-						usableCacheModels.map(model => buildModel(model)),
-					),
+					this.#applyProviderCompat(providerConfig.compat, usableCacheModels),
 				),
 			);
 			cachedModels.push(...models);
@@ -1601,12 +1603,7 @@ export class ModelRegistry {
 					models: cached?.models.map(model => model.id) ?? [],
 				});
 				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
-				return cached
-					? this.#normalizeDiscoverableModels(
-							providerConfig,
-							cached.models.map(model => buildModel(model)),
-						)
-					: [];
+				return cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [];
 			}
 		}
 
@@ -2159,10 +2156,20 @@ export class ModelRegistry {
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
 		return models.map(model => {
-			if (extendedContext) {
-				const maximum = resolveMaxContextWindow(model);
-				if (maximum !== undefined && model.contextWindow !== null && maximum > model.contextWindow) {
-					model = applyModelOverride(model, { contextWindow: maximum });
+			const maximum = resolveMaxContextWindow(model);
+			if (maximum !== undefined && model.contextWindow !== null) {
+				// Only extended-window models need a fresh policy baseline: a
+				// materialized cache row may carry an earlier applied window.
+				// Preserve valid standard capacity when an advertised maximum is
+				// smaller, without retaining an obsolete extended window.
+				const standardWindow = buildModel(toModelSpec(model)).contextWindow ?? model.contextWindow;
+				if (extendedContext) {
+					const window = Math.max(standardWindow, maximum);
+					if (window !== model.contextWindow) {
+						model = applyModelOverride(model, { contextWindow: window });
+					}
+				} else if (standardWindow < model.contextWindow) {
+					model = { ...model, contextWindow: standardWindow };
 				}
 			}
 			// Extended context off: cap models with a premium long-context price
