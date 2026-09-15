@@ -30,15 +30,16 @@ import {
 import type { ModelRegistry } from "../../config/model-registry";
 import {
 	formatModelSelectorValue,
+	parseModelPattern,
 	type ModelRoleLookup,
-	parseModelString,
-	splitUpstreamRouting,
+	parseExactModelSelectorWithRouting,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import { parseRetryFallbackSelector } from "../../session/retry-fallback-chains";
 import { thinkingLevelGlyph } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
@@ -1050,23 +1051,7 @@ export class ModelHubComponent implements Component {
 				upstream: string | undefined;
 		  }
 		| undefined {
-		const trimmed = raw.trim();
-		const parse = (pattern: string) =>
-			parseModelString(pattern, {
-				allowMaxSuffix: true,
-				allowAutoAlias: true,
-				isLiteralModelId: (provider, id) => this.#findFallbackModel(provider, id) !== undefined,
-			});
-		const literal = parse(trimmed);
-		if (literal && this.#findFallbackModel(literal.provider, literal.id)) return { ...literal, upstream: undefined };
-		const routing = splitUpstreamRouting(trimmed);
-		if (!routing) {
-			if (!literal) return undefined;
-			return { ...literal, upstream: undefined };
-		}
-		const parsed = parse(routing.base.trim());
-		if (!parsed) return undefined;
-		return { ...parsed, upstream: routing.upstream };
+		return parseExactModelSelectorWithRouting(raw, (provider, id) => this.#registry.find(provider, id));
 	}
 
 	/**
@@ -1134,9 +1119,20 @@ export class ModelHubComponent implements Component {
 		const base = `${resolved.item.provider}/${resolved.item.id}`;
 		const routed = resolved.upstream ? `${base}@${resolved.upstream}` : base;
 		const next = formatModelSelectorValue(routed, level);
-		chain[index] = next;
-		for (let i = chain.length - 1; i >= 0; i--) {
-			if (i !== index && chain[i] === next) chain.splice(i, 1);
+		const normalizedNext = parseRetryFallbackSelector(next, this.#registry)?.raw ?? next;
+		const primaryRaw = role.includes("/") ? role : this.#settings.getModelRole(role);
+		const normalizedPrimary = primaryRaw ? parseRetryFallbackSelector(primaryRaw, this.#registry)?.raw : undefined;
+		if (role !== "default" && normalizedPrimary === normalizedNext) {
+			chain.splice(index, 1);
+		} else {
+			chain[index] = next;
+			for (let i = chain.length - 1; i >= 0; i--) {
+				if (
+					i !== index &&
+					(parseRetryFallbackSelector(chain[i], this.#registry)?.raw ?? chain[i]) === normalizedNext
+				)
+					chain.splice(i, 1);
+			}
 		}
 		this.#setFallbackChain(role, chain);
 		const rowIndex = this.#rolesRows.findIndex(
@@ -1144,7 +1140,6 @@ export class ModelHubComponent implements Component {
 		);
 		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
-
 	#closeStrip(): void {
 		const strip = this.#strip;
 		this.#strip = null;
@@ -1685,6 +1680,10 @@ export class ModelHubComponent implements Component {
 			this.#openRoleNameStrip();
 			return;
 		}
+		if (printable === "t" && row?.kind === "fallback") {
+			this.#openFallbackThinkingStrip(row);
+			return;
+		}
 		if (printable === "t") {
 			const assignment = role ? this.#roles[role] : undefined;
 			if (role && assignment) {
@@ -2211,7 +2210,7 @@ export class ModelHubComponent implements Component {
 				// inherit and unknown models have no ladder to offer, so the
 				// action would be inert there.
 				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
-				const thinking = editable ? " · t thinking" : "";
+				const thinking = editable ? " · t thinking" : " · thinking n/a";
 				return `↑/↓ rows · Enter replace · f add another · x remove${thinking} · [/] reorder · ← providers`;
 			}
 			if (row?.kind === "chainKey") {
