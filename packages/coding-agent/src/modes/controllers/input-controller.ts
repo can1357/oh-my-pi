@@ -339,6 +339,11 @@ export class InputController {
 					this.ctx.toggleThinkingBlockVisibility();
 					return { consume: true };
 				}
+				if (this.ctx.keybindings.matches(data, "app.display.toggleDetail")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					this.ctx.toggleDetailVisibility();
+					return { consume: true };
+				}
 				if (this.ctx.keybindings.matches(data, "app.history.search")) {
 					if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() instanceof HistorySearchComponent) {
 						return undefined;
@@ -583,6 +588,7 @@ export class InputController {
 		this.ctx.ui.onDebug = () => this.ctx.showDebugSelector();
 		this.ctx.editor.setActionKeys("app.model.select", this.ctx.keybindings.getKeys("app.model.select"));
 		this.ctx.editor.onSelectModel = () => this.ctx.showModelSelector();
+
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteImage",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
@@ -2328,6 +2334,12 @@ export class InputController {
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
 			return;
 		}
+		if (this.ctx.hideToolOutputDetails) {
+			const detailsKey = this.ctx.keybindings.getDisplayString("app.display.toggleDetail");
+			const detailsHint = detailsKey ? `${detailsKey} or /settings` : "/settings";
+			this.ctx.showStatus(`Tool output details are hidden — show them with ${detailsHint} before expanding`);
+			return;
+		}
 		this.setToolsExpanded(!this.ctx.toolOutputExpanded);
 		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
@@ -2347,7 +2359,8 @@ export class InputController {
 			) {
 				child.setExpanded(false);
 			} else if (child instanceof AssistantMessageComponent) {
-				child.setToolResultImagesVisible(!this.ctx.hideToolActivity);
+				// Folding tool output takes its images with it, so visibility needs both flags.
+				child.setToolResultImagesVisible(!this.ctx.hideToolActivity && !this.ctx.hideToolOutputDetails);
 			}
 		}
 		this.ctx.chatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
@@ -2371,41 +2384,94 @@ export class InputController {
 	}
 
 	toggleThinkingBlockVisibility(): void {
-		// When thinking is "off" and the session has not produced reasoning
-		// content, thinking blocks stay auto-hidden; the toggle would only corrupt
-		// the persisted preference. OpenAI-compatible servers can stream reasoning
-		// without advertising model support, so observed thinking content unlocks
-		// the display toggle.
-		const thinkingOff =
-			((this.ctx.viewSession ?? this.ctx.session)?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
-		if (thinkingOff && !this.ctx.hasDisplayableThinkingContent) {
+		if (this.#thinkingBlocksUntoggleable()) {
 			this.ctx.showStatus("Thinking is off — enable thinking to show blocks");
 			return;
 		}
-		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
-		this.ctx.settings.set("hideThinkingBlock", this.ctx.hideThinkingBlock);
+		this.#applyThinkingBlockVisibility(!this.ctx.hideThinkingBlock);
+		this.#resetTranscriptRendering();
+		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
+	}
+
+	toggleToolOutputDetailsVisibility(): void {
+		this.#applyToolOutputDetailsHidden(!this.ctx.hideToolOutputDetails);
+		this.#resetTranscriptRendering();
+		this.ctx.showStatus(`Tool output details: ${this.ctx.hideToolOutputDetails ? "hidden" : "visible"}`);
+	}
+
+	/**
+	 * Gesture behind `app.display.toggleDetail`: one keystroke folds both halves
+	 * of the assistant's working detail — reasoning blocks and tool output — into
+	 * their collapsed presentation. Single-axis toggles stay on their own keys, so
+	 * this is the only entry point that moves both at once.
+	 *
+	 * Deliberately silent: the replay shows the new presentation, so a status line
+	 * would only leave a transcript row that can never be dismissed.
+	 */
+	toggleDetailVisibility(): void {
+		const thinkingToggleable = !this.#thinkingBlocksUntoggleable();
+		// One target state for both axes: a half-folded transcript (thinking hidden
+		// by its own toggle, tool details still visible, or the reverse) folds fully
+		// on the next press instead of swapping which half is visible.
+		const hidden = !(this.ctx.hideToolOutputDetails && (!thinkingToggleable || this.ctx.hideThinkingBlock));
+		if (thinkingToggleable) this.#applyThinkingBlockVisibility(hidden);
+		this.#applyToolOutputDetailsHidden(hidden);
+		this.#resetTranscriptRendering();
+	}
+
+	/**
+	 * When thinking is "off" and the session has not produced reasoning content,
+	 * thinking blocks stay auto-hidden; a toggle would only corrupt the persisted
+	 * preference. OpenAI-compatible servers can stream reasoning without
+	 * advertising model support, so observed thinking content unlocks the
+	 * display toggle.
+	 */
+	#thinkingBlocksUntoggleable(): boolean {
+		const thinkingOff =
+			((this.ctx.viewSession ?? this.ctx.session)?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
+		return thinkingOff && !this.ctx.hasDisplayableThinkingContent;
+	}
+
+	#applyThinkingBlockVisibility(hidden: boolean): void {
+		this.ctx.hideThinkingBlock = hidden;
+		this.ctx.settings.set("hideThinkingBlock", hidden);
 
 		for (const child of this.ctx.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(this.ctx.hideThinkingBlock);
+				child.setHideThinkingBlock(hidden);
 			}
 		}
 
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
-			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.hideThinkingBlock);
+			this.ctx.streamingComponent.setHideThinkingBlock(hidden);
 			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
 		}
+	}
 
-		// This is an explicit user display gesture: rebuild native history so the
-		// visibility change also applies to rows already retired from the viewport.
-		// Append-only thinking heads emitted their stable rows to scrollback while
-		// streaming (visible); forget that emission ledger so the paired scrollback
-		// clear re-renders them under the new visibility instead of replaying the
-		// captured reasoning (#10177).
+	#applyToolOutputDetailsHidden(hidden: boolean): void {
+		this.ctx.hideToolOutputDetails = hidden;
+		this.ctx.settings.set("display.hideToolOutputDetails", hidden);
+		this.ctx.chatContainer.setToolOutputDetailsHidden(hidden);
+
+		// Read-result images belong to the assistant message, not the tool card, so
+		// the fold has to reach them separately; they stay hidden while tool
+		// activity itself is off.
+		const imagesVisible = !hidden && !this.ctx.hideToolActivity;
+		for (const child of this.ctx.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) child.setToolResultImagesVisible(imagesVisible);
+		}
+	}
+
+	/**
+	 * This is an explicit user display gesture: rebuild native history so the
+	 * change also applies to rows already retired from the viewport. Append-only
+	 * heads emitted their stable rows to scrollback while streaming (visible);
+	 * forget that emission ledger so the paired scrollback clear re-renders them
+	 * under the new presentation instead of replaying the captured rows (#10177).
+	 */
+	#resetTranscriptRendering(): void {
 		this.ctx.chatContainer.resetStableEmission();
 		this.ctx.ui.resetDisplay();
-
-		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
 	}
 
 	async openExternalEditor(): Promise<void> {

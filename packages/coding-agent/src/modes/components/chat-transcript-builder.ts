@@ -107,6 +107,7 @@ export class ChatTranscriptBuilder {
 
 	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
+		this.container.setToolOutputDetailsHidden(settings.get("display.hideToolOutputDetails"));
 	}
 
 	/** Whether the transcript currently holds any rendered rows. */
@@ -396,7 +397,9 @@ export class ChatTranscriptBuilder {
 			this.deps.linkTargets,
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
-		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
+		assistantComponent.setToolResultImagesVisible(
+			!settings.get("display.hideToolActivity") && !settings.get("display.hideToolOutputDetails"),
+		);
 		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
@@ -432,7 +435,9 @@ export class ChatTranscriptBuilder {
 				this.deps.linkTargets,
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
-			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
+			component.setToolResultImagesVisible(
+				!settings.get("display.hideToolActivity") && !settings.get("display.hideToolOutputDetails"),
+			);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 		};

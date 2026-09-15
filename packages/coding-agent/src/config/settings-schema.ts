@@ -1370,6 +1370,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.hideToolOutputDetails": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Hide Tool Output Details",
+			description: "Render each tool call as a one-line summary, hiding its output body",
+		},
+	},
+
 	"display.showTokenUsage": {
 		type: "boolean",
 		default: false,

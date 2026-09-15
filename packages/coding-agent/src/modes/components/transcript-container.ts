@@ -1,6 +1,6 @@
 import { type Component, Container, type HistoryBatch } from "@oh-my-pi/pi-tui/tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { isToolActivityComponent } from "./tool-activity";
+import { isToolActivityComponent, supportsToolOutputDetails } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
 export interface AnimationFrame {
@@ -150,6 +150,7 @@ export class TranscriptContainer extends Container {
 	#replayPending = false;
 	#replayRequested = false;
 	#toolActivityVisible = true;
+	#toolOutputDetailsHidden = false;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
 	#childStartRows = new Map<Component, number>();
@@ -161,6 +162,7 @@ export class TranscriptContainer extends Container {
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
+		if (supportsToolOutputDetails(component)) component.setToolOutputDetailsHidden(this.#toolOutputDetailsHidden);
 		super.addChild(component);
 		this.#childrenVersion++;
 		this.#entries.push({
@@ -202,6 +204,22 @@ export class TranscriptContainer extends Container {
 		this.#toolActivityVisible = visible;
 		for (const child of this.children) {
 			if (isToolActivityComponent(child)) child.setToolActivityVisible(visible);
+		}
+		this.invalidate();
+	}
+
+	/**
+	 * Fold tool output bodies into their call summaries. Blocks that never emit a
+	 * distinct body (reminders, diagnostics, receipts) do not implement the
+	 * capability and are unaffected. Pair with {@link resetStableEmission} plus a
+	 * scrollback-clearing `resetDisplay` for the same reason as the thinking
+	 * toggle (#10177).
+	 */
+	setToolOutputDetailsHidden(hidden: boolean): void {
+		if (this.#toolOutputDetailsHidden === hidden) return;
+		this.#toolOutputDetailsHidden = hidden;
+		for (const child of this.children) {
+			if (supportsToolOutputDetails(child)) child.setToolOutputDetailsHidden(hidden);
 		}
 		this.invalidate();
 	}

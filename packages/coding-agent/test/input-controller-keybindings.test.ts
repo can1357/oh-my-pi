@@ -23,6 +23,7 @@ type FakeEditor = {
 	onSelectModel?: () => void;
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
+
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
@@ -70,6 +71,7 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
+		"app.display.toggleDetail": ["ctrl+h"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -213,9 +215,15 @@ async function createContext() {
 		isBashMode: false,
 		isPythonMode: false,
 		hideToolActivity: false,
+		hideToolOutputDetails: false,
 		toolOutputExpanded: false,
 		settings: { set: vi.fn() },
-		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
+		chatContainer: {
+			children: [],
+			setToolActivityVisible: vi.fn(),
+			setToolOutputDetailsHidden: vi.fn(),
+			resetStableEmission: vi.fn(),
+		},
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
@@ -226,6 +234,7 @@ async function createContext() {
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
+		toggleDetailVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
 		hasActiveBtw,
@@ -704,6 +713,7 @@ describe("InputController global editor actions", () => {
 	const CTRL_R = "\x12";
 	const CTRL_G = "\x07";
 	const CTRL_SHIFT_O = "\x1b[111;6u";
+	const CTRL_H = "\x1b[104;5u";
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -740,6 +750,27 @@ describe("InputController global editor actions", () => {
 
 		expect(dispatchInput(listeners, CTRL_T)).toEqual({ consume: true });
 		expect(context.ctx.toggleThinkingBlockVisibility).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes the combined detail toggle to the transcript", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_H)).toEqual({ consume: true });
+		expect(context.ctx.toggleDetailVisibility).toHaveBeenCalledTimes(1);
+	});
+
+	it("defers the combined detail toggle while an overlay owns the active surface", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		context.setOverlayVisible(true);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_H)).toBeUndefined();
+		expect(context.ctx.toggleDetailVisibility).not.toHaveBeenCalled();
 	});
 
 	it("defers while an overlay owns the active surface", async () => {

@@ -858,8 +858,14 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
  * punctuation so error strings with embedded paths stay readable. */
 export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 	const resolvedHome = homeDir ?? (cachedHomeDir ??= os.homedir());
-	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
+	// Every rewrite below requires the home directory to appear literally, so text
+	// that does not contain it returns untouched — callers on a render path pay no
+	// allocation for the common case. Windows paths compare case-insensitively,
+	// matching the `gi` replacement below.
+	const hasHome = windowsStyle ? text.toLowerCase().includes(resolvedHome.toLowerCase()) : text.includes(resolvedHome);
+	if (!hasHome) return text;
+	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);
 	const textWithShortenedHome =
 		shortenedHome !== resolvedHome ? text.replace(homePattern, match => shortenPath(match, resolvedHome)) : text;
