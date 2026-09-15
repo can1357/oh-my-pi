@@ -123,6 +123,8 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked ([#12236](https://github.com/can1357/oh-my-pi/pull/12236) by [@shivamklr](https://github.com/shivamklr)).
+- Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
+- Hashline edit errors now tell agents to replace incompatible patch bodies on the first rejection instead of only asking for a snapshot header ([#11771](https://github.com/can1357/oh-my-pi/issues/11771); [#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
 
 ## [18.2.1] - 2026-09-15
 
@@ -557,7 +559,6 @@
 - Multi-step logins (e.g. Perplexity email → code) now move the input field under the latest prompt instead of leaving it stuck beneath the first one.
 - Todo updates made through Eval's `tool.todo(...)` now persist to the session, so they survive resume/rewind/fork and no longer trigger false incomplete-todo reminders.
 - Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
-- Hashline edit errors now tell agents to replace incompatible patch bodies instead of only prepending a snapshot header ([#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
 
 ## [18.1.21] - 2026-09-14
 
