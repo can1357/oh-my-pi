@@ -102,6 +102,11 @@ export class YieldQueue {
 		return false;
 	}
 
+	/** Number of queued (not yet drained) entries for a kind. */
+	count(kind: string): number {
+		return this.#entries.get(kind)?.length ?? 0;
+	}
+
 	/** Arrange an idle flush for entries queued near the end of a streaming run. */
 	requestIdleFlush(): void {
 		for (const [kind, dispatcher] of this.#dispatchers) {
