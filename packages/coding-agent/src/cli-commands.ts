@@ -172,6 +172,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.sayHelp,
 	},
 	{
+		name: "session-stats",
+		load: () => import("./commands/session-stats").then(m => m.default),
+		help: commandHelp.sessionStatsHelp,
+	},
+	{
 		name: "share",
 		load: () => import("./commands/share").then(m => m.default),
 		help: commandHelp.shareHelp,
