@@ -2648,6 +2648,15 @@ export class TurnRecovery {
 		// pattern instead of re-sampling the same stalled reasoning.
 		this.#maybeInjectThinkingLoopRedirect(id);
 
+		// Stale-switch guard input, captured before the sleep: an explicit model
+		// change (#activeRetryFallback cleared, selector moved) must win over
+		// the booked reset route. `hadActiveFallbackWalk` preserves the
+		// already-inactive case — a cleared walk with a surviving reset record
+		// (e.g. explicit switch back to the primary) still routes onto the
+		// winning candidate, since nothing changed *during* the wait.
+		const hadActiveFallbackWalk = this.#activeRetryFallback !== undefined;
+		const quotaResetCurrentSelector = currentSelector;
+		const quotaResetGeneration = generation;
 		// Wait with exponential backoff (abortable).
 		const retryAbortController = new AbortController();
 		this.#retryAbortController?.abort();
@@ -2697,14 +2706,14 @@ export class TurnRecovery {
 			: undefined;
 		if (
 			quotaResetWait &&
-			currentSelector &&
-			postWaitSelector === currentSelector &&
-			this.#activeRetryFallback !== undefined &&
-			this.#host.promptGeneration() === generation
+			quotaResetCurrentSelector &&
+			postWaitSelector === quotaResetCurrentSelector &&
+			(this.#activeRetryFallback !== undefined || !hadActiveFallbackWalk) &&
+			this.#host.promptGeneration() === quotaResetGeneration
 		) {
 			this.#host.modelRegistry.clearSuppressedSelector(quotaResetWait.selector.raw);
 			try {
-				await this.applyRetryFallbackCandidate(quotaResetWait.role, quotaResetWait.selector, currentSelector);
+				await this.applyRetryFallbackCandidate(quotaResetWait.role, quotaResetWait.selector, quotaResetCurrentSelector);
 			} catch (error) {
 				// A switch that cannot be applied after the wait (e.g. the
 				// reset did not actually clear the credential) degrades to

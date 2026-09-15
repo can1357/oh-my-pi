@@ -6675,4 +6675,106 @@ describe("AgentSession retry fallback", () => {
 		expect(resetWaits).toHaveLength(1);
 		expect(resetWaits[0]).toBeLessThanOrEqual(3_600_000);
 	});
+
+	it("applies a booked quota reset on a cleared walk left by an earlier model change", async () => {
+		// Contract: reset records outlive the walk that recorded them. A cleared
+		// walk (explicit switch back to the primary) followed by a fresh quota
+		// failure must still route onto the sooner-resetting candidate after
+		// its wait instead of sleeping that wait and retrying the later model.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled cleared-walk quota-reset test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const resetErrorAfterMs = (afterMs: number): string => {
+			const stamp = new Date(Date.now() + afterMs).toISOString().slice(0, 19).replace("T", " ");
+			return `429 已达到 5 小时的使用上限。您的限额将在 ${stamp} 重置。`;
+		};
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let secondPrompt = false;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (!secondPrompt) {
+					// Seed walk: primary records a 1h reset, fallback a 2h one;
+					// the exhausted walk books the primary's sooner reset and
+					// recovers there, leaving the fallback suppressed with a
+					// surviving provider-timed record.
+					if (requestedModels.length === 1) mock.push({ throw: resetErrorAfterMs(3_600_000) });
+					else if (requestedModels.length === 2) mock.push({ throw: resetErrorAfterMs(7_200_000) });
+					else mock.push({ content: ["seed walk recovered on the primary"] });
+				} else if (requestedModels.length === 1) {
+					// Fresh failure with no active walk: the primary's new 7h
+					// reset is later than the surviving 2h fallback record, so
+					// the run must book the fallback's wait and resume there.
+					mock.push({ throw: resetErrorAfterMs(25_200_000) });
+				} else {
+					mock.push({ content: [`recovered on ${selector}`] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.waitForUsageReset": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Seed quota resets on the first walk");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, primarySelector]);
+		requestedModels.length = 0;
+		fallbackAppliedEvents.length = 0;
+
+		// Explicit switch back to the primary clears #activeRetryFallback while
+		// the fallback's reset record and suppression survive.
+		secondPrompt = true;
+		await session.setModelTemporary(primaryModel, undefined, { ephemeral: true });
+
+		await session.prompt("Trigger quota failure with no active walk");
+		await session.waitForIdle();
+
+		// Pre-fix guard (`#activeRetryFallback !== undefined`) rejected the
+		// switch here: the fallback's 2h wait was booked but the continuation
+		// retried the primary (7h) instead.
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		const resetWaits = waitSpy.mock.calls.map(call => call[0] as number).filter(ms => ms > 6_900_000);
+		expect(resetWaits).toHaveLength(1);
+		expect(resetWaits[0]).toBeLessThanOrEqual(7_200_000);
+		expect(fallbackAppliedEvents).toEqual([
+			{ type: "retry_fallback_applied", from: primarySelector, to: fallbackSelector, role: "default" },
+		]);
+		expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: `recovered on ${fallbackSelector}` }]);
+	});
 });
