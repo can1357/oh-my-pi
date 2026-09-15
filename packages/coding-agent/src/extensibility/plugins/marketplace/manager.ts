@@ -15,7 +15,7 @@ import { expandTilde } from "../../../tools/path-utils";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig } from "../types";
 
-import { cachePlugin } from "./cache";
+import { cachePlugin, getCachedPluginPath } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
@@ -241,7 +241,7 @@ export class MarketplaceManager {
 	async installPlugin(
 		name: string,
 		marketplace: string,
-		options?: { force?: boolean; scope?: "user" | "project" },
+		options?: { force?: boolean; scope?: "user" | "project"; dryRun?: boolean },
 	): Promise<InstalledPluginEntry> {
 		const force = options?.force ?? false;
 		const scope = options?.scope ?? "user";
@@ -303,7 +303,22 @@ export class MarketplaceManager {
 		let cachePath!: string;
 		try {
 			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
-			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
+			cachePath = getCachedPluginPath(this.#opts.pluginsCacheDir, marketplace, name, version);
+			if (options?.dryRun) {
+				// Resolve the package name just as a real install would, but leave the
+				// cache, registries, runtime links, and lock file untouched.
+				await this.#resolvePluginPackageName(sourcePath, name);
+				const now = new Date().toISOString();
+				return {
+					scope,
+					installPath: cachePath,
+					version,
+					installedAt: now,
+					lastUpdated: now,
+					...(existing?.some(e => e.enabled === false) ? { enabled: false } : {}),
+				};
+			}
+			await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
 		} finally {

@@ -373,12 +373,17 @@ async function handleInstall(
 				const entry = await mktMgr.installPlugin(target.name, target.marketplace, {
 					force: flags.force,
 					scope: flags.scope,
+					dryRun: flags.dryRun,
 				});
-				console.log(
-					chalk.green(
-						`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
-					),
-				);
+				if (flags.dryRun) {
+					console.log(chalk.dim(`[dry-run] Would install ${target.name}@${target.marketplace}`));
+				} else {
+					console.log(
+						chalk.green(
+							`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
+						),
+					);
+				}
 			} catch (err) {
 				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
 				process.exit(1);

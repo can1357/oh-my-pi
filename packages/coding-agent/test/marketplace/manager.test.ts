@@ -242,6 +242,25 @@ describe("MarketplaceManager", () => {
 		expect(installed[0].id).toBe("hello-plugin@test-marketplace");
 	});
 
+	it("installPlugin dry-run reports the install without changing cache or registries", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+
+		const installPath = path.join(ctx.tmpDir, "cache", "plugins", "test-marketplace___hello-plugin___1.0.0");
+		const lockPath = path.join(ctx.tmpDir, "omp-plugins.lock.json");
+		const installedRegistryPath = path.join(ctx.tmpDir, "installed_plugins.json");
+		fs.mkdirSync(installPath, { recursive: true });
+		fs.writeFileSync(path.join(installPath, "sentinel"), "keep me\n");
+		fs.writeFileSync(lockPath, '{"sentinel":true}\n');
+
+		const entry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { dryRun: true });
+
+		expect(entry).toMatchObject({ scope: "user", installPath, version: "1.0.0" });
+		expect(fs.readFileSync(path.join(installPath, "sentinel"), "utf8")).toBe("keep me\n");
+		expect(fs.readFileSync(lockPath, "utf8")).toBe('{"sentinel":true}\n');
+		expect(fs.existsSync(installedRegistryPath)).toBe(false);
+		expect(await ctx.manager.listInstalledPlugins()).toEqual([]);
+	});
+
 	it("installPlugin rejects package names that escape node_modules", async () => {
 		const marketplaceDir = path.join(ctx.tmpDir, "bad-package-marketplace");
 		const pluginDir = path.join(marketplaceDir, "plugins", "bad-package");
