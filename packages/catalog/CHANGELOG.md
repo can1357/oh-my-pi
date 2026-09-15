@@ -4,7 +4,7 @@
 
 ### Added
 
-- Muse Spark 1.3 Contributor models now expose the `max` effort tier on the Meta Model API and Muse Code subscription paths ([#11788](https://github.com/can1357/oh-my-pi/issues/11788)).
+- Muse Spark 1.3 Contributor now supports `max` on the Meta Model API and Muse Code providers ([#11788](https://github.com/can1357/oh-my-pi/issues/11788), [#12199](https://github.com/can1357/oh-my-pi/pull/12199) by [@mgpai22](https://github.com/mgpai22)).
 
 ## [18.2.1] - 2026-09-15
 
