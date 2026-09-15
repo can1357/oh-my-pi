@@ -1,0 +1,5 @@
+// Bedrock injects a callable sentinel when tool-free requests retain tool history.
+// Apply this transport contract to every routed Bedrock deployment.
+on-api "bedrock-converse-stream" {
+	requires-tool-free-history-for-tool-opt-out #true
+}

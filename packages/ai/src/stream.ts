@@ -1814,7 +1814,7 @@ function resolveBedrockThinkingBudget(
 	model: Model<"bedrock-converse-stream">,
 	options?: SimpleStreamOptions,
 ): { budget: number; level: Effort } | null {
-	if (!options?.reasoning || !model.reasoning) return null;
+	if (!options?.reasoning || !model.reasoning || options.disableReasoning || options.forceReasoningOff) return null;
 	const level = requireSupportedEffort(model, options.reasoning);
 	const budget = options.thinkingBudgets?.[level] ?? BEDROCK_CLAUDE_THINKING[level];
 	return { budget, level };

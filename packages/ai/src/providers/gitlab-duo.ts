@@ -127,7 +127,11 @@ export function streamGitLabDuo(
 				...options.headers,
 			};
 
-			const reasoningEffort = options.reasoning;
+			// This wrapper dispatches directly to the routed provider and bypasses
+			// mapOptionsForApi(), so preserve the shared explicit reasoning-off
+			// contract here as well. In particular, capped side turns rely on this
+			// to keep Anthropic from raising max_tokens for a thinking budget.
+			const reasoningEffort = options.disableReasoning || options.forceReasoningOff ? undefined : options.reasoning;
 
 			const inner =
 				route.api === "anthropic-messages"

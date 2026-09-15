@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import type { Context } from "@oh-my-pi/pi-ai";
+import { Effort, type Context } from "@oh-my-pi/pi-ai";
 import {
 	clearGitLabDuoDirectAccessCache,
 	getGitLabDuoModels,
@@ -60,6 +60,39 @@ describe("GitLab Duo catalog mapping", () => {
 });
 
 describe("GitLab Duo prompt cache affinity", () => {
+	it("honors disableReasoning for capped Anthropic-routed requests", async () => {
+		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-opus-4-6");
+		if (!model) throw new Error("GitLab Duo Anthropic model is missing");
+		const anthropicSpy = spyOn(registerBuiltins, "streamAnthropic");
+
+		await streamGitLabDuo(model, context, {
+			apiKey: "gitlab-thinking-token",
+			maxTokens: 32,
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			fetch: async input => {
+				if (String(input).includes("/direct_access")) {
+					return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				throw new Error("the payload hook should stop the proxy request before fetch");
+			},
+			onPayload: () => {
+				throw new Error("stop after dispatch capture");
+			},
+		}).result();
+
+		expect(anthropicSpy).toHaveBeenCalledTimes(1);
+		expect(anthropicSpy.mock.calls[0]?.[2]).toMatchObject({
+			maxTokens: 32,
+			thinkingEnabled: false,
+			thinkingBudgetTokens: undefined,
+			reasoning: undefined,
+		});
+	});
+
 	it("dispatches Anthropic and chat aliases to their catalog-selected transports and upstream ids", async () => {
 		const models = getGitLabDuoModels();
 		const anthropicModel = models.find(candidate => candidate.id === "duo-chat-sonnet-4-5");

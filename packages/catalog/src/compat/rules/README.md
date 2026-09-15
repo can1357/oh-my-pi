@@ -151,7 +151,7 @@ discovery {
 
 ## Cascade grammar
 
-A cascade document starts with `class` or `provider`. Every selector adds a conjunct to the current rule. `on` scopes by deployment provider; `on-api` scopes by request adapter, including custom provider names. Axis directives may appear directly in any permitted scope, and nested selector blocks may appear alongside them.
+A cascade document starts with `class`, `provider`, or `on-api`. Root `on-api` declares a transport contract independent of model identity and provider name. Every selector adds a conjunct to the current rule. `on` scopes by deployment provider; `on-api` scopes by request adapter, including custom provider names. Axis directives may appear directly in any permitted scope, and nested selector blocks may appear alongside them.
 
 ```kdl
 class "gemini" {
@@ -183,7 +183,7 @@ provider "openrouter" {
 | `class` | `class "id" { ... }` | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`. |
 | `provider` | `provider "id" { ... }` | Exact provider ID. It is root-only and may contain `class` and `models`. |
 | `on` | `on "provider-a" "provider-b" { ... }` | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`. |
-| `on-api` | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`. |
+| `on-api` | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. At document root it may contain `class` and `models`; under a root `class` it may contain `family`, `revision`, and `models`. |
 | `family` | `family "id" { ... }` | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match. |
 | `revision` | `revision ">=2.5 <4" { ... }` | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match. |
 | `models` | `models "id" "vendor/*" { ... }` | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics. |

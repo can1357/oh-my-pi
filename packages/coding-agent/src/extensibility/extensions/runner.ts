@@ -452,6 +452,8 @@ export class ExtensionRunner {
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
 	#getSystemPromptFn: () => string[] = () => [];
+	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
+	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
@@ -700,6 +702,7 @@ export class ExtensionRunner {
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
+		this.#runEphemeralTurnFn = contextActions.runEphemeralTurn;
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -1182,6 +1185,7 @@ export class ExtensionRunner {
 		},
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const runEphemeralTurn = this.#runEphemeralTurnFn;
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
@@ -1202,6 +1206,20 @@ export class ExtensionRunner {
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			runEphemeralTurn: runEphemeralTurn
+				? async options => {
+						const hook = this.#ephemeralTurnBlocker.getStore();
+						if (hook) throw new Error(`runEphemeralTurn cannot be called from a ${hook} hook`);
+						// Resolve at call time so saved contexts inherit the active handler's
+						// cancellation too. Keep an aborted scope after a handler times out.
+						const signals = [
+							options.signal,
+							delegation?.signal,
+							this.#toolRegistrationScope.getStore()?.signal,
+						].filter((signal): signal is AbortSignal => signal !== undefined);
+						return runEphemeralTurn(signals.length ? { ...options, signal: AbortSignal.any(signals) } : options);
+					}
+				: undefined,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
@@ -1304,11 +1322,18 @@ export class ExtensionRunner {
 						registrationScope.signal = handlerSignal;
 						let result: R | undefined;
 						try {
+							const blockingHook =
+								this.#ephemeralTurnBlocker.getStore() ??
+								(["context", "before_provider_request", "after_provider_response"].includes(event.type)
+									? event.type
+									: undefined);
+							const handlerContext = createHandlerContext(
+								ctx,
+								handlerSignal,
+								event.type === "tool_call" ? budget : undefined,
+							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(
-									event,
-									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
-								),
+								this.#ephemeralTurnBlocker.run(blockingHook, () => handler(event, handlerContext)),
 							);
 						} catch (error) {
 							handlerFailure = { error };
@@ -1630,7 +1655,7 @@ export class ExtensionRunner {
 		return transformed;
 	}
 
-	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+	async emitContext(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
 
 		// Check if any extensions actually have context handlers before cloning
@@ -1669,6 +1694,8 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
 				);
 
 				if (handlerResult && (handlerResult as ContextEventResult).messages) {
