@@ -8,7 +8,10 @@
 import type { OAuthCallbackFlowOptions } from "@oh-my-pi/pi-ai/oauth/callback-server";
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/oauth/callback-server";
 import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
 import { buildWellKnownUrls } from "./oauth-discovery";
@@ -294,6 +297,22 @@ function filterResourceIndicator(
 	return resource;
 }
 
+/**
+ * Make an untrusted issuer safe for TUI display. Both operands of the
+ * comparison can be attacker-influenced (`iss` arrives on the callback,
+ * `expected` can come from a server-supplied metadata/error body), and the
+ * message reaches `ctx.showError()` verbatim. Strip ANSI/C0/C1/DEL
+ * control characters, flatten to a single line (tabs would indent the line,
+ * newlines would split it), then width-truncate with the shared helpers.
+ * Comparison itself always runs on the raw values.
+ */
+function sanitizeIssuerForDisplay(value: string): string {
+	const flattened = sanitizeText(value)
+		.replace(/[\r\n]+/g, " ")
+		.trim();
+	return replaceTabs(truncateToWidth(flattened, TRUNCATE_LENGTHS.LONG));
+}
+
 export interface MCPOAuthConfig {
 	/** Authorization endpoint URL */
 	authorizationUrl: string;
@@ -301,6 +320,8 @@ export interface MCPOAuthConfig {
 	tokenUrl: string;
 	/** Authorization-server issuer URL used for metadata discovery. */
 	issuerUrl?: string;
+	/** True when discovery metadata advertised RFC 9207 `iss` support. */
+	issParameterSupported?: boolean;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
 	/** Client ID (optional when already embedded in authorization URL) */
@@ -404,6 +425,56 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 */
 	get authorizationUrl(): string {
 		return this.config.authorizationUrl;
+	}
+
+	/**
+	 * Reject a redirected callback whose `iss` (issuer) does not match the
+	 * authorization server this flow started against (RFC 9207). Compares
+	 * exactly against the discovered RFC 8414 issuer when metadata produced
+	 * one. Without a discovered issuer, only an `iss` that names a *different*
+	 * origin than the authorization endpoint is rejected - a guessed origin
+	 * cannot distinguish path-scoped issuers, so exact matching there would
+	 * reject legitimate callbacks. When the server advertised RFC 9207 support
+	 * a missing `iss` is itself a tamper signal.
+	 */
+	override onAuthorizeRedirect(url: URL): void {
+		const iss = url.searchParams.get("iss");
+		if (iss === null) {
+			if (this.config.issParameterSupported) {
+				throw new AIError.OAuthError(
+					"OAuth iss mismatch (RFC 9207): server advertises iss support but the callback omitted it",
+					{ kind: "device-auth" },
+				);
+			}
+			return; // Legacy AS - no issuer claim, continue.
+		}
+		const expected = this.config.issuerUrl;
+		if (expected === undefined) {
+			if (this.config.issParameterSupported) {
+				// Advertising strict RFC 9207 support while omitting the issuer is
+				// a malformed configuration: an omitted `iss` would be rejected
+				// above, so accepting any `iss` here would let a malicious
+				// metadata document redeem codes from an arbitrary issuer.
+				throw new AIError.OAuthError(
+					"OAuth iss mismatch (RFC 9207): server advertises iss support but discovery found no issuer to compare against",
+					{ kind: "device-auth" },
+				);
+			}
+			// No discovered issuer and no strict flag: there is no identifier to
+			// compare against, and OAuth metadata does not require the endpoint
+			// origin to match the issuer origin, so any origin-based inference
+			// can reject legitimate callbacks. Fail open; the exact guard covers
+			// servers that publish metadata.
+			return;
+		}
+		// RFC 9207 `iss` is the issuer identifier (RFC 8414 `issuer`); distinct
+		// identifiers may differ only by trailing slash, so compare exactly.
+		if (iss !== expected) {
+			throw new AIError.OAuthError(
+				`OAuth iss mismatch (RFC 9207): expected ${sanitizeIssuerForDisplay(expected)}, got ${sanitizeIssuerForDisplay(iss)}`,
+				{ kind: "device-auth" },
+			);
+		}
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {

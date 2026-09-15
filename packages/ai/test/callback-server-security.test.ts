@@ -16,6 +16,33 @@ class CallbackProbeFlow extends OAuthCallbackFlow {
 	}
 }
 
+class IssuerGuardedFlow extends OAuthCallbackFlow {
+	readonly expectedIssuer: string;
+
+	constructor(expectedIssuer: string) {
+		super({}, { preferredPort: 0 });
+		this.expectedIssuer = expectedIssuer;
+	}
+	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string }> {
+		const url = new URL(this.expectedIssuer);
+		url.searchParams.set("redirect_uri", redirectUri);
+		url.searchParams.set("state", state);
+		return { url: url.toString() };
+	}
+
+	async exchangeToken(code: string): Promise<OAuthCredentials> {
+		return { access: code, refresh: "refresh", expires: Date.now() + 60_000 };
+	}
+
+	override onAuthorizeRedirect(url: URL): void {
+		// Mirrors MCPOAuthFlow: compare the RFC 9207 `iss` parameter against the
+		// authorization-server issuer (origin + path); a legacy AS omits `iss`.
+		const iss = url.searchParams.get("iss");
+		if (iss === null) return;
+		if (iss !== this.expectedIssuer) throw new Error("OAuth iss mismatch");
+	}
+}
+
 /**
  * Whether this host can bind the IPv6 loopback at all. Probed with `Bun.serve`
  * rather than the flow's own `os.networkInterfaces()` check, so a broken
@@ -167,6 +194,225 @@ describe("OAuthCallbackFlow callback security", () => {
 			// No `::1` attempt at all: a misleading Bun bind error can then never be
 			// misread as a port collision and tear down the healthy IPv4 listener.
 			expect(hostnames).toEqual(["127.0.0.1"]);
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("rejects a callback whose RFC 9207 issuer does not match the authorization server", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		const authFired = Promise.withResolvers<OAuthAuthInfo>();
+		flow.ctrl = { onAuth: info => authFired.resolve(info), signal: abort.signal };
+		const login = flow.login();
+		void login.catch(() => undefined);
+		const info = await authFired.promise;
+
+		try {
+			const authUrl = new URL(info.url);
+			const redirectUri = authUrl.searchParams.get("redirect_uri");
+			const state = authUrl.searchParams.get("state");
+			if (!redirectUri || !state) throw new Error("OAuth test flow did not advertise its callback parameters");
+
+			const attacker = `${redirectUri}?code=stolen-code&state=${encodeURIComponent(state)}&iss=${encodeURIComponent("https://attacker.example.com")}`;
+			const attackerResponse = await fetch(attacker);
+			expect(attackerResponse.status).toBe(500);
+			const page = await attackerResponse.text();
+			expect(page).toContain('"ok":false');
+			expect(page).toContain("OAuth iss mismatch");
+			await expect(login).rejects.toThrow("OAuth iss mismatch");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("accepts a callback whose RFC 9207 issuer matches the discovered authorization server", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		const authFired = Promise.withResolvers<OAuthAuthInfo>();
+		flow.ctrl = { onAuth: info => authFired.resolve(info), signal: abort.signal };
+		const login = flow.login();
+		void login.catch(() => undefined);
+		const info = await authFired.promise;
+
+		try {
+			const authUrl = new URL(info.url);
+			const redirectUri = authUrl.searchParams.get("redirect_uri");
+			const state = authUrl.searchParams.get("state");
+			if (!redirectUri || !state) throw new Error("OAuth test flow did not advertise its callback parameters");
+
+			const legitimate = `${redirectUri}?code=legitimate-code&state=${encodeURIComponent(state)}&iss=${encodeURIComponent("https://auth.example.com/tenant")}`;
+			const response = await fetch(legitimate);
+			expect(response.status).toBe(200);
+			expect((await login).access).toBe("legitimate-code");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("accepts a legacy callback that omits the iss parameter", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		const authFired = Promise.withResolvers<OAuthAuthInfo>();
+		flow.ctrl = { onAuth: info => authFired.resolve(info), signal: abort.signal };
+		const login = flow.login();
+		void login.catch(() => undefined);
+		const info = await authFired.promise;
+
+		try {
+			const authUrl = new URL(info.url);
+			const redirectUri = authUrl.searchParams.get("redirect_uri");
+			const state = authUrl.searchParams.get("state");
+			if (!redirectUri || !state) throw new Error("OAuth test flow did not advertise its callback parameters");
+
+			const response = await fetch(`${redirectUri}?code=legacy-code&state=${encodeURIComponent(state)}`);
+			expect(response.status).toBe(200);
+			expect((await login).access).toBe("legacy-code");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("rejects a pasted redirect whose RFC 9207 issuer does not match", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () =>
+				"https://localhost/callback?code=stolen-code&iss=https%3A%2F%2Fattacker.example.com",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			await expect(login).rejects.toThrow("OAuth iss mismatch");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("accepts a pasted redirect whose RFC 9207 issuer matches", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () =>
+				"https://localhost/callback?code=legitimate-code&iss=https%3A%2F%2Fauth.example.com%2Ftenant",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			expect((await login).access).toBe("legitimate-code");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("rejects a pasted bare query string whose RFC 9207 issuer does not match", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () => "code=stolen-code&iss=https%3A%2F%2Fattacker.example.com",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			await expect(login).rejects.toThrow("OAuth iss mismatch");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("HTML-escapes untrusted issuer text in the callback failure page", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		const authFired = Promise.withResolvers<OAuthAuthInfo>();
+		flow.ctrl = { onAuth: info => authFired.resolve(info), signal: abort.signal };
+		const login = flow.login();
+		void login.catch(() => undefined);
+		const info = await authFired.promise;
+		try {
+			const authUrl = new URL(info.url);
+			const redirectUri = authUrl.searchParams.get("redirect_uri");
+			const state = authUrl.searchParams.get("state");
+			if (!redirectUri || !state) throw new Error("OAuth test flow did not advertise its callback parameters");
+			const injected = `${redirectUri}?code=x&state=${encodeURIComponent(state)}&iss=${encodeURIComponent("</script><script>alert(1)</script>")}`;
+			const response = await fetch(injected);
+			const page = await response.text();
+			expect(response.status).toBe(500);
+			expect(page).not.toContain("</script><script>alert");
+			await expect(login).rejects.toThrow("OAuth iss mismatch");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("rejects a pasted hash-prefixed fragment whose RFC 9207 issuer does not match", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () => "#code=stolen-code&iss=https%3A%2F%2Fattacker.example.com",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			await expect(login).rejects.toThrow("OAuth iss mismatch");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("skips the issuer guard for a pasted bare authorization code", async () => {
+		// A bare code is not a callback URL, so the flow must not synthesize one
+		// and invoke the guard: a strict server (iss advertised) would otherwise
+		// reject every bare paste. The probe throws on any hook invocation, so a
+		// successful exchange proves the hook was skipped.
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		flow.onAuthorizeRedirect = () => {
+			throw new Error("issuer guard must not run for a bare pasted code");
+		};
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () => "legitimate-code",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			expect((await login).access).toBe("legitimate-code");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("accepts a pasted bare query string whose RFC 9207 issuer matches", async () => {
+		const flow = new IssuerGuardedFlow("https://auth.example.com/tenant");
+		const abort = new AbortController();
+		flow.ctrl = {
+			onAuth: () => {},
+			onManualCodeInput: async () => "code=legitimate-code&iss=https%3A%2F%2Fauth.example.com%2Ftenant",
+			signal: abort.signal,
+		};
+		const login = flow.login();
+		void login.catch(() => undefined);
+		try {
+			expect((await login).access).toBe("legitimate-code");
 		} finally {
 			abort.abort("test cleanup");
 			await login.catch(() => undefined);
