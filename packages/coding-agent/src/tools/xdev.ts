@@ -42,7 +42,7 @@ import { truncateHeadBytes } from "../session/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
 import { renderDefaultToolExecution } from "./default-renderer";
 import type { Tool } from "./index";
-import { replaceTabs, shortenEmbeddedPaths } from "./render-utils";
+import { replaceTabs } from "./render-utils";
 import type { ToolActivitySummary, ToolRenderer } from "./renderers";
 import { renderError, ToolAbortError, ToolError } from "./tool-errors";
 
@@ -539,10 +539,7 @@ export function xdevActivitySummary(
 	if (!detail && typeof content === "string" && !content.trimStart().startsWith("{")) {
 		detail = content.trim().split("\n", 1)[0];
 	}
-	// Folded mode makes this row the whole card, and the picked keys carry inner
-	// arguments verbatim — `xd://grep { path: … }` would print the home directory.
-	// Shortening the assembled line keeps the rewrite off the verb and label.
-	return { label: displayDeviceLabel(name, mounted), detail: detail ? shortenEmbeddedPaths(detail) : undefined };
+	return { label: displayDeviceLabel(name, mounted), detail: detail || undefined };
 }
 
 /** Drop the streaming-decode bookkeeping key before showing inner args. */

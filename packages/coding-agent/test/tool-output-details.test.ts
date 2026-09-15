@@ -197,6 +197,41 @@ describe("tool output details", () => {
 		}
 	});
 
+	it("shortens a home path embedded in a folded command", () => {
+		const home = os.homedir();
+		const card = new ToolExecutionComponent(
+			"custom-thing",
+			{ command: `cat ${home}/notes.md` },
+			{},
+			undefined,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const row = plain(card.render(120));
+
+			expect(row).toContain("cat ~/notes.md");
+			expect(row).not.toContain(home);
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
+	it("keeps a folded read group to one row per call", () => {
+		const longPath = `/${"segment-".repeat(12)}file.ts`;
+		const group = new ReadToolGroupComponent({ showContentPreview: true });
+		group.updateArgs({ path: longPath }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "line 1\nline 2" }] }, false, "read-0");
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(40);
+
+		expect(rows).toHaveLength(1);
+		expect(Bun.stringWidth(plain(rows))).toBeLessThanOrEqual(40);
+	});
+
 	it("keeps an interrupted call neutral while folded", () => {
 		// Steering interrupts a pending call and reports `isError`; the full card
 		// renders the placeholder neutrally, so the folded row must not claim failure.

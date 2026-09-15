@@ -1,12 +1,12 @@
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Container, Text } from "@oh-my-pi/pi-tui";
+import { Container, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
 import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
-import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
+import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync, WidthAwareText } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
@@ -331,7 +331,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#entries = new Map<string, ReadEntry>();
 	#usageRows = new Map<string, ReadUsageRow>();
 	#usageBatchByToolCallId = new Map<string, string>();
-	#text: Text;
+	#text: WidthAwareText;
+	#summaryLines: readonly string[] = [];
 	#expanded = false;
 	#toolActivityVisible = true;
 	#toolOutputDetailsHidden = false;
@@ -354,9 +355,26 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
 		this.#showContentPreview = options.showContentPreview ?? false;
-		this.#text = new Text("", 0, 0);
+		this.#text = this.#createSummaryText();
 		this.addChild(this.#text);
 		this.#updateDisplay();
+	}
+
+	/**
+	 * The summary rows, cut to the terminal width while tool output details are
+	 * folded: the setting promises one row per read call, and the `Text` inside
+	 * would otherwise wrap a long target into several physical rows.
+	 */
+	#createSummaryText(): WidthAwareText {
+		return new WidthAwareText(
+			contentWidth =>
+				(this.#toolOutputDetailsHidden
+					? this.#summaryLines.map(line => truncateToWidth(line, contentWidth))
+					: this.#summaryLines
+				).join("\n"),
+			0,
+			0,
+		);
 	}
 
 	override render(width: number): readonly string[] {
@@ -554,10 +572,11 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
-		this.#text = new Text("", 0, 0);
+		this.#summaryLines = [];
+		this.#text = this.#createSummaryText();
 
 		if (displayRows.length === 0) {
-			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
+			this.#summaryLines = [` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`];
 			this.addChild(this.#text);
 			return;
 		}
@@ -570,7 +589,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
-				this.#text.setText(lines.join("\n"));
+				this.#summaryLines = lines;
 				this.addChild(this.#text);
 			}
 			for (const entry of this.#previewEntriesForRow(row)) {
@@ -590,7 +609,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			this.#appendSummaryRow(lines, row, index, rows.length, usageRowsBySummaryRow.get(index) ?? []);
 		}
 
-		this.#text.setText(lines.join("\n"));
+		this.#summaryLines = lines;
 		this.addChild(this.#text);
 
 		for (const entry of entries) {

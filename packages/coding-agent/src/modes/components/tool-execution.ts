@@ -22,7 +22,7 @@ import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
-import { formatStatusIcon, replaceTabs, resolveImageOptions, shortenPath } from "../../tools/render-utils";
+import { formatStatusIcon, replaceTabs, resolveImageOptions, shortenEmbeddedPaths } from "../../tools/render-utils";
 import {
 	type FirstResultViewportRepaint,
 	type ToolActivitySummary,
@@ -892,9 +892,12 @@ export class ToolExecutionComponent extends Container {
 		// under `display.hideToolOutputDetails`, so terminal control bytes come out
 		// before styling. `sanitizeText` returns the input untouched when there is
 		// nothing to strip, but keeps tabs and newlines, which would break the
-		// one-line row; both halves collapse their whitespace afterwards.
+		// one-line row; both halves collapse their whitespace afterwards, and the
+		// detail also drops any home-prefixed path it embeds (`cat /home/me/x`).
 		const label = sanitizeText(summary.label).replace(/\s+/g, " ");
-		const detail = summary.detail ? theme.fg("muted", ` · ${sanitizeText(summary.detail).replace(/\s+/g, " ")}`) : "";
+		const detail = summary.detail
+			? theme.fg("muted", ` · ${shortenEmbeddedPaths(sanitizeText(summary.detail).replace(/\s+/g, " "))}`)
+			: "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
 		const elapsed =
@@ -944,11 +947,9 @@ export class ToolExecutionComponent extends Container {
 			for (const key of ["command", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
-					// A path is the one argument worth rewriting before it reaches the
-					// user: the row must not print the home directory. Control bytes
-					// are stripped later, in `#renderCompact`, for every summary.
-					const line = value.split("\n", 1)[0] ?? "";
-					return { label: this.#toolLabel, detail: key === "path" ? shortenPath(line) : line };
+					// Control bytes, whitespace, and home-prefixed paths are handled
+					// where the row is assembled, for every summary alike.
+					return { label: this.#toolLabel, detail: value.split("\n", 1)[0] };
 				}
 			}
 		}
