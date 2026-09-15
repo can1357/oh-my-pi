@@ -9,6 +9,7 @@ from robomp.github_events import (
     extract_mention,
     is_implementation_authorizer,
     is_maintainer,
+    payload_has_reviewer_bot_directive,
     rate_limit_cap,
     route,
     verify_signature,
@@ -827,6 +828,37 @@ def test_route_review_comment_normalizes_bot_author_suffix() -> None:
 
 
 # ---------- reviewer bots ----------
+
+
+def _directive_payload(author: str) -> dict:
+    return {"_robomp_directive": {"body": "leak", "author": author}}
+
+
+@pytest.mark.parametrize("author", ["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"])
+def test_predicate_matches_suffixed_configured_bot_login(author: str) -> None:
+    """A configured `coderabbitai[bot]`-style login (suffix stripped by Settings)
+    MUST match a directive author with or without the `[bot]` suffix."""
+    assert payload_has_reviewer_bot_directive(_directive_payload(author), frozenset({"chatgpt-codex-connector"}))
+
+
+def test_predicate_matches_bare_configured_bot_login() -> None:
+    """A bare configured login matches a suffixed author too (normalization on both sides)."""
+    assert payload_has_reviewer_bot_directive(
+        _directive_payload("chatgpt-codex-connector[bot]"), frozenset({"chatgpt-codex-connector"})
+    )
+
+
+def test_predicate_rejects_non_configured_bot() -> None:
+    assert not payload_has_reviewer_bot_directive(
+        _directive_payload("renovate[bot]"), frozenset({"chatgpt-codex-connector"})
+    )
+
+
+def test_predicate_ignores_missing_directive_block() -> None:
+    assert not payload_has_reviewer_bot_directive({}, frozenset({"chatgpt-codex-connector"}))
+    assert not payload_has_reviewer_bot_directive(
+        {"_robomp_directive": {"body": "x"}}, frozenset({"chatgpt-codex-connector"})
+    )
 
 
 def test_route_reviewer_bot_comment_on_incoming_pr_is_ignored() -> None:

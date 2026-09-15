@@ -539,6 +539,7 @@ def _build_prompt(
             comment_body=body,
             comment_path=path,
             comment_line_range=line_range,
+            thread=thread,
         )
     raise ValueError(f"unknown task kind: {task_kind!r}")
 

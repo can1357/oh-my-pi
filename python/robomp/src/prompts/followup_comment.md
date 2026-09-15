@@ -21,5 +21,6 @@ Thread: {{origin.description}}. PR: `{{state.pr_status}}`.
 - PR change requested: amend `{{workspace.branch}}`; push only for an already-open PR / authorized implementation. NEVER open a second PR or first PR for an unauthorized enhancement/proposal. Short `gh_post_comment` naming changes.
 - Confirmation or unrelated question: one `gh_post_comment`; code untouched.
 - Bot author or no actionable content: no-op.
+- Point already addressed on `{{workspace.branch}}` or already answered in the thread: no-op — no commit, no comment; NEVER a second "already resolved" reply.
 
 MUST reuse recorded session state. NEVER restart from scratch.

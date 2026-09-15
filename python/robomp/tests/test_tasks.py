@@ -235,3 +235,98 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
     row = db.get_issue("octo/widget#1")
     assert row is not None
     assert row.state == "reproducing"
+
+
+async def test_handle_review_passes_full_thread_to_run_task(db, settings, monkeypatch, tmp_path):
+    """The inline-triggered run MUST receive the full review thread, not just the single comment."""
+    db.upsert_issue(
+        key="octo/widget#5",
+        repo="octo/widget",
+        number=5,
+        state="open",
+        branch="farm/abc/5",
+        pr_number=7,
+    )
+
+    repo = RepoInfo(
+        full_name="octo/widget",
+        default_branch="main",
+        clone_url="https://x/octo/widget.git",
+        private=False,
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=5,
+        title="bug",
+        body="b",
+        state="open",
+        author="alice",
+        labels=(),
+        is_pull_request=False,
+    )
+
+    async def _get_repo(_r):
+        return repo
+
+    async def _get_issue(_r, _n):
+        return issue
+
+    async def _list_comments(_r, _n):
+        return []
+
+    async def _list_review_comments(_r, _n):
+        return [
+            SimpleNamespace(
+                author="coderabbit", body="leak at 42", path="src/foo.py", line=42, created_at="2026-05-02T10:00:00Z"
+            ),
+        ]
+
+    async def _list_pr_reviews(_r, _n):
+        return []
+
+    github = SimpleNamespace(
+        get_repo=_get_repo,
+        get_issue=_get_issue,
+        list_comments=_list_comments,
+        list_review_comments=_list_review_comments,
+        list_pr_reviews=_list_pr_reviews,
+    )
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kwargs: SimpleNamespace(branch="farm/abc/5", session_dir=str(tmp_path / "sess")),
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _capturing_run_task(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(tasks, "run_task", _capturing_run_task)
+
+    payload = {
+        "pull_request": {"number": 7},
+        "repository": {"full_name": "octo/widget"},
+        "comment": {
+            "user": {"login": "coderabbit"},
+            "body": "leak at 42",
+            "path": "src/foo.py",
+            "line": 42,
+        },
+    }
+
+    await tasks.handle_review(
+        settings=settings,
+        db=db,
+        github=github,
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d-review",
+    )
+
+    thread = captured.get("thread")
+    assert isinstance(thread, tuple) and thread, "handle_review must pass the fetched thread to run_task"
+    review_messages = [m for m in thread if getattr(m, "kind", "") == "review_comment"]
+    assert len(review_messages) == 1
+    assert review_messages[0].body == "leak at 42"
+    assert review_messages[0].path == "src/foo.py"
