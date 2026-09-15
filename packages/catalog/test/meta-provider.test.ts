@@ -14,7 +14,8 @@ const MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
-// Meta documents the `max` tier for Muse Spark 1.3 (standard) only.
+// The `max` tier answers on the direct wire for Muse Spark 1.3 (standard) and
+// 1.3-contributor with the Muse client fingerprint; older revisions stay 5-tier.
 const MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
@@ -54,7 +55,7 @@ describe("Meta Model API provider", () => {
 		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
 			name: "Muse Spark 1.3 (C)",
 			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-			thinking: MUSE_SPARK_THINKING,
+			thinking: MUSE_SPARK_MAX_THINKING,
 		});
 		const options = metaModelManagerOptions();
 		expect(options.providerId).toBe("meta");
@@ -204,22 +205,19 @@ describe("Muse Code subscription provider", () => {
 		expect(getBundledModel("meta", "muse-spark-1.3-contributor")?.applyPatchToolType).toBeUndefined();
 	});
 
-	test("exposes the max tier on bundled 1.3 standard rows only", () => {
+	test("exposes the max tier on bundled 1.3 and 1.3-contributor rows", () => {
 		for (const provider of ["muse-code", "meta"] as const) {
-			expect(getBundledModel(provider, "muse-spark-1.3")?.thinking?.efforts).toEqual([
-				Effort.Minimal,
-				Effort.Low,
-				Effort.Medium,
-				Effort.High,
-				Effort.XHigh,
-				Effort.Max,
-			]);
-			for (const id of [
-				"muse-spark-1.1",
-				"muse-spark-1.2",
-				"muse-spark-1.2-contributor",
-				"muse-spark-1.3-contributor",
-			]) {
+			for (const id of ["muse-spark-1.3", "muse-spark-1.3-contributor"]) {
+				expect(getBundledModel(provider, id)?.thinking?.efforts).toEqual([
+					Effort.Minimal,
+					Effort.Low,
+					Effort.Medium,
+					Effort.High,
+					Effort.XHigh,
+					Effort.Max,
+				]);
+			}
+			for (const id of ["muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.2-contributor"]) {
 				expect(getBundledModel(provider, id)?.thinking?.efforts).toEqual([
 					Effort.Minimal,
 					Effort.Low,

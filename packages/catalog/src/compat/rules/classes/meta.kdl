@@ -3,8 +3,12 @@
 class "meta" {
 	// Exact ids on purpose: only an exact selector upgrades hosts whose
 	// discovery misreports a Muse Spark revision as non-reasoning.
-	// muse-spark-1.3 exposes the max effort tier; older/contributor revisions
-	// keep the 5-tier ladder.
+	// muse-spark-1.3 exposes the max effort tier; 1.3-contributor exposes it
+	// on the direct Model API wire (meta, muse-code), where the captured Muse
+	// User-Agent enables `max` in live tests. Vendor documents `max` for
+	// standard 1.3 and announces Contributor `max` for Muse Code
+	// subscriptions; PAYG success is observed wire behavior, not a permission
+	// claim. Older revisions keep the 5-tier ladder.
 	models "muse-spark-1.3" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
 		thinking-mode "effort"
@@ -12,6 +16,12 @@ class "meta" {
 	models "muse-spark-1.1" "muse-spark-1.2" "muse-spark-1.2-contributor" "muse-spark-1.3-contributor" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		thinking-mode "effort"
+	}
+	on "meta" "muse-code" {
+		models "muse-spark-1.3-contributor" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			thinking-mode "effort"
+		}
 	}
 	on "kilo" "nvidia" {
 		family "llama" {

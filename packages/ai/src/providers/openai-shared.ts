@@ -21,6 +21,7 @@ import {
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { isDirectMetaModelEndpoint, MUSE_USER_AGENT } from "./muse-fingerprint";
 import {
 	$env,
 	classifyJsonPrefix,
@@ -338,6 +339,12 @@ export function resolveOpenAIRequestSetup(
 	// Attribute xAI traffic as omp unless a User-Agent is already set.
 	if (model.provider === "xai" || model.provider === "xai-oauth") {
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+	}
+	// The captured Muse User-Agent enables Contributor `max` in live tests on
+	// the direct Meta endpoint. Explicit User-Agent headers still win; proxies
+	// and gateways never receive it.
+	if ((model.provider === "meta" || model.provider === "muse-code") && isDirectMetaModelEndpoint(baseUrl)) {
+		setHeaderIfAbsent(headers, "User-Agent", MUSE_USER_AGENT);
 	}
 	const requestHeaders = { ...headers };
 	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
