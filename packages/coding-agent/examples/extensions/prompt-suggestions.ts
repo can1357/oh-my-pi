@@ -43,6 +43,9 @@ import { completeSimple } from "@oh-my-pi/pi-ai";
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getComposerStyle, isKeyRelease, matchesKey, parseSgrMouse, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
+import { prompt } from "@oh-my-pi/pi-utils";
+import suggestionSystemPrompt from "./prompt-suggestions-system.md" with { type: "text" };
+import suggestionUserPrompt from "./prompt-suggestions-user.md" with { type: "text" };
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -144,21 +147,16 @@ export function isSuccessfulFinalStop(messages: readonly unknown[]): boolean {
 	return false;
 }
 
+// Prompt wording lives in the sibling .md templates (role labels, rules, and
+// the system persona). `prompt.compile` — not `prompt.render` — keeps the
+// output byte-exact: render's post-format pass would rewrite ASCII arrows and
+// RFC wording inside injected conversation text.
+const SUGGESTION_SYSTEM_PROMPT = suggestionSystemPrompt.trimEnd();
+const compileSuggestionPrompt = prompt.compile(suggestionUserPrompt.trimEnd());
+
 /** Build the single user prompt sent to the tiny model. */
 export function buildSuggestionPrompt(turns: readonly TextTurn[]): string {
-	const lines = turns.map(t => `${t.role === "user" ? "User" : "Assistant"}: ${t.text}`);
-	return [
-		"Conversation with a coding agent (most recent last; may be clipped):",
-		"",
-		...lines,
-		"",
-		"Predict the single next message the human user is most likely to type.",
-		"Rules:",
-		"- Reply with the message text only: no quotes, no labels, no markdown, no explanation.",
-		"- Write it in the same language as the conversation (Chinese conversation -> Chinese).",
-		"- One short line, at most ~15 words / 60 characters. It must read like something the user would type themselves (a follow-up request, question, or next step).",
-		"- If no next message is obvious, reply exactly: NO_SUGGESTION",
-	].join("\n");
+	return compileSuggestionPrompt({ turns });
 }
 
 const LABEL_PREFIX_RE =
@@ -344,9 +342,7 @@ export default function promptSuggestionsExtension(pi: ExtensionAPI): void {
 		void completeSimple(
 			model,
 			{
-				systemPrompt: [
-					"You predict the next chat message a user would send to a coding agent. You reply with that message text only, or the exact token NO_SUGGESTION. Never explain.",
-				],
+				systemPrompt: [SUGGESTION_SYSTEM_PROMPT],
 				messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
 			},
 			{

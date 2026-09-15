@@ -22,6 +22,7 @@ import { isKittyProtocolActive, setKittyProtocolActive } from "@oh-my-pi/pi-tui/
 import type { EditorTheme } from "@oh-my-pi/pi-tui/components/editor";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import promptSuggestionsExtension, {
+	buildSuggestionPrompt,
 	cleanSuggestion,
 	extractRecentTurns,
 } from "../examples/extensions/prompt-suggestions";
@@ -533,6 +534,18 @@ describe("prompt-suggestions extension", () => {
 });
 
 describe("prompt-suggestions pure helpers", () => {
+	it("preserves conversation text and turn order when filling the prompt template", () => {
+		const userText = '检查 a < b && a != c -> {{literal}}\nMUST NOT rewrite "quotes" or <tag>';
+		const assistantTurn = "第一行\n\n```ts\nvalue <= limit\n```\n最后一行";
+		const rendered = buildSuggestionPrompt([
+			{ role: "user", text: userText },
+			{ role: "assistant", text: assistantTurn },
+		]);
+		expect(rendered).toContain(userText);
+		expect(rendered).toContain(assistantTurn);
+		expect(rendered.indexOf(userText)).toBeLessThan(rendered.indexOf(assistantTurn));
+	});
+
 	it("bounds the context and excludes tools, thinking, images, and injected messages", () => {
 		const result = extractRecentTurns([
 			{ role: "user", content: "x".repeat(12_000) },

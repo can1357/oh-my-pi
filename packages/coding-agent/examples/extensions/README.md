@@ -69,7 +69,12 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ## Prompt suggestions
 
-Load `prompt-suggestions.ts` explicitly or copy it into your extensions directory.
+Load `prompt-suggestions.ts` explicitly or copy it into your extensions
+directory. Its prompt wording lives in two sibling templates,
+`prompt-suggestions-system.md` and `prompt-suggestions-user.md`: keep those
+files next to `prompt-suggestions.ts` when loading it explicitly, and copy all
+three files together when copying it into your extensions directory.
+
 After a successful final response, it asks the configured `@tiny` model for a
 short follow-up and shows it as dim text in an empty composer. Tab inserts the
 suggestion for editing; it does not send it. Typing, pasting, starting another
