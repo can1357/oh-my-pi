@@ -38,6 +38,8 @@ interface ConfigInit {
 	disabled?: boolean;
 	displayOption?: DisplayOption;
 	isModelRouter?: boolean;
+	/** `ModelInfo.harnessUids` — non-empty marks a harness-backed composite, not an AssignModel slot. */
+	harnessUids?: string[];
 	/** `ClientModelConfig.maxTokens` — the context window. */
 	contextWindow?: number;
 	maxOutputTokens?: number;
@@ -48,7 +50,7 @@ interface ConfigInit {
 		supportsImages?: boolean;
 	};
 	supportsImages?: boolean;
-	dimensions?: readonly { label: string; value: number; denominator?: string }[];
+	dimensions?: readonly { label: string; value: number; denominator?: string; kind?: ModelDimensionKind }[];
 	/** `modelFamilyMetadata.modelFamilyLabel`. */
 	family?: string;
 	/** `Reasoning Effort` entry name; omitted means the family has no effort axis. */
@@ -129,7 +131,7 @@ function config(init: ConfigInit): ClientModelConfig {
 				label: dimension.label,
 				value: dimension.value,
 				denominator: dimension.denominator ?? "1M tokens",
-				kind: ModelDimensionKind.COST,
+				kind: dimension.kind ?? ModelDimensionKind.COST,
 			}),
 		),
 		...(init.family !== undefined
@@ -148,6 +150,7 @@ function config(init: ConfigInit): ClientModelConfig {
 						displayOption: init.displayOption ?? DisplayOption.UNSPECIFIED,
 						maxOutputTokens: init.maxOutputTokens ?? 64_000,
 						isModelRouter: init.isModelRouter ?? false,
+						harnessUids: init.harnessUids ?? [],
 						...(init.features !== undefined ? { modelFeatures: create(ModelFeaturesSchema, init.features) } : {}),
 					}),
 				}),
@@ -278,6 +281,25 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		maxOutputTokens: 0,
 		family: "Adaptive",
 		effort: "Medium",
+	}),
+	// Harness-backed composite: router-flagged but a valid chat uid itself, so
+	// `AssignModel` must not be used. Its `modelDimensions` flatten the composite
+	// rate card plus each dispatched component's card — only the first is read.
+	config({
+		uid: "fusion",
+		label: "Fusion",
+		displayOption: DisplayOption.MODEL_ROUTER,
+		isModelRouter: true,
+		harnessUids: ["fusion"],
+		dimensions: [
+			{ label: "Input", value: 10 },
+			{ label: "Cached input", value: 0.25 },
+			{ label: "Output", value: 50 },
+			{ label: "Sidekick", value: 0, kind: ModelDimensionKind.UNSPECIFIED },
+			{ label: "Input", value: 3 },
+			{ label: "Cached input", value: 0.3 },
+			{ label: "Output", value: 15 },
+		],
 	}),
 	// Internal display slots: requested so the server reveals them, never exposed.
 	config({ uid: "quick-review-internal", displayOption: DisplayOption.QUICK_REVIEW }),
@@ -431,6 +453,14 @@ describe("devin native display filtering", () => {
 		expect(adaptive.contextWindow).toBe(200_000);
 		expect(adaptive.maxTokens).toBe(64_000);
 		expect(adaptive.baseUrl).toBe("https://server.codeium.com");
+	});
+
+	it("surfaces a harness-backed composite as a direct-chat model, not an AssignModel router", () => {
+		const fusion = model("fusion");
+		expect(fusion.compat?.modelRouter).toBeUndefined();
+		// Composite dims flatten the composite card plus each component's card;
+		// only the first card is the model's own rate.
+		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
 	});
 });
 

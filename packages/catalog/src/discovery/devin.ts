@@ -104,18 +104,29 @@ function devinCostDenominatorTokens(denominator: string): number {
  * an estimated rate, not a different unit, so both kinds are read. `cacheWrite`
  * has no Cascade dimension — Devin bills cache writes at the input rate — and
  * stays 0.
+ *
+ * Composite configs (`fusion`) flatten their own rate card plus every
+ * dispatched component's card into one `modelDimensions` list, separated by
+ * `Sidekick` marker dimensions. The first card is the model's own rate; a
+ * repeated cost label marks the next component's card, so reading stops there.
  */
 function devinModelCost(config: ClientModelConfig): ModelCost {
 	const cost: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const seenLabels = new Set<string>();
 	for (const dimension of config.modelDimensions) {
 		if (dimension.kind !== ModelDimensionKind.COST && dimension.kind !== ModelDimensionKind.COST_FUZZY) {
 			continue;
 		}
+		const label = dimension.label.trim().toLowerCase();
+		if (seenLabels.has(label)) {
+			break;
+		}
+		seenLabels.add(label);
 		// Dimension values arrive as protobuf floats: round off float32 noise
 		// (0.1 decodes as 0.10000000149011612) at sub-cent precision.
 		const perMillion =
 			Math.round(((dimension.value * 1_000_000) / devinCostDenominatorTokens(dimension.denominator)) * 1e6) / 1e6;
-		switch (dimension.label.trim().toLowerCase()) {
+		switch (label) {
 			case DEVIN_COST_LABEL_INPUT:
 				cost.input = perMillion;
 				break;
@@ -379,14 +390,14 @@ function devinModelSpec(
 	config: ClientModelConfig,
 	uid: string,
 	baseUrl: string,
-	isRouter: boolean,
+	isAssignModelRouter: boolean,
 ): ModelSpec<"devin-agent"> {
 	const features = config.modelInfo?.modelFeatures;
 	const supportsImages =
 		(features !== undefined ? features.supportsImages : config.supportsImages) && !DEVIN_IMAGE_BLIND_UIDS.has(uid);
 	const input: ("text" | "image")[] = supportsImages ? ["text", "image"] : ["text"];
 	const compat: DevinCompat = {};
-	if (isRouter) compat.modelRouter = true;
+	if (isAssignModelRouter) compat.modelRouter = true;
 	if (features?.supportsParallelToolCalls === true) compat.supportsParallelToolCalls = true;
 	const maxOutputTokens = config.modelInfo?.maxOutputTokens ?? 0;
 	const spec: ModelSpec<"devin-agent"> = {
@@ -439,7 +450,13 @@ function normalizeDevinModels(
 		}
 		seen.add(uid);
 		const isRouter = displayOption === DisplayOption.MODEL_ROUTER || config.modelInfo?.isModelRouter === true;
-		specs.push(devinModelSpec(config, uid, baseUrl, isRouter));
+		// `isModelRouter` marks two different things: harness-less routing slots
+		// (`adaptive`, `subagent-default`) that `AssignModel` resolves into a
+		// concrete model, and harness-backed composites (`fusion`,
+		// `fusion-sidekick-*`) that are themselves valid chat uids. Only the
+		// former take the `AssignModel` path — sending a composite uid there 404s.
+		const isAssignModelRouter = isRouter && (config.modelInfo?.harnessUids.length ?? 0) === 0;
+		specs.push(devinModelSpec(config, uid, baseUrl, isAssignModelRouter));
 		// A router is a server-side dispatcher, not an effort tier: it stays a
 		// standalone model even when upstream files it under a family.
 		if (!isRouter) {
