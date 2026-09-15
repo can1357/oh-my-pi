@@ -54,6 +54,7 @@
 
 ### Added
 
+- Added `tui.stateFile`, which writes the agent run state (working, idle, or waiting on you) to `<terminal>.state.json` in the terminal-sessions directory ([#11830](https://github.com/can1357/oh-my-pi/pull/11830) by [@michael-schnell](https://github.com/michael-schnell)).
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
