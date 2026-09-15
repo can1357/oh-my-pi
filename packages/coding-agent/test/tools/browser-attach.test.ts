@@ -540,3 +540,35 @@ describe("attach flag parsing", () => {
 		expect(findUserDataDirInArgs(["chrome", "--user-data-dir", "/tmp/p"])).toBe("/tmp/p");
 	});
 });
+
+describe("findReusableCdp executable matching", () => {
+	// A symlinked exe (/usr/bin/google-chrome -> /opt/...) must still match its
+	// own processes: fromPath compares against the kernel-resolved exe path. A
+	// port-less match refuses relaunch, which is what proves the match happened
+	// (no match would return null instead of throwing).
+	test.skipIf(process.platform !== "linux")("matches processes through a symlinked exe path", async () => {
+		let sleepBin: string | undefined;
+		for (const candidate of ["/usr/bin/sleep", "/bin/sleep"]) {
+			try {
+				await fs.stat(candidate);
+				sleepBin = candidate;
+				break;
+			} catch {}
+		}
+		if (!sleepBin) throw new Error("Expected a sleep binary");
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-exe-symlink-"));
+		try {
+			const link = path.join(dir, "my-sleep");
+			await fs.symlink(sleepBin, link);
+			const child = Bun.spawn([link, "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+			try {
+				await expect(findReusableCdp(link)).rejects.toThrow("already running without a reusable CDP endpoint");
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});

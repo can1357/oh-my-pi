@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
@@ -277,7 +278,12 @@ export async function findReusableCdp(
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
 			? normalizeUserDataDir(requestedUserDataDir)
 			: null;
-	const candidates = Process.fromPath(exe).filter(process => process.status() === ProcessStatus.Running);
+	// /proc/PID/exe (and its platform equivalents) is always fully resolved, so
+	// match against the canonical path: a symlinked exe such as
+	// /usr/bin/google-chrome would otherwise never match its own processes and
+	// every borrowed-profile attach would relaunch onto the locked profile.
+	const resolvedExe = await fs.realpath(exe).catch(() => exe);
+	const candidates = Process.fromPath(resolvedExe).filter(process => process.status() === ProcessStatus.Running);
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
 	for (const process of candidates) {

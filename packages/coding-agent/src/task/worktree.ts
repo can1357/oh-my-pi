@@ -211,10 +211,21 @@ async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promi
 	let unstaged: string;
 	try {
 		staged = await repo.diffText({ binary: true, cached: true, maxBytes: budgetBytes });
+		// Stale addons predate maxBytes enforcement (18.2.0 ignores it): enforce
+		// here so over-budget diffs refuse identically. Fresh addons never return
+		// over-cap output, so this only fires on legacy binaries (which also lose
+		// the renderer's OOM protection and buffer the full diff first).
+		if (Buffer.byteLength(staged) > budgetBytes) {
+			throw new IsolationBaselineTooLargeError(repoRoot, undefined, budgetBytes);
+		}
 		// The renderer's cap and the budget are UTF-8 bytes; a render that
 		// succeeded is at most `budgetBytes` of them, so the remainder is never
 		// negative.
-		unstaged = await repo.diffText({ binary: true, maxBytes: budgetBytes - Buffer.byteLength(staged) });
+		const unstagedBudget = budgetBytes - Buffer.byteLength(staged);
+		unstaged = await repo.diffText({ binary: true, maxBytes: unstagedBudget });
+		if (Buffer.byteLength(unstaged) > unstagedBudget) {
+			throw new IsolationBaselineTooLargeError(repoRoot, undefined, budgetBytes);
+		}
 	} catch (error) {
 		if (vcs.isVcsError(error) && error.code === "OutputTooLarge") {
 			throw new IsolationBaselineTooLargeError(repoRoot, undefined, budgetBytes);

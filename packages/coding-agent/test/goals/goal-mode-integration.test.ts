@@ -56,6 +56,10 @@ type SharedFixture = {
 async function createSharedFixture(): Promise<SharedFixture> {
 	const baseDir = TempDir.createSync("@pi-goal-mode-shared-");
 	const authStorage = await AuthStorage.create(path.join(baseDir.path(), "testauth.db"));
+	// Goal continuations dispatch real prompt plumbing (key validation runs even
+	// with a mocked streamFn); without a key this file only passes on machines
+	// with ambient credentials. A dummy runtime key keeps CI deterministic.
+	authStorage.setRuntimeApiKey("anthropic", "test-anthropic-key");
 	const modelRegistry = new ModelRegistry(authStorage);
 	const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 	if (!model) {
