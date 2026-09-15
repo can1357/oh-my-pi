@@ -55,6 +55,8 @@ import type {
 	ToolDefinition,
 	ToolInfo,
 } from "./types";
+import { clearAll as clearUiStringsAll, registerUiStrings } from "./ui-strings";
+import { clearAllPromptOverrides, registerPromptOverrides } from "./prompt-overrides";
 
 installLegacyPiSpecifierShim();
 
@@ -355,6 +357,19 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	unregisterProvider(name: string): void {
 		this.runtime.unregisterProvider(name, this.extension.path);
 	}
+
+	registerUiStrings(registration: { strings: Record<string, string> }): void {
+		registerUiStrings(registration, this.extension.path);
+	}
+	registerPromptOverrides(registration: {
+		overrides: Array<{
+			id: string;
+			full?: string;
+			transform?: (source: string) => string;
+		}>;
+	}): void {
+		registerPromptOverrides(registration, this.extension.path);
+	}
 }
 
 /**
@@ -482,6 +497,8 @@ export async function bindPreparedExtensions(
 	cwd: string,
 	eventBus?: EventBus,
 ): Promise<LoadExtensionsResult> {
+	clearUiStringsAll();
+	clearAllPromptOverrides();
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();

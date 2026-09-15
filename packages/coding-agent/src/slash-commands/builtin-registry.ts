@@ -15,6 +15,11 @@ import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./buil
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { parseSlashCommand } from "./helpers/parse";
+import {
+	resolveCommandDescription,
+	resolveCommandHint,
+	resolveCommandSubcommands,
+} from "./command-ui";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -72,21 +77,28 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
-	if (cmd.subcommands) {
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: resolveCommandDescription(cmd.name, cmd.description),
+	};
+	const subcommands = cmd.subcommands
+		? resolveCommandSubcommands(cmd.name, cmd.subcommands)
+		: undefined;
+	if (subcommands) {
+		materialized.subcommands = subcommands;
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
-				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: buildArgumentCompletions(cmd.subcommands);
-		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+				? buildMcpArgumentCompletions(subcommands, runtime)
+				: buildArgumentCompletions(subcommands);
+		materialized.getInlineHint = buildSubcommandInlineHint(subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
-		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(resolveCommandHint(cmd.name, cmd.inlineHint));
 	} else if (cmd.name === "switch" && runtime) {
 		materialized.getArgumentCompletions = buildModelSelectorCompletions(runtime);
-		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(resolveCommandHint(cmd.name, cmd.inlineHint));
 	} else if (cmd.inlineHint) {
-		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+		materialized.getInlineHint = buildStaticInlineHint(resolveCommandHint(cmd.name, cmd.inlineHint));
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
 		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);

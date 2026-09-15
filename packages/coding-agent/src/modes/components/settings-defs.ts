@@ -11,6 +11,7 @@
 
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../config/settings";
+import { resolveUiString } from "../../extensibility/extensions/ui-strings";
 import {
 	type AnyUiMetadata,
 	getDefault,
@@ -188,11 +189,11 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
 	const base = {
 		path,
-		label: ui.label,
-		description: ui.description,
+		label: resolveUiString(`setting.${path}.label`, ui.label),
+		description: resolveUiString(`setting.${path}.description`, ui.description),
 		warning: ui.warning,
 		tab: ui.tab,
-		group: ui.group,
+		group: ui.group ?? "",
 		condition,
 	};
 

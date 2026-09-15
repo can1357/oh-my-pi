@@ -8,10 +8,19 @@ import {
 	TAB_GROUPS,
 } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/modes/components/settings-defs";
+import {
+	clearAll as clearAllUiStrings,
+	registerUiStrings,
+	resolveUiString,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/ui-strings";
 
 interface UiShape {
 	tab: SettingTab;
 	group?: string;
+}
+
+function resetUiStrings(): void {
+	clearAllUiStrings();
 }
 
 describe("settings layout", () => {
@@ -36,6 +45,38 @@ describe("settings layout", () => {
 			}
 		}
 		expect(violations).toEqual([]);
+	});
+
+	it("keeps def.group as the canonical TAB_GROUPS name (regression: escaped group key template)", () => {
+		resetUiStrings();
+		// The group key must interpolate the tab/group at build time. An escaped
+		// template produced the literal "group.${ui.tab}.${ui.group ?? ""}" as the
+		// key (and as the group name), silently breaking every UI override and
+		// pushing every group past the TAB_GROUPS sort rank.
+		for (const tab of SETTING_TABS) {
+			for (const def of getSettingsForTab(tab)) {
+				if (!def.group) continue;
+				expect(TAB_GROUPS[tab].includes(def.group)).toBe(true);
+			}
+		}
+	});
+
+	it("resolves the group display label without mutating the canonical def.group", () => {
+		resetUiStrings();
+		const def = getSettingsForTab("appearance").find(item => item.path === "terminal.showProgress");
+		expect(def).toBeDefined();
+		if (!def?.group) throw new Error("terminal.showProgress should be grouped");
+		const group = def.group;
+
+		// No override: display label falls back to the canonical name.
+		expect(resolveUiString(`group.appearance.${group}`, group)).toBe(group);
+
+		registerUiStrings({ strings: { "group.appearance.Display": "Display-ZH" } }, "/path/to/plugin");
+		expect(resolveUiString(`group.appearance.${group}`, group)).toBe("Display-ZH");
+
+		// The canonical group stays the sort identity; only the label changes.
+		expect(def.group).toBe(group);
+		resetUiStrings();
 	});
 
 	it("getSettingsForTab returns contiguous groups in TAB_GROUPS order", () => {
