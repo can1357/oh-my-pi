@@ -564,6 +564,12 @@ describe("shortenEmbeddedPaths", () => {
 		const filePath = String.raw`C:\Users\Jane\projects\demo: failed`;
 		expect(shortenEmbeddedPaths(filePath, home)).toBe("~/projects/demo: failed");
 	});
+
+	it("shortens a Windows home path spelled with different casing", () => {
+		const home = String.raw`C:\Users\Jane`;
+		const filePath = String.raw`cat C:\USERS\JANE\projects\demo`;
+		expect(shortenEmbeddedPaths(filePath, home)).toBe("cat ~/projects/demo");
+	});
 });
 
 describe("sanitizeDisplayWarnings", () => {

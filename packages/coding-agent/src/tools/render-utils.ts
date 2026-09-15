@@ -839,12 +839,15 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 /** Shorten home-prefixed paths inside free text, preserving surrounding
  * punctuation so error strings with embedded paths stay readable. */
 export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
-	// Every rewrite below requires the home directory to appear literally, so
-	// text that does not contain it returns untouched — callers on a render path
-	// pay no allocation for the common case.
-	if (homeDir.length === 0 || !text.includes(homeDir)) return text;
-	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
+	if (homeDir.length === 0) return text;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
+	// Every rewrite below requires the home directory to appear literally, so text
+	// that does not contain it returns untouched — callers on a render path pay no
+	// allocation for the common case. Windows paths compare case-insensitively,
+	// matching the `gi` replacement below.
+	const hasHome = windowsStyle ? text.toLowerCase().includes(homeDir.toLowerCase()) : text.includes(homeDir);
+	if (!hasHome) return text;
+	const shortenedHome = homeDir.length > 1 ? shortenPath(homeDir, homeDir) : homeDir;
 	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const homePattern = new RegExp(
 		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
