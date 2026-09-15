@@ -1791,7 +1791,7 @@ describe("lsp regressions", () => {
 				expect(request.command).toBe("typescript.tsserverRequest");
 				const [command, arguments_] = request.arguments;
 				requests.push({ command, arguments: arguments_ });
-				expect(arguments_).toMatchObject({ file: uri, includeLinePosition: false });
+				expect(arguments_).toMatchObject({ file: filePath, includeLinePosition: false });
 				const body =
 					requestCount >= TS_DIAGNOSTIC_COMMANDS.length &&
 					requestCount < TS_DIAGNOSTIC_COMMANDS.length * 2 &&
@@ -1820,7 +1820,7 @@ describe("lsp regressions", () => {
 					.flat()
 					.sort(),
 			);
-			expect(requests.every(request => request.arguments.file === uri)).toBe(true);
+			expect(requests.every(request => request.arguments.file === filePath)).toBe(true);
 			expect(requests.every(request => request.arguments.includeLinePosition === false)).toBe(true);
 		} finally {
 			tempDir.removeSync();

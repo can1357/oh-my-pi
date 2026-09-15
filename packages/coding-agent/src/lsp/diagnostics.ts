@@ -347,7 +347,10 @@ async function requestTypescriptDiagnostics(
 				"workspace/executeCommand",
 				{
 					command: "typescript.tsserverRequest",
-					arguments: [command, { file: uri, includeLinePosition: false }],
+					// tsserver takes a filesystem path; the server only rewrites a URI to
+					// the open document's path, so a URI fails for a document we have not
+					// opened yet.
+					arguments: [command, { file: uriToFile(uri), includeLinePosition: false }],
 				},
 				signal,
 				Math.max(1, deadline - Date.now()),
