@@ -172,6 +172,24 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 		expect(fs.existsSync(path.join(cached, "ignored.txt"))).toBe(false);
 	});
 
+	it("cachePlugin excludes ignored descendants of tracked directories", async () => {
+		const sourcePath = path.join(sourceDir, "nested-files-plugin");
+		const nestedPath = path.join(sourcePath, "src");
+		await fsp.mkdir(nestedPath, { recursive: true });
+		await fsp.writeFile(path.join(nestedPath, "kept.ts"), "kept");
+		await fsp.writeFile(path.join(nestedPath, "generated.tmp"), "ignored");
+		await fsp.writeFile(path.join(sourcePath, ".gitignore"), "src/generated.tmp\n");
+		initGitRepo(sourcePath);
+		gitRun(sourcePath, ["config", "user.email", "test@example.com"]);
+		gitRun(sourcePath, ["config", "user.name", "Tester"]);
+		gitRun(sourcePath, ["add", ".gitignore", "src/kept.ts"]);
+		gitRun(sourcePath, ["commit", "-m", "init"]);
+
+		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "nested-files-plugin", "1.0.0");
+		expect(fs.existsSync(path.join(cached, "src", "kept.ts"))).toBe(true);
+		expect(fs.existsSync(path.join(cached, "src", "generated.tmp"))).toBe(false);
+	});
+
 	it("cachePlugin copies files from an untracked nested Git repository", async () => {
 		const sourcePath = path.join(sourceDir, "nested-git-plugin");
 		await fsp.mkdir(sourcePath, { recursive: true });
@@ -193,6 +211,31 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 
 		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "nested-git-plugin", "1.0.0");
 		expect(fs.existsSync(path.join(cached, "vendor", "nested.txt"))).toBe(true);
+	});
+
+	it("cachePlugin preserves initialized submodule descendants", async () => {
+		const sourcePath = path.join(sourceDir, "submodule-plugin");
+		const submoduleSource = path.join(sourceDir, "submodule-source");
+		await fsp.mkdir(submoduleSource, { recursive: true });
+		await fsp.writeFile(path.join(submoduleSource, "submodule.txt"), "submodule");
+		initGitRepo(submoduleSource);
+		gitRun(submoduleSource, ["config", "user.email", "test@example.com"]);
+		gitRun(submoduleSource, ["config", "user.name", "Tester"]);
+		gitRun(submoduleSource, ["add", "submodule.txt"]);
+		gitRun(submoduleSource, ["commit", "-m", "init"]);
+
+		await fsp.mkdir(sourcePath, { recursive: true });
+		await fsp.writeFile(path.join(sourcePath, "tracked.txt"), "tracked");
+		initGitRepo(sourcePath);
+		gitRun(sourcePath, ["config", "user.email", "test@example.com"]);
+		gitRun(sourcePath, ["config", "user.name", "Tester"]);
+		gitRun(sourcePath, ["add", "tracked.txt"]);
+		gitRun(sourcePath, ["commit", "-m", "init"]);
+		gitRun(sourcePath, ["-c", "protocol.file.allow=always", "submodule", "add", submoduleSource, "vendor/sub"]);
+		gitRun(sourcePath, ["commit", "-m", "add submodule"]);
+
+		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "submodule-plugin", "1.0.0");
+		expect(fs.existsSync(path.join(cached, "vendor", "sub", "submodule.txt"))).toBe(true);
 	});
 
 	it("cachePlugin keeps copying all files from non-Git sources", async () => {
