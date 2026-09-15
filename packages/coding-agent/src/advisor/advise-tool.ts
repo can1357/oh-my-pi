@@ -176,37 +176,16 @@ function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
 	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
 }
 
-/**
- * Live admission: the guard accepted the note and handed it to the session's
- * delivery routing. That is the whole truthful claim — `onAdvice` is
- * synchronous void and MAY only buffer the note for a terminal-boundary flush
- * or preserve it as a card; no actual send or consumption acknowledgment
- * exists at this layer.
- */
-const ADVISOR_ACK_SENT = "Accepted for primary delivery.";
-
-/**
- * Deferred admission: the note holds a reservation behind an in-progress
- * primary turn and flushes automatically when the turn completes. The promise
- * is conditional on priority: a strictly-higher-severity note from the SAME
- * review may still displace it at a full budget. Truthful for both a fresh
- * reservation and a re-raise of an already-queued note.
- */
-const ADVISOR_ACK_DEFERRED =
-	"Deferred — primary is mid-turn; this note is queued for automatic delivery when the turn completes, " +
-	"unless a higher-severity note from the same review displaces it. Do not re-raise the same point.";
-
-/**
- * Rejections, keyed by the guard's suppression reason. A suppressed note is
- * never described as recorded, queued, or scheduled for delivery — the
- * advisor learns the note was dropped and why, so a rate-limited note is not
- * mislabeled a duplicate and a dropped deferred note is never promised.
- */
+/** Admission acks: one line each — the advisor needs the verdict, not a policy essay. */
+const ADVISOR_ACK_SENT = "Delivered.";
+/** Held behind the in-progress primary turn; flushed when it completes. */
+const ADVISOR_ACK_DEFERRED = "Queued for the end of the turn. Do not re-raise.";
+/** A suppressed note is never described as recorded or queued. */
 const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
-	empty: "Not recorded — empty note.",
-	noise: "Not recorded — the note carries no concrete, actionable content.",
-	duplicate: "Duplicate advice ignored — this point was already raised.",
-	"rate-limit": "Not recorded — this update's non-blocker advice budget is spent; the note was dropped.",
+	empty: "Dropped: empty note.",
+	noise: "Dropped: nothing actionable.",
+	duplicate: "Dropped: already raised.",
+	"rate-limit": "Dropped: this update's advice budget is spent.",
 };
 
 export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails> {

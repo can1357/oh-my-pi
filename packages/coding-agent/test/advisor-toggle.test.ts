@@ -1200,7 +1200,7 @@ describe("AgentSession advisor toggle", () => {
 					note: `${prefix} note ${i}`,
 					severity: "concern",
 				});
-				expect(JSON.stringify(result.content)).toContain("Deferred");
+				expect(JSON.stringify(result.content)).toContain("Queued for the end of the turn");
 			}
 			const rejected = await tool.execute(`${prefix}-${budget + 1}`, {
 				note: `${prefix} note ${budget + 1}`,
