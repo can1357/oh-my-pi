@@ -97,6 +97,11 @@ export function resolveToolTier(tool: ApprovalSubject, args: unknown): ToolTier 
 	return getToolDecision(tool, args).tier;
 }
 
+/** Resolve the mounted tool's operation policy key for an outer transport gate. */
+export function resolveToolPolicyKey(tool: ApprovalSubject, args: unknown): string | undefined {
+	return getToolDecision(tool, args).policyKey;
+}
+
 function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
 	return TIER_RANK[tier] <= TIER_RANK[APPROVAL_MODE_MAX_TIER[mode]];
 }

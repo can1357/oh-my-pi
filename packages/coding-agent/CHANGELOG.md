@@ -54,6 +54,7 @@
 
 ### Added
 
+- GitHub tool approval policies can now target individual operations such as `github.pr_checkout`, while retaining the tool-wide `github` fallback ([#12081](https://github.com/can1357/oh-my-pi/pull/12081) by [@Dante-dan](https://github.com/Dante-dan)).
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 

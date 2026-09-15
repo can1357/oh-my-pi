@@ -71,6 +71,8 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"run_watch",
 ]);
 
+const GITHUB_EXEC_OPS: ReadonlySet<string> = new Set(["pr_create", "pr_checkout", "pr_push"]);
+
 const githubSchema = type({
 	op: type(
 		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
@@ -206,7 +208,9 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawOp = (args as Partial<GithubInput>).op;
 		const op = typeof rawOp === "string" ? rawOp : "";
-		return GITHUB_READONLY_OPS.has(op) ? "read" : "exec";
+		if (GITHUB_READONLY_OPS.has(op)) return { tier: "read", policyKey: `github.${op}` };
+		if (GITHUB_EXEC_OPS.has(op)) return { tier: "exec", policyKey: `github.${op}` };
+		return "exec";
 	};
 	readonly summary = "Interact with GitHub repositories, files, pull requests, and Actions";
 	readonly loadMode = "discoverable";

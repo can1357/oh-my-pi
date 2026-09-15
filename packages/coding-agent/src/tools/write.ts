@@ -37,7 +37,7 @@ import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { routeWriteThroughBridge } from "./acp-bridge";
-import { resolveToolTier, truncateForPrompt } from "./approval";
+import { resolveToolPolicyKey, resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
 import { formatHashlineHeader, stripHashlinePrefixes } from "./hashline-format";
 import {
@@ -551,7 +551,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// policyKey makes the outer gate consult `tools.approval.<device>` for
 				// this dispatch before falling back to `tools.approval.write`, so users
 				// can scope allow/deny/prompt to a single device (issue #7923).
-				return { tier: resolveToolTier(inst, parsed), policyKey: xdevTarget.name! };
+				return {
+					tier: resolveToolTier(inst, parsed),
+					policyKey: resolveToolPolicyKey(inst, parsed) ?? xdevTarget.name!,
+				};
 			} catch {
 				return "exec";
 			}
