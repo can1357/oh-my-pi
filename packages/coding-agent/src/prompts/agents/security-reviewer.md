@@ -47,11 +47,11 @@ output:
               optionalProperties:
                 excerpt:
                   type: string
-          optionalProperties:
-            anchor:
-              type: string
-            remediation:
-              type: string
+        optionalProperties:
+          anchor:
+            type: string
+          remediation:
+            type: string
     reviewed_paths:
       elements:
         type: string

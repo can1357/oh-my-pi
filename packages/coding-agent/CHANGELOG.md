@@ -4,6 +4,7 @@
 
 ### Added
 
+- Fixed the `security-reviewer` agent rejecting every valid finding: the finding schema's `optionalProperties` node sat inside `properties`, making a field literally named `optionalProperties` required and leaving `anchor` and `remediation` unreachable ([#12200](https://github.com/can1357/oh-my-pi/pull/12200) by [@dhofheinz](https://github.com/dhofheinz)).
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
 
 ## [18.2.1] - 2026-09-15
