@@ -45,11 +45,24 @@ impl Default for OutputDecoder {
 
 impl OutputDecoder {
 	/// Decode with the host ANSI code page as the Windows fallback.
+	///
+	/// Windows resolves the code page through `GetACP`, which no `const` context
+	/// can call, so only the platforms without an ANSI fallback get a `const`
+	/// constructor.
+	#[cfg(not(windows))]
 	pub const fn new() -> Self {
 		Self {
 			pending: Vec::new(),
-			mode: Mode::Utf8,
-			#[cfg(windows)]
+			mode:    Mode::Utf8,
+		}
+	}
+
+	/// Decode with the host ANSI code page as the Windows fallback.
+	#[cfg(windows)]
+	pub fn new() -> Self {
+		Self {
+			pending:           Vec::new(),
+			mode:              Mode::Utf8,
 			fallback_codepage: acp(),
 		}
 	}
