@@ -567,6 +567,7 @@ mod tests {
 	use futures::StreamExt as _;
 
 	use super::*;
+	use crate::debug_render;
 
 	#[derive(Clone, Default)]
 	struct CancellationControl(Arc<Mutex<Option<CancellationToken>>>);

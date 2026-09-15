@@ -584,6 +584,7 @@ mod tests {
 					"end": { "line": 3, "character": 8 },
 				},
 			}),
+			omitted: 0,
 		};
 		let view = render_lsp_payload(&LspState::default(), &payload).to_tml();
 		assert!(view.contains("<json max-depth=6 max-rows=16 max-chars=160>"));
