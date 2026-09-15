@@ -461,6 +461,12 @@ export interface ExtensionModelQuery {
 }
 
 /** Runtime host mode exposed to Pi-compatible extensions. */
+/** Read-only effective settings query exposed at `ctx.settings`. */
+export interface ExtensionSettingsQuery {
+	/** Get a deep-cloned effective setting value by its dotted path. */
+	get(path: string): unknown;
+}
+
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
@@ -488,6 +494,8 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/** Read-only effective settings query by dotted path. */
+	settings: ExtensionSettingsQuery;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
