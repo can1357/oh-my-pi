@@ -343,6 +343,7 @@ fn split_raw_sections(
 		.split('\n')
 		.map(|line| line.strip_suffix('\r').unwrap_or(line))
 		.collect();
+	let tokenizer = Tokenizer::new();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
 		let preview: String = first.chars().take(120).collect();
@@ -355,7 +356,10 @@ fn split_raw_sections(
 		);
 		// Heuristic only: append a format hint without changing the parser's
 		// missing-header error.
-		let foreign_syntax = detect_foreign_syntax(&input);
+		let foreign_syntax = detect_foreign_syntax(lines.iter().copied().take_while(|line| {
+			let clean = unbracket_envelope_markers(line.trim_end());
+			!matches!(tokenizer.tokenize(clean, 0), Token::EnvelopeEnd { .. } | Token::Abort { .. })
+		}));
 		if !foreign_syntax.is_empty() {
 			message.push_str("\nPossible non-Hashline syntax: ");
 			message.push_str(&foreign_syntax);
@@ -366,7 +370,6 @@ fn split_raw_sections(
 		}
 		return Err(EditError::parse(message));
 	}
-	let tokenizer = Tokenizer::new();
 	let mut sections = Vec::new();
 	let mut current: Option<RawSection> = None;
 	let mut body = Vec::new();

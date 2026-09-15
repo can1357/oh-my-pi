@@ -624,6 +624,16 @@ fn input_rejects_malformed_tags_and_missing_headers() {
 }
 
 #[test]
+fn input_ignores_foreign_syntax_after_terminators() {
+	for terminator in ["*** End Patch", "*** Abort"] {
+		let input = format!("*** Begin Patch\nCUT 38.=40\n{terminator}\ndiff --git a/a.ts b/a.ts");
+		let error = Patch::parse(&input, &options()).unwrap_err().to_string();
+		assert!(error.contains("Missing Hashline header"), "{terminator}: {error}");
+		assert!(!error.contains("Possible non-Hashline syntax"), "{terminator}: {error}");
+	}
+}
+
+#[test]
 fn input_reports_all_detected_foreign_syntax_on_first_failure() {
 	let error = Patch::parse(
 		"*** Begin Patch\n*** Update File: a.ts\n@@ -1,1 +1,1 @@\n<<<<<<< \
