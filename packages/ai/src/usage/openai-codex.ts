@@ -43,10 +43,23 @@ interface CodexUsageAdditionalRateLimitPayload {
 	rate_limit?: CodexUsageRateLimitPayload | null;
 }
 
+interface CodexUsageCreditsPayload {
+	has_credits?: boolean;
+	unlimited?: boolean;
+	overage_limit_reached?: boolean;
+	balance?: string | number;
+}
+
+interface CodexUsageSpendControlPayload {
+	reached?: boolean;
+}
+
 interface CodexUsagePayload {
 	plan_type?: string;
 	rate_limit?: CodexUsageRateLimitPayload | null;
 	additional_rate_limits?: CodexUsageAdditionalRateLimitPayload[] | null;
+	credits?: CodexUsageCreditsPayload | null;
+	spend_control?: CodexUsageSpendControlPayload | null;
 }
 
 interface ParsedUsageWindow {
@@ -72,6 +85,13 @@ interface ParsedUsage {
 	primary?: ParsedUsageWindow;
 	secondary?: ParsedUsageWindow;
 	additional: ParsedAdditionalUsage[];
+	/**
+	 * True when the account can still serve requests on credits after its plan
+	 * windows report `limit_reached`. `/wham/usage` only describes the *plan*
+	 * allowance, so without this a credit-funded account looks permanently
+	 * exhausted until the weekly reset while `/responses` keeps accepting it.
+	 */
+	creditOverage: boolean;
 	raw: CodexUsagePayload;
 }
 
@@ -161,6 +181,21 @@ function parseAdditionalRateLimit(payload: unknown): ParsedAdditionalUsage | nul
 	return { limitName, meteredFeature, allowed, limitReached, primary, secondary };
 }
 
+/**
+ * True when paid credits can still fund requests the plan windows no longer
+ * cover. Codex CLI never gates on `/wham/usage`, so once the plan allowance is
+ * spent it keeps working off this balance; omp must mirror that or it parks a
+ * perfectly usable account until the weekly reset.
+ */
+function hasCreditOverageHeadroom(payload: Record<string, unknown>): boolean {
+	const credits = isRecord(payload.credits) ? payload.credits : undefined;
+	if (!credits) return false;
+	if (credits.unlimited !== true && credits.has_credits !== true) return false;
+	if (credits.overage_limit_reached === true) return false;
+	const spendControl = isRecord(payload.spend_control) ? payload.spend_control : undefined;
+	return spendControl?.reached !== true;
+}
+
 function parseUsagePayload(payload: unknown): ParsedUsage | null {
 	if (!isRecord(payload)) return null;
 	const planType = typeof payload.plan_type === "string" ? payload.plan_type : undefined;
@@ -177,6 +212,7 @@ function parseUsagePayload(payload: unknown): ParsedUsage | null {
 		primary: rateLimit ? parseUsageWindow(rateLimit.primary_window) : undefined,
 		secondary: rateLimit ? parseUsageWindow(rateLimit.secondary_window) : undefined,
 		additional,
+		creditOverage: hasCreditOverageHeadroom(payload),
 		raw: payload as CodexUsagePayload,
 	};
 	if (
@@ -273,6 +309,19 @@ function buildUsageStatus(args: { usedFraction?: number; explicitlyAllowed: bool
 	return "ok";
 }
 
+/**
+ * Whether Codex will still serve this meter: an explicit positive verdict, or
+ * credits covering overage once the plan window reports `limit_reached`.
+ */
+function isCodexRequestAllowed(args: {
+	allowed?: boolean;
+	limitReached?: boolean;
+	creditOverage?: boolean;
+}): boolean {
+	if (args.creditOverage === true) return true;
+	return args.allowed === true && args.limitReached === false;
+}
+
 function buildUsageLimit(args: {
 	key: "primary" | "secondary";
 	window: ParsedUsageWindow;
@@ -280,6 +329,7 @@ function buildUsageLimit(args: {
 	planType?: string;
 	allowed?: boolean;
 	limitReached?: boolean;
+	creditOverage?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -296,11 +346,12 @@ function buildUsageLimit(args: {
 		amount,
 		// The shared account-level rejection flag cannot identify which window
 		// is binding, but an explicit positive verdict applies to both windows.
-		// Preserve 100% as a warning when Codex still allows requests; live
-		// usage_limit_reached responses remain authoritative for blocking.
+		// Preserve 100% as a warning when Codex still allows requests — either
+		// explicitly, or because credits fund overage past the plan window.
+		// Live usage_limit_reached responses remain authoritative for blocking.
 		status: buildUsageStatus({
 			usedFraction: amount.usedFraction,
-			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+			explicitlyAllowed: isCodexRequestAllowed(args),
 		}),
 	};
 }
@@ -335,6 +386,7 @@ function buildAdditionalUsageLimit(args: {
 	meteredFeature?: string;
 	allowed?: boolean;
 	limitReached?: boolean;
+	creditOverage?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -356,7 +408,7 @@ function buildAdditionalUsageLimit(args: {
 		// percentage rounds to 100; negative shared verdicts remain window-local.
 		status: buildUsageStatus({
 			usedFraction: amount.usedFraction,
-			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+			explicitlyAllowed: isCodexRequestAllowed(args),
 		}),
 	};
 }
@@ -391,6 +443,20 @@ export function parseCodexRateLimitHeaders(headers: Record<string, string>, now 
 		limits,
 		metadata: { source: "ratelimit-headers" },
 	};
+}
+
+/**
+ * Meter verdict as credential selection should see it. Credits funding overage
+ * flip a plan-level rejection back to serving, which is what lets a stale
+ * usage-limit block self-heal instead of parking the account until reset.
+ */
+function buildMeterState(
+	allowed: boolean | undefined,
+	limitReached: boolean | undefined,
+	creditOverage: boolean,
+): { allowed?: boolean; limitReached?: boolean } {
+	if (!creditOverage) return { allowed, limitReached };
+	return { allowed: allowed === false ? true : allowed, limitReached: limitReached === true ? false : limitReached };
 }
 
 export const openaiCodexUsageProvider: UsageProvider = {
@@ -444,9 +510,10 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			parsed?.planType ??
 			(isRecord(payload) && typeof payload.plan_type === "string" ? payload.plan_type : undefined);
 
+		const creditOverage = parsed?.creditOverage === true;
 		const limits: UsageLimit[] = [];
 		const meterStates: Record<string, { allowed?: boolean; limitReached?: boolean }> = {
-			chat: { allowed: parsed?.allowed, limitReached: parsed?.limitReached },
+			chat: buildMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 		};
 		if (parsed?.primary) {
 			limits.push(
@@ -457,6 +524,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					planType,
 					allowed: parsed.allowed,
 					limitReached: parsed.limitReached,
+					creditOverage,
 					nowMs,
 				}),
 			);
@@ -470,6 +538,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					planType,
 					allowed: parsed.allowed,
 					limitReached: parsed.limitReached,
+					creditOverage,
 					nowMs,
 				}),
 			);
@@ -477,7 +546,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 		for (const extra of parsed?.additional ?? []) {
 			const slug = additionalLimitSlug({ limitName: extra.limitName, meteredFeature: extra.meteredFeature });
 			const displayName = additionalDisplayName(slug, extra.limitName);
-			meterStates[slug] = { allowed: extra.allowed, limitReached: extra.limitReached };
+			meterStates[slug] = buildMeterState(extra.allowed, extra.limitReached, creditOverage);
 			if (extra.primary) {
 				limits.push(
 					buildAdditionalUsageLimit({
@@ -490,6 +559,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 						meteredFeature: extra.meteredFeature,
 						allowed: extra.allowed,
 						limitReached: extra.limitReached,
+						creditOverage,
 						nowMs,
 					}),
 				);
@@ -506,6 +576,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 						meteredFeature: extra.meteredFeature,
 						allowed: extra.allowed,
 						limitReached: extra.limitReached,
+						creditOverage,
 						nowMs,
 					}),
 				);
@@ -548,8 +619,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			...(resetCredits ? { resetCredits } : {}),
 			metadata: {
 				planType,
-				allowed: parsed?.allowed,
-				limitReached: parsed?.limitReached,
+				...buildMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 				email,
 				accountId,
 				meterStates,

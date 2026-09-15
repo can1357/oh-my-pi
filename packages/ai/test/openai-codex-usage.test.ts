@@ -85,6 +85,63 @@ describe("openai-codex usage parser", () => {
 		expect(report?.metadata).toMatchObject({ planType: "team", allowed: true, limitReached: false });
 	});
 
+	// A Pro account whose weekly plan window is spent keeps serving requests off
+	// its credit balance — Codex CLI never gates on /wham/usage, so it just
+	// works. `/wham/usage` still reports the *plan* verdict as
+	// allowed:false/limit_reached:true, so ignoring `credits` parks a usable
+	// account (status "exhausted" → credential block until the weekly reset,
+	// and metadata that can never satisfy the block-healing predicate).
+	it("keeps a plan-exhausted account usable when credits fund overage", async () => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.credits = { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "489.25" };
+		payload.spend_control = { reached: false };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		const primary = report?.limits.find(limit => limit.id === "openai-codex:primary");
+		expect(primary?.amount.usedFraction).toBe(1);
+		expect(primary?.status).toBe("warning");
+		expect(report?.metadata).toMatchObject({ allowed: true, limitReached: false });
+		expect(report?.metadata?.meterStates).toMatchObject({ chat: { allowed: true, limitReached: false } });
+	});
+
+	it.each([
+		["no credit balance", { has_credits: false, balance: "0" }, undefined],
+		["overage cap hit", { has_credits: true, overage_limit_reached: true, balance: "12" }, undefined],
+		["spend control tripped", { has_credits: true, balance: "12" }, { reached: true }],
+	])("keeps a plan-exhausted account blocked with %s", async (_name, credits, spendControl) => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.credits = credits;
+		if (spendControl) payload.spend_control = spendControl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		expect(report?.limits.find(limit => limit.id === "openai-codex:primary")?.status).toBe("exhausted");
+		expect(report?.metadata).toMatchObject({ allowed: false, limitReached: true });
+	});
+
 	it("surfaces additional_rate_limits as spark UsageLimit entries the widget can detect", async () => {
 		const report = await openaiCodexUsageProvider.fetchUsage(
 			{
