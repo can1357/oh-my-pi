@@ -8966,14 +8966,13 @@ export class AgentSession {
 	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`).
 	 * Deliberately detached — the reasoning on `model_changed` above applies
 	 * unchanged: a model switch, including retry-fallback on the error path,
-	 * must not wait on extension handlers. Skipped entirely when no extension
-	 * registered a handler; handler errors are logged, never thrown.
+	 * must not wait on extension handlers. `ExtensionRunner.emitModelSelect`
+	 * serializes deliveries FIFO (rapid switches cannot overtake each other)
+	 * while keeping them fire-and-forget; it also skips entirely when no
+	 * extension registered a handler.
 	 */
 	#notifyModelSelect(previousModel: Model | undefined, model: Model, source: ModelSelectSource): void {
-		if (!this.#extensionRunner?.hasHandlers("model_select")) return;
-		void this.#extensionRunner
-			.emit({ type: "model_select", model, previousModel, source })
-			.catch(error => logger.warn("model_select extension notification failed", { error: String(error) }));
+		this.#extensionRunner?.emitModelSelect({ model, previousModel, source });
 	}
 
 	async #reconcileModelDependentState(previousModel: Model | undefined, model: Model): Promise<void> {

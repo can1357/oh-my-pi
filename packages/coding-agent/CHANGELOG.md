@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added the pi-compatible `model_select` extension event — `{ model, previousModel, source: "set" | "cycle" | "restore" }` — fired once per real model change (explicit selection, role switch, prewalk hand-off, retry-fallback swaps → `set`; `cycleModel()` → `cycle`; session switch/resume rebinds, failed-switch rollback, retry-fallback returns → `restore`), delivered detached and FIFO-serialized so handlers never delay a model switch ([#12186](https://github.com/can1357/oh-my-pi/pull/12186) by [@Sash0l](https://github.com/Sash0l)).
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
 - Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local tool-result elision, while preserving assistant/user history, unsafe partial output, and existing stateful retries ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).
 - User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under their own `## User Instructions` heading whenever generated blocks precede them, instead of trailing the `## MCP Server Instructions` section and reading as server-supplied, unverified content ([#11832](https://github.com/can1357/oh-my-pi/pull/11832) by [@iacore](https://github.com/iacore)).

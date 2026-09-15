@@ -58,6 +58,7 @@ import type {
 	InputEvent,
 	InputEventResult,
 	McpNotificationEvent,
+	ModelSelectEvent,
 	MessageRenderer,
 	RegisteredCommand,
 	RegisteredTool,
@@ -515,6 +516,17 @@ export class ExtensionRunner {
 	 */
 	#fileFallbackDisposers: Array<() => void> = [];
 	/**
+	 * Promise-chain mutex serializing detached `model_select` notifications
+	 * (PR #12186 review). Without it, two rapid switches A→B→C run their
+	 * handler passes concurrently, and the older A→B emit can finish after
+	 * the newer B→C one — an extension that awaits quota state and then
+	 * records "current model" would persist the stale B. Chaining keeps
+	 * notification-only delivery detached from the switch (the chain head is
+	 * never awaited by `AgentSession`) while preserving FIFO handler order.
+	 * Kept non-rejecting so a failed pass never wedges the queue.
+	 */
+	#modelSelectChain: Promise<void> = Promise.resolve();
+	/**
 	 * Dedup markers for `tool_call` emission, keyed `${toolCallId}:${toolName}`.
 	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
 	 * `tool_execution_start`) via the session's `beforeToolCall` wiring; the
@@ -843,6 +855,22 @@ export class ExtensionRunner {
 			return;
 		}
 		await this.emit({ type: "credential_disabled", ...event });
+	}
+
+	/**
+	 * Forward the pi-compatible `model_select` notification to extension
+	 * handlers, serialized through {@link #modelSelectChain}. Delivery stays
+	 * detached from the model switch itself: the caller fires this
+	 * fire-and-forget and never awaits the returned promise, so a slow
+	 * handler cannot delay a switch (including retry-fallback on the error
+	 * path). Handler errors are logged, never thrown, and never wedge the
+	 * chain.
+	 */
+	emitModelSelect(event: Omit<ModelSelectEvent, "type">): void {
+		if (!this.hasHandlers("model_select")) return;
+		this.#modelSelectChain = this.#modelSelectChain
+			.then(() => this.emit({ type: "model_select", ...event }))
+			.catch(error => logger.warn("model_select extension notification failed", { error: String(error) }));
 	}
 
 	/**
