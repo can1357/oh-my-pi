@@ -210,8 +210,14 @@ async function buildListing(url: InternalUrl, localRoot: string): Promise<Intern
 }
 
 function extractRelativePath(url: InternalUrl): string {
-	const host = url.rawHost || url.hostname;
-	const pathname = url.rawPathname ?? url.pathname;
+	// parseInternalUrl already decodes rawHost; only the pathname still needs decoding.
+	const host = (url.rawHost || url.hostname).replaceAll("\\", "/");
+	let pathname: string;
+	try {
+		pathname = decodeURIComponent((url.rawPathname ?? url.pathname).replaceAll("\\", "/"));
+	} catch {
+		throw new Error(`Invalid URL encoding in local:// path: ${url.href}`);
+	}
 
 	const combined = host
 		? pathname && pathname !== "/"
@@ -225,18 +231,12 @@ function extractRelativePath(url: InternalUrl): string {
 		return "";
 	}
 
-	let decoded: string;
 	try {
-		decoded = decodeURIComponent(combined.replaceAll("\\", "/"));
-	} catch {
-		throw new Error(`Invalid URL encoding in local:// path: ${url.href}`);
-	}
-	try {
-		validateRelativePath(decoded);
+		validateRelativePath(combined);
 	} catch (error) {
 		throw toLocalValidationError(error);
 	}
-	return decoded;
+	return combined;
 }
 
 /** Resolve the session-scoped local:// root, shortening long Windows artifact paths before writes hit MAX_PATH. */
