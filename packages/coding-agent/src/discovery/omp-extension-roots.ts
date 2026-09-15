@@ -366,7 +366,9 @@ async function listInstalledPluginRoots(ctx: LoadContext): Promise<InjectedRoot[
 			listClaudePluginRoots(ctx.home, ctx.cwd),
 		]);
 		const marketplaceRealpaths = new Set(
-			await Promise.all(marketplaceRoots.roots.map(root => realpathOrResolved(root.path))),
+			await Promise.all(
+				marketplaceRoots.roots.filter(root => root.origin === "claude").map(root => realpathOrResolved(root.path)),
+			),
 		);
 		const installedRoots = await Promise.all(
 			plugins.map(async plugin => ({

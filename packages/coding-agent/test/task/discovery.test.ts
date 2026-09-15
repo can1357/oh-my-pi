@@ -39,6 +39,24 @@ const CLAUDE_AGENT_MD = [
 	"You are a Claude Code custom subagent.",
 ].join("\n");
 
+const OMP_MARKETPLACE_AGENT_MD = [
+	"---",
+	"name: omp-marketplace-agent",
+	"description: OMP marketplace agent.",
+	"model: @plan",
+	"---",
+	"You are an OMP marketplace agent.",
+].join("\n");
+
+const CLAUDE_MARKETPLACE_AGENT_MD = [
+	"---",
+	"name: claude-marketplace-agent",
+	"description: Claude marketplace agent.",
+	"model: @plan",
+	"---",
+	"You are a Claude marketplace agent.",
+].join("\n");
+
 async function writeOmpPluginAgent(home: string): Promise<void> {
 	const userPluginsRoot = path.join(home, ".omp", "plugins");
 	const pluginRoot = path.join(userPluginsRoot, "node_modules", "loom");
@@ -56,6 +74,59 @@ async function writeOmpPluginAgent(home: string): Promise<void> {
 		}),
 	);
 	await fs.writeFile(path.join(pluginRoot, "agents", "loom-verify-spec.md"), OMP_PLUGIN_AGENT_MD);
+}
+
+async function writeMarketplacePluginAgents(home: string): Promise<void> {
+	const fixtures = [
+		{
+			configDir: ".omp",
+			pluginId: "omp-marketplace-agent@example",
+			agentName: "omp-marketplace-agent",
+			content: OMP_MARKETPLACE_AGENT_MD,
+		},
+		{
+			configDir: ".claude",
+			pluginId: "claude-marketplace-agent@example",
+			agentName: "claude-marketplace-agent",
+			content: CLAUDE_MARKETPLACE_AGENT_MD,
+		},
+	] as const;
+
+	for (const fixture of fixtures) {
+		const pluginRoot = path.join(home, fixture.configDir, "plugins", "cache", fixture.agentName);
+		await fs.mkdir(path.join(pluginRoot, "agents"), { recursive: true });
+		await fs.writeFile(path.join(pluginRoot, "agents", `${fixture.agentName}.md`), fixture.content);
+		if (fixture.configDir === ".omp") {
+			await fs.writeFile(
+				path.join(pluginRoot, "package.json"),
+				JSON.stringify({ name: fixture.agentName, version: "1.0.0", omp: { version: "1.0.0" } }),
+			);
+			const nodeModulesPath = path.join(home, ".omp", "plugins", "node_modules");
+			await fs.mkdir(nodeModulesPath, { recursive: true });
+			await fs.symlink(pluginRoot, path.join(nodeModulesPath, fixture.agentName), "dir");
+			await fs.writeFile(
+				path.join(home, ".omp", "plugins", "omp-plugins.lock.json"),
+				JSON.stringify({ plugins: { [fixture.agentName]: { version: "1.0.0", enabled: true } }, settings: {} }),
+			);
+		}
+		await fs.writeFile(
+			path.join(home, fixture.configDir, "plugins", "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					[fixture.pluginId]: [
+						{
+							scope: "user",
+							installPath: pluginRoot,
+							version: "1.0.0",
+							installedAt: "2025-01-15T10:30:00.000Z",
+							lastUpdated: "2025-01-15T10:30:00.000Z",
+						},
+					],
+				},
+			}),
+		);
+	}
 }
 
 describe("discoverAgents", () => {
@@ -111,6 +182,16 @@ describe("discoverAgents", () => {
 		const names = agents.map(agent => agent.name);
 
 		expect(names).not.toContain("loom-verify-spec");
+	});
+
+	test("preserves model for OMP marketplace agents but ignores it for Claude agents", async () => {
+		await writeMarketplacePluginAgents(tempHome);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+
+		expect(agents.find(agent => agent.name === "omp-marketplace-agent")?.model).toEqual(["@plan"]);
+		expect(agents.filter(agent => agent.name === "omp-marketplace-agent")).toHaveLength(1);
+		expect(agents.find(agent => agent.name === "claude-marketplace-agent")?.model).toBeUndefined();
 	});
 
 	test("CLI extension agents win over project `extensions:` settings on dedup", async () => {

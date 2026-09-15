@@ -111,6 +111,9 @@ export async function discoverAgents(
 	const packageRoots = isProviderEnabled("omp-plugins")
 		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
 		: [];
+	const packageRootRealpaths = new Set(
+		await Promise.all(packageRoots.map(root => fs.realpath(root.path).catch(() => path.resolve(root.path)))),
+	);
 	for (const root of packageRoots) {
 		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
 	}
@@ -124,21 +127,31 @@ export async function discoverAgents(
 	const { roots: pluginRoots } = isProviderEnabled("claude-plugins")
 		? await listClaudePluginRoots(home, resolvedCwd)
 		: { roots: [] };
-	const filteredPluginRoots = pluginRoots.filter(
-		r => r.scope === "project" || claudePluginsUserEnabled || r.origin !== "claude",
+	const rootsWithRealpaths = await Promise.all(
+		pluginRoots.map(async root => ({
+			root,
+			realpath: await fs.realpath(root.path).catch(() => path.resolve(root.path)),
+		})),
 	);
+	const filteredPluginRoots = rootsWithRealpaths
+		.filter(
+			({ root, realpath }) =>
+				!packageRootRealpaths.has(realpath) &&
+				(root.scope === "project" || claudePluginsUserEnabled || root.origin !== "claude"),
+		)
+		.map(({ root }) => root);
 	const sortedPluginRoots = [...filteredPluginRoots].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "project" ? -1 : 1;
 	});
 	for (const plugin of sortedPluginRoots) {
 		// Claude aliases such as "sonnet" and "opus" are not OMP model selectors.
-		// Leave the model unset so settings overrides or the parent session choose it.
+		// Keep models from OMP marketplace roots, which declare OMP selectors.
 		const agentsDir = path.join(plugin.path, "agents");
 		orderedDirs.push({
 			dir: agentsDir,
 			source: plugin.scope === "project" ? "project" : "user",
-			ignoreModel: true,
+			ignoreModel: plugin.origin !== "omp",
 		});
 	}
 
