@@ -542,21 +542,23 @@ describe("attach flag parsing", () => {
 	});
 });
 
+async function sleepExecutable(): Promise<string> {
+	for (const candidate of ["/usr/bin/sleep", "/bin/sleep"]) {
+		try {
+			await fs.stat(candidate);
+			return candidate;
+		} catch {}
+	}
+	throw new Error("Expected a sleep binary");
+}
+
 describe("findReusableCdp executable matching", () => {
 	// A symlinked exe (/usr/bin/google-chrome -> /opt/...) must still match its
 	// own processes: fromPath compares against the kernel-resolved exe path. A
 	// port-less match refuses relaunch, which is what proves the match happened
 	// (no match would return null instead of throwing).
 	test.skipIf(process.platform !== "linux")("matches processes through a symlinked exe path", async () => {
-		let sleepBin: string | undefined;
-		for (const candidate of ["/usr/bin/sleep", "/bin/sleep"]) {
-			try {
-				await fs.stat(candidate);
-				sleepBin = candidate;
-				break;
-			} catch {}
-		}
-		if (!sleepBin) throw new Error("Expected a sleep binary");
+		const sleepBin = await sleepExecutable();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-exe-symlink-"));
 		try {
 			const link = path.join(dir, "my-sleep");
@@ -572,47 +574,51 @@ describe("findReusableCdp executable matching", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
-});
 
-describe("TEMP-DEBUG reuse state", () => {
-	test("dumps reuse lookup state", async () => {
-		const exe = await ensureChromiumExecutable();
-		if (!exe) throw new Error("DBG: no chromium executable");
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dbg-reuse-"));
-		const profile = path.join(root, "borrowed");
-		const port = await findFreeCdpPort();
-		const child = Bun.spawn(
-			[exe, "--headless=new", "--no-sandbox", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`],
-			{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-		);
-		try {
-			await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
-			const resolved = await fs.realpath(exe).catch(() => exe);
-			const cands = Process.fromPath(resolved).filter(candidate => {
+	// Debian/Ubuntu Google Chrome: the launcher realpaths to a wrapper script,
+	// but /proc/pid/exe is the sibling ELF `chrome`. Matching only realpath
+	// relaunches onto the locked profile.
+	test.skipIf(process.platform !== "linux")(
+		"matches processes launched through a sibling chrome wrapper",
+		async () => {
+			let python = "";
+			for (const candidate of ["/usr/bin/python3", "/bin/python3"]) {
 				try {
-					return candidate.status() === ProcessStatus.Running;
-				} catch {
-					return false;
-				}
-			});
-			const self = cands.find(candidate => candidate.pid === child.pid);
-			let argInfo = "self-not-found";
-			if (self) {
-				try {
-					const a = self.args();
-					argInfo = `argc=${a.length} arg0len=${a[0]?.length} head=${JSON.stringify((a[0] ?? "").slice(0, 90))}`;
-				} catch (err) {
-					argInfo = `ARGS-THREW:${String(err).slice(0, 80)}`;
-				}
+					await fs.stat(candidate);
+					python = candidate;
+					break;
+				} catch {}
 			}
-			const reused = await findReusableCdp(exe, { appArgs: ["--user-data-dir", profile] });
-			throw new Error(
-				`DBG exe=${exe} resolved=${resolved} same=${exe === resolved} cands=${cands.length} childInCands=${self !== undefined} ${argInfo} reused=${JSON.stringify(reused)}`,
-			);
-		} finally {
-			child.kill();
-			await child.exited;
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	}, 60_000);
+			if (!python) throw new Error("Expected python3");
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-exe-wrapper-"));
+			try {
+				const chrome = path.join(dir, "chrome");
+				const wrapper = path.join(dir, "google-chrome");
+				await fs.symlink(python, chrome);
+				await Bun.write(wrapper, `#!/bin/sh\nexec "$(dirname "$0")/chrome" -c "import time; time.sleep(30)"\n`);
+				await fs.chmod(wrapper, 0o755);
+				const child = Bun.spawn([wrapper], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+				try {
+					let matched = false;
+					for (let i = 0; i < 40 && !matched; i++) {
+						try {
+							await findReusableCdp(wrapper);
+						} catch (error) {
+							expect(error).toBeInstanceOf(Error);
+							expect((error as Error).message).toContain("already running without a reusable CDP endpoint");
+							matched = true;
+							break;
+						}
+						await Bun.sleep(25);
+					}
+					expect(matched).toBe(true);
+				} finally {
+					child.kill();
+					await child.exited;
+				}
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	);
 });

@@ -264,6 +264,51 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 	return status !== null && status >= 200 && status < 300;
 }
 
+/** ELF names that live next to a Chromium-family launcher script. */
+const CHROMIUM_PROCESS_SIBLINGS = ["chrome", "chromium", "chromium-browser", "msedge"] as const;
+
+/**
+ * Paths whose `/proc/pid/exe` (or platform equivalent) may belong to a
+ * process launched through `exe`.
+ *
+ * `Process.fromPath` matches the kernel exe path exactly. A symlink to the
+ * binary is handled by realpath. Debian/Ubuntu Google Chrome is different:
+ * `/usr/bin/google-chrome-stable` realpaths to the wrapper script
+ * `/opt/google/chrome/google-chrome`, while the live process exe is the
+ * sibling ELF `chrome`. Missing that sibling relaunches onto a locked
+ * profile.
+ */
+async function processMatchPaths(exe: string): Promise<string[]> {
+	const paths = new Set<string>();
+	const add = async (candidate: string): Promise<void> => {
+		paths.add(candidate);
+		paths.add(await fs.realpath(candidate).catch(() => candidate));
+	};
+	await add(exe);
+	const resolved = await fs.realpath(exe).catch(() => exe);
+	const dir = path.dirname(resolved);
+	for (const name of CHROMIUM_PROCESS_SIBLINGS) {
+		const sibling = path.join(dir, name);
+		try {
+			const st = await fs.stat(sibling);
+			if (st.isFile()) await add(sibling);
+		} catch {
+			// sibling missing
+		}
+	}
+	return [...paths];
+}
+
+function runningProcessesForPaths(exes: string[]): Process[] {
+	const byPid = new Map<number, Process>();
+	for (const exe of exes) {
+		for (const process of Process.fromPath(exe)) {
+			if (process.status() === ProcessStatus.Running) byPid.set(process.pid, process);
+		}
+	}
+	return [...byPid.values()];
+}
+
 /**
  * Return a reusable CDP endpoint for `exe`, or null when no instance is
  * running. Refuse to replace an occupied instance unless the caller can
@@ -278,12 +323,7 @@ export async function findReusableCdp(
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
 			? normalizeUserDataDir(requestedUserDataDir)
 			: null;
-	// /proc/PID/exe (and its platform equivalents) is always fully resolved, so
-	// match against the canonical path: a symlinked exe such as
-	// /usr/bin/google-chrome would otherwise never match its own processes and
-	// every borrowed-profile attach would relaunch onto the locked profile.
-	const resolvedExe = await fs.realpath(exe).catch(() => exe);
-	const candidates = Process.fromPath(resolvedExe).filter(process => process.status() === ProcessStatus.Running);
+	const candidates = runningProcessesForPaths(await processMatchPaths(exe));
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
 	for (const process of candidates) {
