@@ -498,6 +498,9 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#offeredHistory = undefined;
 		if (this.#historyReplayRequested) this.#startHistoryReplay();
+		if (offered.kind === "replay") {
+			this.ui.requestRender();
+		}
 	}
 
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
