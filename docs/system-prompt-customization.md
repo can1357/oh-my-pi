@@ -31,7 +31,7 @@ Without an explicit custom source, discovery is project-first, then user-level. 
 
 The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. This shared config lookup does not use `PI_CODING_AGENT_DIR` as an arbitrary replacement base.
 
-Discovery does **not** walk ancestors. Starting OMP in `<repo>/packages/api` does not discover `<repo>/.omp/SYSTEM_TEMPLATE.md` or `<repo>/.omp/SYSTEM.md`; launch from `<repo>`, put the file under the current directory's config base, or use a user-level file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
+Template-file discovery does **not** walk ancestors: starting OMP in `<repo>/packages/api` does not discover `<repo>/.omp/SYSTEM_TEMPLATE.md`. Before accepting a user-level template, OMP also checks its existing project-level `SYSTEM.md` capability providers. Their ancestor `.omp/SYSTEM.md` and supported `.agent` / `.agents` prompts take precedence over a global template. Explicit CLI/SDK overrides still win. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
 
 `SYSTEM_TEMPLATE.md` is always read as a file. `--system-prompt-template <path>` is also a strict file path: a missing, unreadable, or non-file path is an error, never a literal prompt. An empty or malformed Handlebars template is an error; OMP does not fall back to `SYSTEM.md` or the bundled prompt.
 

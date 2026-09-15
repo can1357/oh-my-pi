@@ -5,6 +5,7 @@ import { CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-ut
 import {
 	buildSystemPrompt,
 	discoverSystemPromptOverride,
+	loadSystemPromptFiles,
 	type BuildSystemPromptOptions,
 	type BuildSystemPromptResult,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
@@ -70,7 +71,7 @@ describe("system prompt Handlebars templates", () => {
 			await Bun.write(templatePath, eagerTasksTemplate);
 			await Bun.write(textPath, "project literal prompt");
 
-			expect(discoverSystemPromptOverride(cwd)).toEqual({ kind: "template", path: templatePath });
+			expect(await discoverSystemPromptOverride(cwd)).toEqual({ kind: "template", path: templatePath });
 			const result = await buildSystemPrompt(options(cwd, { eagerTasks: true }));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("TASK_BRANCH=eager");
@@ -85,9 +86,25 @@ describe("system prompt Handlebars templates", () => {
 			await Bun.write(projectPath, "project literal prompt");
 			await Bun.write(userTemplatePath, eagerTasksTemplate);
 
-			expect(discoverSystemPromptOverride(cwd)).toEqual({ kind: "text", path: projectPath });
+			expect(await discoverSystemPromptOverride(cwd)).toEqual({ kind: "text", path: projectPath });
 		});
 	});
+
+	for (const directory of [CONFIG_DIR_NAME, ".agents"]) {
+		it(`preserves ancestor ${directory}/SYSTEM.md over a user template`, async () => {
+			await withDiscoveryHome(async ({ cwd, userConfig }) => {
+				const nestedCwd = path.join(cwd, "nested");
+				await Bun.write(path.join(nestedCwd, "file.txt"), "");
+				await Bun.write(path.join(cwd, directory, "SYSTEM.md"), literalDataTemplate);
+				expect(await loadSystemPromptFiles({ cwd: nestedCwd })).toBe(literalDataTemplate);
+
+				await Bun.write(path.join(userConfig, "SYSTEM_TEMPLATE.md"), eagerTasksTemplate);
+				const result = await buildSystemPrompt(options(nestedCwd));
+				expect(result.systemPrompt.join("\n")).toContain(literalDataTemplate.trim());
+				expect(result.systemPrompt.join("\n")).not.toContain("TASK_BRANCH=");
+			});
+		});
+	}
 
 	it("prefers a user SYSTEM_TEMPLATE.md over a user SYSTEM.md when no project prompt exists", async () => {
 		await withDiscoveryHome(async ({ cwd, userConfig }) => {
@@ -96,7 +113,7 @@ describe("system prompt Handlebars templates", () => {
 			await Bun.write(templatePath, eagerTasksTemplate);
 			await Bun.write(textPath, "user literal prompt");
 
-			expect(discoverSystemPromptOverride(cwd)).toEqual({ kind: "template", path: templatePath });
+			expect(await discoverSystemPromptOverride(cwd)).toEqual({ kind: "template", path: templatePath });
 		});
 	});
 

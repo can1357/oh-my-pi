@@ -1223,7 +1223,7 @@ export async function buildSessionOptions(
 	const cwd = options.cwd;
 	const discoveredOverride =
 		parsed.systemPrompt === undefined && parsed.systemPromptTemplate === undefined
-			? discoverSystemPromptOverride(cwd)
+			? await discoverSystemPromptOverride(cwd)
 			: undefined;
 	const systemPromptSource =
 		parsed.systemPrompt ?? (discoveredOverride?.kind === "text" ? discoveredOverride.path : undefined);
@@ -1233,7 +1233,9 @@ export async function buildSessionOptions(
 	const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt, resolvedSystemPromptTemplate] =
 		await Promise.all([
-			resolvePromptInput(systemPromptSource, "system prompt"),
+			discoveredOverride?.content !== undefined
+				? Promise.resolve(discoveredOverride.content)
+				: resolvePromptInput(systemPromptSource, "system prompt"),
 			resolvePromptInput(appendPromptSource, "append system prompt"),
 			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
 			templatePath === undefined ? Promise.resolve(undefined) : loadSystemPromptTemplateFile(templatePath),

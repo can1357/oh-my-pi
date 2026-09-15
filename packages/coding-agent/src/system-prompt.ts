@@ -386,16 +386,29 @@ export function discoverTitleSystemPromptFile(cwd?: string): string | undefined 
 export interface SystemPromptOverride {
 	kind: "template" | "text";
 	path: string;
+	/** Already-loaded capability content; it must not be resolved as a path again. */
+	content?: string;
 }
 
 /** Project overrides beat user overrides; templates beat literal prompts within a scope. */
-export function discoverSystemPromptOverride(cwd?: string): SystemPromptOverride | undefined {
+export async function discoverSystemPromptOverride(cwd?: string): Promise<SystemPromptOverride | undefined> {
 	for (const scope of [
 		{ cwd, user: false },
 		{ cwd, project: false },
 	]) {
 		const templatePath = findConfigFile("SYSTEM_TEMPLATE.md", scope);
-		if (templatePath) return { kind: "template", path: templatePath };
+		if (templatePath) {
+			if (scope.project === false) {
+				const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, {
+					cwd: cwd ?? getProjectDir(),
+				});
+				const projectPrompt = result.items.find(item => item.level === "project");
+				if (projectPrompt) {
+					return { kind: "text", path: projectPrompt.path, content: projectPrompt.content };
+				}
+			}
+			return { kind: "template", path: templatePath };
+		}
 		const textPath = findConfigFile("SYSTEM.md", scope);
 		if (textPath) return { kind: "text", path: textPath };
 	}
@@ -809,14 +822,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
 	let resolvedSystemPromptTemplate = options.systemPromptTemplate;
+	let resolvedCustomPromptInput = providedResolvedCustomPrompt;
 	const hasExplicitCustomPrompt = customPrompt !== undefined || providedResolvedCustomPrompt !== undefined;
 	if (resolvedSystemPromptTemplate !== undefined && hasExplicitCustomPrompt) {
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	}
 	if (resolvedSystemPromptTemplate === undefined && !hasExplicitCustomPrompt) {
-		const override = discoverSystemPromptOverride(resolvedCwd);
+		const override = await discoverSystemPromptOverride(resolvedCwd);
 		if (override?.kind === "template") {
 			resolvedSystemPromptTemplate = await loadSystemPromptTemplateFile(override.path);
+		} else if (override?.content !== undefined) {
+			resolvedCustomPromptInput = override.content;
 		}
 	}
 	if (resolvedSystemPromptTemplate !== undefined && !resolvedSystemPromptTemplate.trim()) {
@@ -876,7 +892,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// capability-path SYSTEM.md walk-up must not silently augment either.
 	const callerControlsCustomPrompt =
 		resolvedSystemPromptTemplate !== undefined ||
-		(typeof providedResolvedCustomPrompt === "string" && providedResolvedCustomPrompt.length > 0) ||
+		(typeof resolvedCustomPromptInput === "string" && resolvedCustomPromptInput.length > 0) ||
 		(typeof customPrompt === "string" && customPrompt.length > 0);
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
@@ -952,8 +968,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
-			providedResolvedCustomPrompt !== undefined
-				? Promise.resolve(providedResolvedCustomPrompt)
+			resolvedCustomPromptInput !== undefined
+				? Promise.resolve(resolvedCustomPromptInput)
 				: resolvePromptInput(customPrompt, "system prompt"),
 			prepDefaults.resolvedCustomPrompt,
 		),
