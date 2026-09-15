@@ -152,6 +152,29 @@ describe("tool output details", () => {
 		}
 	});
 
+	it("shortens a home-directory argument inside a device summary", () => {
+		const home = os.homedir();
+		// `write` targeting a device delegates its summary to the xdev helper, which
+		// echoes inner arguments such as `path` verbatim.
+		const card = new ToolExecutionComponent(
+			"write",
+			{ path: "xd://grep", content: JSON.stringify({ pattern: "needle", path: `${home}/project` }) },
+			{},
+			undefined,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const row = plain(card.render(120));
+
+			expect(row).toContain("~/project");
+			expect(row).not.toContain(home);
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
 	it("keeps an interrupted call neutral while folded", () => {
 		// Steering interrupts a pending call and reports `isError`; the full card
 		// renders the placeholder neutrally, so the folded row must not claim failure.
