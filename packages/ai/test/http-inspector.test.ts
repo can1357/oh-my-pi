@@ -50,6 +50,27 @@ describe("buildHttp400DumpPayload", () => {
 		expect(payload.headers?.["x-api-key"]).toBe("[redacted]");
 		expect(payload.headers?.["content-type"]).toBe("application/json");
 	});
+
+	it("redacts provider-specific auth headers the fixed list never named", () => {
+		const googleDump: RawHttpRequestDump = {
+			provider: "google",
+			api: "google-generative-ai",
+			model: "gemini-2.5-flash",
+			method: "POST",
+			url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent",
+			headers: {
+				"x-goog-api-key": "AIzaSy-live-google-key",
+				"x-amz-security-token": "aws-session-token",
+				"content-type": "application/json",
+			},
+			body: { generationConfig: {} },
+		};
+		const payload = buildHttp400DumpPayload(googleDump, new HttpError(400, "x"), "x");
+
+		expect(payload.headers?.["x-goog-api-key"]).toBe("[redacted]");
+		expect(payload.headers?.["x-amz-security-token"]).toBe("[redacted]");
+		expect(payload.headers?.["content-type"]).toBe("application/json");
+	});
 });
 
 describe("shouldDumpRejectedRequest", () => {

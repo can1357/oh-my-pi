@@ -42,6 +42,30 @@ describe("Editor atom table", () => {
 		expect(editor.getExpandedText()).toBe("🖼 #1");
 	});
 
+	it("collapses a typed span into an atom and keeps a trailing cursor anchored to the text after it", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("use /skill:foo now");
+		editor.moveToMessageEnd();
+		editor.collapseToAtom(0, 4, 14, "✦ foo", "/skill:foo");
+		expect(editor.getText()).toBe("use ✦ foo now");
+		expect(editor.getCursor()).toEqual({ line: 0, col: "use ✦ foo now".length });
+		expect(editor.getExpandedText()).toBe("use /skill:foo now");
+	});
+
+	it("moves a cursor that sat inside the collapsed span to just after the atom", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("/skill:foo tail");
+		editor.moveToMessageStart();
+		for (let i = 0; i < 6; i++) editor.handleInput("\x1b[C");
+		editor.collapseToAtom(0, 0, 10, "✦ foo", "/skill:foo");
+		expect(editor.getCursor()).toEqual({ line: 0, col: "✦ foo".length });
+		// A cursor before the span is untouched.
+		editor.setText("a /skill:foo");
+		editor.moveToMessageStart();
+		editor.collapseToAtom(0, 2, 12, "✦ foo", "/skill:foo");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+	});
+
 	it("deletes an icon atom as one unit under atomicTokenPattern", () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.atomicTokenPattern = /🖼 #[1-9]\d*/gu;
@@ -51,5 +75,30 @@ describe("Editor atom table", () => {
 		editor.handleInput("\x7f");
 		editor.handleInput("\x7f");
 		expect(editor.getText()).toBe("");
+	});
+
+	it("advances the text revision for programmatic edits, deletion, undo, and history restore", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const initial = editor.textRevision;
+		editor.setText("one");
+		expect(editor.textRevision).toBeGreaterThan(initial);
+		const afterSet = editor.textRevision;
+		editor.insertText(" two");
+		expect(editor.textRevision).toBeGreaterThan(afterSet);
+		const afterInsert = editor.textRevision;
+		editor.pasteText(" pasted");
+		expect(editor.textRevision).toBeGreaterThan(afterInsert);
+		const afterPaste = editor.textRevision;
+		editor.handleInput("\x7f");
+		expect(editor.textRevision).toBeGreaterThan(afterPaste);
+		const afterDelete = editor.textRevision;
+		editor.handleInput("\x1f");
+		expect(editor.textRevision).toBeGreaterThan(afterDelete);
+		editor.addToHistory("history");
+		editor.setText("");
+		const beforeHistoryRestore = editor.textRevision;
+		editor.handleInput("\x1b[A");
+		expect(editor.textRevision).toBeGreaterThan(beforeHistoryRestore);
+		expect(editor.getText()).toBe("history");
 	});
 });

@@ -4,6 +4,7 @@ import { compileCompatRules, renderAuthIds } from "../scripts/compat-compiler";
 import { compileAuth } from "../scripts/compat-compiler/compile-auth";
 import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
+import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
 import committed from "../src/compat/rules.json";
 
@@ -79,6 +80,14 @@ describe("compat compiler grammar", () => {
 				text: 'behavior {\n\texclude-models provider="a" provider="b" substring="tts"\n}',
 			}),
 		).toThrow(/malformed value/);
+	});
+
+	test("exclude-discovery-modes compiles exact provider mode exclusions", () => {
+		const compiled = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: 'behavior {\n\texclude-discovery-modes "embedding" "moderation" provider="litellm"\n}',
+		});
+		expect(compiled.excludeDiscoveryModes).toEqual([{ provider: "litellm", modes: ["embedding", "moderation"] }]);
 	});
 
 	test("duplicate axis in one block is rejected", () => {
@@ -185,6 +194,17 @@ describe("auth grammar", () => {
 		expect(renderAuthIds(compiled)).toContain('export type AuthProviderId = "a" | "b";');
 	});
 
+	test("provider-owned authentication APIs compile into auth policy", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "X"\n\tnative-auth-api "bedrock-converse-stream" "openai-responses"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
+	});
+
 	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {
 		const compiled = compileAuth([
 			{
@@ -221,6 +241,114 @@ describe("auth grammar", () => {
 			token: { url: { value: "https://t" }, body: "json", standard: true, params: {} },
 			credential: { expires: { fromPath: "created_at" } },
 		});
+	});
+});
+
+describe("provider catalog grammar", () => {
+	const row = [
+		'\t\tmodel "m" name="M" {',
+		"\t\t\treasoning #true",
+		'\t\t\tinput "text"',
+		"\t\t\tcost input=1 output=2 cache-read=0.1 cache-write=0",
+		"\t\t\tlimits context=1000",
+		"$AXES",
+		"\t\t}",
+	];
+	const provider = (id: string, nodes: string[]) => `provider "${id}" {\n${nodes.join("\n")}\n}`;
+	const seed = (header: string, axes = "") =>
+		[`\tseed ${header} {`, ...row.map(line => (line === "$AXES" ? axes : line)), "\t}"].join("\n");
+	const src = (text: string) => [{ file: "providers/p.kdl", text }];
+
+	test("entry nodes compile alongside cascade rules; catalog membership requires default-model", () => {
+		const compiled = compileProviders(
+			src(
+				provider("p", [
+					'\tdefault-model "m"',
+					'\tenv "P_KEY" "P_ALT"',
+					"\tdynamic-models-authoritative #true",
+					'\tdiscovery label="P" oauth-provider="p" allow-unauthenticated=#true { env "P_GEN" }',
+					"\tsupports-store #false",
+				]),
+			),
+		);
+		expect(compiled.p).toEqual({
+			id: "p",
+			defaultModel: "m",
+			envVars: ["P_KEY", "P_ALT"],
+			dynamicModelsAuthoritative: true,
+			discovery: { label: "P", oauthProvider: "p", allowUnauthenticated: true, envVars: ["P_GEN"] },
+		});
+		// The cascade sees only the axis; catalog nodes are not directives.
+		const cascade = compileCascade(
+			src(provider("p", ['\tdefault-model "m"', '\tenv "P_KEY"', "\tsupports-store #false"])),
+		);
+		expect(cascade.rules).toEqual([
+			{ source: "providers/p.kdl:1", providers: ["p"], wire: { supportsStore: false } },
+		]);
+		// Wire-compat-only files (custom provider ids) are not catalog entries…
+		expect(compileProviders(src(provider("llama.cpp", ["\tsupports-store #false"])))).toEqual({});
+		// …but a stray catalog node without default-model is an error, not a silent drop.
+		expect(() => compileProviders(src(provider("p", ['\tenv "P_KEY"'])))).toThrow(
+			/providers\/p\.kdl:1.*has catalog nodes but no default-model/,
+		);
+	});
+
+	test("seed axis directives split into thinking/compat; catalog axes and foreign wire axes are rejected", () => {
+		const { p } = compileProviders(
+			src(
+				provider("p", [
+					'\tdefault-model "m"',
+					seed(
+						'api="openai-completions" base-url="https://x" bundle="fallback"',
+						'\t\t\tthinking-mode "effort"\n\t\t\tthinking-efforts "low" "high"\n\t\t\tsupports-developer-role #false',
+					),
+				]),
+			),
+		);
+		expect(p.seed?.bundle).toBe("fallback");
+		expect(p.seed?.precedence).toBe("upstream");
+		expect(p.seed?.models[0]).toMatchObject({
+			id: "m",
+			provider: "p",
+			api: "openai-completions",
+			baseUrl: "https://x",
+			maxTokens: null,
+			thinking: { mode: "effort", efforts: ["low", "high"] },
+			compat: { supportsDeveloperRole: false },
+		});
+		const seeded = (header: string, axes: string) => src(provider("p", ['\tdefault-model "m"', seed(header, axes)]));
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tedit-revision "x"')),
+		).toThrow(/providers\/p\.kdl:9.*catalog axis `edit-revision` is rule-owned/);
+		expect(() =>
+			compileProviders(seeded('api="anthropic-messages" base-url="https://x"', "\t\t\tsupports-store #true")),
+		).toThrow(/wire axis `supports-store` does not apply to api `anthropic-messages`/);
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tthinking-efforts "low"')),
+		).toThrow(/need both thinking-mode and thinking-efforts/);
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x" bundle="sometimes"', "")),
+		).toThrow(/seed bundle must be one of/);
+	});
+
+	test("models-from copies rows under the inheriting provider; entries are keyed and sorted by id", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tseed { models-from "p" }']),
+			},
+			{
+				file: "providers/p.kdl",
+				text: provider("p", ['\tdefault-model "m"', seed('api="openai-completions" base-url="https://x"')]),
+			},
+		]);
+		expect(Object.keys(compiled)).toEqual(["p", "q"]);
+		expect(compiled.q.seed?.models).toEqual([{ ...compiled.p.seed!.models[0], provider: "q" }]);
+		expect(() =>
+			compileProviders([
+				{ file: "providers/q.kdl", text: provider("q", ['\tdefault-model "m"', '\tseed { models-from "p" }']) },
+			]),
+		).toThrow(/models-from `p` must name a provider seed with its own model rows/);
 	});
 });
 

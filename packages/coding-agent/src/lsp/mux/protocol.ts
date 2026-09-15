@@ -10,9 +10,7 @@
  * entry (`server.ts`), the client connector (`daemon.ts`), and tests.
  */
 import * as path from "node:path";
-
-/** Hidden CLI selector used to re-enter the LSP mux worker. */
-export const LSP_MUX_WORKER_ARG = "__omp_worker_lsp_mux";
+export { LSP_MUX_WORKER_ARG } from "../../cli/worker-selectors";
 
 /** Environment key carrying the socket endpoint the mux must listen on. */
 export const LSP_MUX_SOCKET_ENV = "OMP_LSP_MUX_SOCKET";

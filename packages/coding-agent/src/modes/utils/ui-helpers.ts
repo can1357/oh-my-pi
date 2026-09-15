@@ -11,6 +11,7 @@ import { AssistantMessageComponent } from "../../modes/components/assistant-mess
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
+import { ServedModelTracker } from "../../modes/components/served-model-marker";
 import { CollabPromptMessageComponent } from "../../modes/components/collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,
@@ -173,6 +174,7 @@ export class UiHelpers {
 				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
 					images: message.images,
 					showImages: settings.get("terminal.showImages"),
 				});
@@ -186,6 +188,7 @@ export class UiHelpers {
 				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
 				});
 				this.ctx.chatContainer.addChild(component);
 				break;
@@ -297,7 +300,7 @@ export class UiHelpers {
 								message,
 								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
 							);
-						userComponent = new UserMessageComponent(textContent, isSynthetic, imageLinks);
+						userComponent = new UserMessageComponent(textContent, { synthetic: isSynthetic, imageLinks });
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
 					this.ctx.chatContainer.addChild(userComponent);
@@ -380,6 +383,9 @@ export class UiHelpers {
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
+		// Same for the served-model tracker: replaying history re-flags the first
+		// occurrence of each substitution and carries the memory forward live.
+		this.ctx.servedModelTracker = new ServedModelTracker();
 
 		if (options.updateFooter) {
 			this.ctx.statusLine.invalidate();
@@ -506,6 +512,7 @@ export class UiHelpers {
 					if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
 						this.ctx.lastAssistantUsage = usage;
 					}
+					assistantComponent.setServedModelMismatch(this.ctx.servedModelTracker.check(message));
 				}
 				const hasVisibleAssistantContent = assistantHasVisibleContent(message);
 				if (hasVisibleAssistantContent) {
@@ -568,6 +575,9 @@ export class UiHelpers {
 							this.ctx.pendingTools.set(content.id, readGroup);
 							if (assistantComponent) {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
+								if (this.ctx.viewSession.isStreaming) {
+									this.ctx.eventController?.inheritReadToolAssistant(content.id, assistantComponent);
+								}
 							}
 						} else {
 							const normalizedArgs = normalizeToolArgs(content.arguments);
@@ -652,6 +662,9 @@ export class UiHelpers {
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
+					if (this.ctx.viewSession.isStreaming) {
+						this.ctx.eventController?.inheritReadToolAssistant(message.toolCallId, undefined);
+					}
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
@@ -659,6 +672,10 @@ export class UiHelpers {
 						assistantComponent.setToolResultImages(message.toolCallId, images);
 						const hasText = message.content.some(c => c.type === "text");
 						if (!hasText && settings.get("terminal.showImages")) {
+							if (pendingReadComponent) {
+								pendingReadComponent.updateResult(message, false, message.toolCallId);
+								this.ctx.pendingTools.delete(message.toolCallId);
+							}
 							readToolCallArgs.delete(message.toolCallId);
 							readToolCallAssistantComponents.delete(message.toolCallId);
 							continue;
@@ -921,6 +938,7 @@ export class UiHelpers {
 		const previousPendingBashComponents = this.ctx.pendingBashComponents;
 		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
 		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
+		const previousServedModelTracker = this.ctx.servedModelTracker;
 		const chatWasAlreadyRendered = this.ctx.initialChatRendered;
 		const renderOptions = {
 			updateFooter: true,
@@ -1027,6 +1045,7 @@ export class UiHelpers {
 				this.ctx.pendingBashComponents = previousPendingBashComponents;
 				this.ctx.pendingPythonComponents = previousPendingPythonComponents;
 				this.ctx.lastAssistantUsage = previousLastAssistantUsage;
+				this.ctx.servedModelTracker = previousServedModelTracker;
 				stagedChatContainer.disposeChildren();
 			}
 			this.ctx.initialChatRendered = committed ? true : chatWasAlreadyRendered;
@@ -1256,6 +1275,9 @@ export class UiHelpers {
 				await this.#deliverQueuedMessage(message);
 			}
 			this.ctx.updatePendingMessagesDisplay();
+			// The dispatch above bypasses `getUserInput`, so nothing would schedule
+			// the next loop iteration for a prompt queued during compaction.
+			if (this.ctx.loopModeEnabled) this.ctx.armLoopAutoSubmit();
 			void promptPromise;
 		} catch (error) {
 			restoreQueue(error);

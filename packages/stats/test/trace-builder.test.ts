@@ -456,6 +456,56 @@ describe("buildSessionTrace", () => {
 		expect(summary.unpricedRequests).toBe(1);
 	});
 
+	it("derives a missing total from buckets before classifying trace costs", async () => {
+		// Legacy entries can omit totalTokens while carrying real buckets; the
+		// parser derives the total and the db marks the request unpriced, so the
+		// trace headline must agree instead of reporting the zero as free. A
+		// malformed bucket counts as absent and stays free at zero tokens.
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		await fs.mkdir(projectDir, { recursive: true });
+		const file = path.join(projectDir, "1700000000002_derived-unpriced.jsonl");
+		const entries: unknown[] = [
+			{ type: "title", v: 1, title: "Derived" },
+			{ type: "session", version: 3, id: "s", timestamp: iso(T), cwd: "/tmp/proj" },
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			},
+			{
+				type: "message",
+				id: "a2",
+				parentId: "a1",
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: "10", output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			},
+		];
+		await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+		const { summary } = await buildSessionTrace(file);
+		expect(summary.requests).toBe(2);
+		expect(summary.totalTokens).toBe(100);
+		expect(summary.costTotal).toBe(0);
+		expect(summary.unpricedRequests).toBe(1);
+	});
+
 	it("rejects paths outside the sessions root", async () => {
 		await writeFixture();
 		expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);
@@ -473,6 +523,59 @@ describe("getTraceEntry", () => {
 });
 
 describe("listSessionSummaries", () => {
+	it("uses the session cwd for home-relative storage keys and keeps the legacy path fallback", async () => {
+		const sessionsDir = getSessionsDir();
+		const currentFile = path.join(sessionsDir, "-project-omp-kit", "current.jsonl");
+		const compressedFile = path.join(sessionsDir, "-project-compressed", "compressed.jsonl.gz");
+		const legacyFile = path.join(sessionsDir, "--work--legacy--", "legacy.jsonl");
+		await fs.mkdir(path.dirname(currentFile), { recursive: true });
+		await fs.mkdir(path.dirname(compressedFile), { recursive: true });
+		await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+		await Bun.write(
+			currentFile,
+			[
+				{ type: "title", v: 1, title: "Current title" },
+				{
+					type: "session",
+					version: 3,
+					id: "current",
+					timestamp: iso(T),
+					cwd: "/home/han/project/omp-kit",
+					title: "Stale header title",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n"),
+		);
+		await Bun.write(
+			compressedFile,
+			Bun.gzipSync(
+				Buffer.from(
+					[
+						{ type: "title", v: 1, title: "Compressed title" },
+						{
+							type: "session",
+							version: 3,
+							id: "compressed",
+							timestamp: iso(T),
+							cwd: "/home/han/project/compressed",
+						},
+					]
+						.map(entry => JSON.stringify(entry))
+						.join("\n"),
+				),
+			),
+		);
+		await Bun.write(legacyFile, JSON.stringify({ type: "title", v: 1, title: "Legacy session" }));
+
+		const rows = await listSessionSummaries();
+		expect(rows.find(row => row.file === currentFile)?.folder).toBe("/home/han/project/omp-kit");
+		expect(rows.find(row => row.file === currentFile)?.title).toBe("Current title");
+		expect(rows.find(row => row.file === compressedFile)?.folder).toBe("/home/han/project/compressed");
+		expect(rows.find(row => row.file === compressedFile)?.title).toBe("Compressed title");
+		expect(rows.find(row => row.file === legacyFile)?.folder).toBe("/work/legacy/");
+	});
+
 	it("lists unsynced on-disk sessions with titles before any sync", async () => {
 		const rootFile = await writeFixture();
 		const rows = await listSessionSummaries();

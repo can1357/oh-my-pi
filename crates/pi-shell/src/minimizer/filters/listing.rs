@@ -237,9 +237,10 @@ fn center_truncate_match(text: &str, max_chars: usize) -> String {
 	//   appear before a long suffix still remain visible.
 	// - Otherwise center in the middle of the full line.
 	// Count leading whitespace in CHARS, not bytes: this value is compared and
-	// combined with char-based quantities (`char_count`, `max_chars`) and used as
-	// a char-stepping floor below. `str::find` returns a byte offset, which would
-	// overstate the index for any multibyte leading whitespace (NBSP, U+3000).
+	// combined with char-based quantities (`char_count`, `max_chars`) and used
+	// as a char-stepping floor below. `str::find` returns a byte offset, which
+	// would overstate the index for any multibyte leading whitespace (NBSP,
+	// U+3000).
 	let first_non_ws = text.chars().take_while(|c| c.is_whitespace()).count();
 	let has_whitespace = text.chars().any(char::is_whitespace);
 	let anchor = if first_non_ws > 0 && first_non_ws < char_count / 3 {
@@ -1282,15 +1283,15 @@ mod tests {
 		let line = format!("{indent}{body}");
 		assert!(line.chars().count() > 140, "test line must exceed max_chars");
 		let out = center_truncate_match(&line, 140);
-		// Should show leading … (indentation was skipped), centered code, and …[+N]
-		// tally.
+		// Should show leading … (indentation was skipped), centered code, and
+		// …[+N] tally.
 		assert!(out.starts_with('\u{2026}'), "should start with …: {out}");
 		assert!(out.ends_with(']'), "should end with tally: {out}");
 		assert!(out.contains("result"), "match region 'result' should be visible: {out}");
 		assert!(out.contains("arg5"), "middle args should be visible: {out}");
-		// Should NOT show the raw "let result" from the very front (since indentation
-		// was dropped). But it might appear inside the window. The key assertion:
-		// leading indent chars are dropped.
+		// Should NOT show the raw "let result" from the very front (since
+		// indentation was dropped). But it might appear inside the window. The
+		// key assertion: leading indent chars are dropped.
 		let after_ellipsis = &out['\u{2026}'.len_utf8()..];
 		assert!(
 			!after_ellipsis.starts_with(' '),
@@ -1324,7 +1325,8 @@ mod tests {
 		let line = format!("{prefix}{marker}{suffix}");
 		assert!(line.chars().count() > 140, "test line must exceed max_chars");
 		let out = center_truncate_match(&line, 140);
-		// marker starts at char 40, window is centered, should include the marker.
+		// marker starts at char 40, window is centered, should include the
+		// marker.
 		assert!(out.contains(marker), "match should be visible: {out}");
 	}
 
@@ -1344,7 +1346,8 @@ mod tests {
 		let line = "a".repeat(141);
 		let out = center_truncate_match(&line, 140);
 		assert!(out.contains("\u{2026}[+"), "should have tally: {out}");
-		// With 141 chars, centering produces window_start=0, shows 140 a's, drops 1.
+		// With 141 chars, centering produces window_start=0, shows 140 a's, drops
+		// 1.
 		let content_chars: String = out.chars().filter(|c| *c == 'a').collect();
 		assert_eq!(content_chars.len(), 140);
 	}

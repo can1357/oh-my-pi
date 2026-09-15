@@ -1,15 +1,20 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
 	getBlobsDir,
+	getCustomSessionFilesDir,
 	getHistoryDbPath,
 	getModelDbPath,
 	getSessionsDir,
 	getStatsDbPath,
+	getTerminalSessionsDir,
+	normalizePathForComparison,
 	readLines,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -231,14 +236,39 @@ async function statIfPresent(target: string) {
 	}
 }
 
+/** Small registry/breadcrumb marker files; a missing file reads as empty. */
 async function readTextIfPresent(file: string): Promise<string> {
 	try {
-		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-			return new TextDecoder().decode(gunzipSync(await Bun.file(file).bytes()));
-		}
 		return await Bun.file(file).text();
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return "";
+		throw error;
+	}
+}
+
+async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
+	// readLines buffers at most the largest record, including malformed records.
+	const scan = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
+		for await (const line of readLines(stream)) onLine(line);
+	};
+	try {
+		const stream = Bun.file(file).stream();
+		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
+			const gunzip = createGunzip();
+			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
+				// Match the native stream's byte budget, not one arbitrary chunk or
+				// a default queue that counts each potentially large chunk as size 1.
+				await scan(
+					Readable.toWeb(source, {
+						strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
+					}),
+				);
+			});
+		} else {
+			await scan(stream);
+		}
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return;
 		throw error;
 	}
 }
@@ -276,23 +306,87 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<string>> {
-	const hashes = new Set<string>();
+async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
+	const files = new Map<string, string>();
+	const decoder = new TextDecoder();
 	for (const root of sessionRoots) {
-		const files = [
+		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
 			...(await collectBackupJsonlFiles(root)),
-		];
-		for (const file of files) {
-			const text = await readTextIfPresent(file);
-			for (const match of text.matchAll(BLOB_REF_RE)) {
+		]) {
+			files.set(normalizePathForComparison(file), file);
+		}
+	}
+	for (const file of exactSessionFiles) {
+		files.set(normalizePathForComparison(file), file);
+	}
+
+	const hashes = new Set<string>();
+	for (const file of files.values()) {
+		// Keep raw-text matching: recoverable malformed records can still own blobs.
+		await scanSessionLinesIfPresent(file, line => {
+			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
 				const hash = match[1]?.toLowerCase();
 				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
 			}
-		}
+		});
 	}
 	return hashes;
+}
+
+/**
+ * Exact session files recorded in the persistent registry
+ * (`<agentDir>/custom-session-files/*`, one marker per transcript whose
+ * content is its absolute path). Recording files rather than parent
+ * directories preserves `--session` paths outside the root-scan globs,
+ * including names without a `.jsonl` suffix.
+ */
+async function collectRegisteredSessionFiles(registryDir: string): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(registryDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+	const files = new Map<string, string>();
+	for (const entry of entries) {
+		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
+		if (!recorded) continue;
+		const sessionFile = path.resolve(recorded);
+		const stat = await statIfPresent(sessionFile);
+		if (!stat?.isFile()) continue;
+		files.set(normalizePathForComparison(sessionFile), sessionFile);
+	}
+	return [...files.values()];
+}
+
+/**
+ * Exact session files recorded in terminal breadcrumbs. Supplements
+ * {@link collectRegisteredSessionFiles}: a breadcrumb holds only that
+ * terminal's last session, but catches the current transcript even if its
+ * persistent marker write failed.
+ */
+async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(breadcrumbDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+	const files = new Map<string, string>();
+	for (const entry of entries) {
+		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
+		const lines = text.split("\n");
+		const breadcrumbCwd = lines[0]?.trim();
+		const recordedSessionFile = lines[1]?.trim();
+		if (!breadcrumbCwd || !recordedSessionFile) continue;
+		const sessionFile = path.resolve(breadcrumbCwd, recordedSessionFile);
+		files.set(normalizePathForComparison(sessionFile), sessionFile);
+	}
+	return [...files.values()];
 }
 
 async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
@@ -325,7 +419,15 @@ async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> 
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const referenced = await collectReferencedBlobHashes([sessionsRoot, archiveSessionsRoot]);
+	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
+	const exactSessionFiles = new Map<string, string>();
+	for (const file of await collectRegisteredSessionFiles(getCustomSessionFilesDir(options.agentDir))) {
+		exactSessionFiles.set(normalizePathForComparison(file), file);
+	}
+	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
+		exactSessionFiles.set(normalizePathForComparison(file), file);
+	}
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
 	const candidates = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
@@ -446,11 +548,15 @@ interface SessionLineageHeader {
 	previousSessionFiles: string[];
 }
 
-function sessionLineageHeaderFromText(text: string): SessionLineageHeader | undefined {
-	let sawTitleSlot = false;
-	for (const rawLine of text.split(/\r?\n/)) {
-		const line = rawLine.trim();
-		if (!line) continue;
+class SessionLineageHeaderReader {
+	header: SessionLineageHeader | undefined;
+	done = false;
+	#sawTitleSlot = false;
+
+	read(line: string): void {
+		if (this.done) return;
+		line = line.trim();
+		if (!line) return;
 		try {
 			const record = JSON.parse(line) as {
 				type?: unknown;
@@ -458,12 +564,13 @@ function sessionLineageHeaderFromText(text: string): SessionLineageHeader | unde
 				parentSession?: unknown;
 				previousSessionFiles?: unknown;
 			};
-			if (!sawTitleSlot && record.type === "title") {
-				sawTitleSlot = true;
-				continue;
+			if (!this.#sawTitleSlot && record.type === "title") {
+				this.#sawTitleSlot = true;
+				return;
 			}
-			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return undefined;
-			return {
+			this.done = true;
+			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return;
+			this.header = {
 				id: record.id,
 				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
 				previousSessionFiles: Array.isArray(record.previousSessionFiles)
@@ -474,23 +581,35 @@ function sessionLineageHeaderFromText(text: string): SessionLineageHeader | unde
 					: [],
 			};
 		} catch {
-			return undefined;
+			this.done = true;
 		}
 	}
-	return undefined;
 }
 
 async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
 	const decoder = new TextDecoder();
-	const lines: string[] = [];
+	const reader = new SessionLineageHeaderReader();
 	for await (const line of readLines(Bun.file(file).stream())) {
-		const decoded = decoder.decode(line).trim();
-		if (!decoded) continue;
-		lines.push(decoded);
-		const header = sessionLineageHeaderFromText(lines.join("\n"));
-		if (header || lines.length >= 2) return header;
+		reader.read(decoder.decode(line));
+		if (reader.done) break;
 	}
-	return undefined;
+	return reader.header;
+}
+
+async function scanArchivedSession(
+	file: string,
+	identities?: Record<StatsEntryTable, StatsEntryIdentity[]>,
+): Promise<SessionLineageHeader | undefined> {
+	const decoder = new TextDecoder();
+	const reader = new SessionLineageHeaderReader();
+	// Drain even after the header: a late gzip error must invalidate the archive.
+	await scanSessionLinesIfPresent(file, line => {
+		if (reader.done && !identities) return;
+		const text = decoder.decode(line);
+		reader.read(text);
+		if (identities) addSessionStatsIdentity(text, identities);
+	});
+	return reader.header;
 }
 
 async function gzipSessionFile(source: string, destination: string): Promise<void> {
@@ -498,8 +617,11 @@ async function gzipSessionFile(source: string, destination: string): Promise<voi
 	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
 	let renamed = false;
 	try {
-		const compressed = gzipSync(await Bun.file(source).bytes(), { level: 9 });
-		await Bun.write(tempPath, compressed);
+		await pipeline(
+			Bun.file(source).stream(),
+			createGzip({ level: 9 }),
+			(await fs.open(tempPath, "w")).createWriteStream(),
+		);
 		await fs.rename(tempPath, destination);
 		renamed = true;
 		await fs.unlink(source);
@@ -512,9 +634,15 @@ async function gzipSessionFile(source: string, destination: string): Promise<voi
 
 async function restoreGzipSessionFile(source: string, destination: string): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const decompressed = gunzipSync(await Bun.file(source).bytes());
-	await Bun.write(destination, decompressed);
-	await fs.unlink(source);
+	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		await pipeline(Bun.file(source).stream(), createGunzip(), (await fs.open(tempPath, "w")).createWriteStream());
+		await fs.rename(tempPath, destination);
+		await fs.unlink(source);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true });
+		throw error;
+	}
 }
 
 async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<void> {
@@ -598,7 +726,7 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]> {
 	const ids = new Set<string>();
 	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
-		const id = sessionLineageHeaderFromText(await readTextIfPresent(file))?.id;
+		const id = (await scanArchivedSession(file))?.id;
 		if (id) ids.add(id);
 	}
 	return [...ids].sort();
@@ -971,12 +1099,6 @@ function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTabl
 	}
 }
 
-function collectSessionStatsIdentitiesFromText(text: string): Record<StatsEntryTable, StatsEntryIdentity[]> {
-	const identities = createStatsIdentities();
-	for (const line of text.split(/\r?\n/)) addSessionStatsIdentity(line, identities);
-	return identities;
-}
-
 async function collectSessionStatsIdentities(
 	sessionPath: string,
 ): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> {
@@ -1136,15 +1258,15 @@ async function collectArchivedStatsSessions(
 		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
 		const sourcePath = path.join(sessionsRoot, relative.slice(0, -".gz".length));
 		try {
-			const text = await readTextIfPresent(file);
-			const header = sessionLineageHeaderFromText(text);
+			const identities = createStatsIdentities();
+			const header = await scanArchivedSession(file, identities);
 			if (!header) throw new Error("archive is missing a valid session header");
 			sessions.push({
 				path: sourcePath,
 				id: header.id,
 				parentSession: header.parentSession,
 				historicalPaths: managedHistoricalSessionPaths(header, sourcePath, sessionsRoot),
-				identities: collectSessionStatsIdentitiesFromText(text),
+				identities,
 			});
 		} catch (error) {
 			onError(file, error);

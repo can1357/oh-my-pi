@@ -140,16 +140,16 @@ describe("advisor memory context", () => {
 			const glob = advisor.state.tools.find(tool => tool.name === "glob");
 			if (!read || !grep || !glob) throw new Error("Expected default advisor URL tools");
 
-			const readResult = await read.execute("advisor-root-read", { path: "memory://root" });
-			expect(JSON.stringify(readResult.content)).toContain("Advisor project summary marker.");
-			const grepResult = await grep.execute("advisor-root-grep", {
-				path: "memory://root",
-				pattern: "Advisor project summary marker",
-			});
-			expect(JSON.stringify(grepResult.content)).toContain("Advisor project summary marker.");
+			const unavailableRoot = `active backend: ${backend}`;
+			await expect(read.execute("advisor-root-read", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
+			await expect(
+				grep.execute("advisor-root-grep", {
+					path: "memory://root",
+					pattern: "Advisor project summary marker",
+				}),
+			).rejects.toThrow(unavailableRoot);
 			for (const path of ["memory://root", "memory://root/*.md"]) {
-				const globResult = await glob.execute("advisor-root-glob", { path });
-				expect(JSON.stringify(globResult.content)).toContain("memory_summary.md");
+				await expect(glob.execute("advisor-root-glob", { path })).rejects.toThrow(unavailableRoot);
 			}
 
 			if (backend === "mnemopi") {

@@ -4,6 +4,38 @@
 
 ### Added
 
+- `Editor.deleteCharForward()` exposes the `tui.editor.deleteCharForward` operation to hosts that resolve the chord themselves, applying the same transient-state teardown the key dispatch does (pending character jump, spelling-assist popup) and routing through Vim's `x` in Normal and Visual modes.
+
+### Changed
+
+- Inline image limits now bound Kitty graphics retained from earlier frames and fullscreen overlays; older scrollback images are evicted until replayed.
+
+### Fixed
+
+- Enter now runs a slash command whose argument completes to a directory, instead of descending into it. ([#12112](https://github.com/can1357/oh-my-pi/pull/12112) by [@Huang-404-Q](https://github.com/Huang-404-Q))
+- Fixed a resize on Windows leaving the screen with a scrolled-up duplicate transcript and no visible response to input. The in-place resize path (default-on for Warp) anchors one settled repaint on a DSR round trip, but a ConPTY host owns that grid: measured on conhost, resizing the pseudoconsole re-emits its whole viewport from `CSI H` with absolute addressing while the application writes nothing, and re-homes the cursor, so the reply reports column 1 and can never be attributed to its probe tag. ConPTY sessions now keep the alternate-screen borrow, whose settled transaction ends in the `ResizeScrollbackMode` rebuild, and skip that unattributable anchor probe — except inside a multiplexer, which answers the DSR from its own grid, and under `PI_TUI_RESIZE_IN_PLACE=1`, which restores the whole pre-change path ([#11625](https://github.com/can1357/oh-my-pi/pull/11625) by [@bse-ai](https://github.com/bse-ai)).
+- Stopped exact-width live rows from entering native scrollback during ConPTY repaints ([#9783](https://github.com/can1357/oh-my-pi/issues/9783)).
+- Forward delete no longer leaves the Vim Normal-mode cursor one column past the end of a line after deleting the final grapheme.
+- Fixed Tabby CMD sessions enabling synchronized output from a spoofed `WT_SESSION`, which caused streaming repaints to overlap when Tabby's terminal chain mishandled DEC 2026.
+- Extension command argument completions now refresh after typing a Space when the previous argument had no suggestions. ([#11060](https://github.com/can1357/oh-my-pi/issues/11060))
+- Detect the wmux Windows terminal multiplexer (`WMUX` / `WMUX_SURFACE_ID`) so its panes take the in-place viewport repaint path instead of the direct-terminal scrollback path.
+
+## [18.2.0] - 2026-09-15
+
+### Added
+
+- Added `Editor.textRevision` for content-dependent render caches, including undo and draft restoration.
+- Added collapseToAtom method to compress text spans into UI-friendly atoms
+
+### Changed
+
+- Redrawing unchanged terminal rows now avoids rescanning ANSI, hyperlinks, and images.
+- Terminal UIs reach their first frame with a smaller startup module graph.
+
+## [18.1.17] - 2026-09-10
+
+### Added
+
 - Editor history can retain local draft snapshots with their paste expansions and host-owned attachment restoration, without writing them to persistent history ([#11524](https://github.com/can1357/oh-my-pi/pull/11524) by [@camjac251](https://github.com/camjac251)).
 - Added an optional Vim-style modal editing layer to `Editor`, off unless `setVimMode(true)` is called: Insert, Normal, and Visual/Visual-Line with motions, count prefixes, and operators. `j`/`k` keep Vim's desired column, so passing over a shorter line does not collapse it, and `$` sticks to end-of-line. `p`/`P` paste from an internal register; yanks are surfaced to the host through `onYank` so it can route them to the system clipboard.
 - Vim mode now exposes its chrome to hosts: `Editor.vimEnabled`, `Editor.vimPending` (the half-typed command, e.g. `2d`), and `Editor.vimSelectedLines` (Visual selection height). `onVimModeChange` additionally fires when the pending command or selection size changes, not only on mode switches.

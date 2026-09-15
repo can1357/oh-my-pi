@@ -163,6 +163,24 @@ describe("status line path segment", () => {
 		}
 	});
 
+	it("normalizes and classifies a project directory only once", () => {
+		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-classify-"));
+		try {
+			setProjectDir(scratchDir);
+			const realpath = vi.spyOn(fs, "realpathSync");
+			renderSegment("path", createPathContext());
+			renderSegment("path", createPathContext());
+
+			const projectRealpaths = realpath.mock.calls.filter(
+				([input]) => path.resolve(String(input)) === path.resolve(scratchDir),
+			);
+			expect(projectRealpaths).toHaveLength(1);
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
+		}
+	});
+
 	it("keeps nested subpaths visible under a scratch root", () => {
 		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-scratch-nest-"));
 		const nested = path.join(scratchDir, "sub", "deep");

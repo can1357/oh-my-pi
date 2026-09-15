@@ -148,7 +148,10 @@ pi.registerProvider("my-provider", {
         headers: { Authorization: `Bearer ${params.credential.apiKey}` },
       });
       if (!response.ok) return null;
-      const payload = (await response.json()) as { used: number; limit: number };
+      const payload = (await response.json()) as {
+        used: number;
+        limit: number;
+      };
       return {
         provider: "my-provider",
         fetchedAt: Date.now(),
@@ -157,7 +160,11 @@ pi.registerProvider("my-provider", {
             id: "requests",
             label: "Requests",
             scope: { provider: "my-provider" },
-            amount: { used: payload.used, limit: payload.limit, unit: "requests" },
+            amount: {
+              used: payload.used,
+              limit: payload.limit,
+              unit: "requests",
+            },
           },
         ],
       };
@@ -193,7 +200,7 @@ Also exposed:
 - `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it starts a turn (`triggerTurn` is ignored; plan mode folds it into context instead)
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
-`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual).
+`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual). The message is recorded with `attribution: "user"` unless you pass `attribution: "agent"`; pass `"agent"` for text the extension generated or relayed from another agent, so consumers can tell it apart from what the user typed.
 
 Payloads passed to `pi.sendMessage` are normalized before delivery (`normalizeCustomMessagePayload` in `session/messages.ts`): non-object payloads are coerced to string content under the default custom type, missing `customType`/`attribution` fields are defaulted, and invalid content collapses to an empty string — malformed payloads no longer persist entries that crash later session resumes.
 
@@ -302,6 +309,20 @@ Cancelable pre-events:
 - `turn_start` / `turn_end`
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
+`before_agent_start` prepares policy for an ordinary prompt and for each steering or follow-up batch containing user work when that batch is actually dequeued. It is not an enqueue notification: a live batch can fire it without another `agent_start`. Queue peeks, provider retries, tool-only iterations, and synthetic-only queued continuations do not fire it. Explicit synthetic prompts retain their ordinary prompt lifecycle.
+
+For queued batches, `prompt` contains the already-transformed text of every selected user message, joined with two newlines between messages; text blocks within a message are concatenated. `images` contains their already-normalized images in delivery order. Hidden agent-attributed companions are excluded from these event inputs but remain in the delivered batch. Input hooks, commands, templates, and original attachment preprocessing are not rerun.
+
+Handlers chain from the current base system prompt. Their final override governs the next provider request and its continuations until another prompt or user-containing batch prepares policy. Overrides remain complete replacements, including strings or arrays unrelated to the base; the host never infers or rebases text patches. Returned custom messages are appended once after the original batch; originals retain their order, identity, attribution, and metadata. Host application of results is cancelled if the turn is aborted or the session or queue ownership changes while handlers are pending.
+
+If a returned override's source base changes during preparation (for example, a handler awaits `ctx.setActiveTools()`), the host discards that attempt's returned custom messages and staged memory, then repeats policy preparation from the winning base. At most three attempts run per delivery; repeated base changes raise an error without delivering the original input. Queued originals remain queued, and settling the failed turn does not retry them automatically. A new prompt or queued delivery can reopen draining, including synthetic follow-ups and custom messages from extensions or advisors; the pause is not restricted to a user-only retry. Ordinary text is returned through the dropped-prompt callback. Unchanged base content does not trigger a retry, even if a refresh replaces the array. Preparations without an override still use the winning base without rerunning handlers or recall. Ownership is checked again synchronously before publishing results; a late change declines the delivery without committing memory or context.
+
+Handlers must tolerate re-entry: a source-base retry can call the entire `before_agent_start` chain again for the same submission, and a cancelled delivery may be prepared again when resumed. Only the accepted attempt's returned context and staged memory are published; external side effects performed by handlers cannot be rolled back. Input hooks, commands, templates, and original attachment preprocessing are never replayed by these policy retries.
+
+If a later queue drain fails, earlier originals that have not reached the
+transcript are restored ahead of newer enqueues. Generated preparation context
+is not requeued, and explicitly cleared or replaced queues are not resurrected.
+
 ### Tool lifecycle
 
 - `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
@@ -333,6 +354,7 @@ pi.on("mcp_notification", (event) => {
   const params = event.params as { from: string; text: string };
   pi.sendUserMessage(`[from ${params.from}] ${params.text}`, {
     deliverAs: "steer",
+    attribution: "agent",
   });
 });
 ```
@@ -490,7 +512,7 @@ permission error from these surfaces as it does today, with no handler consulted
 - The ACP bridge's `writeTextFile`, which hands the write to a remote client.
 - The `lsp` tool's own writes: applying a workspace edit or code action, and the
   Biome formatter, which writes the buffer and then shells out to `biome format
-  --write` — a subprocess write no in-process seam can reach.
+--write` — a subprocess write no in-process seam can reach.
 
 ### File delete fallback (`registerFileDeleteFallback`)
 
@@ -523,7 +545,7 @@ succeed, and nothing happens at all when no handler is registered. Two differenc
 
 **Registering for deletes is deliberately separate from registering for writes.** A
 write handler brokers `req.content` to `req.dst`; if a delete request reached it, the
-missing content invites brokering an empty write and *truncating* the file that was
+missing content invites brokering an empty write and _truncating_ the file that was
 meant to be removed. A write-only handler therefore never sees a delete.
 
 Two lifecycle constraints, which apply to both seams:
@@ -620,6 +642,68 @@ pi.on("session_start", async (_event, ctx) => {
   }
   // restore from latest
 });
+```
+
+### Session-entry roles (`message.role` is camelCase)
+
+When you iterate `ctx.sessionManager.getBranch()`, each persisted entry has a `type`
+(`message`, `custom_message`, `branch_summary`, `compaction`, …; the
+[session-entry model](./session.md#entry-taxonomy) is the reference). A `type: "message"`
+entry carries an `AgentMessage` under `entry.message`, whose `role` discriminant is
+**camelCase** — not the snake_case used by the raw LLM wire format or by the
+`tool_call` / `tool_result` **hook** names above:
+
+| Persisted `entry.message.role` | Meaning                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------- |
+| `user`                         | User / tool-feedback turn.                                                 |
+| `developer`                    | Developer-role instruction turn.                                           |
+| `assistant`                    | Model turn. Tool calls are `{ type: "toolCall" }` blocks inside `content`. |
+| `toolResult`                   | One tool's result — **not** `tool_result`. Has `toolCallId` / `toolName`.  |
+| `bashExecution`                | Standalone `!`-bash run.                                                   |
+| `pythonExecution`              | Standalone python run.                                                     |
+| `hookMessage`                  | Legacy hook-injected message (migration only; use `custom`).               |
+| `fileMention`                  | Inlined `@file` mention contents.                                          |
+
+Three roles in reconstructed agent context come from dedicated source entries in
+extension-facing branch history; `getBranch()` exposes those source entries instead:
+
+| Persisted `entry.type` | Reconstructed `message.role` | Meaning                               |
+| ---------------------- | ---------------------------- | ------------------------------------- |
+| `branch_summary`       | `branchSummary`              | Summary of an abandoned branch.       |
+| `compaction`           | `compactionSummary`          | Compaction summary turn.              |
+| `custom_message`       | `custom`                     | Message sent through `pi.sendMessage` |
+
+`toolCall` is a **content-block type**, not a role: a tool call is a block in the
+`assistant` message's `content` array, and the paired result is a separate entry with
+`role: "toolResult"`. Match these values **verbatim** — a filter that compares against
+snake_case constants, or lowercases `role` first (`"toolResult"` → `"toolresult"`), matches
+no branch and **silently drops** the entry with no error or log, so a session capture keyed
+off `role` loses every tool result while user/assistant text still flows through.
+
+```ts
+for (const entry of ctx.sessionManager.getBranch()) {
+  switch (entry.type) {
+    case "custom_message":
+      // pi.sendMessage payload: entry.customType, entry.content
+      break;
+    case "branch_summary":
+      // reconstructed as role: "branchSummary"
+      break;
+    case "compaction":
+      // reconstructed as role: "compactionSummary"
+      break;
+    case "message":
+      switch (entry.message.role) {
+        case "assistant":
+          // tool calls: entry.message.content.filter(b => b.type === "toolCall")
+          break;
+        case "toolResult":
+          // entry.message.toolCallId, entry.message.content
+          break;
+      }
+      break;
+  }
+}
 ```
 
 ## Rendering extension points

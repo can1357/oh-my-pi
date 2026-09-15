@@ -7,7 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
+import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
@@ -17,6 +17,7 @@ import type { StructuredSubagentOutput } from "../../task/types";
 import { parseConfiguredThinkingLevel } from "../../thinking";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import type { ToolSession } from "..";
+import { formatArtifactErrorNotice, stripOutputNotice } from "../output-meta";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
@@ -33,14 +34,6 @@ import {
 } from "../render-utils";
 import type { AgentActivitySnapshot, CancelOutcome, CoordinationDetails, HubRenderArgs, JobSnapshot } from "./types";
 
-const WAIT_DURATION_MS: Record<string, number> = {
-	"5s": 5_000,
-	"10s": 10_000,
-	"30s": 30_000,
-	"1m": 60_000,
-	"5m": 5 * 60_000,
-};
-
 /**
  * A wait snapshot where every watched job is still running and nothing was
  * cancelled — pure "still waiting" noise once a newer wait exists. The TUI
@@ -52,20 +45,6 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	if (!d || !Array.isArray(d.jobs) || d.jobs.length === 0) return false;
 	if (d.cancelled?.length) return false;
 	return d.jobs.every(job => job?.status === "running");
-}
-
-/** Poll window for a job-watching wait: `async.pollWaitDuration` fixed value or smart ladder. */
-export function resolvePollWindow(
-	session: ToolSession,
-	manager: AsyncJobManager,
-	ownerId: string | undefined,
-): { waitMs: number; smart: boolean } {
-	const pollSetting = session.settings.get("async.pollWaitDuration");
-	const smart = pollSetting === "smart";
-	const waitMs = smart
-		? manager.nextPollWaitMs(ownerId)
-		: ((pollSetting ? WAIT_DURATION_MS[pollSetting] : undefined) ?? WAIT_DURATION_MS["30s"]);
-	return { waitMs, smart };
 }
 
 /**
@@ -115,16 +94,21 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 		}
 	}
 	const now = Date.now();
+	// Accepted runs that never terminalized: reported as actionable state
+	// instead of a generic stale-registration hint (#11079).
+	const staleAccepted = new Set(registry.staleAcceptedRuns().map(ref => ref.id));
 	const out: AgentActivitySnapshot[] = [];
 	for (const ref of registry.list()) {
 		if (ref.kind !== "sub" || ref.status !== "running") continue;
 		if (ref.id === selfId || covered.has(ref.id)) continue;
+		const acceptedAt = staleAccepted.has(ref.id) ? ref.lifecycle?.acceptedAt : undefined;
 		out.push({
 			id: ref.id,
 			...(ref.parentId ? { parentId: ref.parentId } : {}),
 			...(ref.activity ? { activity: ref.activity } : {}),
 			ageMs: Math.max(0, now - ref.createdAt),
 			live: registry.isRunning(ref),
+			...(acceptedAt !== undefined ? { acceptedAt } : {}),
 		});
 	}
 	return out;
@@ -136,7 +120,14 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 	for (const agent of agents) {
 		const parent = agent.parentId ? ` (spawned by \`${agent.parentId}\`)` : "";
 		const activity = agent.activity ? ` — ${agent.activity}` : "";
-		const stale = agent.live ? "" : " — no turn in flight (stale registration?)";
+		// An accepted final result with no turn in flight is the #11079 leak:
+		// the run is over but the ref never terminalized, so say so actionably
+		// instead of the generic stale-registration hint.
+		const stale = agent.live
+			? ""
+			: agent.acceptedAt !== undefined
+				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with \`hub\` cancel`
+				: " — no turn in flight (stale registration?)";
 		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
 	lines.push("", "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`.");
@@ -154,7 +145,7 @@ interface TrackedJobLike {
 	status: string;
 	label: string;
 	startTime: number;
-	latestDetails?: Record<string, unknown>;
+	latestDetails?: AsyncJobDetails;
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
@@ -212,6 +203,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(advisor ? { advisor: true } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
+			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
 			...(!resultConsumed && latest.structured
 				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
 				: {}),
@@ -308,6 +300,8 @@ export function buildJobResult(
 
 	const details: CoordinationDetails = {
 		op,
+		// The report is complete even when an individual job's raw capture failed.
+		meta: { source: { type: "report", value: "background jobs snapshot" } },
 		jobs: jobResults,
 		...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
 		...(agents.length ? { agents } : {}),
@@ -636,6 +630,16 @@ export function jobsRenderResult(
 		uiTheme,
 	);
 
+	const outputMeta = result.details?.meta;
+	// Historical snapshots promoted a job failure to the root. Render it there
+	// only when no row identifies that failure; new report capture errors are distinct.
+	const aggregateArtifactError =
+		outputMeta?.artifactError &&
+		(outputMeta.source?.type === "report" ||
+			!jobs.some(job => (job.meta?.artifactError ?? job.artifactError) === outputMeta.artifactError))
+			? outputMeta.artifactError
+			: undefined;
+
 	// Sort: running first (so user sees what's still pending), then failed, then completed/cancelled.
 	const statusOrder: Record<JobSnapshot["status"], number> = {
 		running: 0,
@@ -741,9 +745,23 @@ export function jobsRenderResult(
 								`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
 							);
 						}
+						const artifactError = job.meta?.artifactError ?? job.artifactError;
+						if (artifactError) {
+							lines.push(
+								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth)),
+							);
+						}
+
+						// Legacy rows did not retain full metadata. Strip the known warning
+						// footer so the dedicated row/root warning remains the only copy.
+						const previewError =
+							artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
+						const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
 
 						const preview = flattenStructuredPreview(
-							stripTaskResultEnvelope(job.errorText?.trim() || job.resultText?.trim() || ""),
+							stripTaskResultEnvelope(
+								stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
+							),
 						);
 						if (preview) {
 							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
@@ -805,7 +823,12 @@ export function jobsRenderResult(
 							uiTheme,
 						);
 
-			const all = [header, ...itemLines, ...agentLines].map(l => truncateToWidth(l, width, Ellipsis.Unicode));
+			const all = [header];
+			if (aggregateArtifactError) {
+				all.push(uiTheme.fg("warning", formatArtifactErrorNotice(aggregateArtifactError)));
+			}
+			all.push(...itemLines, ...agentLines);
+			for (let i = 0; i < all.length; i++) all[i] = truncateToWidth(all[i]!, width, Ellipsis.Unicode);
 			cached = { key, lines: all };
 			return all;
 		},

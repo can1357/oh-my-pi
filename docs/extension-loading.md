@@ -15,6 +15,7 @@ Extension loading builds a list of module entry files, imports each module with 
 ## Primary implementation files
 
 - `src/extensibility/extensions/loader.ts` — path discovery + import/execution
+- `src/extensibility/extensions/directory-resolution.ts` — shared configured/plugin manifest and directory precedence
 - `src/extensibility/extensions/index.ts` — public exports
 - `src/extensibility/extensions/runner.ts` — runtime/event execution after load
 - `src/discovery/builtin.ts` — native auto-discovery provider for extension modules
@@ -44,7 +45,7 @@ Notes:
 
 ### 2) Discovered JS/TS hook factories
 
-After native auto-discovery, `discoverAndLoadExtensions()` also appends JS/TS hook factories from the `hook` capability — any hook whose entry path is a `.ts`/`.js` file — so they load through the same module pipeline.
+After native auto-discovery, `discoverAndLoadExtensions()` also appends JS/TS hook factories from the `hook` capability — any hook whose entry path is a `.ts`/`.js` file — so they load through the same module pipeline. The native provider discovers these under `<cwd>/.omp/hooks/pre|post/` and `<agentDir>/hooks/pre|post/` only; see [Hooks: native discovery location](./hooks.md#native-discovery-location) for the required `pre/`/`post/` layout.
 
 Hook-capability loading already applies its own hook-specific disabled ids, so these paths are not additionally filtered by `disabledExtensions` extension-module names.
 
@@ -172,7 +173,7 @@ It is used directly as a module entry candidate. Explicit `.ts`, `.js`, `.mjs`, 
 
 Resolution order:
 
-1. `package.json` in that directory with `omp.extensions` (or legacy `pi.extensions`) -> use declared entries
+1. `package.json` in that directory with a non-empty `omp.extensions` (or legacy `pi.extensions`) array -> use declared entries
 2. `index.ts`
 3. `index.js`
 4. Otherwise scan one level for extension entries:
@@ -184,7 +185,8 @@ Rules and constraints:
 
 - no recursive discovery beyond one subdirectory level
 - declared `extensions` manifest entries are resolved relative to that package directory
-- declared entries are included only if file exists/access is allowed
+- a non-empty declared array is authoritative: convention-based index/scan fallback stays suppressed even when every declared entry is missing
+- missing or inaccessible declared entries are skipped individually, so existing entries in a partially missing manifest still load
 - in `*/index.{ts,js}` pairs, TypeScript is preferred over JavaScript
 - symlinks are treated as eligible files/directories
 
@@ -227,6 +229,7 @@ Each candidate path is loaded via `loadLegacyPiModule()` (`src/extensibility/plu
 
 - the entry's realpath is resolved, then dynamically imported with an `?mtime` cache-buster so edited source reloads. Since 16.3.7 the same mtime tag propagates to every module in the extension-owned dependency graph — relative `./`/`../` imports, package `imports` aliases (`#alias/*`), and extension-local bare dependencies — via the graph-wide `onLoad` rewrite, so same-process re-imports pick up edits across the whole graph, not just the entry file. Host-resolved rewrites (legacy pi-package specifiers, the TypeBox shim) stay untagged `file://` URLs because they point at in-process host code that never changes between reloads
 - a scoped Bun `onLoad` hook rewrites legacy pi-package specifiers (`@mariozechner/*`, `@earendil-works/*`) and bare `@sinclair/typebox` onto the host-bundled copies before evaluation. Legacy Pi package-root imports resolve through compat shims: catalog symbols that moved to `@oh-my-pi/pi-catalog/models` (`calculateCost`, `modelsAreEqual`, `getBundledProviders`, plus `getModel`/`getModels` aliases) are re-exported by the legacy pi-ai shim (`src/extensibility/legacy-pi-ai-shim.ts`), and legacy `@oh-my-pi/pi-coding-agent` imports — including `DefaultResourceLoader` — resolve to the compat loader in `src/extensibility/legacy-pi-coding-agent-shim.ts`
+- graph-owned CommonJS modules use synchronous Bun `onLoad` object modules exposing runtime own-string export keys, including computed and non-enumerable names; `default` remains the complete `module.exports` value. The shared evaluator preserves cycles and `require`/import identity, while required host ESM shims are prepared before synchronous evaluation. No generated facade files or AST named-export reconstruction are needed
 - factory is selected by `getExtensionFactory(module)`: the module itself if it is a function, otherwise `module.default`
 - factory must be a function (`ExtensionFactory`) and may return `void` or a promise; loading awaits it before continuing to the next path
 

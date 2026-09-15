@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
-import { colorLuma, getCustomThemesDir, logger } from "@oh-my-pi/pi-utils";
+import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { colorLuma } from "@oh-my-pi/pi-utils/color";
+import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import type { ThemeColor, ThemeJson } from "./schema";
@@ -149,6 +151,11 @@ export function initThemeSync(
 		currentThemeName = "dark";
 		theme = loadThemeSync("dark", options);
 	}
+}
+
+/** Ensure the module-local theme is initialized before synchronous component work. */
+export function ensureThemeSync(): void {
+	if (typeof theme === "undefined") initThemeSync();
 }
 
 /** Initialize the default theme only when no earlier prepaint initialized one. */

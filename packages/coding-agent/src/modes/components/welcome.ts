@@ -1,13 +1,7 @@
-import {
-	type Component,
-	padding,
-	replaceTabs,
-	TERMINAL,
-	truncateToWidth,
-	visibleWidth,
-	wrapTextWithAnsi,
-} from "@oh-my-pi/pi-tui";
-import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import type { Component } from "@oh-my-pi/pi-tui/tui";
+import { padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui/utils";
+import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { theme } from "../../modes/theme/theme";
 import tipsText from "./tips.txt" with { type: "text" };
 

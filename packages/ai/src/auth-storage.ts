@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -31,6 +31,7 @@ import type {
 } from "./registry/oauth/types";
 import { AUTHENTICATED_SENTINEL } from "./registry/types";
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
+import { extractProviderRetryHint } from "./utils/retry-after";
 import type { Provider } from "./types";
 import type {
 	ClientUsageIdentity,
@@ -51,6 +52,7 @@ import type {
 } from "./usage";
 import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
+import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { clinePassUsageProvider } from "./usage/cline-pass";
 import { cursorUsageProvider } from "./usage/cursor";
@@ -677,6 +679,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
 	devinUsageProvider,
+	charmHyperUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -763,6 +766,11 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
  * the usage report reveals. Callers that wait the account out (instead of
  * rotating) must sleep until this, not the error-text hint alone.
  *
+ * `requestedBlockedUntilMs` (epoch ms) is this mark call's initial deadline,
+ * before usage-report correction and longest-wins merging. Callers use it to
+ * distinguish the call's replaceable heuristic from a longer merged block
+ * that credential selection will continue enforcing.
+ *
  * `priorBlockedUntilMs` (epoch ms) is the live block deadline the map already
  * stored for this credential before this call. The merged `blockedUntilMs`
  * masks a pre-existing block shorter than this call's own heuristic
@@ -788,6 +796,8 @@ export interface UsageLimitMarkResult {
 	switched: boolean;
 	retryAtMs?: number;
 	blockedUntilMs?: number;
+	/** This mark call's initial deadline, before report correction and merging. */
+	requestedBlockedUntilMs?: number;
 	priorBlockedUntilMs?: number;
 	priorBlockedUntilTimed?: boolean;
 	reportResetAtMs?: number;
@@ -1351,7 +1361,7 @@ export class AuthStorage {
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
 	#sessionLastCredential: Map<
 		string,
-		Map<string, { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number }>
+		Map<string, { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number }>
 	> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
@@ -1486,6 +1496,36 @@ export class AuthStorage {
 		await this.reload();
 		if (this.#generation === previousGeneration) this.#bumpGeneration("external-store");
 		return true;
+	}
+
+	/**
+	 * Adopt credentials another process committed before selecting or rotating.
+	 *
+	 * The store is shared across every omp process, but the pool is an
+	 * in-process cache refreshed only by this process's own writes. Without
+	 * this a long-running session ranks a stale pool for its whole lifetime:
+	 * `omp auth` in another terminal is invisible, rotation reports no usable
+	 * sibling while a freshly added account sits unblocked in SQLite, and the
+	 * turn degrades to the fallback chain. The auth-broker path already polls;
+	 * direct-store sessions had no equivalent.
+	 *
+	 * A poll is two cheap reads (`PRAGMA data_version` plus the auth revision)
+	 * and re-lists credentials only when another connection committed, so it
+	 * runs on every resolution rather than on a timer that would make recovery
+	 * depend on wall-clock spacing. It sits on the paths that read the pool —
+	 * OAuth selection, and the two public usage-limit entry points — and is
+	 * idempotent, so a rotation reached through `markUsageLimitReached` costs
+	 * one extra `data_version` read and no second reload.
+	 */
+	async #adoptExternalCredentialChanges(): Promise<void> {
+		if (this.#closed || this.#store.pollExternalChanges === undefined) return;
+		try {
+			await this.pollExternalChanges();
+		} catch (error) {
+			// A failed poll must not fail credential resolution: the in-memory
+			// pool is still serviceable, just possibly stale.
+			logger.debug("External credential poll failed", { error: String(error) });
+		}
 	}
 
 	onGenerationChanged(listener: (generation: number) => void): () => void {
@@ -2082,12 +2122,12 @@ export class AuthStorage {
 	): void {
 		if (!sessionId) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
+		const credentialId = this.#getStoredCredentials(provider)[index]?.id;
 		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map();
-		sessionMap.set(sessionId, { type, index, lastUsedAtMs: nowMs });
+		sessionMap.set(sessionId, { type, index, credentialId, lastUsedAtMs: nowMs });
 		this.#sessionLastCredential.set(provider, sessionMap);
 
 		try {
-			const credentialId = this.#getStoredCredentials(provider)[index]?.id;
 			if (credentialId !== undefined) {
 				const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
 				const cacheValue = JSON.stringify({
@@ -2109,11 +2149,24 @@ export class AuthStorage {
 	#getSessionCredential(
 		provider: string,
 		sessionId: string | undefined,
-	): { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number } | undefined {
+	): { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number } | undefined {
 		if (!sessionId) return undefined;
 		let sessionMap = this.#sessionLastCredential.get(provider);
-		if (sessionMap?.has(sessionId)) {
-			return sessionMap.get(sessionId);
+		const live = sessionMap?.get(sessionId);
+		if (live) {
+			// Another process can add or drop rows mid-session and the pool is an
+			// index-ordered snapshot, so re-resolve the pin through its durable row
+			// id: a compacted array must not point the session at a different
+			// account, and a deleted account must not hand its slot to a sibling.
+			if (live.credentialId === undefined) return live;
+			const stored = this.#getStoredCredentials(provider);
+			const actualIndex = stored.findIndex(entry => entry.id === live.credentialId);
+			if (actualIndex === -1 || stored[actualIndex]?.credential.type !== live.type) {
+				sessionMap?.delete(sessionId);
+				return undefined;
+			}
+			live.index = actualIndex;
+			return live;
 		}
 		try {
 			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
@@ -2147,6 +2200,7 @@ export class AuthStorage {
 				const sessionVal = {
 					type: val.type,
 					index: val.index,
+					credentialId: val.credentialId,
 					lastUsedAtMs: val.lastUsedAtMs,
 				};
 				sessionMap.set(sessionId, sessionVal);
@@ -3143,6 +3197,7 @@ export class AuthStorage {
 			onProgress: ctrl.onProgress,
 			onPrompt: ctrl.onPrompt,
 			onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
+			onBrowserSession: ctrl.onBrowserSession,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
 		});
@@ -4202,7 +4257,14 @@ export class AuthStorage {
 				const credentialType = entry.credential.type;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
 				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
-				if (blockedUntil !== undefined && provider !== "openai-codex") {
+				// A block under a scope the strategy can vouch for must still fetch
+				// a probe report, or it outlives the recovery that report would
+				// prove: no report means no reconciliation, so the credential idles
+				// until the clock runs out even after quota is restored.
+				if (
+					blockedUntil !== undefined &&
+					!this.#blockedCredentialCanHeal(provider, providerKey, index, blockScopes)
+				) {
 					return {
 						credentialId: entry.id,
 						credentialType,
@@ -4229,7 +4291,7 @@ export class AuthStorage {
 					planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
 				}
 
-				if (provider === "openai-codex") {
+				if (this.#supportsUsageBlockHealing(provider)) {
 					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				}
 				if (blockedUntil !== undefined) {
@@ -4793,6 +4855,7 @@ export class AuthStorage {
 			signal?: AbortSignal;
 		},
 	): Promise<UsageLimitMarkResult> {
+		await this.#adoptExternalCredentialChanges();
 		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
@@ -4818,7 +4881,8 @@ export class AuthStorage {
 
 		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
-		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		const requestedBlockedUntilMs = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		let blockedUntil = requestedBlockedUntilMs;
 		// Heuristic/default fallbacks are guesses; provider-stated hints and
 		// report-derived extensions are timed.
 		let providerTimed = options?.providerTimed === true;
@@ -4869,7 +4933,11 @@ export class AuthStorage {
 			routing,
 			providerTimed,
 		);
-		return reportResetAtMs === undefined ? rotation : { ...rotation, reportResetAtMs };
+		return {
+			...rotation,
+			requestedBlockedUntilMs,
+			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
+		};
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -5009,7 +5077,15 @@ export class AuthStorage {
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
-				if (blockedUntil !== undefined && args.provider === "openai-codex") {
+				if (
+					blockedUntil !== undefined &&
+					this.#blockedCredentialCanHeal(
+						args.provider,
+						args.providerKey,
+						selection.index,
+						args.blockScopes ?? args.blockScope,
+					)
+				) {
 					usage = await this.#getUsageReport(args.provider, selection.credential, {
 						...args.options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -5134,6 +5210,7 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
+		await this.#adoptExternalCredentialChanges();
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
@@ -5887,6 +5964,8 @@ export class AuthStorage {
 			return configKey;
 		}
 
+		await this.#adoptExternalCredentialChanges();
+
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
 		const oauthSelection = this.#selectCredentialByType(provider, "oauth");
@@ -6160,6 +6239,32 @@ export class AuthStorage {
 		if (target?.credential.type !== "oauth") return false;
 		this.#recordSessionCredential(provider, sessionId, "oauth", index, options?.lastUsedAtMs);
 		return true;
+	}
+
+	/**
+	 * Copy every stored credential affinity from one live session to another.
+	 *
+	 * The target receives its own sticky entries, so request resolution, usage
+	 * blocking, credential rotation, metadata, and persisted pins all continue
+	 * through the target session id without retaining a live dependency on the
+	 * source session.
+	 */
+	inheritSessionCredentials(sourceSessionId: string, targetSessionId: string): number {
+		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return 0;
+		let inherited = 0;
+		for (const provider of this.#data.keys()) {
+			const credential = this.#getSessionCredential(provider, sourceSessionId);
+			if (!credential) continue;
+			this.#recordSessionCredential(
+				provider,
+				targetSessionId,
+				credential.type,
+				credential.index,
+				credential.lastUsedAtMs,
+			);
+			inherited += 1;
+		}
+		return inherited;
 	}
 
 	/**
@@ -6611,6 +6716,29 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Whether a fresh report could lift what currently blocks this credential.
+	 *
+	 * A strategy that names healable scopes can only vouch for those scopes, so
+	 * a live unscoped block — an Opus/Sonnet usage limit, a refresh failure —
+	 * keeps the credential unusable whatever the report says about a tier. A
+	 * probe then cannot change the outcome and must not be spent; the tier scope
+	 * heals on a later pass, once the block that actually holds the credential
+	 * has lifted. Codex heals through its meter metadata rather than named
+	 * scopes, so its blocks always qualify.
+	 */
+	#blockedCredentialCanHeal(
+		provider: Provider,
+		providerKey: string,
+		credentialIndex: number,
+		blockScopeOrScopes: string | readonly string[] | undefined,
+	): boolean {
+		if (!this.#supportsUsageBlockHealing(provider)) return false;
+		if (this.#rankingStrategyResolver?.(provider)?.healableBlockScopes === undefined) return true;
+		if (this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex) !== undefined) return false;
+		return this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScopeOrScopes) !== undefined;
+	}
+
+	/**
 	 * Self-heal stale usage-limit blocks: when a fresh live usage report says a
 	 * scope is below every limit gating it, drop its persisted and in-memory
 	 * blocks so credential selection re-includes the recovered account before
@@ -6624,6 +6752,10 @@ export class AuthStorage {
 		if (credentialIndex < 0) return;
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (provider !== "openai-codex") {
+			// Only a live report proves recovery. A broker can serve its retained
+			// last-good report for hours after `/usage` starts failing, and those
+			// healthy limits describe the account before the 429 that blocked it.
+			if (!Number.isFinite(report.fetchedAt) || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS) return;
 			for (const { blockScope, limits } of strategy?.healableBlockScopes?.(report) ?? []) {
 				if (limits.length === 0 || this.#isUsageLimitReached(limits)) continue;
 				this.#clearHealedBlockScope(provider, providerKey, credentialId, credentialIndex, blockScope);
@@ -6859,6 +6991,7 @@ export class AuthStorage {
 			signal?: AbortSignal;
 		},
 	): Promise<boolean> {
+		await this.#adoptExternalCredentialChanges();
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
@@ -6868,7 +7001,7 @@ export class AuthStorage {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
-			const retryAfterMs = extractRetryHint(undefined, message);
+			const retryAfterMs = extractProviderRetryHint(provider, message);
 			return (
 				await this.markUsageLimitReached(provider, sessionId, {
 					retryAfterMs,

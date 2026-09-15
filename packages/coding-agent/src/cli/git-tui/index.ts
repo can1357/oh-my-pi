@@ -14,12 +14,14 @@
  * clicks/wheel. All toolbar buttons are clickable and mirrored by keys:
  * `v` cycles the view (`1`–`4` pick one), `alt+↓`/`alt+↑` jump hunks and roll
  * into the adjacent file at the edges, `]`/`[` switch files, `s`/`u`
- * stage/unstage (hunk-aware), `x` discards a hunk, `w` wraps, `b` cycles
+ * stage/unstage (hunk-aware), `x` discards a hunk, `delete` discards the
+ * whole file (press twice to confirm), `w` wraps, `b` cycles
  * whitespace handling (exact → ignore whitespace → ignore
  * formatting/import-only changes), `c` jumps to the commit form, `r`
  * refreshes. In the sidebar tree `←`/`→` collapse/expand directories,
- * `enter` opens the selected file in the diff pane, and `space` stages or
- * unstages the selected row — on a directory, every file underneath it.
+ * `enter` opens the selected file in the diff pane, `space` stages or
+ * unstages the selected row, and `delete` discards it — on a directory,
+ * every file underneath it.
  */
 
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -291,10 +293,26 @@ class GitTuiComponent implements Component {
 	}
 
 	async #runAction(action: SidebarAction): Promise<void> {
+		if (action.type === "discard") {
+			// Two-step confirm keyed on the exact target, matching hunk/line discards.
+			const key = action.selection.files.map(file => `${file.area}:${file.path}`).join("\0");
+			if (this.#pendingDiscard !== key) {
+				this.#pendingDiscard = key;
+				this.#setStatus(
+					theme.fg("warning", `Discard changes to ${action.selection.label}? Press delete again to confirm`),
+				);
+				return;
+			}
+			this.#pendingDiscard = null;
+		}
 		if (this.#busy) return;
 		this.#busy = true;
 		try {
 			switch (action.type) {
+				case "discard":
+					await this.#model.discard(action.selection.files);
+					this.#setStatus(theme.fg("success", `Discarded ${action.selection.label}`));
+					break;
 				case "stage":
 					await this.#model.stage(action.selection?.files);
 					this.#setStatus(
@@ -487,6 +505,13 @@ class GitTuiComponent implements Component {
 		else if (file.area === "staged") void this.#runAction({ type: "unstage", selection });
 	}
 
+	/** `delete` in the diff pane: discard every change of the shown file. */
+	#discardCurrentFile(): void {
+		const file = this.#currentFile;
+		if (!file || file.area === "commit") return;
+		void this.#runAction({ type: "discard", selection: { files: [file], label: file.path } });
+	}
+
 	#setMode(mode: ViewMode): void {
 		this.#pane.setMode(mode);
 		this.#ui.requestRender();
@@ -605,6 +630,9 @@ class GitTuiComponent implements Component {
 				const hunk = this.#pane.mode === "hunk" ? this.#pane.currentHunk : null;
 				if (hunk && this.#pane.patchTarget === "stage") void this.#hunkAction(hunk, "discard");
 				return;
+			} else if (matchesKey(data, "delete")) {
+				this.#discardCurrentFile();
+				return;
 			} else return;
 			this.#ui.requestRender();
 			return;
@@ -704,8 +732,8 @@ class GitTuiComponent implements Component {
 			theme.fg(
 				"dim",
 				this.#focus === "diff"
-					? "alt+↓/↑ hunk · ]/[ file · shift+↑/↓ select · s/u stage · x discard · v view · c commit · q quit"
-					: "↑/↓ move · ←/→ fold · space stage · enter open · alt+↓/↑ hunk · c commit · t tree · q quit",
+					? "alt+↓/↑ hunk · ]/[ file · shift+↑/↓ select · s/u stage · x/del discard · v view · c commit · q quit"
+					: "↑/↓ move · ←/→ fold · space stage · del discard · enter open · alt+↓/↑ hunk · c commit · t tree · q quit",
 			);
 		const free = width - row.width - right.width - 1;
 		const middleText = free > visibleWidth(middle) + 4 ? middle : truncateToWidth(middle, Math.max(0, free - 4));

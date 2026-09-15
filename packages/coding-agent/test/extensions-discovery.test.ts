@@ -481,6 +481,20 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("exists.ts");
 	});
 
+	it("does not fall back to index.ts when a configured manifest only declares missing entries", async () => {
+		const configuredDir = path.join(tempDir.path(), "configured-package");
+		fs.mkdirSync(configuredDir);
+		fs.writeFileSync(path.join(configuredDir, "index.ts"), extensionCodeWithTool("decoy-index"));
+		fs.writeFileSync(
+			path.join(configuredDir, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./missing.ts"] } }),
+		);
+
+		const paths = await discoverExtensionPaths([configuredDir], tempDir.path(), undefined, { ambient: false });
+
+		expect(paths).toEqual([]);
+	});
+
 	it("loads extensions and registers commands", async () => {
 		fs.writeFileSync(path.join(extensionsDir, "with-command.ts"), extensionCode);
 

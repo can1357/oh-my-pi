@@ -78,6 +78,8 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
+import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
+import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import {
 	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
@@ -675,7 +677,7 @@ const streamOpenAICompletionsOnce = (
 	(async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
-		const policy = resolveOpenAICompatForRequest(model, options);
+		const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -724,7 +726,15 @@ const streamOpenAICompletionsOnce = (
 				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
-			const { copilotPremiumRequests, baseUrl, headers, query, requestHeaders } = createRequestSetup(
+			const {
+				copilotPremiumRequests,
+				baseUrl,
+				headers,
+				query,
+				requestHeaders,
+				copilotCacheKey,
+				copilotCacheSnapshot,
+			} = createRequestSetup(
 				model,
 				context,
 				apiKey,
@@ -755,14 +765,17 @@ const streamOpenAICompletionsOnce = (
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
-				const reasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
-					"chat-completions",
-					trimmedBaseUrl,
-					params.model,
-				);
-				const requestReasoningEffortFallback = requestReasoningEffortFallbacks.has(reasoningEffortFallbackKey)
-					? requestReasoningEffortFallbacks.get(reasoningEffortFallbackKey)
-					: getOpenAIReasoningEffortFallback(providerSessionState, reasoningEffortFallbackKey);
+				// Tool-triggered suppression is a hard wire constraint; cached
+				// enabled-effort negotiation must not overwrite its `none`.
+				const reasoningEffortFallbackKey = builtParams.reasoningEffortFallbackAllowed
+					? createOpenAIReasoningEffortFallbackKey("chat-completions", trimmedBaseUrl, params.model)
+					: undefined;
+				const requestReasoningEffortFallback =
+					reasoningEffortFallbackKey === undefined
+						? undefined
+						: requestReasoningEffortFallbacks.has(reasoningEffortFallbackKey)
+							? requestReasoningEffortFallbacks.get(reasoningEffortFallbackKey)
+							: getOpenAIReasoningEffortFallback(providerSessionState, reasoningEffortFallbackKey);
 				if (requestReasoningEffortFallback !== undefined) {
 					applyOpenAIReasoningEffortFallback(params, requestReasoningEffortFallback);
 				}
@@ -796,13 +809,22 @@ const streamOpenAICompletionsOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: wrapFetchForCopilotFallback(
+							options?.fetch,
+							model.provider === "github-copilot",
+							resolveCopilotRequestIdentity(options?.headers),
+							copilotCacheKey,
+							copilotCacheSnapshot,
+						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
+					// Disarm the first-event watchdog as soon as headers arrive — a slow
+					// onResponse callback must not abort an already-connected stream.
+					clearTimeout(requestTimeout);
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
@@ -1147,6 +1169,21 @@ const streamOpenAICompletionsOnce = (
 			});
 			for await (const chunk of terminalAwareStream) {
 				if (!chunk || typeof chunk !== "object") continue;
+				// Rate-limit/overload bodies sent inside an HTTP 200 stream (Azure,
+				// LiteLLM-style aggregators, some gates) arrive as an `error` member or
+				// a bare `{ code, status }` chunk. This probe runs first: the legacy
+				// stream-error guard below turns *any* object `error` member into a
+				// statusless `ProviderResponseError`, so if it went first no throttle
+				// envelope would ever reach the in-band classifier.
+				//
+				// Invariants (body-error.ts): the status is read only from error
+				// `status`/`code` fields and restricted to 429/5xx — never derived from
+				// prose, so a body mentioning 401/403 stays out of the auth lane — and a
+				// synthesized message is never opaque, so an unreadable body cannot burn
+				// a credential. Envelopes that are not a recognised throttle return
+				// `undefined` and keep their pre-existing handling.
+				const inBand = AIError.createInBandProviderError(chunk);
+				if (inBand) throw inBand;
 				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
 				if (streamError) throw streamError;
 
@@ -1361,6 +1398,7 @@ const streamOpenAICompletionsOnce = (
 					if (Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
 							if (!detail || typeof detail !== "object") continue;
+							if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
 							const detailObject = detail as { type?: unknown; id?: unknown; data?: unknown };
 							if (detailObject.type === "reasoning.encrypted" && detailObject.id && detailObject.data) {
 								const matchingToolCall = output.content.find(
@@ -1550,12 +1588,14 @@ function createRequestSetup(
 function resolveOpenAICompatForRequest(
 	model: Model<"openai-completions">,
 	options: OpenAICompletionsOptions | undefined,
+	hasTools: boolean,
 ): OpenAICompatPolicy {
 	return resolveOpenAICompatPolicy(model, {
 		endpoint: "chat-completions",
 		reasoning: options?.reasoning,
 		disableReasoning: options?.disableReasoning,
 		toolChoice: mapToOpenAICompletionsToolChoice(options?.toolChoice),
+		hasTools,
 	});
 }
 
@@ -1658,8 +1698,9 @@ function buildParams(
 	params: OpenAICompletionsParams;
 	toolStrictMode: AppliedToolStrictMode;
 	strictToolsApplied: boolean;
+	reasoningEffortFallbackAllowed: boolean;
 } {
-	const initialPolicy = resolveOpenAICompatForRequest(model, options);
+	const initialPolicy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 	const initialCompat = initialPolicy.compat as ResolvedOpenAICompat;
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 
@@ -1813,6 +1854,7 @@ function buildParams(
 		reasoning: options?.reasoning,
 		disableReasoning: options?.disableReasoning,
 		toolChoice: params.tool_choice,
+		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
 	const compat = finalPolicy.compat as ResolvedOpenAICompat;
 	const messages = convertMessages(model, context, compat);
@@ -1837,7 +1879,11 @@ function buildParams(
 	}
 	applyChatCompletionsToolStream(params, model, compat);
 
-	applyChatCompletionsReasoningParams(params, model, compat, { ...options, toolChoice: params.tool_choice });
+	applyChatCompletionsReasoningParams(params, model, compat, {
+		...options,
+		toolChoice: params.tool_choice,
+		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
+	});
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
 	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
@@ -1847,7 +1893,12 @@ function buildParams(
 	});
 	applyOpenAIChatCompletionsPromptCachePolicy(params, model, options);
 
-	return { params, toolStrictMode, strictToolsApplied };
+	return {
+		params,
+		toolStrictMode,
+		strictToolsApplied,
+		reasoningEffortFallbackAllowed: finalPolicy.reasoning.disableReason !== "tools",
+	};
 }
 
 export function parseChunkUsage(

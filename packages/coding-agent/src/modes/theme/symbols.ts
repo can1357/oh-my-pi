@@ -206,6 +206,8 @@ export type SymbolKey =
 	| "md.colorSwatch"
 	// Advisor note rail
 	| "advisor.rail"
+	// Skill callout rail (user turn that opened with a skill chip)
+	| "skill.rail"
 	// Language/file type icons
 	| "lang.default"
 	| "lang.typescript"
@@ -565,6 +567,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "■",
 	// Advisor note rail (heavier than md.quoteBorder so notes read as a distinct voice)
 	"advisor.rail": "▎",
+	"skill.rail": "▎",
 	// Language/file icons (emoji-centric, no Nerd Font required)
 	"lang.default": "⌘",
 	"lang.typescript": "🟦",
@@ -815,6 +818,9 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
 	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
+	// INTENTIONAL: U+F0D57 is the chosen glyph here. It has been "fixed" to
+	// U+F03FF before (2ec52b8bdd) and reverted because it renders the wrong glyph;
+	// do not swap it again.
 	"icon.omp": "\u{f0d57}",
 	// pick: 󱊷 (nf-md-keyboard_esc) | alt: ⎋
 	"icon.esc": "\u{f12b7}",
@@ -1010,6 +1016,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "■",
 	// pick: ▎ | alt: ┃ │
 	"advisor.rail": "▎",
+	"skill.rail": "▎",
 	// Language icons (nerd font devicons)
 	"lang.default": "",
 	"lang.typescript": "\u{E628}",
@@ -1288,6 +1295,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"md.bullet": "*",
 	"md.colorSwatch": "[]",
 	"advisor.rail": "|",
+	"skill.rail": "|",
 	// Language icons (ASCII uses abbreviations)
 	"lang.default": "code",
 	"lang.typescript": "ts",

@@ -11,6 +11,11 @@ afterEach(async () => {
 });
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
+	// Neutralize any ambient diff driver / textconv (e.g. a user's `diff.external`
+	// like difftastic) so raw unified-diff assertions stay stable regardless of the
+	// host's global git config. `--no-ext-diff` is the reliable switch here; setting
+	// `diff.external=` to empty makes git execute "" as the driver and fail.
+	if (args[0] === "diff") args = ["diff", "--no-ext-diff", "--no-textconv", ...args.slice(1)];
 	const process = Bun.spawn(["git", ...args], { cwd, stderr: "pipe", stdout: "pipe" });
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(process.stdout).text(),
@@ -69,7 +74,7 @@ describe("in-process VCS bindings", () => {
 		expect(await repo!.statusSummary()).toEqual({ staged: 0, unstaged: 1, untracked: 1 });
 
 		const nativePatch = await repo!.diffText({});
-		const cliPatch = await git(root, "diff", "--no-ext-diff", "--no-textconv");
+		const cliPatch = await git(root, "diff");
 		expect(nativePatch.trimEnd()).toBe(cliPatch);
 		expect(nativePatch).toContain("diff --git a/tracked.txt b/tracked.txt");
 		expect(nativePatch).toContain("@@");
