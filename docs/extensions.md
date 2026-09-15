@@ -297,6 +297,10 @@ Cancelable pre-events:
 - `session_before_compact` → `{ cancel?: boolean; compaction?: CompactionResult }`
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
 
+### Model selection
+
+- `model_select` — `{ model, previousModel, source: "set" | "cycle" | "restore" }`, fired when the active model actually changes (explicit selection via `/model`, `/switch`, role switch (the ctrl+p role-model cycler included), a retry-fallback swap, or a prewalk hand-off → `set`; `cycleModel()` (RPC `cycle_model` / SDK; no TUI keybinding) → `cycle`; session switch/resume rebinds, the failed-switch rollback, and retry-fallback returning to the previously selected model after an aborted swap or cooldown expiry → `restore`). Notification-only: its FIFO slot is reserved when the model changes and released once the switch has fully committed — model-change entry appended, thinking level re-applied, prompt/tools synced — but still detached from the switch itself, so handlers never delay a model change. Every reset that actually changed the model produces exactly one event, in switch order; a failed session switch reports the attempted restore and then the rollback restore. Same-model rebinds (extended-context toggle, discovery metadata refresh) do not fire it.
+
 ### Prompt and turn lifecycle
 
 - `input`

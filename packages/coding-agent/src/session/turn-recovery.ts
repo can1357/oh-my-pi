@@ -43,6 +43,7 @@ import type { EditMode } from "../utils/edit-mode";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type {
 	InitialRetryFallbackState,
+	ModelSwitchResult,
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
@@ -213,7 +214,7 @@ export interface TurnRecoveryHost {
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
-	setModelWithProviderSessionReset(model: Model): Promise<void>;
+	setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult>;
 	/** Edit mode resolved for the active model and settings, captured before a fallback swap. */
 	resolveActiveEditMode(): EditMode;
 	/** Rebuilds the model-dependent base system prompt when a swap changed the edit mode or model policy. */
@@ -1883,43 +1884,53 @@ export class TurnRecovery {
 		const servedBeforeSwap = this.#activeRetryFallback?.served;
 		this.#markFallbackRouted();
 		if (this.#activeRetryFallback) this.#activeRetryFallback.served = false;
-		await this.#host.setModelWithProviderSessionReset(candidate);
-		if (options?.signal?.aborted) {
-			this.#fallbackRoutedFor = routedBeforeSwap;
-			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
-			if (previousModel && this.#host.model() === candidate) {
-				await this.#host.setModelWithProviderSessionReset(previousModel);
+		// The swap reserved its FIFO slot at reset time; the try/finally releases it
+		// below no matter which branch settles the swap (see ModelSwitchResult).
+		const swap = await this.#host.setModelWithProviderSessionReset(candidate);
+		try {
+			if (options?.signal?.aborted) {
+				this.#fallbackRoutedFor = routedBeforeSwap;
+				if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+				if (previousModel && this.#host.model() === candidate) {
+					const rollback = await this.#host.setModelWithProviderSessionReset(previousModel);
+					// The rollback reserved a LATER slot, so delivery is the `set`
+					// that briefly committed followed by the `restore` that undid it,
+					// regardless of this commit ordering.
+					rollback.commit("restore");
+				}
+				return false;
 			}
-			return false;
-		}
-		if (this.#host.model() !== candidate) {
-			this.#fallbackRoutedFor = routedBeforeSwap;
-			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
-			return false;
-		}
-		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
-		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
-		this.#host.setThinkingLevel(nextThinkingLevel);
-		if (!this.#activeRetryFallback) {
-			this.#activeRetryFallback = {
+			if (this.#host.model() !== candidate) {
+				this.#fallbackRoutedFor = routedBeforeSwap;
+				if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+				return false;
+			}
+			this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
+			this.#host.setThinkingLevel(nextThinkingLevel);
+			if (!this.#activeRetryFallback) {
+				this.#activeRetryFallback = {
+					role,
+					originalSelector: currentSelector,
+					originalThinkingLevel: currentThinkingLevel,
+					lastAppliedFallbackThinkingLevel: nextThinkingLevel,
+					pinned: options?.pinFallback === true,
+				};
+			} else {
+				this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
+				this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			}
+			await this.#host.syncAfterModelChange(previousEditMode);
+			await this.#host.emitSessionEvent({
+				type: "retry_fallback_applied",
+				from: currentSelector,
+				to: selector.raw,
 				role,
-				originalSelector: currentSelector,
-				originalThinkingLevel: currentThinkingLevel,
-				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
-				pinned: options?.pinFallback === true,
-			};
-		} else {
-			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
-			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			});
+			return true;
+		} finally {
+			swap.commit("set");
 		}
-		await this.#host.syncAfterModelChange(previousEditMode);
-		await this.#host.emitSessionEvent({
-			type: "retry_fallback_applied",
-			from: currentSelector,
-			to: selector.raw,
-			role,
-		});
-		return true;
 	}
 
 	async #tryRetryModelFallback(
@@ -2076,17 +2087,21 @@ export class TurnRecovery {
 		// A capability degrade is fallback routing too, even though it arms no
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
-		await this.#host.setModelWithProviderSessionReset(baseModel);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
-		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
-		await this.#host.syncAfterModelChange(previousEditMode);
-		await this.#host.emitSessionEvent({
-			type: "retry_fallback_applied",
-			from: currentSelector,
-			to: baseSelector,
-			role: "fireworks-fast",
-		});
-		return true;
+		const switched = await this.#host.setModelWithProviderSessionReset(baseModel);
+		try {
+			this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
+			await this.#host.syncAfterModelChange(previousEditMode);
+			await this.#host.emitSessionEvent({
+				type: "retry_fallback_applied",
+				from: currentSelector,
+				to: baseSelector,
+				role: "fireworks-fast",
+			});
+			return true;
+		} finally {
+			switched.commit("set");
+		}
 	}
 
 	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
@@ -2142,12 +2157,16 @@ export class TurnRecovery {
 		// attribution in that window would see the restored primary still tagged
 		// as fallback-served.
 		this.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(primaryModel);
-		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
-		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
-		this.#host.setThinkingLevel(thinkingToApply);
-		await this.#host.syncAfterModelChange(previousEditMode);
-		return true;
+		const switched = await this.#host.setModelWithProviderSessionReset(primaryModel);
+		try {
+			this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+			this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
+			this.#host.setThinkingLevel(thinkingToApply);
+			await this.#host.syncAfterModelChange(previousEditMode);
+			return true;
+		} finally {
+			switched.commit("restore");
+		}
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {

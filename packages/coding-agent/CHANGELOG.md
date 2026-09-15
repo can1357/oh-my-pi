@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Added the pi-compatible `model_select` extension event — `{ model, previousModel, source: "set" | "cycle" | "restore" }` — fired once per real model change (explicit selection, role switch, prewalk hand-off, retry-fallback swaps → `set`; `cycleModel()` → `cycle`; session switch/resume rebinds, failed-switch rollback, retry-fallback returns → `restore`), with its FIFO slot reserved at switch time and delivered after the switch fully commits (model-change entry, thinking level, prompt/tools) — one event per actual change, in switch order, still detached so handlers never delay a model switch ([#12186](https://github.com/can1357/oh-my-pi/pull/12186) by [@Sash0l](https://github.com/Sash0l)).
 
 ## [18.2.1] - 2026-09-15
 
