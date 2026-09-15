@@ -209,6 +209,32 @@ describe("code-model session phase", () => {
 		expect(state.effort()).toBe(ThinkingLevel.Low);
 	});
 
+	it("retains the original target when start repeats during a retry fallback", async () => {
+		const state = harness();
+		const session = installCodeModelSession(state.pi, state.settings, {
+			getRetryFallbackPrimary: () =>
+				state.current() === state.fallback
+					? {
+							selector: `${state.coding.provider}/${state.coding.id}`,
+							effort: ThinkingLevel.High,
+							fallbackEffort: ThinkingLevel.Low,
+						}
+					: undefined,
+		});
+		await session.run("start", state.ctx);
+		state.setCurrent(state.fallback, ThinkingLevel.Low);
+		state.setFallback();
+
+		const repeated = await session.run("start", state.ctx);
+		expect(repeated).toMatchObject({ changed: false, phase: "coding" });
+		expect(state.current()).toBe(state.fallback);
+
+		const finished = await session.run("finish", state.ctx);
+		expect(finished.changed).toBe(true);
+		expect(state.current()).toBe(state.main);
+		expect(state.effort()).toBe(ThinkingLevel.Low);
+	});
+
 	it("records phase ownership when only effort changes", async () => {
 		const state = harness({ role: "main/reviewer:high" });
 		const session = installCodeModelSession(state.pi, state.settings);

@@ -190,4 +190,82 @@ describe("AgentSession session_stop willContinue", () => {
 		expect(agentEnds[1]?.willContinue).toBeFalsy();
 		expect(beforeIdleEvents).toEqual([false, true, false, false]);
 	});
+
+	it("schedules a continuation returned by final idle recovery", async () => {
+		const model = getBundledModel("openai", "gpt-5");
+		if (!model) {
+			throw new Error("Expected bundled OpenAI test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ content: ["first settle"], stopReason: "stop" },
+				{ content: ["after final idle recovery"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const extensionEmits: Array<{ type: string; willContinue?: boolean }> = [];
+		let sessionStopCalls = 0;
+		const extensionRunner = {
+			emit: async (event: { type: string; willContinue?: boolean }) => {
+				extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+			},
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "session_stop",
+			emitSessionStop: async () => {
+				sessionStopCalls++;
+				return undefined;
+			},
+			createContext: () => ({}),
+		} as unknown as ExtensionRunner;
+
+		let finalizerCalls = 0;
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+			codeModelBeforeIdleHandler: async event => {
+				if (event.willContinue) return undefined;
+				finalizerCalls++;
+				if (finalizerCalls === 2) {
+					return { continue: true, additionalContext: "review after final idle recovery" };
+				}
+				return undefined;
+			},
+		});
+
+		await session.prompt("Trigger final idle recovery");
+		await session.waitForIdle();
+
+		const agentEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(sessionStopCalls).toBe(2);
+		expect(mock.calls).toHaveLength(2);
+		expect(agentEnds).toEqual([
+			{ type: "agent_end", willContinue: true },
+			{ type: "agent_end", willContinue: undefined },
+		]);
+		expect(
+			session.agent.state.messages.some(message =>
+				JSON.stringify(message).includes("review after final idle recovery"),
+			),
+		).toBe(true);
+	});
 });

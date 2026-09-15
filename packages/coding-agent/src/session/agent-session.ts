@@ -3522,22 +3522,29 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
+				let willContinue = options?.willContinue === true;
 				const beforeIdleEvent = {
 					type: "session_before_idle" as const,
 					messages: [...activeMessages],
-					willContinue: options?.willContinue === true,
+					willContinue,
 				};
 				const runner = this.#extensionRunner;
 				if (this.#codeModelBeforeIdleHandler && runner) {
-					await this.#codeModelBeforeIdleHandler(beforeIdleEvent, runner.createContext());
+					const internalResult = await this.#codeModelBeforeIdleHandler(beforeIdleEvent, runner.createContext());
+					const additionalContext = this.#sessionStopContinuationContext(internalResult);
+					if (!willContinue && additionalContext) {
+						willContinue = this.#scheduleSessionStopContinuation(additionalContext);
+						beforeIdleEvent.willContinue = willContinue;
+					}
 				}
 				await runner?.emit(beforeIdleEvent);
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
 				// tell final settles from scheduled continuations.
-				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
-				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
+				await this.#emitSessionEvent({ ...event, isTerminal: !willContinue });
+				const continuationOptions = willContinue ? { willContinue: true } : undefined;
+				void this.#emitAgentEndNotification([...activeMessages], continuationOptions).catch(err => {
 					logger.error("Agent end extension notification failed", { err });
 				});
 			};
@@ -4342,6 +4349,31 @@ export class AgentSession {
 		return undefined;
 	}
 
+	#scheduleSessionStopContinuation(additionalContext: string): boolean {
+		if (this.#sessionStopContinuationCount >= SESSION_STOP_CONTINUATION_CAP) {
+			logger.warn("session_stop continuation cap reached", {
+				sessionId: this.sessionId,
+				cap: SESSION_STOP_CONTINUATION_CAP,
+			});
+			this.#resetSessionStopContinuationState();
+			return false;
+		}
+		this.#sessionStopContinuationCount++;
+		this.#sessionStopHookActive = true;
+		this.#queueHiddenNextTurnMessage(
+			{
+				role: "custom",
+				customType: "session-stop-continuation",
+				content: additionalContext,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+			true,
+		);
+		return true;
+	}
+
 	async #emitAgentEndNotification(messages: AgentMessage[], options?: { willContinue?: boolean }): Promise<void> {
 		await this.#extensionRunner?.emit({
 			type: "agent_end",
@@ -4400,28 +4432,7 @@ export class AgentSession {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
-		if (this.#sessionStopContinuationCount >= SESSION_STOP_CONTINUATION_CAP) {
-			logger.warn("session_stop continuation cap reached", {
-				sessionId: this.sessionId,
-				cap: SESSION_STOP_CONTINUATION_CAP,
-			});
-			this.#resetSessionStopContinuationState();
-			return false;
-		}
-		this.#sessionStopContinuationCount++;
-		this.#sessionStopHookActive = true;
-		this.#queueHiddenNextTurnMessage(
-			{
-				role: "custom",
-				customType: "session-stop-continuation",
-				content: additionalContext,
-				display: false,
-				attribution: "agent",
-				timestamp: Date.now(),
-			},
-			true,
-		);
-		return true;
+		return this.#scheduleSessionStopContinuation(additionalContext);
 	}
 
 	/** Emit extension events based on session events */

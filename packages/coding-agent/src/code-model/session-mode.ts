@@ -188,6 +188,15 @@ export function installCodeModelSession(
 		return latest?.resolvedModelIsFallback === true;
 	}
 
+	function retryFallbackMatchesCodingPhase(ctx: ExtensionContext, coding: ModelState): boolean {
+		const retryFallback = hooks.getRetryFallbackPrimary?.();
+		const fallbackEffort =
+			retryFallback && "fallbackEffort" in retryFallback ? retryFallback.fallbackEffort : coding.effort;
+		const retryPrimaryMatchesCoding =
+			retryFallback === undefined || matchesRetryPrimary(retryFallback.selector, coding, ctx);
+		return retryPrimaryMatchesCoding && retryFallbackIsActive(ctx) && configuredThinkingLevel() === fallbackEffort;
+	}
+
 	function save(next: PhaseState | undefined): void {
 		pi.appendEntry(CODE_MODEL_STATE_TYPE, next);
 		state = next;
@@ -249,9 +258,6 @@ export function installCodeModelSession(
 		const interrupted =
 			previous.phase !== "coding" && (sameModel(active, previous.original) || sameModel(active, previous.coding));
 		const effort = configuredThinkingLevel();
-		const retryFallback = hooks.getRetryFallbackPrimary?.();
-		const fallbackEffort =
-			retryFallback && "fallbackEffort" in retryFallback ? retryFallback.fallbackEffort : previous.coding.effort;
 		const latest = branch(ctx).findLast(item => item.type === "model_change") as ModelChangeEntry | undefined;
 		// Legacy phase snapshots predate explicit role attribution. Hosts whose
 		// extension setModel action drops the ephemeral option serialize the
@@ -261,11 +267,9 @@ export function installCodeModelSession(
 		const latestMatchesCoding = phaseSwitchEntry !== undefined && latest === phaseSwitchEntry;
 		const codingRoleMatches =
 			previous.original.role === undefined || latest?.role === EPHEMERAL_MODEL_CHANGE_ROLE || latestMatchesCoding;
-		const retryPrimaryMatchesCoding =
-			retryFallback === undefined || matchesRetryPrimary(retryFallback.selector, previous.coding, ctx);
 		const codingStateMatches =
 			(codingRoleMatches && sameModel(active, previous.coding) && effort === previous.coding.effort) ||
-			(retryPrimaryMatchesCoding && retryFallbackIsActive(ctx) && effort === fallbackEffort);
+			retryFallbackMatchesCodingPhase(ctx, previous.coding);
 		if (!options.force && !interrupted && !codingStateMatches && !currentMatches(ctx, previous.original)) {
 			save(undefined);
 			return {
@@ -284,7 +288,7 @@ export function installCodeModelSession(
 			if (state.phase !== "coding") {
 				throw new Error("The previous model switch still needs restoration. Run code-model finish first.");
 			}
-			if (currentMatches(ctx, state.coding)) {
+			if (currentMatches(ctx, state.coding) || retryFallbackMatchesCodingPhase(ctx, state.coding)) {
 				return {
 					changed: false,
 					phase: state.phase,
