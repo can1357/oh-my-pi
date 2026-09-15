@@ -71,7 +71,7 @@ export interface ChatTranscriptBuilderDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
-	/** Session-scoped resolved destinations for model-authored Markdown links. */
+	liveThinkingPreview?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 }
@@ -385,6 +385,7 @@ export class ChatTranscriptBuilder {
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
 		const hideThinkingBlock = this.deps.hideThinkingBlock?.() ?? false;
 		const proseOnlyThinking = this.deps.proseOnlyThinking ? this.deps.proseOnlyThinking() : true;
+		const liveThinkingPreview = this.deps.liveThinkingPreview?.() ?? false;
 		const timeline = splitAssistantMessageToolTimeline(message);
 		const assistantComponent = new AssistantMessageComponent(
 			timeline.beforeTools,
@@ -397,6 +398,7 @@ export class ChatTranscriptBuilder {
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
+		assistantComponent.setLiveThinkingPreview(liveThinkingPreview);
 		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
@@ -433,6 +435,7 @@ export class ChatTranscriptBuilder {
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
+			component.setLiveThinkingPreview(liveThinkingPreview);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 		};
