@@ -6,7 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
+import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -445,5 +445,194 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer stale-bearer", tenant: "stale-tenant" },
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
+	});
+
+	test("invalidateAllCommandConfigs drops cached stdout so the next resolve re-runs", () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		fs.writeFileSync(tokenFile, "initial");
+		const config = `!${stdoutFileCommand(tokenFile)}`;
+
+		expect(resolveConfigValue(config)).toBe("initial");
+		fs.writeFileSync(tokenFile, "rotated");
+		expect(resolveConfigValue(config)).toBe("initial");
+
+		invalidateAllCommandConfigs();
+		expect(resolveConfigValue(config)).toBe("rotated");
+	});
+
+	test("refresh('online') re-runs a command-backed API key after the backend rotates", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		fs.writeFileSync(tokenFile, "fresh-key");
+		// Background / policy reloads must not spawn credential helpers.
+		await registry.refresh("online-if-uncached");
+		await registry.refresh("offline");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		// User-facing recovery: `omp models refresh`, `/models refresh`, TUI F5.
+		await registry.refresh("online");
+		expect(await registry.getApiKey(model)).toBe("fresh-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+		expect(registry.find("custom-proxy", "custom-model")?.headers?.Authorization).toBe("Bearer fresh-key");
+	});
+
+	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		// Helper is healthy again, but the 30s failure backoff would still block
+		// getApiKey until process restart — unless online refresh clears it.
+		fs.writeFileSync(tokenFile, "recovered-key");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		await registry.refresh("online");
+		expect(await registry.getApiKey(model)).toBe("recovered-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+
+	test("refreshProvider('online') invalidates only that provider's command cache", async () => {
+		const tokenA = path.join(tempDir, "token-a.txt");
+		const tokenB = path.join(tempDir, "token-b.txt");
+		const counterA = path.join(tempDir, "counter-a.txt");
+		const counterB = path.join(tempDir, "counter-b.txt");
+		fs.writeFileSync(tokenA, "a-stale");
+		fs.writeFileSync(tokenB, "b-stale");
+		fs.writeFileSync(counterA, "");
+		fs.writeFileSync(counterB, "");
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"proxy-a": {
+						baseUrl: "https://a.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenA, counterA)}`,
+						models: [{ id: "model-a", name: "A" }],
+					},
+					"proxy-b": {
+						baseUrl: "https://b.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenB, counterB)}`,
+						models: [{ id: "model-b", name: "B" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(await registry.getApiKeyForProvider("proxy-a")).toBe("a-stale");
+		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
+		expect(fs.readFileSync(counterA, "utf8")).toBe("1");
+		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
+
+		fs.writeFileSync(tokenA, "a-fresh");
+		fs.writeFileSync(tokenB, "b-fresh");
+		await registry.refreshProvider("proxy-a", "online");
+
+		expect(await registry.getApiKeyForProvider("proxy-a")).toBe("a-fresh");
+		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
+		expect(fs.readFileSync(counterA, "utf8")).toBe("11");
+		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
+	});
+
+	test("refreshProvider('online') re-runs extension-registered command-backed headers", async () => {
+		const providerHeaderFile = path.join(tempDir, "provider-header.txt");
+		const modelHeaderFile = path.join(tempDir, "model-header.txt");
+		const providerCounter = path.join(tempDir, "provider-counter.txt");
+		const modelCounter = path.join(tempDir, "model-counter.txt");
+		fs.writeFileSync(providerHeaderFile, "stale-provider");
+		fs.writeFileSync(modelHeaderFile, "stale-model");
+		fs.writeFileSync(providerCounter, "");
+		fs.writeFileSync(modelCounter, "");
+		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		registry.registerProvider("ext-proxy", {
+			baseUrl: "https://ext.example.com/v1",
+			api: "openai-completions",
+			apiKey: "literal-key",
+			headers: { "x-tenant-token": `!${trackedTokenCommand(providerHeaderFile, providerCounter)}` },
+			models: [
+				{
+					id: "ext-model",
+					name: "Ext",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+					headers: { "x-model-token": `!${trackedTokenCommand(modelHeaderFile, modelCounter)}` },
+				},
+			],
+		});
+
+		const model = registry.find("ext-proxy", "ext-model");
+		if (!model) throw new Error("Expected extension model");
+		expect(model.headers?.["x-tenant-token"]).toBe("stale-provider");
+		expect(model.headers?.["x-model-token"]).toBe("stale-model");
+		expect(fs.readFileSync(providerCounter, "utf8")).toBe("1");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("1");
+
+		fs.writeFileSync(providerHeaderFile, "fresh-provider");
+		fs.writeFileSync(modelHeaderFile, "fresh-model");
+		await registry.refreshProvider("ext-proxy", "online");
+
+		const refreshed = registry.find("ext-proxy", "ext-model");
+		expect(refreshed?.headers?.["x-tenant-token"]).toBe("fresh-provider");
+		expect(refreshed?.headers?.["x-model-token"]).toBe("fresh-model");
+		expect(fs.readFileSync(providerCounter, "utf8")).toBe("11");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
 	});
 });

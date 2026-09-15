@@ -61,6 +61,7 @@ import {
 import {
 	type CommandApiKeyResolution,
 	createLiveConfigHeaders,
+	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
 	resolveConfigHeaders,
@@ -272,6 +273,10 @@ export class ModelRegistry {
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
 	#runtimeProviderApiKeys: Map<string, string> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
+	// Command-backed values from registerProvider (apiKey + provider/model
+	// headers). Separate from #commandConfigsByProvider because static reload
+	// rebuilds that map from models.yml only; runtime entries must survive.
+	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
 	// Credential-aware model projections registered via
 	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
 	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
@@ -341,8 +346,22 @@ export class ModelRegistry {
 	#invalidateProviderCommandConfigs(provider: string): void {
 		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
 		const configs = this.#commandConfigsByProvider.get(provider);
-		if (!configs) return;
-		for (const config of configs) invalidateCommandConfig(config);
+		if (configs) {
+			for (const config of configs) invalidateCommandConfig(config);
+		}
+		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
+		if (!runtimeConfigs) return;
+		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+	}
+
+	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
+		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
+		this.#collectCommandConfigValues(target, config.apiKey, config.headers);
+		for (const modelDef of config.models ?? []) {
+			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+		}
+		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
+		else this.#runtimeCommandConfigsByProvider.delete(providerName);
 	}
 
 	#installProviderApiKey(provider: string, keyConfig: string): void {
@@ -406,7 +425,17 @@ export class ModelRegistry {
 	 * Reload models from disk (built-in + custom config).
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
-		this.#reloadStaticModels();
+		if (strategy === "online") {
+			// User-facing recovery (`omp models refresh`, `/models refresh`, TUI F5):
+			// re-run command-backed credentials. The 401 retry path only invalidates
+			// once; a stuck cache otherwise lasts until process restart.
+			// preserveRuntimeDiscovery keeps extension/discovered models in place
+			// while keys re-install; #refreshRuntimeDiscoveries below still refetches.
+			invalidateAllCommandConfigs();
+			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		} else {
+			this.#reloadStaticModels();
+		}
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
@@ -538,7 +567,12 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		this.#reloadStaticModels();
+		if (strategy === "online") {
+			this.#invalidateProviderCommandConfigs(providerId);
+			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		} else {
+			this.#reloadStaticModels();
+		}
 		for (const selector of this.#suppressedSelectors.keys()) {
 			if (selector.startsWith(`${providerId}/`)) {
 				this.#suppressedSelectors.delete(selector);
@@ -2700,6 +2734,7 @@ export class ModelRegistry {
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
+		this.#runtimeCommandConfigsByProvider.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
@@ -2852,6 +2887,7 @@ export class ModelRegistry {
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}
+		this.#recordRuntimeCommandConfigs(providerName, config);
 
 		if (config.models && config.models.length > 0) {
 			// Build model overlays that persist across refresh() cycles
