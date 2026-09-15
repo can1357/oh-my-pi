@@ -60,8 +60,10 @@ import {
 import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
+	copyPerCallContextMessage,
 	type ConversationalUserCarrier,
 	isConversationalUser,
+	isPerCallContextMessage,
 	isSyntheticUser,
 	kConversationalUser,
 	kStreamingBlockIndex,
@@ -454,6 +456,15 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * `compat.replayUnsignedThinking: false`. Cleared on session close.
 	 */
 	replayUnsignedThinkingDisabled: boolean;
+	/**
+	 * Runtime-learned: this endpoint kept rejecting replayed thinking
+	 * signatures even after unsigned demotion — every surviving block is
+	 * signed by a foreign signer (e.g. a failover proxy swapped upstreams
+	 * mid-conversation and minted signatures the restored upstream cannot
+	 * verify). All subsequent requests drop replayed thinking entirely for
+	 * this (baseUrl, modelId). Cleared on session close.
+	 */
+	thinkingReplayDisabled: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
 	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
@@ -478,12 +489,14 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
 		replayUnsignedThinkingDisabled: false,
+		thinkingReplayDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		controlStates: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
+			state.thinkingReplayDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.controlStates.clear();
 		},
@@ -2296,7 +2309,8 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
-			let dropAllThinking = false;
+			let droppedAllThinkingForSignature = providerSessionState?.thinkingReplayDisabled ?? false;
+			let dropAllThinking = droppedAllThinkingForSignature;
 			let prefixBindingRetryAttempted = false;
 			let prefixMismatchBehavior =
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
@@ -3368,6 +3382,48 @@ const streamAnthropicOnce = (
 						continue;
 					}
 					if (
+						!dropAllThinking &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						!isThinkingPrefixBindingError(streamFailureMessage) &&
+						isInvalidThinkingSignatureError(streamFailureMessage)
+					) {
+						// The unsigned-demotion retry only rewrites UNSIGNED blocks;
+						// when every replayed block carries a signature the signer no
+						// longer accepts (e.g. a failover proxy swapped upstreams
+						// mid-conversation and minted foreign signatures), the retry
+						// resends a byte-identical body and the session 400s forever.
+						// Escalate: drop all replayed thinking — prior-turn reasoning
+						// is optional context — and retry once. Stored history keeps
+						// its thinking blocks; only the wire payload changes.
+						logger.warn(
+							"anthropic: thinking signatures still rejected after unsigned demotion, dropping replayed thinking and retrying",
+							{
+								provider: model.provider,
+								model: model.id,
+								baseUrl,
+								error: streamFailureMessage,
+							},
+						);
+						if (providerSessionState) {
+							providerSessionState.thinkingReplayDisabled = true;
+						}
+						droppedAllThinkingForSignature = true;
+						dropAllThinking = true;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.inputTransformations = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
 						!dropFastMode &&
 						model.provider === "anthropic" &&
 						options?.serviceTier === "priority" &&
@@ -3450,6 +3506,9 @@ const streamAnthropicOnce = (
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "unsigned-thinking-replay"];
+			}
+			if (droppedAllThinkingForSignature) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "thinking-replay"];
 			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
@@ -3892,14 +3951,26 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		params.messages[trailingIndex - 1]?.role === "assistant";
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
 
+	// A breakpoint caches every preceding byte, not only the decorated message.
+	// Once per-call or turn-scoped content appears, no later message can anchor a
+	// prefix reusable by the next request.
+	let stableMessageEnd = messageEnd;
+	for (let index = 0; index <= messageEnd; index++) {
+		const message = params.messages[index];
+		if (message && (message.clear_at === "next_user_message" || isPerCallContextMessage(message))) {
+			stableMessageEnd = index - 1;
+			break;
+		}
+	}
+
 	// Decimation counts conversational turns, so it reads the provenance marker
 	// `convertAnthropicMessages` records rather than the wire role. A wire `user`
 	// can also be a serialized `developer` message, a tool_result run, or an
 	// interior `Continue.` pad, none of which advance the user turn ordinal.
 	const userIndices: number[] = [];
-	for (let index = 0; index <= messageEnd; index++) {
+	for (let index = 0; index <= stableMessageEnd; index++) {
 		const message = params.messages[index];
-		if (message && message.clear_at !== "next_user_message" && isConversationalUser(message)) {
+		if (message && isConversationalUser(message)) {
 			userIndices.push(index);
 		}
 	}
@@ -3907,11 +3978,11 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
 	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
 
-	// Collect eligible trailing candidates (up to 2 messages walking backward from messageEnd).
+	// Collect up to 2 trailing candidates from the reusable prefix.
 	const trailingCandidates: number[] = [];
-	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
+	for (let index = stableMessageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
-		if (!message || message.clear_at === "next_user_message") continue;
+		if (!message) continue;
 		trailingCandidates.push(index);
 	}
 
@@ -4774,7 +4845,12 @@ export function convertAnthropicMessages(
 			(msg.role === "user" || msg.role === "developer") &&
 			isReplayableAnthropicCompaction(msg.providerPayload, model)
 		) {
-			params.push({ role: "assistant", content: [compactionBlockParam(msg.providerPayload)] });
+			const compactionParam: AnthropicMessageParam = {
+				role: "assistant",
+				content: [compactionBlockParam(msg.providerPayload)],
+			};
+			copyPerCallContextMessage(compactionParam, msg);
+			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
 			// Queue the file metadata for after the block: it sits past the
@@ -4845,6 +4921,7 @@ export function convertAnthropicMessages(
 			if (msg.role === "user" && !agentAuthored && !isSyntheticUser(msg)) {
 				param[kConversationalUser] = true;
 			}
+			copyPerCallContextMessage(param, msg);
 			params.push(param);
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -4982,10 +5059,12 @@ export function convertAnthropicMessages(
 				blocks.push(...nonToolUse, ...toolUse);
 			}
 			if (blocks.length === 0) continue;
-			params.push({
+			const assistantParam: AnthropicMessageParam = {
 				role: "assistant",
 				content: blocks,
-			});
+			};
+			copyPerCallContextMessage(assistantParam, msg);
+			params.push(assistantParam);
 			// Flush queued file metadata unless this turn left tool calls open:
 			// their results must follow the turn contiguously, so the metadata
 			// waits for the merged result message (or the end of the list).
@@ -4997,15 +5076,21 @@ export function convertAnthropicMessages(
 			const toolResults: ContentBlockParam[] = [];
 			// Images stripped out of error tool results, re-attached after the run.
 			const hoistedImages: ContentBlockParam[] = [];
+			const toolResultParam: AnthropicMessageParam = {
+				role: "user",
+				content: toolResults,
+			};
 
 			// Add the current tool result
 			toolResults.push(buildToolResultBlock(model, msg, hoistedImages));
+			copyPerCallContextMessage(toolResultParam, msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
 				toolResults.push(buildToolResultBlock(model, nextMsg, hoistedImages));
+				copyPerCallContextMessage(toolResultParam, nextMsg);
 				j++;
 			}
 
@@ -5020,10 +5105,7 @@ export function convertAnthropicMessages(
 			}
 
 			// Add a single user message with all tool results
-			params.push({
-				role: "user",
-				content: toolResults,
-			});
+			params.push(toolResultParam);
 			// An open tool_use turn's results are whole again; queued file
 			// metadata can follow without splitting the pairing.
 			flushCompactionFiles();
@@ -5060,20 +5142,24 @@ export function convertAnthropicMessages(
 				const controlContent = content.filter(block => block.type !== "text");
 				if (scopedContent.length > 0) {
 					params[idx] = {
+						...params[idx],
 						role: "system",
 						content: scopedContent,
 						clear_at: "next_user_message",
 					};
-					params.splice(idx + 1, 0, {
+					const controlParam: AnthropicMessageParam = {
 						role: "system",
 						content: controlContent,
 						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
-					});
+					};
+					copyPerCallContextMessage(controlParam, params[idx]);
+					params.splice(idx + 1, 0, controlParam);
 					continue;
 				}
 			}
 
 			params[idx] = {
+				...params[idx],
 				role: "system",
 				content,
 				...(turnScoped && !hasEffort && !hasToolChanges ? { clear_at: "next_user_message" } : {}),

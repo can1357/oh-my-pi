@@ -8,7 +8,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { getMarkdownLinkUrls, setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
+import { getMarkdownLinkUrls, setTerminalHyperlinks, TERMINAL, type TerminalId } from "@oh-my-pi/pi-tui";
 import { isSettingsInitialized, settings } from "../config/settings";
 import {
 	extractUriScheme,
@@ -45,12 +45,44 @@ function buildLinkId(uri: string): string {
 	return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/** Build a properly encoded `file://` URI with optional line/col query params. */
+/**
+ * Build the OSC 8 target for a file path on `terminalId`.
+ *
+ * A `file:` URI handed to an editor has to be a plain path. `Paths.get(URI)`
+ * rejects one carrying a query or a fragment outright — `IllegalArgumentException:
+ * URI has a query component` / `URI has a fragment component` — so appending
+ * `?line=` made every JVM-based language server (Kotlin LSP, Eclipse JDT LS)
+ * fail *every* request for the resulting document, and VS Code reads the query
+ * as part of the resource identity rather than as a cursor position: a blank
+ * editor tab that navigates nowhere and persists across window reloads (#12109).
+ *
+ * The VS Code family instead navigates the documented
+ * `vscode://file/<path>:<line>:<col>` form. Everywhere else the plain `file:`
+ * URI is right, with the location left in the visible text — terminals that
+ * parse a `path:line:col` suffix resolve that on their own.
+ */
+export function fileUriForTerminal(
+	filePath: string,
+	opts: { line?: number; col?: number } | undefined,
+	terminalId: TerminalId,
+): string {
+	if (terminalId !== "vscode") return url.pathToFileURL(filePath).href;
+	// vscode:// takes a filesystem path with forward slashes. Encode each
+	// segment independently so separators and a Windows drive colon stay
+	// structural while reserved bytes in file names cannot become URI syntax.
+	const asPath = filePath.replace(/\\/gu, "/");
+	const encodedPath = asPath
+		.split("/")
+		.map((segment, index) => (index === 0 && /^[a-z]:$/iu.test(segment) ? segment : encodeURIComponent(segment)))
+		.join("/");
+	const position =
+		opts?.line === undefined ? "" : opts.col === undefined ? `:${opts.line}` : `:${opts.line}:${opts.col}`;
+	return `vscode://file${encodedPath.startsWith("/") ? "" : "/"}${encodedPath}${position}`;
+}
+
+/** Build the OSC 8 target for `filePath` on this terminal. */
 function buildFileUri(filePath: string, opts?: { line?: number; col?: number }): string {
-	const uri = url.pathToFileURL(filePath);
-	if (opts?.line !== undefined) uri.searchParams.set("line", String(opts.line));
-	if (opts?.col !== undefined) uri.searchParams.set("col", String(opts.col));
-	return uri.href;
+	return fileUriForTerminal(filePath, opts, TERMINAL.id);
 }
 
 /**

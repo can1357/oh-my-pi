@@ -20,7 +20,11 @@ const RESET_IN_HR_MIN_PATTERN = /resets?\s+in\s+~?\s*(\d+(?:\.\d+)?)\s*hr\s*(\d+
 // "Your limit will reset at 2026-09-01 09:44:51" / "reset at 2026-09-01T09:44:51Z"
 const WILL_RESET_AT_PATTERN =
 	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
+// Both grammars carry a timezone-naive wall clock. The default reading is UTC;
+// a provider-specific offset (Z.AI/Zhipu Beijing time) is applied only through
+// `RetryHintOptions.naiveResetTimezoneOffset`, never inferred from the language.
 const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\s*重置/;
+const RESET_AT_PATTERNS: readonly RegExp[] = [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 
@@ -33,6 +37,12 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 // disagrees with the merged relative wait, the merged wait (which already
 // ignores the naive stamp) sleeps first, and the retry after it is the
 // probe — success proves skew, a fresh 429 re-anchors with live timing.
+
+/** Provider-specific interpretation for timezone-naive retry timestamps. */
+export interface RetryHintOptions {
+	/** UTC offset appended to an absolute reset stamp that omits its timezone. */
+	naiveResetTimezoneOffset?: string;
+}
 
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
@@ -51,14 +61,18 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
  *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
  *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置`
- *    (offset-bearing only; a timezone-naive stamp is provider wall clock in
- *    an unknown zone and only resolves when no relative signal is present)
+ *    (a provider offset makes a naive wall clock authoritative; otherwise it
+ *    resolves only when no relative signal is present)
  *
  * Returns `undefined` if no signal is found, or `0` when the provider
  * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
  * reset timestamp that has already elapsed).
  */
-export function extractRetryHint(source: Response | Headers | null | undefined, body?: string): number | undefined {
+export function extractRetryHint(
+	source: Response | Headers | null | undefined,
+	body?: string,
+	options?: RetryHintOptions,
+): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	if (headers) {
 		const retryAfterMs = headers.get("retry-after-ms");
@@ -142,25 +156,20 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			consider(totalMs > 0 ? totalMs : undefined);
 		}
 	}
-	for (const pattern of [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN]) {
+	for (const pattern of RESET_AT_PATTERNS) {
 		const match = pattern.exec(body);
 		if (!match?.[1]) continue;
 		// Offset-bearing stamps are unambiguous and compete by longest-wins.
-		// Naive stamps (provider wall clock, unknown zone) resolve after the
-		// relative signals below, and only when nothing unambiguous was
-		// found — never by guessing the zone against a conflicting signal.
+		// A configured provider offset makes an otherwise naive wall clock
+		// unambiguous too. Without one, preserve the relative-signal-first
+		// fallback and interpret the wall clock as UTC only when it stands alone.
 		const normalized = match[1].replace(" ", "T");
 		const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
-		if (hasOffset) {
-			const parsed = Date.parse(normalized);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) {
-				consider(parsed - Date.now());
-			}
-		} else {
-			const parsed = Date.parse(`${normalized}Z`);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) {
-				considerNaive(parsed - Date.now());
-			}
+		const configuredOffset = options?.naiveResetTimezoneOffset;
+		const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset ?? "Z"}`);
+		if (!Number.isNaN(parsed) && parsed > Date.now()) {
+			if (hasOffset || configuredOffset !== undefined) consider(parsed - Date.now());
+			else considerNaive(parsed - Date.now());
 		}
 	}
 	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic

@@ -39,7 +39,6 @@ describe("advisor context reset observability", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -81,7 +80,6 @@ describe("advisor context reset observability", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -101,11 +99,11 @@ describe("advisor context reset observability", () => {
 
 	it("logs quarantine reset reasons while preserving the retry limit", async () => {
 		const recoveryLogged = Promise.withResolvers<void>();
-		const exhaustedLogged = Promise.withResolvers<void>();
+		const latchedLogged = Promise.withResolvers<void>();
 		const debugSpy = vi.spyOn(logger, "debug").mockImplementation((message, details) => {
 			if (message !== "advisor context reset") return;
 			if (hasResetReason(details, "quarantine-recovery")) recoveryLogged.resolve();
-			if (hasResetReason(details, "quarantine-retry-exhausted")) exhaustedLogged.resolve();
+			if (hasResetReason(details, "quarantine-latched")) latchedLogged.resolve();
 		});
 		try {
 			const messages: AgentMessage[] = [userMessage("turn body", 1)];
@@ -123,14 +121,13 @@ describe("advisor context reset observability", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			});
 
 			runtime.onTurnEnd();
 			await recoveryLogged.promise;
 			runtime.onTurnEnd();
-			await exhaustedLogged.promise;
+			await latchedLogged.promise;
 
 			const events = debugSpy.mock.calls.map(call => ({ message: call[0], details: call[1] }));
 			expect(
@@ -142,8 +139,7 @@ describe("advisor context reset observability", () => {
 			expect(
 				events.some(
 					event =>
-						event.message === "advisor context reset" &&
-						hasResetReason(event.details, "quarantine-retry-exhausted"),
+						event.message === "advisor context reset" && hasResetReason(event.details, "quarantine-latched"),
 				),
 			).toBe(true);
 			expect(agentResetCalls).toBe(2);

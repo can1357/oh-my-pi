@@ -617,7 +617,7 @@ export const evalToolRenderer = {
 				? uiTheme.fg("dim", wrapBrackets(`Timeout: ${timeoutSeconds}s`, uiTheme))
 				: undefined;
 		let warningLine: string | undefined;
-		if (details?.meta?.truncation) {
+		if (details?.meta?.truncation || details?.meta?.artifactError) {
 			warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
 		}
 		const noticeLine = details?.notice ? uiTheme.fg("dim", wrapBrackets(details.notice, uiTheme)) : undefined;

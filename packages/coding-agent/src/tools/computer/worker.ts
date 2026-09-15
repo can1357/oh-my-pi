@@ -73,7 +73,9 @@ export interface NativeDesktopSession {
 }
 
 /** Creates the native session co-located with the computer worker runtime. */
-export type NativeDesktopSessionFactory = (options: DesktopSessionOptions) => NativeDesktopSession;
+export type NativeDesktopSessionFactory = (
+	options: DesktopSessionOptions,
+) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
 type WindowFilter = { app?: string; title?: string };
 type DeliveryOptions = { delivery?: string };
@@ -418,6 +420,8 @@ export class ComputerWorkerCore {
 	readonly #createSession?: NativeDesktopSessionFactory;
 	readonly #unsubscribe: () => void;
 	#session?: NativeDesktopSession;
+	/** In-flight lazy session creation, shared so concurrent run/capabilities requests never double-create. */
+	#sessionInit?: Promise<NativeDesktopSession>;
 	#runtime?: JsRuntime;
 	#active: ActiveRun | null = null;
 	/**
@@ -444,6 +448,9 @@ export class ComputerWorkerCore {
 			case "run":
 				void this.#run(message);
 				return;
+			case "capabilities":
+				void this.#capabilities(message);
+				return;
 			case "abort":
 				if (this.#active?.id === message.id) this.#active.ac.abort(new ToolAbortError());
 				return;
@@ -457,15 +464,27 @@ export class ComputerWorkerCore {
 
 	async #ensureSession(snapshot: ComputerSessionSnapshot): Promise<NativeDesktopSession> {
 		if (this.#session) return this.#session;
+		// Single-flight: share one creation promise so a run and a capabilities
+		// request racing on a cold worker cannot each build (and leak) a session.
+		this.#sessionInit ??= (async () => {
+			try {
+				// The worker must answer its readiness handshake without loading the native
+				// addon; normal CLI startup and selector pings never execute desktop code.
+				const createSession =
+					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
+				const session = await createSession({ display: snapshot.display });
+				this.#session = session;
+				return session;
+			} catch (error) {
+				throw nativeError(error);
+			}
+		})();
 		try {
-			// The worker must answer its readiness handshake without loading the native
-			// addon; normal CLI startup and selector pings never execute desktop code.
-			const createSession =
-				this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-			this.#session = createSession({ display: snapshot.display });
-			return this.#session;
+			return await this.#sessionInit;
 		} catch (error) {
-			throw nativeError(error);
+			// A failed attempt must not pin the rejection; let the next request retry.
+			this.#sessionInit = undefined;
+			throw error;
 		}
 	}
 
@@ -595,6 +614,34 @@ export class ComputerWorkerCore {
 				id: message.id,
 				ok: true,
 				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots, capabilities },
+			});
+		}
+	}
+
+	/**
+	 * Answers a direct capabilities request without executing a script. Unlike a
+	 * run, this never touches `#active`, so it resolves even while a run is in
+	 * flight and always reports the session's current permission/backend state.
+	 */
+	async #capabilities(message: Extract<ComputerWorkerInbound, { type: "capabilities" }>): Promise<void> {
+		if (this.#closed) {
+			this.#transport.send({
+				type: "capabilities",
+				id: message.id,
+				ok: false,
+				error: errorPayload(new ToolError("Computer worker is closed")),
+			});
+			return;
+		}
+		try {
+			const session = await this.#ensureSession(message.session);
+			this.#transport.send({ type: "capabilities", id: message.id, ok: true, capabilities: session.capabilities });
+		} catch (error) {
+			this.#transport.send({
+				type: "capabilities",
+				id: message.id,
+				ok: false,
+				error: errorPayload(error instanceof ToolAbortError ? error : nativeError(error)),
 			});
 		}
 	}
@@ -749,6 +796,7 @@ export class ComputerWorkerCore {
 			// Closing is best-effort; the worker is exiting and has no request to report this against.
 		} finally {
 			this.#session = undefined;
+			this.#sessionInit = undefined;
 			this.#unsubscribe();
 			this.#transport.send({ type: "closed" });
 			this.#transport.close();

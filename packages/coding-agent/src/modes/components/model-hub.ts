@@ -94,7 +94,7 @@ export interface ModelHubCallbacks {
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		selector: string,
 		scope?: ModelRoleSelectionScope,
-	) => void;
+	) => void | boolean | Promise<void | boolean>;
 	/** Clear a configured role back to auto-selection. */
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
@@ -156,6 +156,8 @@ type StripState =
 			index: number;
 			/** Where to land when a scope or thinking strip closes. */
 			returnToRoles: boolean;
+			/** Thinking value already committed for this strip. */
+			initialThinkingLevel?: ConfiguredThinkingLevel;
 	  }
 	| {
 			/** Footer text input naming a new custom role. */
@@ -235,6 +237,8 @@ export class ModelHubComponent implements Component {
 
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
+	#assignmentPending = false;
+	#disposed = false;
 	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
 	#searchCounts: Map<string, number> | null = null;
 
@@ -302,6 +306,7 @@ export class ModelHubComponent implements Component {
 
 	/** Cancel pending provider refresh timers and the spinner. Host calls this on overlay close. */
 	dispose(): void {
+		this.#disposed = true;
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
 		this.#refreshingProviders.clear();
@@ -860,6 +865,27 @@ export class ModelHubComponent implements Component {
 		const resolved = this.#roleForScope(role, scope);
 		return resolved.explicitThinkingLevel ? (resolved.thinkingLevel ?? ThinkingLevel.Inherit) : ThinkingLevel.Inherit;
 	}
+	#finishAssignment(result: void | boolean | Promise<void | boolean>, onSuccess: () => void): void {
+		if (!(result instanceof Promise)) {
+			if (result !== false) onSuccess();
+			else this.#tui.requestRender();
+			return;
+		}
+		this.#assignmentPending = true;
+		this.#tui.requestRender();
+		void result.then(
+			applied => {
+				this.#assignmentPending = false;
+				if (this.#disposed) return;
+				if (applied !== false) onSuccess();
+				else this.#tui.requestRender();
+			},
+			() => {
+				this.#assignmentPending = false;
+				if (!this.#disposed) this.#tui.requestRender();
+			},
+		);
+	}
 
 	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
@@ -877,9 +903,11 @@ export class ModelHubComponent implements Component {
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
-		this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
-		this.#refreshAfterMutation();
-		this.#openThinkingStrip(item, role, returnToRoles, scope);
+		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
+		this.#finishAssignment(result, () => {
+			this.#refreshAfterMutation();
+			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
+		});
 	}
 
 	#unassignRole(role: string): void {
@@ -957,12 +985,14 @@ export class ModelHubComponent implements Component {
 		role: string,
 		returnToRoles: boolean,
 		scope?: ModelRoleSelectionScope,
+		committedLevel?: ConfiguredThinkingLevel,
 	): void {
 		const options = this.#thinkingOptionsFor(item.model);
 		const current =
-			this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
+			committedLevel ??
+			(this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
 				? this.#thinkingLevelForScope(role, scope)
-				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
+				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit));
 		const chips = this.#thinkingChips(options);
 		const preselect = options.indexOf(current);
 		this.#strip = {
@@ -973,6 +1003,7 @@ export class ModelHubComponent implements Component {
 			chips,
 			index: preselect >= 0 ? preselect : 0,
 			returnToRoles,
+			initialThinkingLevel: current,
 		};
 	}
 
@@ -1165,25 +1196,31 @@ export class ModelHubComponent implements Component {
 					this.#assignRole(strip.item, strip.role, strip.returnToRoles, chip.scope);
 				}
 				return;
-			case "thinking":
-				if (strip.role && chip.thinkingLevel !== undefined) {
-					if (strip.kind === "thinking" && strip.fallbackIndex !== undefined) {
-						this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
-						this.#strip = null;
-						this.#chipRanges = [];
-						return;
-					}
-					this.#callbacks.onAssign(
+			case "thinking": {
+				if (strip.role && chip.thinkingLevel !== undefined && strip.fallbackIndex !== undefined) {
+					this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
+					this.#strip = null;
+					this.#chipRanges = [];
+					return;
+				}
+				// The preselected level is confirmation, not a force-reapply action;
+				// only a changed level should call setModel() again.
+				const changed = chip.thinkingLevel !== strip.initialThinkingLevel;
+				if (strip.role && chip.thinkingLevel !== undefined && changed) {
+					const result = this.#callbacks.onAssign(
 						strip.item.model,
 						strip.role,
 						chip.thinkingLevel,
 						strip.item.selector,
 						strip.scope,
 					);
-					this.#refreshAfterMutation();
+					this.#closeStrip();
+					this.#finishAssignment(result, () => this.#refreshAfterMutation());
+				} else {
+					this.#closeStrip();
 				}
-				this.#closeStrip();
 				return;
+			}
 		}
 	}
 
@@ -1365,6 +1402,10 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	handleInput(data: string): void {
+		if (this.#assignmentPending) {
+			if (matchesSelectCancel(data)) this.#callbacks.onCancel();
+			return;
+		}
 		if (data.startsWith("\x1b[<")) {
 			routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
 			return;
@@ -1680,6 +1721,7 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
+		if (this.#assignmentPending) return true;
 		const contentLine = event.row - this.#contentRowStart;
 		const overContent = contentLine >= 0 && contentLine < this.#contentRowCount;
 		const sidebarColStart = 2;
@@ -1893,6 +1935,9 @@ export class ModelHubComponent implements Component {
 	}
 
 	#statusRow(width: number): string {
+		if (this.#assignmentPending) {
+			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
+		}
 		if (this.#assigning !== null) {
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(

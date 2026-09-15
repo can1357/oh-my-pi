@@ -1719,7 +1719,14 @@ export class Editor implements Component, Focusable {
 					} else {
 						if (selected && this.#autocompleteProvider) {
 							const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
-							const shouldChainDirectoryCompletion = isDirectoryCompletionValue(selected.value);
+							// Directory chaining exists so an @ mention can be browsed deeper
+							// without retyping the path. It must not apply to a slash
+							// command's directory argument: there the accepted value is the
+							// whole argument, so chaining reopens the popup on the directory's
+							// children, the command never submits, and every further Enter
+							// descends another level (#12107).
+							const shouldChainDirectoryCompletion =
+								this.#autocompletePrefix.startsWith("@") && isDirectoryCompletionValue(selected.value);
 							const result = this.#autocompleteProvider.applyCompletion(
 								this.#state.lines,
 								this.#state.cursorLine,
@@ -2498,6 +2505,29 @@ export class Editor implements Component, Focusable {
 		this.#moveToMessageEnd();
 	}
 
+	/** The `tui.editor.deleteCharForward` operation, callable by hosts that resolve the chord
+	 *  themselves rather than redispatching the raw key (see CustomEditor's exit-chord overlap).
+	 *  Mirrors the transient state the key dispatch tears down before this action so the two
+	 *  cannot diverge: a pending character jump is cancelled by any other key, and an open
+	 *  spelling-assist popup is dismissed by anything that is not one of its accept keys (its
+	 *  debounced refresh skips assist mode, so a surviving list would hang around forever).
+	 *  While Vim owns the buffer (Normal or Visual) the operation is Vim's `x` — deleting the
+	 *  selection and returning to Normal in Visual mode, the grapheme under the cursor
+	 *  otherwise. Only Insert mode and Vim-off editors delete straight through. */
+	deleteCharForward(): void {
+		this.#jumpMode = null;
+		if (this.#autocompleteState === "assist") {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
+		const vim = this.#vim;
+		if (vim !== null && vim.mode !== "insert") {
+			this.#runVimKey("x", vim);
+			return;
+		}
+		this.#handleForwardDelete();
+	}
+
 	/**
 	 * Undo the last meaningful edit while ignoring transient text that is still present at the cursor.
 	 * Used for command-like autocomplete actions whose typed trigger should not count as the edit being undone.
@@ -2759,6 +2789,10 @@ export class Editor implements Component, Focusable {
 			}
 			// Auto-trigger for "#" prompt actions anywhere in the current token
 			else if (char === "#") {
+				this.#tryTriggerAutocomplete();
+			}
+			// Argument providers may expose candidates only after a separator.
+			else if (char === " " && this.#isInSubmittedSlashCommandContext()) {
 				this.#tryTriggerAutocomplete();
 			}
 			// Also auto-trigger when typing letters/path chars in a completable context
@@ -3542,6 +3576,13 @@ export class Editor implements Component, Focusable {
 			this.#state.lines[this.#state.cursorLine] = currentLine + nextLine;
 			this.#state.lines.splice(this.#state.cursorLine + 1, 1);
 		}
+
+		// Deleting the final grapheme can leave the cursor one past the end of the line, which
+		// Normal mode never allows (it rests *on* a grapheme). Vim's own `x` clamps via
+		// #applyVimCommands; callers that invoke this operation directly — hosts resolving a
+		// chord themselves, or a key bound to deleteCharForward that Vim does not map — get the
+		// same treatment here so the cursor can't sit off the buffer.
+		this.#clampVimCursor();
 
 		this.#notifyChange();
 

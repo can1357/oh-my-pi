@@ -139,6 +139,27 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.type).toBe("array");
 		expect(parsed.value).toEqual(["claude-opus-4-6", "gpt-5.3-codex"]);
 	});
+
+	it("rejects unknown status line segment ids", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new Error("process.exit");
+		}) as typeof process.exit);
+
+		await expect(
+			runConfigCommand({
+				action: "set",
+				key: "statusLine.leftSegments",
+				value: '["modle","git"]',
+				flags: { json: true },
+			}),
+		).rejects.toThrow("process.exit");
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining('Unknown status line segment: "modle". Valid segments: pi, status, model'),
+		);
+	});
 	it("sets numeric idle compaction settings from CLI values", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		await runConfigCommand({

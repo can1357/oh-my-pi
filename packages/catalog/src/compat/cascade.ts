@@ -293,6 +293,7 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
 		wire: cloneAxisRecord(axes.wire),
 		thinking: cloneAxisRecord(axes.thinking),
 		catalog: cloneAxisRecord(axes.catalog),
+		reasoning: axes.reasoning,
 	};
 }
 
@@ -326,7 +327,7 @@ export function resolveCascadeRules(cascade: CompiledCascade, target: ResolveTar
 
 function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes {
 	const ranked = rankRelevantRules(index, prepareTarget(target));
-	let reasoning = target.reasoning;
+	let reasoning = target.reasoning === true;
 	if (!reasoning) {
 		for (const { rule, rank } of ranked) {
 			if (rule.hasExactEffortsRule && rank[0] === 2) {
@@ -347,5 +348,6 @@ function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes
 		wire: collect(wire, rule => rule.wire),
 		thinking: collect(thinking, rule => rule.thinking),
 		catalog: collect(catalog, rule => rule.catalog),
+		reasoning,
 	};
 }

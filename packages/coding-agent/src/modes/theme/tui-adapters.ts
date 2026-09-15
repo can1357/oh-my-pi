@@ -14,7 +14,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveMermaidAscii } from "./mermaid-cache";
 import type { SlashCommandIconName } from "./symbols";
-import { theme } from "./theme";
+import { ensureThemeSync, theme } from "./theme";
 import type { Theme } from "./theme-class";
 
 // ============================================================================
@@ -179,6 +179,7 @@ export function setMarkdownMermaidRendering(enabled: boolean): void {
 }
 
 export function getMarkdownTheme(): MarkdownTheme {
+	ensureThemeSync();
 	if (cachedMarkdownTheme !== undefined && cachedMarkdownThemeRef === theme) {
 		return cachedMarkdownTheme;
 	}
