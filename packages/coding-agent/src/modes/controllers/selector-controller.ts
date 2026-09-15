@@ -86,7 +86,11 @@ import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { captureBrowserSession } from "../../utils/browser-session";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
-import { setSessionTerminalTitle } from "../../utils/title-generator";
+import {
+	setSessionTerminalTitle,
+	setTerminalTitleSpinnerStyle,
+	setTerminalTitleStateEnabled,
+} from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
@@ -751,6 +755,12 @@ export class SelectorController {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.invalidate();
 				this.ctx.ui.requestRender();
+				break;
+			case "tui.titleState":
+				setTerminalTitleStateEnabled(value as boolean);
+				break;
+			case "tui.titleSpinner":
+				setTerminalTitleSpinnerStyle(value as string);
 				break;
 			case "tui.resizeScrollback":
 				this.ctx.ui.setResizeScrollback(value as ResizeScrollbackMode);

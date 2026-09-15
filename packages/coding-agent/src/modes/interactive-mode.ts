@@ -175,6 +175,7 @@ import {
 	popTerminalTitle,
 	pushTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -1500,6 +1501,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
+		setTerminalTitleSpinnerStyle(this.settings.get("tui.titleSpinner"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
