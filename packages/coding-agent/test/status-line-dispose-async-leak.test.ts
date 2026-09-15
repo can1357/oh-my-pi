@@ -47,13 +47,17 @@ beforeEach(async () => {
 		linkedWorktree: () => null,
 	} as unknown as VcsGitRepo;
 	vi.spyOn(vcs, "git").mockReturnValue(gitRepository);
-	vi.spyOn(vcs, "repo").mockReturnValue({
+	const repository = {
 		kind: () => "git",
 		asGit: () => gitRepository,
 		asJj: () => null,
 		root: () => fakeRepoInfo.repoRoot,
 		watchTarget: () => fakeRepoInfo.headPath,
-	} as unknown as VcsRepo);
+	} as unknown as VcsRepo;
+	vi.spyOn(vcs, "repo").mockReturnValue(repository);
+	// The render path resolves the branch through the display detector first;
+	// left unstubbed it finds the real checkout and caches its branch.
+	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repository);
 });
 
 afterEach(() => {
