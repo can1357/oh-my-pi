@@ -376,8 +376,8 @@ export class JsRuntime {
 		if (this.#disposed) throw new Error("Cannot set cwd on a disposed JS runtime");
 		// Always stamp the runtime and session state: WorkerCore/browser/cmux call
 		// setCwd from init and pre-run paths that may race another same-realm
-		// runtime, and a throw here used to escape the inline-worker microtask
-		// path as a fatal unhandledRejection that killed the whole session.
+		// runtime, and a throw here used to escape the harness microtask path as
+		// a fatal unhandledRejection that killed the whole session.
 		// #session is the same object saved in this owner's global stack entry,
 		// so the new cwd survives deferred activation and is visible to this
 		// runtime's next run; run()/setRunScope still assert exclusive ownership.
@@ -737,7 +737,7 @@ interface GlobalStack {
 	entries: GlobalOwnerEntry[];
 }
 
-// Inline fallback and cmux tabs can create multiple JsRuntime instances in one Bun realm.
+// Same-realm harnesses and cmux tabs can create multiple JsRuntime instances in one Bun realm.
 // Track reserved helper globals by owner so disposing one runtime restores the next active
 // owner (or the original process global after the last owner), not a stale snapshot.
 const GLOBAL_STACKS = new Map<string, GlobalStack>();

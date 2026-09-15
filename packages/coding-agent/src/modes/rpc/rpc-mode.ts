@@ -28,6 +28,7 @@ import {
 	buildSkillPromptMessage,
 	parseSkillInvocation,
 	type Skill,
+	type SkillPromptInput,
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
@@ -125,9 +126,8 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
-export interface RpcSkillInvocation {
+export interface RpcSkillInvocation extends SkillPromptInput {
 	skill: Skill;
-	args: string;
 }
 
 /**
@@ -141,7 +141,7 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return null;
-	return { skill, args: parsed.args };
+	return { skill, args: parsed.args, prompt: parsed.prompt };
 }
 
 /**
@@ -157,7 +157,7 @@ export async function runRpcSkillCommand(
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
 ): Promise<boolean> {
-	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
+	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -194,7 +194,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	// keep that error contract by awaiting it before answering. The expensive
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
-	const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
+	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,
 		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),

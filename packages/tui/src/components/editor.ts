@@ -2437,6 +2437,24 @@ export class Editor implements Component, Focusable {
 		});
 	}
 
+	/** Collapse the typed span `[start, end)` on `line` into the atom `label` (expanding back
+	 *  to `expansion` on submit). A cursor at or past the span keeps its position relative to
+	 *  the span end; a cursor inside it lands after the label. */
+	collapseToAtom(line: number, start: number, end: number, label: string, expansion: string): void {
+		const text = this.#state.lines[line];
+		if (text === undefined || start < 0 || end > text.length || start >= end) return;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		this.registerAtom(label, expansion);
+		this.#state.lines[line] = text.slice(0, start) + label + text.slice(end);
+		if (this.#state.cursorLine === line && this.#state.cursorCol > start) {
+			const col = this.#state.cursorCol;
+			this.#setCursorCol(col >= end ? col - (end - start) + label.length : start + label.length);
+		}
+		this.#lastAction = null;
+		this.onChange?.(this.getText());
+	}
+
 	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
 	clearAtoms(): void {
 		this.#atoms.clear();

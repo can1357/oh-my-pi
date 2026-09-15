@@ -1106,6 +1106,12 @@ export class WorkerCore {
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
+			if (payload.mode === "headless" || payload.emulateFocus) {
+				// Background Chromium tabs stop producing frames, stalling rAF,
+				// IntersectionObserver, and input acknowledgements. Keep owned tabs
+				// interactive without raising a window; explicit settle-freeze still applies.
+				await this.#page.emulateFocusedPage(true);
+			}
 			if (payload.url) {
 				await this.#page.goto(payload.url, {
 					// Default to "load" because dev servers with HMR/WS never reach networkidle.

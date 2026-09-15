@@ -1,6 +1,10 @@
 // Provider-wire compat for "deepseek"; regenerated from the frozen census using deployment contract selectors.
 
 provider "deepseek" {
+	default-model "deepseek-v4-pro"
+	env "DEEPSEEK_API_KEY"
+	discovery label="DeepSeek"
+
 	extra-body {
 		thinking {
 			type "enabled"

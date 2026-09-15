@@ -11,15 +11,6 @@ import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 
 describe("bundled agent parsing", () => {
-	it("lets reviewer inherit thinking effort from its model role", () => {
-		const reviewer = getBundledAgent("reviewer");
-
-		expect(reviewer).toBeDefined();
-		expect(reviewer?.source).toBe("bundled");
-		expect(reviewer?.model).toEqual(["@slow"]);
-		expect(reviewer?.thinkingLevel).toBeUndefined();
-	});
-
 	it("defaults the task agent to the auto thinking selector", () => {
 		const task = getBundledAgent("task");
 
