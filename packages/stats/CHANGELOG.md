@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Attribute routed usage to the provider-reported upstream model in stats.
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed
