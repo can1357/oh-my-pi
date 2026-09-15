@@ -90,10 +90,111 @@ fn unified_header_is_dev_null(line: &str, marker: &str) -> Option<bool> {
 	Some(path == "/dev/null")
 }
 
+#[derive(Clone, Copy)]
+enum UnifiedFileKind {
+	Add,
+	Existing,
+}
+
+#[derive(Default)]
+struct UnifiedGitSection {
+	kind:                   Option<UnifiedFileKind>,
+	in_hunk:                bool,
+	old_header_is_dev_null: Option<bool>,
+}
+
+const fn record_unified_section(syntax: &mut ForeignSyntax, section: UnifiedGitSection) {
+	match section.kind {
+		Some(UnifiedFileKind::Add) => syntax.unified_diff_add_file = true,
+		Some(UnifiedFileKind::Existing) | None => syntax.unified_diff_existing_file = true,
+	}
+}
+
+fn detect_git_unified_syntax(input: &str, syntax: &mut ForeignSyntax) {
+	let mut section = None;
+	for raw_line in input.lines() {
+		let line = raw_line.trim_end_matches('\r');
+		if line.starts_with("diff --git ") {
+			if let Some(previous) = section.replace(UnifiedGitSection::default()) {
+				record_unified_section(syntax, previous);
+			}
+			syntax.unified_diff = true;
+			continue;
+		}
+		let Some(current) = section.as_mut() else {
+			continue;
+		};
+		if is_unified_hunk_line(line) {
+			current.in_hunk = true;
+			continue;
+		}
+		if current.in_hunk {
+			continue;
+		}
+		if line.starts_with("new file mode ") {
+			current.kind = Some(UnifiedFileKind::Add);
+			continue;
+		}
+		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
+			current.old_header_is_dev_null = Some(old_is_dev_null);
+			continue;
+		}
+		if let Some(new_is_dev_null) = unified_header_is_dev_null(line, "+++ ")
+			&& let Some(old_is_dev_null) = current.old_header_is_dev_null.take()
+		{
+			current.kind = Some(if old_is_dev_null && !new_is_dev_null {
+				UnifiedFileKind::Add
+			} else {
+				UnifiedFileKind::Existing
+			});
+		}
+	}
+	if let Some(section) = section {
+		record_unified_section(syntax, section);
+	}
+}
+
+fn detect_plain_unified_syntax(input: &str, syntax: &mut ForeignSyntax) {
+	let mut current_kind = None;
+	let mut old_header_is_dev_null = None;
+	for raw_line in input.lines() {
+		let line = raw_line.trim_end_matches('\r');
+		if line.starts_with("new file mode ") {
+			syntax.unified_diff = true;
+			syntax.unified_diff_add_file = true;
+			current_kind = Some(UnifiedFileKind::Add);
+			continue;
+		}
+		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
+			old_header_is_dev_null = Some(old_is_dev_null);
+			current_kind = None;
+			continue;
+		}
+		if let Some(new_is_dev_null) = unified_header_is_dev_null(line, "+++ ")
+			&& let Some(old_is_dev_null) = old_header_is_dev_null.take()
+		{
+			let kind = if old_is_dev_null && !new_is_dev_null {
+				syntax.unified_diff_add_file = true;
+				UnifiedFileKind::Add
+			} else {
+				syntax.unified_diff_existing_file = true;
+				UnifiedFileKind::Existing
+			};
+			syntax.unified_diff = true;
+			current_kind = Some(kind);
+			continue;
+		}
+		if is_unified_hunk_line(line) {
+			syntax.unified_diff = true;
+			if current_kind.is_none() {
+				syntax.unified_diff_existing_file = true;
+			}
+		}
+	}
+}
+
 pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
 	let mut syntax = ForeignSyntax::default();
-	let mut pending_unified_old = None;
-	let mut saw_unified_file_pair = false;
 	let mut saw_search_marker = false;
 	let mut saw_replace_marker = false;
 	for raw_line in input.lines() {
@@ -102,29 +203,16 @@ pub(super) fn detect_foreign_syntax(input: &str) -> ForeignSyntax {
 		syntax.apply_patch |= existing_file_op || add_file;
 		syntax.apply_patch_existing_file |= existing_file_op;
 		syntax.apply_patch_add_file |= add_file;
-		let new_file_mode = line.starts_with("new file mode ");
-		syntax.unified_diff |=
-			is_unified_hunk_line(line) || line.starts_with("diff --git ") || new_file_mode;
-		syntax.unified_diff_add_file |= new_file_mode;
-		if let Some(old_is_dev_null) = unified_header_is_dev_null(line, "--- ") {
-			pending_unified_old = Some(old_is_dev_null);
-		}
-		if let Some(new_is_dev_null) = unified_header_is_dev_null(line, "+++ ")
-			&& let Some(old_is_dev_null) = pending_unified_old.take()
-		{
-			syntax.unified_diff = true;
-			saw_unified_file_pair = true;
-			if old_is_dev_null && !new_is_dev_null {
-				syntax.unified_diff_add_file = true;
-			} else {
-				syntax.unified_diff_existing_file = true;
-			}
-		}
 		saw_search_marker |= line.starts_with("<<<<<<< SEARCH");
 		saw_replace_marker |= line.starts_with(">>>>>>> REPLACE");
 	}
-	if syntax.unified_diff && !saw_unified_file_pair && !syntax.unified_diff_add_file {
-		syntax.unified_diff_existing_file = true;
+	if input
+		.lines()
+		.any(|line| line.trim_end_matches('\r').starts_with("diff --git "))
+	{
+		detect_git_unified_syntax(input, &mut syntax);
+	} else {
+		detect_plain_unified_syntax(input, &mut syntax);
 	}
 	syntax.search_replace = saw_search_marker && saw_replace_marker;
 	syntax

@@ -731,6 +731,32 @@ fn input_reports_both_recovery_paths_for_mixed_unified_diff() {
 }
 
 #[test]
+fn input_preserves_metadata_only_existing_sections_with_additions() {
+	let error = Patch::parse(
+		"diff --git a/empty b/empty\nnew file mode 100644\nindex 0000000..e69de29\ndiff --git a/old \
+		 b/new\nsimilarity index 100%\nrename from old\nrename to new",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("use the `write` tool"), "{error}");
+	assert!(error.contains("rewrite existing-file changes as Hashline"), "{error}");
+	assert!(error.contains("`MV DEST` to move or rename it"), "{error}");
+}
+
+#[test]
+fn input_ignores_file_markers_inside_unified_hunks() {
+	let error = Patch::parse(
+		"diff --git a/doc b/doc\n@@ -1,2 +1,2 @@\n new file mode 100644\n--- /dev/null\n+++ b/new",
+		&options(),
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(error.contains("rewrite existing-file changes as Hashline"), "{error}");
+	assert!(!error.contains("use the `write` tool"), "{error}");
+}
+
+#[test]
 fn input_supports_fallback_path_and_absolute_paths_in_cwd() {
 	let fallback = SplitOptions { cwd: None, path: Some("a.ts") };
 	let patch = Patch::parse("PUT <1:\n+x", &fallback).unwrap();
