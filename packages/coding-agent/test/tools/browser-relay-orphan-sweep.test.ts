@@ -7,6 +7,7 @@ import {
 	runAfterStartupReconciliation,
 	runExpiredOrphanSweep,
 	seedOrphanSweepDeadline,
+	serializeOrphanReconciliation,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -281,5 +282,26 @@ describe("browser relay orphan sweep scheduling", () => {
 		startup.resolve();
 		await run;
 		expect(swept).toBe(true);
+	});
+
+	it("serializes overlapping orphan reconciliation snapshots", async () => {
+		const first = deferred<void>();
+		const firstStarted = deferred<void>();
+		const order: string[] = [];
+		let pending = serializeOrphanReconciliation(Promise.resolve(), async () => {
+			order.push("first:start");
+			firstStarted.resolve();
+			await first.promise;
+			order.push("first:end");
+		});
+		pending = serializeOrphanReconciliation(pending, async () => {
+			order.push("second");
+		});
+
+		await firstStarted.promise;
+		expect(order).toEqual(["first:start"]);
+		first.resolve();
+		await pending;
+		expect(order).toEqual(["first:start", "first:end", "second"]);
 	});
 });

@@ -96,6 +96,18 @@ export async function runAfterStartupReconciliation(
 	await runSweep();
 }
 
+/**
+ * Queue orphan reconciliation behind the previous attempt. Callers can fire
+ * this from overlapping lifecycle events without letting an older browser
+ * snapshot finish after a newer one and overwrite its attachment state.
+ */
+export function serializeOrphanReconciliation(
+	previousReconciliation: Promise<void>,
+	reconcile: () => Promise<void>,
+): Promise<void> {
+	return previousReconciliation.catch(() => {}).then(reconcile);
+}
+
 export async function runExpiredOrphanSweep(
 	clearDeadline: () => Promise<unknown>,
 	revalidateAndSweep: () => Promise<void>,

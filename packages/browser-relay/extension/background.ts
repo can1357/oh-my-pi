@@ -45,6 +45,7 @@ import {
 	runAfterStartupReconciliation,
 	runExpiredOrphanSweep,
 	seedOrphanSweepDeadline,
+	serializeOrphanReconciliation,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -1391,10 +1392,20 @@ async function reconcileOrphans(): Promise<void> {
 	await setOrphanSweepDeadline(null);
 }
 
+let orphanReconciliations: Promise<void> = Promise.resolve();
+function queueOrphanReconciliation(): Promise<void> {
+	const reconciliation = serializeOrphanReconciliation(
+		orphanReconciliations,
+		reconcileOrphans,
+	);
+	orphanReconciliations = reconciliation.catch(() => {});
+	return reconciliation;
+}
+
 // An orphan-sweep alarm can be the event that wakes a fresh MV3 worker. Keep a
 // shared, retryable startup barrier so the alarm cannot inspect the guard before
 // persisted ownership has been loaded and reconciled into it.
-const ensureStartupReconciled = createRetryableLoader(reconcileOrphans);
+const ensureStartupReconciled = createRetryableLoader(queueOrphanReconciliation);
 
 async function connect(): Promise<void> {
 	if (hasUsableRelaySocket(ws, WebSocket.OPEN, WebSocket.CONNECTING)) return;
@@ -1626,7 +1637,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
 	if (alarm.name === KEEPALIVE_ALARM) {
-		void reconcileOrphans();
+		void queueOrphanReconciliation();
 		void connect();
 		return;
 	}
@@ -1661,11 +1672,11 @@ chrome.action.onClicked.addListener(
 	() => void chrome.runtime.openOptionsPage(),
 );
 chrome.runtime.onInstalled.addListener(() => {
-	void reconcileOrphans();
+	void queueOrphanReconciliation();
 	void connect();
 });
 chrome.runtime.onStartup.addListener(() => {
-	void reconcileOrphans();
+	void queueOrphanReconciliation();
 	void connect();
 });
 // `runtime.onSuspend` cannot rely on async `chrome.debugger.detach()` calls:
