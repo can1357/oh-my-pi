@@ -94,6 +94,24 @@ describe("model thinking derivation", () => {
 		expect(gptOss.thinking?.effortMap).toBeUndefined();
 	});
 
+	it("stores low/medium/high effort limits for the Cerebras Qwen 3.8 27B metadata", () => {
+		const cerebras = createModel({
+			id: "qwen-3.8-27b",
+			api: "openai-completions",
+			provider: "cerebras",
+			baseUrl: "https://api.cerebras.ai/v1",
+		});
+
+		expect(cerebras.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+		});
+		expect(requireSupportedEffort(cerebras, Effort.High)).toBe(Effort.High);
+		expect(() => requireSupportedEffort(cerebras, Effort.XHigh)).toThrow(/Supported efforts: low, medium, high/);
+		expect(clampThinkingLevelForModel(cerebras, Effort.Minimal)).toBe(Effort.Low);
+		expect(clampThinkingLevelForModel(cerebras, Effort.XHigh)).toBe(Effort.High);
+	});
+
 	it("stores MiMo OpenAI-compatible effort limits in model metadata", () => {
 		const mimo = createModel({
 			id: "mimo-v2.5-pro",

@@ -838,6 +838,9 @@ export function groqModelManagerOptions(config?: GroqModelManagerConfig): ModelM
 // 3. Cerebras
 // ---------------------------------------------------------------------------
 
+/** 2026-09 endpoint additions that reason but predate the bundled catalog entry. */
+const CEREBRAS_LIVE_REASONING_MODEL_IDS = /(?:^|\/)qwen-?3\.8-27b$/i;
+
 export interface CerebrasModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -847,7 +850,31 @@ export interface CerebrasModelManagerConfig {
 export function cerebrasModelManagerOptions(
 	config?: CerebrasModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("cerebras", "https://api.cerebras.ai/v1", config);
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.cerebras.ai/v1";
+	const references = createBundledReferenceMap<"openai-completions">("cerebras");
+	return {
+		providerId: "cerebras",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "cerebras",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						// New 2026-09 endpoint SKU with no bundled reference yet —
+						// flag it reasoning so the low/medium/high dial is live
+						// before the blessed bundle refresh lands the entry
+						// (surface comes from the model-thinking.ts deriver).
+						const mapped = mapWithBundledReference(entry, defaults, references.get(defaults.id));
+						if (!mapped || !CEREBRAS_LIVE_REASONING_MODEL_IDS.test(defaults.id)) return mapped;
+						return { ...mapped, reasoning: true };
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cerebras `qwen-3.8-27b` (Qwen3.8 27B, added to the endpoint 2026-09) now carries its reasoning dial through live discovery: the cerebras mapper flags the not-yet-catalogued SKU id so the thinking deriver pins its `effort` surface to exactly the low/medium/high tiers `models.dev` lists for it, matching the OpenRouter twin — the bundled catalog entry lands with the next generated-catalog refresh.
+
 ## [16.4.18] - 2026-09-09
 
 ### Fixed

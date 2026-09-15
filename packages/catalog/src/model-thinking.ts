@@ -313,6 +313,9 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (isSakanaFuguReasoningModel(spec)) {
 		return FUGU_REASONING_EFFORTS;
 	}
+	if (isCerebrasQwen3827bReasoningModel(spec)) {
+		return LOW_MEDIUM_HIGH_REASONING_EFFORTS;
+	}
 	return isOpenAICompatReasoningApi(spec.api) &&
 		(isMinimaxM2FamilyModelId(spec.id) ||
 			isOpenAIGptOssModelId(spec.id) ||
@@ -422,6 +425,15 @@ function inferDetectedEffortMap<TApi extends Api>(
 
 function isSakanaFuguReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
 	return spec.provider === "sakana" && /^fugu(?:$|-)/i.test(spec.id);
+}
+
+/**
+ * Cerebras' newest dense Qwen SKU (added to the endpoint 2026-09). models.dev
+ * lists its `reasoning` efforts as none/low/medium/high — surface exactly the
+ * dial tiers, off stays implicit like every other effort-surface entry.
+ */
+function isCerebrasQwen3827bReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return spec.provider === "cerebras" && /(?:^|\/)qwen-?3\.8-27b$/i.test(spec.id);
 }
 
 function isDeepseekReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
