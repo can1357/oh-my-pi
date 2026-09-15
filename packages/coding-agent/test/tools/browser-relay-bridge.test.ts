@@ -4145,7 +4145,7 @@ describe("RelayBridge tab grouping", () => {
 				id: ++msgSeq,
 				sessionId: pageSession,
 				method: "Page.addScriptToEvaluateOnNewDocument",
-				params: { source: "window.__relayInjected = true;", runImmediately: true },
+				params: { source: "window.__relayInjected = true;", runImmediately: true, includeCommandLineAPI: true },
 			}),
 		);
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
@@ -4203,6 +4203,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		expect(ext2.pending("send").find(rpc => rpc.method === "Runtime.evaluate")?.params).toMatchObject({
 			contextId: 102,
+			includeCommandLineAPI: true,
 		});
 		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));

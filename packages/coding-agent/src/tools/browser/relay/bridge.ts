@@ -3608,6 +3608,7 @@ export class RelayBridge {
 							changedChildFrames,
 							markPreloadApplication(script.params.source, applicationMarker),
 							script.params.worldName,
+							script.params.includeCommandLineAPI,
 							expectedExt,
 						);
 						appliedToCurrentDocument = true;
@@ -3772,8 +3773,10 @@ export class RelayBridge {
 		frameIds: string[],
 		source: string,
 		worldName: unknown,
+		includeCommandLineAPI: unknown,
 		expectedExt: RelaySocket | null,
 	): Promise<void> {
+		const commandLineAPI = typeof includeCommandLineAPI === "boolean" ? { includeCommandLineAPI } : {};
 		const enabledForProbe = !tab.rootRuntimeEnabled;
 		const contexts = enabledForProbe ? new Map<number, Record<string, unknown>>() : tab.runtimeContexts;
 		let probeEnabled = false;
@@ -3804,7 +3807,7 @@ export class RelayBridge {
 						tabId: tab.tabId,
 						...(sessionId ? { sessionId } : {}),
 						method: "Runtime.evaluate",
-						params: { expression: source, contextId: isolatedWorld.executionContextId },
+						params: { expression: source, contextId: isolatedWorld.executionContextId, ...commandLineAPI },
 					});
 					continue;
 				}
@@ -3815,7 +3818,7 @@ export class RelayBridge {
 						tabId: tab.tabId,
 						sessionId,
 						method: "Runtime.evaluate",
-						params: { expression: source },
+						params: { expression: source, ...commandLineAPI },
 					});
 					continue;
 				}
@@ -3834,7 +3837,7 @@ export class RelayBridge {
 					op: "send",
 					tabId: tab.tabId,
 					method: "Runtime.evaluate",
-					params: { expression: source, contextId: match[0] },
+					params: { expression: source, contextId: match[0], ...commandLineAPI },
 				});
 			}
 		} finally {
