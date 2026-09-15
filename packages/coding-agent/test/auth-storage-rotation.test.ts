@@ -236,6 +236,9 @@ describe("AuthStorage account rotation", () => {
 					rotationTargets.push(options?.apiKey);
 					return false;
 				},
+				async modelEntitlementError() {
+					return undefined;
+				},
 			},
 		};
 		const resolver = createApiKeyResolver(registry, "openai-codex", {
@@ -263,6 +266,9 @@ describe("AuthStorage account rotation", () => {
 			authStorage: {
 				async rotateSessionCredential() {
 					return false;
+				},
+				async modelEntitlementError() {
+					return undefined;
 				},
 			},
 		};

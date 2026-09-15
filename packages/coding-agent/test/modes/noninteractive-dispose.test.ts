@@ -41,6 +41,7 @@ describe("print mode disposes the session before terminating", () => {
 			},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
+			getDisabledCredentialNotices: async () => [],
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => {

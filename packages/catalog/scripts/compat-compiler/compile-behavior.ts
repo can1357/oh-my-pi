@@ -5,7 +5,7 @@
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
  * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
  * exclude-discovery-modes, exclude-models, plan-requirement, pricing-peer,
- * and retry-reset-timezone.
+ * retry-reset-timezone, and credential-retirement.
  * Every node kind is optional; per-node shapes are strict.
  */
 import type {
@@ -303,6 +303,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		referenceIsolatedProviders: [],
 		planRequirements: [],
 		retryResetTimezones: [],
+		credentialRetirements: [],
 		pricingPeers: [],
 	};
 	if (!source) return behavior;
@@ -372,6 +373,14 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 			case "retry-reset-timezone":
 				behavior.retryResetTimezones.push(parseRetryResetTimezone(node));
 				break;
+			case "credential-retirement": {
+				ensureLeaf(node, ["provider", "retire-oauth-on-hard401"]);
+				const provider = requiredProp(node, "provider");
+				const retireOAuthOnHard401 = propBool(node, "retire-oauth-on-hard401");
+				if (!provider || retireOAuthOnHard401 === undefined || node.args.length > 0) malformed(node);
+				behavior.credentialRetirements.push({ provider, retireOAuthOnHard401 });
+				break;
+			}
 			case "pricing-peer":
 				behavior.pricingPeers.push(parsePricingPeer(node));
 				break;

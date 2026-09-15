@@ -40,7 +40,10 @@ describe("commit role thinking selection", () => {
 			getAvailable: () => [defaultModel, commitModel],
 			getApiKey: async () => "test-key",
 			getApiKeyForProvider: async () => "test-key",
-			authStorage: { rotateSessionCredential: async () => false as const },
+			authStorage: {
+				rotateSessionCredential: async () => false as const,
+				modelEntitlementError: async () => undefined,
+			},
 			resolver: () => async () => "test-key",
 		};
 

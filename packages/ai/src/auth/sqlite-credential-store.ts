@@ -157,7 +157,20 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 	return null;
 }
 
-function normalizeDisabledCause(disabledCause: string): string {
+/**
+ * Whether a persisted `disabled_cause` records an automatic teardown (refresh
+ * failure, upstream invalidation, broker disable) rather than a deliberate or
+ * lifecycle action. Every writer of a hygiene cause is enumerated here:
+ * `replaced by …` (re-login / API-key rotation), `deleted by user` and
+ * `logged out by user` (logout paths), and `deduplicated duplicate credential`.
+ * Retention and every display surface (`omp usage`, session notices) share
+ * this one split so a row is never kept by one and hidden by the other.
+ */
+export function isAutomaticDisableCause(cause: string): boolean {
+	return !/^(replaced by|deleted by user|logged out by user|deduplicated )/i.test(cause);
+}
+
+export function normalizeDisabledCause(disabledCause: string): string {
 	const normalized = disabledCause.trim();
 	return normalized.length > 0 ? normalized : "disabled";
 }
@@ -166,7 +179,7 @@ function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): Store
 	return { id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause };
 }
 
-function resolveProviderCredentialIdentityKey(provider: string, identifiers: string[]): string | null {
+function resolveProviderCredentialIdentityKey(provider: string, identifiers: readonly string[]): string | null {
 	const emailIdentifier = identifiers.find(identifier => identifier.startsWith("email:"));
 	if (provider === "anthropic" || provider === "openai-codex") {
 		// One account email can hold several organizations/workspaces (e.g. a
@@ -199,6 +212,53 @@ export function resolveCredentialIdentityKey(provider: string, credential: AuthC
 	return resolveProviderCredentialIdentityKey(provider, extractOAuthCredentialIdentifiers(credential));
 }
 
+type OAuthIdentityFields = Partial<
+	Pick<OAuthCredential, "email" | "accountId" | "projectId" | "orgId" | "access" | "refresh">
+>;
+
+export interface ResolvedOAuthCredentialIdentity {
+	key: string | null;
+	identifiers: readonly string[];
+}
+
+/** Resolve once before comparing against multiple credentials; token bytes never enter the result. */
+export function resolveOAuthCredentialIdentity(
+	provider: string,
+	credential: OAuthIdentityFields,
+): ResolvedOAuthCredentialIdentity {
+	const identifiers = extractOAuthCredentialIdentifiers(credential);
+	return { key: resolveProviderCredentialIdentityKey(provider, identifiers), identifiers };
+}
+
+/** Project primary token claims into existing identity fields without exposing token material. */
+export function copyOAuthCredentialIdentity(
+	target: Pick<OAuthIdentityFields, "email" | "accountId" | "projectId" | "orgId">,
+	credential: OAuthIdentityFields,
+	identity?: ResolvedOAuthCredentialIdentity,
+): void {
+	let email = credential.email;
+	let accountId = credential.accountId;
+	if (!normalizeStoredEmail(email) || !normalizeStoredAccountId(accountId)) {
+		const identifiers = identity?.identifiers ?? extractOAuthCredentialIdentifiers(credential);
+		if (!normalizeStoredEmail(email)) email = identifiers.find(value => value.startsWith("email:"))?.slice(6);
+		if (!normalizeStoredAccountId(accountId)) {
+			accountId = identifiers.find(value => value.startsWith("account:"))?.slice(8);
+		}
+	}
+	if (email) target.email = email;
+	if (accountId) target.accountId = accountId;
+	if (credential.projectId) target.projectId = credential.projectId;
+	if (credential.orgId) target.orgId = credential.orgId;
+}
+
+/** A live identity cannot prove recovery of an unidentified tombstone. */
+export function isOAuthCredentialIdentityRecovered(
+	existing: ResolvedOAuthCredentialIdentity,
+	incoming: ResolvedOAuthCredentialIdentity,
+): boolean {
+	return matchesOAuthCredentialIdentity(existing, incoming);
+}
+
 function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string | null {
 	const identityKey = normalizeStoredIdentityKey(row.identity_key);
 	if (identityKey) return identityKey;
@@ -228,8 +288,22 @@ function matchesReplacementCredential(
 		}
 		return false;
 	}
-	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
-	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);
+	if (existing.type !== "oauth") return false;
+	const incomingIdentity = resolveOAuthCredentialIdentity(provider, incoming);
+	if (incomingIdentity.key !== null && incomingIdentity.key === existingIdentityKey) return true;
+	return matchesOAuthCredentialIdentity(
+		{ key: existingIdentityKey, identifiers: extractOAuthCredentialIdentifiers(existing) },
+		incomingIdentity,
+	);
+}
+
+function matchesOAuthCredentialIdentity(
+	existing: ResolvedOAuthCredentialIdentity,
+	incoming: ResolvedOAuthCredentialIdentity,
+): boolean {
+	const existingIdentityKey = existing.key;
+	const incomingIdentityKey = incoming.key;
+	const incomingIdentifiers = incoming.identifiers;
 	if (incomingIdentityKey === null) return false;
 	if (incomingIdentityKey === existingIdentityKey) return true;
 	if (existingIdentityKey === null) return false;
@@ -256,15 +330,20 @@ function matchesReplacementCredential(
 	if (orgIdentifier === undefined) return false;
 	if (incomingIdentityKey !== orgIdentifier && !incomingIdentityKey.endsWith(`|${orgIdentifier}`)) return false;
 	if (existingIdentityKey === orgIdentifier) return true;
-	const existingIdentifiers =
-		existing.type === "oauth" && existingIdentityKey.endsWith(`|${orgIdentifier}`)
-			? extractOAuthCredentialIdentifiers(existing)
-			: null;
+	const existingIdentifiers = existingIdentityKey.endsWith(`|${orgIdentifier}`) ? existing.identifiers : null;
 	// A base identifier that merely repeats the org qualifier's id carries no
 	// per-user identity (openai-codex stores the ChatGPT workspace id as both
 	// accountId and orgId, shared by every member) — letting it act as a
 	// claimable base would re-key another member's same-org row.
 	const orgQualifierId = orgIdentifier.slice("org:".length);
+	// A broker can withhold the token carrying the base claim while retaining
+	// its authoritative key. That key still proves the same one-way upgrade.
+	if (
+		incomingIdentityKey === `${existingIdentityKey}|${orgIdentifier}` &&
+		existingIdentityKey.slice(existingIdentityKey.indexOf(":") + 1) !== orgQualifierId
+	) {
+		return true;
+	}
 	for (const identifier of incomingIdentifiers) {
 		const isBase =
 			identifier.startsWith("email:") || identifier.startsWith("account:") || identifier.startsWith("project:");
@@ -277,7 +356,7 @@ function matchesReplacementCredential(
 	return false;
 }
 
-function extractOAuthCredentialIdentifiers(credential: OAuthCredential): string[] {
+function extractOAuthCredentialIdentifiers(credential: OAuthIdentityFields): string[] {
 	const identifiers = new Set<string>();
 	const accountId = normalizeStoredAccountId(credential.accountId);
 	if (accountId) identifiers.add(`account:${accountId}`);
@@ -357,6 +436,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#insertStmt: Statement;
 	#updateStmt: Statement;
 	#deleteStmt: Statement;
+	#disableIfActiveStmt: Statement;
 	#deleteIfMatchesStmt: Statement;
 	#updateIfMatchesStmt: Statement;
 	#deleteByProviderStmt: Statement;
@@ -427,6 +507,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#deleteStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+		);
+		// The automatic path additionally requires the row to still be active: a
+		// row a peer already tombstoned must not be re-stamped with a second cause
+		// and timestamp, which would overwrite the original forensics and let this
+		// process announce a teardown it did not perform. A deliberate removal
+		// still uses the unguarded statement above — it owns the row's history.
+		this.#disableIfActiveStmt = this.#db.prepare(
+			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
 		);
 		this.#deleteIfMatchesStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND data = ? AND disabled_cause IS NULL`,
@@ -1225,9 +1313,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				cause: row.disabled_cause ?? "disabled",
 			};
 			if (credential?.type === "oauth") {
-				if (credential.email) summary.email = credential.email;
-				if (credential.accountId) summary.accountId = credential.accountId;
-				if (credential.orgId) summary.orgId = credential.orgId;
+				copyOAuthCredentialIdentity(summary, credential);
 				if (credential.orgName) summary.orgName = credential.orgName;
 			}
 			if (typeof row.updated_at === "number" && Number.isFinite(row.updated_at)) {
@@ -1281,12 +1367,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				}
 			}
 
+			this.#purgeSupersededDisabledRows(
+				providerName,
+				result,
+				result.some(row => row.credential.type === "oauth"),
+			);
 			return result;
 		});
 
-		const result = replace(provider, credentials);
-		this.#purgeSupersededDisabledRows(provider, result);
-		return result;
+		return replace(provider, credentials);
 	}
 
 	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[] {
@@ -1336,60 +1425,69 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				if (!activeCredential) continue;
 				result.push(toStoredAuthCredential(row, activeCredential));
 			}
+			this.#purgeSupersededDisabledRows(providerName, result, item.type === "oauth" && targetId !== null);
 			return result;
 		});
 
-		const result = upsert(provider, credential);
-		this.#purgeSupersededDisabledRows(provider, result);
-		return result;
+		return upsert(provider, credential);
 	}
 
 	/**
 	 * Hard-deletes disabled rows for a provider when an active replacement exists.
-	 * OAuth credentials match by identity key; API keys match by provider and type.
-	 * Disabled rows without an active same-type replacement remain recoverable.
+	 * OAuth credentials use the replacement identity matcher, including token
+	 * claims and alternate same-org identities; API keys match by provider and type.
+	 * Unidentified OAuth tombstones require an explicit later login/replacement,
+	 * not the presence or refresh of an unrelated sibling. Only upsert/replace
+	 * pass `oauthLogin` after writing a row, in the same transaction: even a
+	 * same-row login proves ordering without timestamp precision or new state.
 	 */
-	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[]): void {
+	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[], oauthLogin = false): void {
 		try {
 			let hasActiveApiKey = false;
-			const activeIdentityKeys = new Set<string>();
-			const activeOAuthCredentials: AuthCredential[] = [];
+			const activeIdentities: ResolvedOAuthCredentialIdentity[] = [];
 			for (const row of activeRows) {
-				if (row.credential.type === "api_key") {
-					hasActiveApiKey = true;
-					continue;
-				}
-				activeOAuthCredentials.push(row.credential);
-				const identityKey = resolveCredentialIdentityKey(provider, row.credential);
-				if (identityKey) activeIdentityKeys.add(identityKey);
+				if (row.credential.type === "api_key") hasActiveApiKey = true;
+				else activeIdentities.push(resolveOAuthCredentialIdentity(provider, row.credential));
 			}
-			if (!hasActiveApiKey && activeIdentityKeys.size === 0) return;
+			if (!hasActiveApiKey && activeIdentities.length === 0) return;
 
-			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
+			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[];
+			// One login accounts for at most one prior sign-out. When several
+			// identity-less tombstones exist, purging all of them on a single login
+			// silently drops the other accounts' startup and usage warnings, so only
+			// the most recent unidentified tombstone is consumed here.
+			const unidentifiedTarget = oauthLogin
+				? disabledRows.reduce<{ id: number; at: number } | null>((target, row) => {
+						if (row.credential_type === "api_key") return target;
+						const candidate = deserializeCredential(row);
+						if (candidate?.type !== "oauth") return target;
+						const candidateIdentity = resolveOAuthCredentialIdentity(provider, candidate);
+						candidateIdentity.key = normalizeStoredIdentityKey(row.identity_key) ?? candidateIdentity.key;
+						if (candidateIdentity.key !== null || candidateIdentity.identifiers.length > 0) return target;
+						if (target === null) return { id: row.id, at: row.updated_at ?? 0 };
+						// Rows are not disabled in insertion order, so the newest
+						// tombstone is the latest `updated_at`; the id only breaks ties.
+						if ((row.updated_at ?? 0) > target.at) return { id: row.id, at: row.updated_at ?? 0 };
+						if ((row.updated_at ?? 0) === target.at && row.id > target.id)
+							return { id: row.id, at: row.updated_at ?? 0 };
+						return target;
+					}, null)
+				: null;
 			for (const row of disabledRows) {
-				if (hasActiveApiKey && row.credential_type === "api_key") {
-					this.#hardDeleteStmt.run(row.id);
+				if (row.credential_type === "api_key") {
+					if (hasActiveApiKey) this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
-				const identityKey = resolveRowCredentialIdentityKey(provider, row);
-				if (identityKey && activeIdentityKeys.has(identityKey)) {
-					this.#hardDeleteStmt.run(row.id);
-					continue;
-				}
-				// Exact key equality misses a tombstone whose key predates a format
-				// the active row now uses (pre-org `<b>` vs `<b>|org:<o>`). An active
-				// credential that WOULD have replaced this row had it still been
-				// active supersedes its tombstone too, so mirror the replacement
-				// matcher rather than restating a weaker rule. The one-way upgrade
-				// and shared-workspace guards in matchesReplacementCredential carry
-				// over, so this never over-deletes another member's or subscription's
-				// row.
 				const disabledCredential = deserializeCredential(row);
-				if (disabledCredential === null) continue;
-				const superseded = activeOAuthCredentials.some(active =>
-					matchesReplacementCredential(provider, disabledCredential, identityKey, active),
-				);
-				if (superseded) this.#hardDeleteStmt.run(row.id);
+				if (disabledCredential?.type !== "oauth") continue;
+				const identity = resolveOAuthCredentialIdentity(provider, disabledCredential);
+				identity.key = normalizeStoredIdentityKey(row.identity_key) ?? identity.key;
+				if (
+					row.id === unidentifiedTarget?.id ||
+					activeIdentities.some(active => isOAuthCredentialIdentityRecovered(identity, active))
+				) {
+					this.#hardDeleteStmt.run(row.id);
+				}
 			}
 		} catch {
 			// Best-effort cleanup; don't let it break the main operation
@@ -1458,11 +1556,24 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
+	/**
+	 * Returns whether this call actually disabled the row. A busy or read-only
+	 * database, an aborting trigger, or a row that is already gone all report
+	 * `false` — callers announce a teardown and drop the row from memory on the
+	 * strength of this answer, and a swallowed write failure would have them do
+	 * that while the credential stays live in persistence.
+	 */
+	deleteAuthCredential(id: number, disabledCause: string): boolean {
+		const cause = normalizeDisabledCause(disabledCause);
+		// A deliberate removal owns the row's history and may replace an existing
+		// tombstone; an automatic teardown must not overwrite a peer's.
+		const stmt = isAutomaticDisableCause(cause) ? this.#disableIfActiveStmt : this.#deleteStmt;
 		try {
-			this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id);
-		} catch {
-			// Ignore delete failures
+			const result = stmt.run(cause, id) as { changes: number };
+			return result.changes > 0;
+		} catch (error) {
+			logger.debug("auth credential disable failed", { id, error: String(error) });
+			return false;
 		}
 	}
 
@@ -1993,6 +2104,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#insertStmt.finalize();
 		this.#updateStmt.finalize();
 		this.#deleteStmt.finalize();
+		this.#disableIfActiveStmt.finalize();
 		this.#deleteIfMatchesStmt.finalize();
 		this.#deleteByProviderStmt.finalize();
 		this.#hardDeleteStmt.finalize();

@@ -1,20 +1,34 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { withAuth } from "@oh-my-pi/pi-ai";
-import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { registerCustomApi, unregisterCustomApis, withAuth } from "@oh-my-pi/pi-ai";
+import {
+	type AuthCredentialStore,
+	AuthStorage,
+	type CredentialDisabledEvent,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai/auth-storage";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import * as compatBehavior from "@oh-my-pi/pi-catalog/compat/behavior";
+import { withTimeout } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";
+const COPILOT_PROVIDER = "github-copilot";
 
 const CODEX_PROVIDER = "openai-codex";
+const CODEX_TEST_API = "auth-storage-rotate-codex-test" as Api;
 const DAYBREAK_MODEL = "gpt-daybreak-blue-latest";
 const CODEX_CHATGPT_MODEL_DENIAL =
 	"The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)";
@@ -58,12 +72,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		unregisterOAuthProviders(SOURCE);
+		unregisterCustomApis(SOURCE);
 		store?.close();
 		store = undefined;
 		authStorage = undefined;
 		if (tempDir) {
 			await removeWithRetries(tempDir);
 			tempDir = "";
+		}
+	});
+
+	test("aborting an explicit id and bearer lookup leaves an uncooperative credential untouched", async () => {
+		if (!store) throw new Error("test setup failed");
+		const started = Promise.withResolvers<void>();
+		const stalled = Promise.withResolvers<string | undefined>();
+		authStorage = new AuthStorage(store, {
+			configValueResolver: () => {
+				started.resolve();
+				return stalled.promise;
+			},
+		});
+		await authStorage.set(PROVIDER, { type: "api_key", key: "uncooperative-config" });
+		const [row] = store.listAuthCredentials(PROVIDER);
+		const controller = new AbortController();
+		const failure = authStorage.rotateSessionCredential(PROVIDER, "cancelled-lookup", {
+			error: authError(),
+			credentialId: row!.id,
+			apiKey: "failed-bearer",
+			signal: controller.signal,
+		});
+		const outcome = failure.catch(error => error);
+		try {
+			await started.promise;
+			controller.abort();
+			expect(await outcome).toMatchObject({ name: "AbortError" });
+			expect(store.listAuthCredentials(PROVIDER)).toEqual([row]);
+			expect(authStorage.listCredentialBlocks([row!.id])).toEqual([]);
+			expect(await authStorage.listDisabledCredentials(PROVIDER)).toEqual([]);
+		} finally {
+			stalled.resolve("failed-bearer");
 		}
 	});
 
@@ -89,6 +136,279 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			},
 		});
 	}
+
+	function copilotStorage(): AuthStorage {
+		if (!store) throw new Error("test setup failed");
+		// Exercise the built-in OAuth refresh without performing unrelated usage requests.
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			rankingStrategyResolver: () => undefined,
+		});
+		return authStorage;
+	}
+
+	function copilotBearer(apiKey: string | undefined): string | undefined {
+		return apiKey === undefined ? undefined : (JSON.parse(apiKey) as { token: string }).token;
+	}
+
+	test.each([true, false, undefined] as const)(
+		"resolver obeys provider credential-retirement fact %s after refresh and retry",
+		async retireOAuthOnHard401 => {
+			if (!authStorage || !store) throw new Error("test setup failed");
+			vi.spyOn(compatBehavior, "credentialRetirementFor").mockReturnValue(
+				retireOAuthOnHard401 === undefined ? undefined : { provider: PROVIDER, retireOAuthOnHard401 },
+			);
+			registerProvider();
+			await authStorage.set(PROVIDER, {
+				type: "oauth",
+				access: "cached-access",
+				refresh: "cached-refresh",
+				expires: farExpiry(),
+			});
+			const [failed] = store.listAuthCredentials(PROVIDER);
+			const attemptedKeys: string[] = [];
+			const denied = new ProviderHttpError("Bad credentials", 401);
+			await expect(
+				withAuth(authStorage.resolver(PROVIDER, { sessionId: "retirement-policy" }), async key => {
+					attemptedKeys.push(key);
+					expect(await authStorage!.listDisabledCredentials(PROVIDER)).toEqual([]);
+					throw denied;
+				}),
+			).rejects.toBe(denied);
+			expect(attemptedKeys).toEqual(["cached-access", "minted-access"]);
+			expect((await authStorage.listDisabledCredentials(PROVIDER)).map(row => row.id)).toEqual(
+				retireOAuthOnHard401 ? [failed!.id] : [],
+			);
+			expect(store.listAuthCredentials(PROVIDER).map(row => row.id)).toEqual(
+				retireOAuthOnHard401 ? [] : [failed!.id],
+			);
+		},
+	);
+
+	test("Copilot hard 401 retires only the retried bearer and persists its sign-out across reopen", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, [
+			{ type: "oauth", access: "cached-A", refresh: "retried-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "cached-B", refresh: "retried-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const sessionId = "copilot-hard-auth";
+		const initialKey = copilotBearer(await storage.getApiKey(COPILOT_PROVIDER, sessionId));
+		const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+		const failed = rows.find(row => row.credential.type === "oauth" && row.credential.access === initialKey);
+		const sibling = rows.find(row => row.id !== failed?.id);
+		if (failed?.credential.type !== "oauth" || sibling?.credential.type !== "oauth") {
+			throw new Error("expected failed and sibling OAuth accounts");
+		}
+		const siblingBearer = sibling.credential.access;
+		const events: CredentialDisabledEvent[] = [];
+		storage.onCredentialDisabled(event => {
+			events.push(event);
+		});
+		const attemptedKeys: string[] = [];
+		const denied = new ProviderHttpError("Bad credentials", 401);
+		const result = await withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId }), async key => {
+			const bearer = copilotBearer(key)!;
+			attemptedKeys.push(bearer);
+			if (bearer === siblingBearer) return bearer;
+			// Neither the first failure nor the refresh itself may sign out the account.
+			expect(store!.listAuthCredentials(COPILOT_PROVIDER).map(row => row.id)).toEqual(rows.map(row => row.id));
+			expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+			expect(events).toEqual([]);
+			throw denied;
+		});
+		expect(result).toBe(sibling.credential.access);
+		expect(attemptedKeys).toEqual([initialKey!, failed.credential.refresh, sibling.credential.access]);
+		expect(events.map(event => event.credentialId)).toEqual([failed.id]);
+		expect((await storage.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed.id]);
+		expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual([sibling]);
+
+		storage.close();
+		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const reopened = copilotStorage();
+		await reopened.reload();
+		expect(copilotBearer(await reopened.getApiKey(COPILOT_PROVIDER, "reopened"))).toBe(sibling.credential.access);
+		expect((await reopened.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed.id]);
+		expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual([sibling]);
+	});
+
+	test("Copilot same-bearer refresh exhaustion retires a revoked last account after bounded retry", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "revoked",
+			refresh: "revoked",
+			expires: farExpiry(),
+		});
+		const [failed] = store.listAuthCredentials(COPILOT_PROVIDER);
+		const denied = new ProviderHttpError("Bad credentials", 401);
+		const attemptedKeys: string[] = [];
+		await expect(
+			withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId: "same-bearer" }), async key => {
+				attemptedKeys.push(copilotBearer(key)!);
+				throw denied;
+			}),
+		).rejects.toBe(denied);
+		// The structured key changes expiry during refresh, but both requests send the same bearer.
+		expect(attemptedKeys).toEqual(["revoked", "revoked"]);
+		expect(await storage.getApiKey(COPILOT_PROVIDER)).toBeUndefined();
+		expect((await storage.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed!.id]);
+	});
+
+	test("Copilot retirement matches a row id against its structured request bearer", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "revoked",
+			refresh: "revoked",
+			expires: farExpiry(),
+		});
+		const [failed] = store.listAuthCredentials(COPILOT_PROVIDER);
+		const apiKey = await storage.getApiKey(COPILOT_PROVIDER, "structured-row");
+		expect(copilotBearer(apiKey)).toBe("revoked");
+		await storage.rotateSessionCredential(COPILOT_PROVIDER, "structured-row", {
+			error: new ProviderHttpError("Bad credentials", 401),
+			apiKey,
+			credentialId: failed!.id,
+		});
+		expect(await storage.getApiKey(COPILOT_PROVIDER)).toBeUndefined();
+		expect((await storage.listDisabledCredentials(COPILOT_PROVIDER)).map(row => row.id)).toEqual([failed!.id]);
+	});
+
+	test("Copilot refresh recovery preserves the now-healthy account", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "old",
+			refresh: "healthy",
+			expires: farExpiry(),
+		});
+		const attemptedKeys: string[] = [];
+		expect(
+			await withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId: "recovery" }), async key => {
+				const bearer = copilotBearer(key)!;
+				attemptedKeys.push(bearer);
+				if (bearer === "old") throw new ProviderHttpError("Bad credentials", 401);
+				return bearer;
+			}),
+		).toBe("healthy");
+		expect(attemptedKeys).toEqual(["old", "healthy"]);
+		expect(copilotBearer(await storage.getApiKey(COPILOT_PROVIDER))).toBe("healthy");
+		expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+	});
+
+	test.each(["missing", "row-only", "stale-bearer", "stale-bearer-with-row"])(
+		"Copilot hard 401 preserves the stored bearer when request identity is %s",
+		async identity => {
+			const storage = copilotStorage();
+			if (!store) throw new Error("test setup failed");
+			const stale = identity.startsWith("stale");
+			await storage.set(COPILOT_PROVIDER, {
+				type: "oauth",
+				access: stale ? "superseded" : "healthy",
+				refresh: "healthy",
+				expires: farExpiry(),
+			});
+			const previousKey = await storage.getApiKey(COPILOT_PROVIDER, "identity");
+			const [target] = store.listAuthCredentials(COPILOT_PROVIDER);
+			if (target?.credential.type !== "oauth") throw new Error("expected OAuth account");
+			if (stale) store.updateAuthCredential(target.id, { ...target.credential, access: "healthy" });
+			const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+			await storage.rotateSessionCredential(COPILOT_PROVIDER, "identity", {
+				error: new ProviderHttpError("Bad credentials", 401),
+				apiKey: stale ? previousKey : undefined,
+				credentialId: identity === "row-only" || identity.endsWith("with-row") ? rows[0]!.id : undefined,
+			});
+			expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual(rows);
+			expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+			expect(store.getCredentialBlock?.(rows[0]!.id, `${COPILOT_PROVIDER}:oauth`, "")).toBeUndefined();
+		},
+	);
+
+	test("Copilot retirement loses to a concurrent bearer replacement without blocking it", async () => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, {
+			type: "oauth",
+			access: "failed",
+			refresh: "failed",
+			expires: farExpiry(),
+		});
+		const [row] = store.listAuthCredentials(COPILOT_PROVIDER);
+		if (row?.credential.type !== "oauth") throw new Error("expected OAuth account");
+		const healthy = { ...row.credential, access: "replacement", refresh: "replacement" };
+		const disableIfMatches = store.tryDisableAuthCredentialIfMatches.bind(store);
+		vi.spyOn(store, "tryDisableAuthCredentialIfMatches").mockImplementation((id, expected, cause) => {
+			store!.updateAuthCredential(id, healthy);
+			return disableIfMatches(id, expected, cause);
+		});
+		const events: CredentialDisabledEvent[] = [];
+		storage.onCredentialDisabled(event => {
+			events.push(event);
+		});
+		expect(
+			copilotBearer(
+				await storage.resolver(COPILOT_PROVIDER, { sessionId: "concurrent" })({
+					lastChance: true,
+					error: new ProviderHttpError("Bad credentials", 401),
+					previousKey: "failed",
+				}),
+			),
+		).toBe("replacement");
+		expect(store.listAuthCredentials(COPILOT_PROVIDER)[0]?.credential).toEqual(healthy);
+		expect(store.getCredentialBlock?.(row.id, `${COPILOT_PROVIDER}:oauth`, "")).toBeUndefined();
+		expect(events).toEqual([]);
+		expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+	});
+
+	test.each(["runtime", "config"])(
+		"Copilot %s overrides never retire a stored account with equal bearer bytes",
+		async origin => {
+			const storage = copilotStorage();
+			if (!store) throw new Error("test setup failed");
+			await storage.set(COPILOT_PROVIDER, {
+				type: "oauth",
+				access: "override",
+				refresh: "override",
+				expires: farExpiry(),
+			});
+			const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+			if (origin === "runtime") storage.setRuntimeApiKey(COPILOT_PROVIDER, "override");
+			else storage.setConfigApiKey(COPILOT_PROVIDER, "override");
+			const denied = new ProviderHttpError("Bad credentials", 401);
+			await expect(
+				withAuth(storage.resolver(COPILOT_PROVIDER), async () => {
+					throw denied;
+				}),
+			).rejects.toBe(denied);
+			expect(await storage.getApiKey(COPILOT_PROVIDER)).toBe("override");
+			expect(store.listAuthCredentials(COPILOT_PROVIDER)).toEqual(rows);
+			expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+		},
+	);
+
+	test.each([
+		["usage cap", new ProviderHttpError("Account usage limit reached", 401)],
+		["concurrency cap", new ProviderHttpError("Too many concurrent requests", 401)],
+		["model/org/account policy", new ProviderHttpError("Access denied", 403)],
+		["rewritten policy denial", new ProviderHttpError("GitHub Copilot access denied (HTTP 403)", 401)],
+	] as const)("Copilot %s preserves the stored credential", async (_kind, denied) => {
+		const storage = copilotStorage();
+		if (!store) throw new Error("test setup failed");
+		await storage.set(COPILOT_PROVIDER, { type: "oauth", access: "valid", refresh: "valid", expires: farExpiry() });
+		const rows = store.listAuthCredentials(COPILOT_PROVIDER);
+		await expect(
+			withAuth(storage.resolver(COPILOT_PROVIDER, { sessionId: "policy" }), async () => {
+				throw denied;
+			}),
+		).rejects.toBe(denied);
+		expect(store.listAuthCredentials(COPILOT_PROVIDER).map(row => row.id)).toEqual(rows.map(row => row.id));
+		expect(copilotBearer(await storage.getApiKey(COPILOT_PROVIDER))).toBe("valid");
+		expect(await storage.listDisabledCredentials(COPILOT_PROVIDER)).toEqual([]);
+	});
 
 	test("forceRefresh re-mints a not-yet-expired token; a normal resolve uses the cached token", async () => {
 		if (!authStorage) throw new Error("test setup failed");
@@ -305,8 +625,16 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 		const firstMark = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
 			credentialId: target.id,
+			apiKey: previousKey,
 		});
-		expect(firstMark.switched).toBe(true);
+		expect(firstMark).toEqual({ switched: false });
+		expect(authStorage.listCredentialBlocks([target.id, sibling.id])).toEqual([]);
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(`${previousKey}-refreshed`);
+
+		const rowMark = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
+			credentialId: target.id,
+		});
+		expect(rowMark.switched).toBe(true);
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sibling.credential.access);
 
 		const delayedMark = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
@@ -356,6 +684,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		});
 		expect(retainedMark.switched).toBe(true);
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sibling.credential.access);
+	});
+
+	test("a peer that retires the row mid-disable still leaves a distinct sibling retryable", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const backing = store;
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-target", refresh: "ref-target", expires: farExpiry(), email: "t@example.com" },
+			{ type: "oauth", access: "acc-sibling", refresh: "ref-sib", expires: farExpiry(), email: "s@example.com" },
+		]);
+		const target = backing
+			.listAuthCredentials(PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.email === "t@example.com");
+		if (target?.credential.type !== "oauth") throw new Error("expected the target row");
+
+		// A peer retires the row after this session resolved it but before the
+		// guarded disable lands, so the disable reports no transition of its own.
+		const guarded = backing.tryDisableAuthCredentialIfMatches.bind(backing);
+		vi.spyOn(backing, "tryDisableAuthCredentialIfMatches").mockImplementationOnce((id, expected, cause, lease) => {
+			const peer = new Database(path.join(tempDir, "agent.db"));
+			try {
+				peer.run("DELETE FROM auth_credentials WHERE id = ?", [id]);
+			} finally {
+				peer.close();
+			}
+			return guarded(id, expected, cause, lease);
+		});
+
+		// Who performed the removal is irrelevant: a distinct sibling is still
+		// usable, so the session must be told it can retry rather than having the
+		// original authentication error surfaced.
+		expect(
+			await authStorage.rotateSessionCredential(PROVIDER, "peer-retired", {
+				error: new Error("Encountered invalidated oauth token for user, failing request"),
+				apiKey: target.credential.access,
+				credentialId: target.id,
+			}),
+		).toBe(true);
+		expect(authStorage.listStoredCredentials(PROVIDER).map(row => row.id)).not.toContain(target.id);
+		expect(await authStorage.getApiKey(PROVIDER, "peer-retired")).toBe("acc-sibling");
 	});
 
 	test("usage marking does not block a sibling when its target disappears during usage lookup", async () => {
@@ -449,7 +816,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sticky);
 	});
 
-	test("credentialId rotation targets the failed row after bearer changes without clearing stale sticky", async () => {
+	test("credentialId rotation never retires a peer's replacement", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		await authStorage.set(PROVIDER, [
 			{ type: "api_key", key: "acc-A" },
@@ -470,12 +837,24 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		store.updateAuthCredential(targetRow.id, { type: "api_key", key: changedKey });
 		await authStorage.reload();
 
+		// The failed bearer is gone, so there is nothing to retire under it and
+		// nothing to switch to on this request: auth-retry keys attempts by row id,
+		// so the replacement on the same row is already considered attempted.
 		const rotated = await authStorage.rotateSessionCredential(PROVIDER, sessionId, {
 			error: authError(),
 			apiKey: oldKey,
 			credentialId: targetRow.id,
 		});
-		expect(rotated).toBe(true);
+		expect(rotated).toBe(false);
+		expect(authStorage.listCredentialBlocks([targetRow.id])).toEqual([]);
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sticky);
+
+		expect(
+			await authStorage.rotateSessionCredential(PROVIDER, sessionId, {
+				error: authError(),
+				credentialId: targetRow.id,
+			}),
+		).toBe(true);
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sticky);
 
 		const laterSelections = new Set<string>();
@@ -894,5 +1273,1078 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(shortWindow.blockedUntilMs).toBeDefined();
 		expect(shortWindow.blockedUntilMs!).toBeGreaterThan(Date.now() + 7_100_000);
 		expect(shortWindow.blockedUntilMs!).toBeLessThanOrEqual(Date.now() + 7_200_000);
+	});
+
+	test("an exhausted Codex model denial names the tried accounts, the recent sign-out, and the way back in", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "entitled-access",
+				refresh: "ref-E",
+				expires: farExpiry(),
+				email: "entitled@example.com",
+			},
+			{ type: "oauth", access: "sibling-a", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "sibling-b", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const entitledRow = store
+			.listAuthCredentials(CODEX_PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.access === "entitled-access");
+		if (!entitledRow) throw new Error("entitled credential row missing");
+		// The only entitled account was torn down earlier (the incident's silent
+		// sign-out); every remaining sibling is a ChatGPT account without the model.
+		expect(
+			codexStorage.disableCredentialById(entitledRow.id, "oauth refresh failed: OAuthError: invalid_grant"),
+		).toBe(true);
+
+		const keys: unknown[] = [];
+		registerCustomApi(
+			CODEX_TEST_API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(options?.apiKey);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [],
+						api: CODEX_TEST_API,
+						provider: CODEX_PROVIDER,
+						model: DAYBREAK_MODEL,
+						timestamp: 1,
+						stopReason: "stop",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					};
+					stream.push({ type: "start", partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: CODEX_CHATGPT_MODEL_DENIAL,
+							errorStatus: 400,
+						},
+					});
+				});
+				return stream;
+			},
+			SOURCE,
+		);
+		const codexModel = {
+			id: DAYBREAK_MODEL,
+			name: "Daybreak",
+			api: CODEX_TEST_API,
+			provider: CODEX_PROVIDER,
+			contextWindow: 1000,
+			maxTokens: 100,
+		} as Model<Api>;
+		const sessionId = "daybreak-exhausted";
+		const stream = streamSimple(
+			codexModel,
+			{ systemPrompt: [], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: codexStorage.resolver(CODEX_PROVIDER, { sessionId, modelId: DAYBREAK_MODEL }) },
+		);
+		for await (const _event of stream) {
+			// drain
+		}
+		const result = await stream.result();
+
+		expect(keys.sort()).toEqual(["sibling-a", "sibling-b"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorClassificationMessage).toBe(CODEX_CHATGPT_MODEL_DENIAL);
+		expect(result.errorMessage).toMatch(
+			new RegExp(
+				"^The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account\\. " +
+					"No other signed-in openai-codex account can serve it: a@example\\.com denied, b@example\\.com denied\\. " +
+					"Recently signed out: entitled@example\\.com \\(sign-in expired, \\S+ ago\\)\\. " +
+					"Sign in with /login openai-codex using an account entitled to this model\\.$",
+			),
+		);
+	});
+
+	test("modelEntitlementError names the requested model, never the provider's captured text", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "path-denied", refresh: "ref-p", expires: farExpiry(), email: "p@example.com" },
+		]);
+		const sessionId = "path-denial";
+		const served = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
+
+		// A proxy quotes an absolute path ending in the model id. The classifier
+		// compares only the final path component, so this still classifies as the
+		// same denial — but the reconstructed sentence is persisted and rendered,
+		// so the path must not survive into it.
+		const denial = new ProviderHttpError(
+			`The '/home/alice/${DAYBREAK_MODEL}' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)`,
+			400,
+			{ code: "invalid_request_error" },
+		);
+		// The verdict is only produced once the failed row is blocked for this
+		// model scope, which is what the rotation attempt does.
+		await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: served,
+		});
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: served,
+		});
+
+		expect(verdict).toBeDefined();
+		expect(verdict?.message).toContain(DAYBREAK_MODEL);
+		expect(verdict?.message).not.toContain("/home/alice");
+		codexStorage.close();
+	});
+	test("entitlement diagnostics do not carry the operator's home path", async () => {
+		// Identity fields come from provider and extension data and the verdict is
+		// persisted in the transcript, so an absolute home path must not survive.
+		const home = os.homedir();
+		if (home.length <= 1) return;
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "home-path-key",
+				refresh: "ref-h",
+				expires: farExpiry(),
+				email: "h@example.com",
+				orgName: `${home}/private`,
+			},
+		]);
+		const sessionId = "home-path";
+		const served = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400, { code: "invalid_request_error" });
+		await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: served,
+		});
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: served,
+		});
+		expect(verdict).toBeDefined();
+		expect(verdict?.message).not.toContain(home);
+		codexStorage.close();
+	});
+
+	test("modelEntitlementError stays silent for errors that are not an exact model-policy denial, or that no stored credential served", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		expect(
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, authError(), { apiKey: "any" }),
+		).toBeUndefined();
+		expect(
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, "gpt-5.3-codex", denial, { apiKey: "any" }),
+		).toBeUndefined();
+		expect(
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, undefined, denial, { apiKey: "any" }),
+		).toBeUndefined();
+		expect(await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial)).toBeUndefined();
+		// A request that ran on a pinned runtime key never rotated through the
+		// stored pool: the failed bearer resolves to no stored credential, so
+		// the pool has nothing to explain — even when an earlier stored-account
+		// request left every row blocked for the model.
+		await authStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "blocked-earlier", refresh: "ref-U", expires: farExpiry(), email: "u@example.com" },
+		]);
+		expect(await authStorage.getApiKey(CODEX_PROVIDER, "earlier", { modelId: DAYBREAK_MODEL })).toBe(
+			"blocked-earlier",
+		);
+		expect(
+			await authStorage.rotateSessionCredential(CODEX_PROVIDER, "earlier", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "blocked-earlier",
+			}),
+		).toBe(false);
+		authStorage.setRuntimeApiKey(CODEX_PROVIDER, "sk-pinned");
+		expect(await authStorage.getApiKey(CODEX_PROVIDER, "pinned", { modelId: DAYBREAK_MODEL })).toBe("sk-pinned");
+		expect(
+			await authStorage.rotateSessionCredential(CODEX_PROVIDER, "pinned", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "sk-pinned",
+			}),
+		).toBe(false);
+		expect(
+			await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "sk-pinned" }),
+		).toBeUndefined();
+	});
+
+	test("the verdict neutralizes a hostile model id echoed by the provider", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref-O", expires: farExpiry(), email: "o@example.com" },
+		]);
+		// A custom model id carrying a tab and an escape sequence, echoed verbatim in the denial.
+		const hostileModel = "gpt-x\t\x1b[31mred";
+		const denial = new ProviderHttpError(
+			`The '${hostileModel}' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)`,
+			400,
+		);
+		const sessionId = "daybreak-hostile-model";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: hostileModel })).toBe("only");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: hostileModel,
+				apiKey: "only",
+			}),
+		).toBe(false);
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, hostileModel, denial, {
+			apiKey: "only",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
+		expect(verdict.message).toMatch(/^The 'gpt-x red' model is not supported/);
+		expect(AIError.is(AIError.classify(verdict), AIError.Flag.AccountPolicy)).toBe(true);
+	});
+
+	test("the verdict is withheld while an untried sibling is still unblocked", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "denied-earlier", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "never-tried", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		// An earlier request left a model-scope block on A; B has never been asked.
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, "earlier", { modelId: DAYBREAK_MODEL })).toBe(
+			"denied-earlier",
+		);
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, "earlier", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "denied-earlier",
+			}),
+		).toBe(true);
+
+		// A later request denied on A again (its bearer handed out by the
+		// blocked-fallback pass) while B is still available — not exhaustion.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "denied-earlier" }),
+		).toBeUndefined();
+		// And a bearer a peer rotated mid-flight resolves to no stored row at all.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "rotated-away" }),
+		).toBeUndefined();
+	});
+
+	test("the verdict is withheld when the stored accounts are parked by an unrelated backoff, not denied the model", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "parked-a", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "parked-b", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		// Earlier auth failures parked both accounts under the unscoped backoff.
+		for (const [sessionId, apiKey] of [
+			["parked-1", "parked-a"],
+			["parked-2", "parked-b"],
+		] as const) {
+			expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(apiKey);
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, { error: authError(), apiKey });
+		}
+
+		// A parked account was never denied this model, so there is no verdict.
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "parked-a" }),
+		).toBeUndefined();
+
+		// Once A is actually denied the model, the verdict names B as parked, not denied.
+		await codexStorage.rotateSessionCredential(CODEX_PROVIDER, "parked-1", {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: "parked-a",
+		});
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "parked-a",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).toMatch(/a@example\.com denied, b@example\.com unavailable for \S+\./);
+	});
+
+	test.each(["api-first", "oauth-first"] as const)(
+		"the entitlement verdict skips API-key commands for an OAuth bearer (%s)",
+		async order => {
+			if (!store) throw new Error("test setup failed");
+			const command = Promise.withResolvers<string | undefined>();
+			const configValueResolver = vi.fn(() => command.promise);
+			const storage = new AuthStorage(store, {
+				usageProviderResolver: () => undefined,
+				configValueResolver,
+			});
+			const oauth = {
+				type: "oauth" as const,
+				access: "chatgpt-only",
+				refresh: "ref-C",
+				expires: farExpiry(),
+				email: "c@example.com",
+			};
+			const apiKey = { type: "api_key" as const, key: "!slow-api-key" };
+			await storage.set(CODEX_PROVIDER, order === "api-first" ? [apiKey, oauth] : [oauth, apiKey]);
+			const deniedRow = store.listAuthCredentials(CODEX_PROVIDER).find(row => row.credential.type === "oauth");
+			if (!deniedRow) throw new Error("expected OAuth credential");
+			const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+			const sessionId = "daybreak-mixed-pool";
+			expect(await storage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("chatgpt-only");
+			expect(
+				await storage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+					error: denial,
+					modelId: DAYBREAK_MODEL,
+					credentialId: deniedRow.id,
+				}),
+			).toBe(false);
+			// Re-resolution stays in the OAuth pool even though a stored API key is unblocked.
+			expect(await storage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("chatgpt-only");
+
+			const pending = storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+				apiKey: "chatgpt-only",
+			});
+			try {
+				const nextTurn = Promise.withResolvers<"pending">();
+				setImmediate(() => nextTurn.resolve("pending"));
+				const verdict = await Promise.race([pending, nextTurn.promise]);
+				expect(verdict).toBeInstanceOf(AIError.ModelEntitlementError);
+				if (!(verdict instanceof AIError.ModelEntitlementError)) throw new Error("expected a prompt verdict");
+				expect(verdict.message).toContain("c@example.com denied.");
+				expect(verdict.message).not.toContain("API key");
+				// Structured OAuth keys use the same token matching contract as rotation.
+				expect(
+					await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+						apiKey: JSON.stringify({ token: "chatgpt-only", enterpriseUrl: "https://example.com" }),
+					}),
+				).toBeInstanceOf(AIError.ModelEntitlementError);
+				expect(configValueResolver).not.toHaveBeenCalled();
+			} finally {
+				command.resolve("sk-unrelated");
+				await pending;
+			}
+		},
+	);
+
+	test("the entitlement API-key fallback requires matching resolved bytes and an exact model block", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			configValueResolver: async () => "sk-served",
+		});
+		await storage.set(CODEX_PROVIDER, [
+			{ type: "api_key", key: "!api-key-command" },
+			{ type: "oauth", access: "untried-oauth", refresh: "ref", expires: farExpiry() },
+		]);
+		const apiKeyRow = store.listAuthCredentials(CODEX_PROVIDER).find(row => row.credential.type === "api_key");
+		if (!apiKeyRow) throw new Error("expected API-key credential");
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		expect(
+			await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "sk-served" }),
+		).toBeUndefined();
+		await storage.rotateSessionCredential(CODEX_PROVIDER, undefined, {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			credentialId: apiKeyRow.id,
+		});
+		const verdict = await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "sk-served",
+		});
+		expect(verdict).toBeInstanceOf(AIError.ModelEntitlementError);
+		expect(verdict?.message).toContain("API key denied.");
+		expect(
+			await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "rotated-away" }),
+		).toBeUndefined();
+		storage.setConfigApiKey(CODEX_PROVIDER, "sk-config");
+		expect(await storage.getApiKey(CODEX_PROVIDER)).toBe("sk-config");
+		expect(
+			await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "sk-config" }),
+		).toBeUndefined();
+	});
+
+	test.each(["budget", "caller"] as const)(
+		"the entitlement API-key fallback stops on %s abort without certifying exhaustion",
+		async abortSource => {
+			if (!store) throw new Error("test setup failed");
+			const budget = new AbortController();
+			const caller = new AbortController();
+			vi.spyOn(AbortSignal, "timeout").mockReturnValue(budget.signal);
+			const command = Promise.withResolvers<string | undefined>();
+			const started = Promise.withResolvers<void>();
+			const configValueResolver = vi.fn(() => {
+				started.resolve();
+				return command.promise;
+			});
+			const storage = new AuthStorage(store, { usageProviderResolver: () => undefined, configValueResolver });
+			await storage.set(CODEX_PROVIDER, [
+				{ type: "api_key", key: "!first-command" },
+				{ type: "api_key", key: "!second-command" },
+			]);
+			const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+			for (const row of store.listAuthCredentials(CODEX_PROVIDER)) {
+				await storage.rotateSessionCredential(CODEX_PROVIDER, undefined, {
+					error: denial,
+					modelId: DAYBREAK_MODEL,
+					credentialId: row.id,
+				});
+			}
+			const pending = storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+				apiKey: "unmatched-bearer",
+				signal: caller.signal,
+			});
+			await started.promise;
+			(abortSource === "budget" ? budget : caller).abort();
+			try {
+				const nextTurn = Promise.withResolvers<"pending">();
+				setImmediate(() => nextTurn.resolve("pending"));
+				expect(await Promise.race([pending, nextTurn.promise])).toBeUndefined();
+			} finally {
+				command.resolve("sk-unrelated");
+				await pending;
+			}
+			// Completion of an abandoned command must not start the next one.
+			expect(configValueResolver).toHaveBeenCalledTimes(1);
+			// The exhausted shared budget/caller signal must not start any new command.
+			expect(
+				await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+					apiKey: "sk-unrelated",
+					signal: caller.signal,
+				}),
+			).toBeUndefined();
+			expect(configValueResolver).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	test.each(["listDisabledCredentials", "revalidateCredentials"] as const)(
+		"noncooperative %s cannot delay an entitlement verdict beyond the budget or caller abort",
+		async method => {
+			if (!store) throw new Error("test setup failed");
+			const configValueResolver = vi.fn(async () => "sk-unrelated");
+			const storage = new AuthStorage(store, { usageProviderResolver: () => undefined, configValueResolver });
+			await storage.set(CODEX_PROVIDER, [
+				{ type: "api_key", key: "!unrelated-command" },
+				{ type: "oauth", access: "only", refresh: "ref", expires: farExpiry() },
+			]);
+			const row = store.listAuthCredentials(CODEX_PROVIDER).find(entry => entry.credential.type === "oauth");
+			if (!row) throw new Error("expected OAuth credential");
+			const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+			await storage.rotateSessionCredential(CODEX_PROVIDER, undefined, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				credentialId: row.id,
+			});
+			const list = storage.listDisabledCredentials.bind(storage);
+			const revalidate = storage.revalidateCredentials.bind(storage);
+			for (const abortSource of ["budget", "caller"] as const) {
+				const caller = new AbortController();
+				const gate = Promise.withResolvers<void>();
+				const started = Promise.withResolvers<AbortSignal | undefined>();
+				let work: Promise<unknown> | undefined;
+				if (method === "listDisabledCredentials") {
+					vi.spyOn(storage, method).mockImplementation((provider, signal) => {
+						started.resolve(signal);
+						const lookup = gate.promise.then(() => list(provider, signal));
+						work = lookup;
+						return lookup;
+					});
+				} else {
+					vi.spyOn(storage, method).mockImplementation(signal => {
+						started.resolve(signal);
+						const refresh = gate.promise.then(() => revalidate(signal));
+						work = refresh;
+						return refresh;
+					});
+				}
+				const pending = storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+					apiKey: "only",
+					signal: caller.signal,
+				});
+				try {
+					const signal = await withTimeout(started.promise, 250, "diagnostic hook never started");
+					if (abortSource === "caller") caller.abort();
+					expect(
+						await withTimeout(pending, abortSource === "caller" ? 250 : 2_500, "diagnostic never stopped"),
+					).toBeUndefined();
+					expect(signal?.aborted).toBe(true);
+				} finally {
+					// The hook deliberately ignores cancellation; settle its real operation before closing the store.
+					gate.resolve();
+					await work;
+					await pending;
+					vi.restoreAllMocks();
+				}
+				// Only diagnostics failed: the exhausted OAuth pool itself is unchanged.
+				expect(
+					await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+				).toBeInstanceOf(AIError.ModelEntitlementError);
+			}
+			expect(configValueResolver).not.toHaveBeenCalled();
+		},
+	);
+
+	test.each(["revalidation", "bearer matching"] as const)(
+		"entitlement %s only receives the remainder of the shared diagnostic deadline",
+		async stage => {
+			if (!store) throw new Error("test setup failed");
+			const gate = Promise.withResolvers<void>();
+			const command = gate.promise.then(() => "sk-served");
+			const storage = new AuthStorage(store, {
+				usageProviderResolver: () => undefined,
+				configValueResolver: () => command,
+			});
+			await storage.set(CODEX_PROVIDER, { type: "api_key", key: "!api-key-command" });
+			const [row] = store.listAuthCredentials(CODEX_PROVIDER);
+			if (!row) throw new Error("expected API-key credential");
+			const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+			await storage.rotateSessionCredential(CODEX_PROVIDER, undefined, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				credentialId: row.id,
+			});
+			let now = performance.now();
+			vi.spyOn(performance, "now").mockImplementation(() => now);
+			const list = storage.listDisabledCredentials.bind(storage);
+			vi.spyOn(storage, "listDisabledCredentials").mockImplementation(async (provider, signal) => {
+				const disabled = await list(provider, signal);
+				now += stage === "revalidation" ? 1_975 : 1_000;
+				return disabled;
+			});
+			const revalidate = storage.revalidateCredentials.bind(storage);
+			let refresh: Promise<void> | undefined;
+			vi.spyOn(storage, "revalidateCredentials").mockImplementation(signal => {
+				refresh = (async () => {
+					if (stage === "revalidation") await gate.promise;
+					await revalidate(signal);
+					if (stage === "bearer matching") now += 975;
+				})();
+				return refresh;
+			});
+			const pending = storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+				apiKey: "sk-served",
+			});
+			try {
+				// Prior awaits consumed 1,975 ms. A fresh per-stage 2 s timer is not a shared deadline.
+				expect(await withTimeout(pending, 250, "diagnostic deadline was reset")).toBeUndefined();
+			} finally {
+				gate.resolve();
+				await refresh;
+				await command;
+				await pending;
+			}
+		},
+	);
+
+	test.each(["listDisabledCredentials", "revalidateCredentials"] as const)(
+		"a failed %s cannot certify cached exhaustion",
+		async method => {
+			if (!store) throw new Error("test setup failed");
+			const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+			await storage.set(CODEX_PROVIDER, [
+				{ type: "oauth", access: "only", refresh: "ref", expires: farExpiry(), email: "only@example.com" },
+			]);
+			const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+			await storage.rotateSessionCredential(CODEX_PROVIDER, "freshness-failure", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "only",
+			});
+			vi.spyOn(storage, method).mockRejectedValue(new Error("broker unavailable"));
+			expect(
+				await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+			).toBeUndefined();
+		},
+	);
+
+	test("a login during diagnostic lookup is observed before certifying exhaustion", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		const storage = new AuthStorage(sqlite, { usageProviderResolver: () => undefined });
+		await storage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref", expires: farExpiry(), email: "only@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		await storage.rotateSessionCredential(CODEX_PROVIDER, "lookup-login", {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: "only",
+		});
+		vi.spyOn(storage, "listDisabledCredentials").mockImplementation(async () => {
+			sqlite.upsertAuthCredentialForProvider(CODEX_PROVIDER, {
+				type: "oauth",
+				access: "fresh",
+				refresh: "ref-fresh",
+				expires: farExpiry(),
+				email: "fresh@example.com",
+			});
+			return [];
+		});
+		expect(
+			await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+		).toBeUndefined();
+	});
+
+	test("recent sign-outs honor an authoritative identity published during snapshot revalidation", async () => {
+		if (!store) throw new Error("test setup failed");
+		for (const [email, marker] of [
+			["recovered@example.test", "stale-signout-marker"],
+			["waiting@example.test", "still-signed-out-marker"],
+			["second@example.test", "second-account-marker"],
+			["third@example.test", "third-account-marker"],
+		]) {
+			const row = store.upsertAuthCredentialForProvider(CODEX_PROVIDER, {
+				type: "oauth",
+				access: `old-${email}`,
+				refresh: `refresh-${email}`,
+				expires: farExpiry(),
+				email,
+			})[0]!;
+			store.deleteAuthCredential(row.id, `oauth refresh failed: invalid_grant ${marker}`);
+		}
+		store.upsertAuthCredentialForProvider(CODEX_PROVIDER, {
+			type: "oauth",
+			access: "opaque-current",
+			refresh: "<remote>",
+			expires: farExpiry(),
+		});
+		let publishRecovery = false;
+		let identityKey: string | null = null;
+		const brokerLike = new Proxy(store, {
+			get(target, property) {
+				if (property === "refreshSnapshot")
+					return async () => {
+						if (publishRecovery) identityKey = "email:recovered@example.test";
+					};
+				if (property === "listAuthCredentials")
+					return (provider?: string) => target.listAuthCredentials(provider).map(row => ({ ...row, identityKey }));
+				if (property === "listDisabledCredentials")
+					return async (provider?: string) => {
+						const now = Date.now();
+						const rows = (await target.listDisabledCredentials!(provider)).map(row => ({
+							...row,
+							disabledAtMs:
+								now -
+								(row.email === "recovered@example.test"
+									? 500
+									: row.email === "waiting@example.test"
+										? 1000
+										: 5000),
+						}));
+						const waiting = rows.find(row => row.email === "waiting@example.test");
+						if (!waiting) throw new Error("expected retained account history");
+						// A broker can retain older generations independently of its active snapshot.
+						return [
+							...rows,
+							...[100, 101].map((id, index) => ({
+								...waiting,
+								id,
+								disabledAtMs: now - (index + 2) * 1000,
+								cause: "oauth refresh failed: invalid_grant older-generation-marker",
+							})),
+						];
+					};
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const storage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			return credential ? { apiKey: credential.access, newCredentials: credential } : null;
+		});
+		await storage.reload();
+		const apiKey = await storage.getApiKey(CODEX_PROVIDER, "identity-recovery", { modelId: DAYBREAK_MODEL });
+		if (!apiKey) throw new Error("expected a stored bearer");
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		expect(
+			await storage.rotateSessionCredential(CODEX_PROVIDER, "identity-recovery", {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey,
+			}),
+		).toBe(false);
+		publishRecovery = true;
+		const verdict = await storage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey });
+		expect(verdict).toBeInstanceOf(AIError.ModelEntitlementError);
+		// The sign-out is named by account and classified cause, not provider text.
+		expect(verdict?.message).toContain("waiting@example.test");
+		expect(verdict?.message).toContain("second@example.test");
+		expect(verdict?.message).toContain("third@example.test");
+		// A recovered account is not named at all.
+		expect(verdict?.message).not.toContain("recovered@example.test");
+	});
+
+	test("the verdict is judged against a refreshed broker snapshot, not the cached pool", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		// A broker-backed store: `refreshSnapshot` is where an account another
+		// client signed in becomes visible to this process.
+		const brokerLike = new Proxy(sqlite, {
+			get(target, property) {
+				if (property === "refreshSnapshot") {
+					return async () => {
+						target.upsertAuthCredentialForProvider(CODEX_PROVIDER, {
+							type: "oauth",
+							access: "fresh-sibling",
+							refresh: "ref-F",
+							expires: farExpiry(),
+							email: "f@example.com",
+						});
+					};
+				}
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const codexStorage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "only", refresh: "ref-O", expires: farExpiry(), email: "o@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-stale-snapshot";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("only");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "only",
+			}),
+		).toBe(false);
+
+		// The cached pool is exhausted; the refreshed one has an untried sibling.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "only" }),
+		).toBeUndefined();
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(
+			"fresh-sibling",
+		);
+	});
+
+	test("a reordered snapshot keeps the session on the same unblocked credential", async () => {
+		if (!store) throw new Error("test setup failed");
+		registerProvider();
+		let reversed = false;
+		const brokerLike = new Proxy(store, {
+			get(target, property) {
+				if (property === "listAuthCredentials")
+					return (provider?: string) => {
+						const rows = target.listAuthCredentials(provider);
+						return reversed ? rows.toReversed() : rows;
+					};
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const storage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		await storage.set(PROVIDER, [
+			{ type: "oauth", access: "sticky-a", refresh: "ref-a", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "sticky-b", refresh: "ref-b", expires: farExpiry(), email: "b@example.com" },
+		]);
+		expect(await storage.getApiKey(PROVIDER, "sticky-reorder")).toBe("sticky-a");
+		reversed = true;
+		await storage.reload();
+		expect(await storage.getApiKey(PROVIDER, "sticky-reorder")).toBe("sticky-a");
+	});
+
+	test("a reordered snapshot keeps each model denial on its own account", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		let reordered = false;
+		// A refreshed broker snapshot that lists the same rows in another order.
+		const brokerLike = new Proxy(sqlite, {
+			get(target, property) {
+				if (property === "refreshSnapshot") {
+					return async () => {
+						reordered = true;
+					};
+				}
+				if (property === "listAuthCredentials") {
+					return (provider?: string) => {
+						const rows = target.listAuthCredentials(provider);
+						return reordered ? rows.toReversed() : rows;
+					};
+				}
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const codexStorage = new AuthStorage(brokerLike, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "denied-a", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "untried-b", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-reordered";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("denied-a");
+		expect(
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: "denied-a",
+			}),
+		).toBe(true);
+
+		// After the refresh B sits where A was; A's denial must not be charged to B.
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "denied-a" }),
+		).toBeUndefined();
+		expect(reordered).toBe(true);
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("untried-b");
+	});
+
+	test("the verdict names at most a screenful of accounts and counts the rest", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(
+			CODEX_PROVIDER,
+			Array.from({ length: 11 }, (_, index) => ({
+				type: "oauth" as const,
+				access: `pool-${index}`,
+				refresh: `ref-${index}`,
+				expires: farExpiry(),
+				email: `member${index}@example.com`,
+			})),
+		);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-large-pool";
+		// Every account gets the denial in turn until rotation has nowhere left to go.
+		let bearer: string | undefined;
+		for (let attempt = 0; attempt < 11; attempt += 1) {
+			bearer = await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: bearer,
+			});
+		}
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: bearer,
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).toContain("member7@example.com denied, and 3 more.");
+		expect((verdict.message.match(/@example\.com denied/g) ?? []).length).toBe(8);
+	});
+
+	test("the verdict sanitizes and bounds provider-controlled text", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "hostile",
+				refresh: "ref-H",
+				expires: farExpiry(),
+				email: `evil\x1b[2J\n${"a".repeat(120)}@example.com`,
+			},
+			// Wide glyphs: 100 code units but 200 terminal columns.
+			{ type: "oauth", access: "wide", refresh: "ref-W", expires: farExpiry(), email: `${"漢".repeat(100)}@例.com` },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-hostile";
+		for (const bearer of ["hostile", "wide"]) {
+			expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(bearer);
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: bearer,
+			});
+		}
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "hostile",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F]/);
+		expect(verdict.message).toContain("evil");
+		expect(verdict.message).not.toContain("a".repeat(120));
+		// Bounded in terminal columns, not code units, and never cut inside a glyph.
+		const wideLabel = verdict.message.match(/漢+…/)?.[0];
+		if (!wideLabel) throw new Error("wide account label missing");
+		expect(Bun.stringWidth(wideLabel)).toBeLessThanOrEqual(60);
+		expect(Bun.stringWidth(wideLabel)).toBeGreaterThan(50);
+		expect(verdict.message).not.toContain("Recently signed out");
+		expect(verdict.message).toMatch(/Sign in with \/login openai-codex using an account entitled to this model\.$/);
+	});
+
+	test("the verdict names a sibling signed out while the pool was being revalidated", async () => {
+		if (!store) throw new Error("test setup failed");
+		const backing = store;
+		const codexStorage = new AuthStorage(backing, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "acc-a", refresh: "ref-a", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "acc-gone", refresh: "ref-gone", expires: farExpiry(), email: "gone@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-late-signout";
+		for (const bearer of ["acc-a", "acc-gone"]) {
+			expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(bearer);
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: bearer,
+			});
+		}
+		const goneId = backing
+			.listAuthCredentials(CODEX_PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.email === "gone@example.com")?.id;
+		if (goneId === undefined) throw new Error("expected the sibling to be stored");
+
+		// A peer signs the sibling out after the first history read and before
+		// the refreshed pool is observed.
+		const revalidate = codexStorage.revalidateCredentials.bind(codexStorage);
+		vi.spyOn(codexStorage, "revalidateCredentials").mockImplementationOnce(async signal => {
+			backing.deleteAuthCredential(goneId, "oauth refresh failed: OAuthError: invalid_grant");
+			await revalidate(signal);
+		});
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "acc-a",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		expect(verdict.message).toContain("Recently signed out: gone@example.com");
+	});
+
+	test("the verdict is withheld when the post-refresh history read fails", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{ type: "oauth", access: "acc-a", refresh: "ref-a", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "acc-b", refresh: "ref-b", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-history-unreadable";
+		for (const bearer of ["acc-a", "acc-b"]) {
+			expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(bearer);
+			await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+				error: denial,
+				modelId: DAYBREAK_MODEL,
+				apiKey: bearer,
+			});
+		}
+
+		// The refresh succeeds, so the identities are fresh, but the history the
+		// verdict would name them against never arrives.
+		const listDisabled = codexStorage.listDisabledCredentials.bind(codexStorage);
+		let reads = 0;
+		vi.spyOn(codexStorage, "listDisabledCredentials").mockImplementation(async (provider, signal, options) => {
+			if (++reads > 1) throw new Error("disabled history unavailable");
+			return await listDisabled(provider, signal, options);
+		});
+
+		expect(
+			await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, { apiKey: "acc-a" }),
+		).toBeUndefined();
+	});
+
+	test("a joined-emoji account label is cut on whole graphemes, not inside the sequence", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		// Each family sequence is one grapheme built from three emoji joined by U+200D.
+		const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}";
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "joined",
+				refresh: "ref-J",
+				expires: farExpiry(),
+				email: `${family.repeat(40)}@ex.com`,
+			},
+		]);
+		const denial = new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400);
+		const sessionId = "daybreak-joined";
+		expect(await codexStorage.getApiKey(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe("joined");
+		await codexStorage.rotateSessionCredential(CODEX_PROVIDER, sessionId, {
+			error: denial,
+			modelId: DAYBREAK_MODEL,
+			apiKey: "joined",
+		});
+
+		const verdict = await codexStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, denial, {
+			apiKey: "joined",
+		});
+		if (!verdict) throw new Error("expected a verdict");
+		const label = verdict.message.match(/\u{1F468}[^,]*?…/u)?.[0];
+		if (!label) throw new Error("joined account label missing");
+		// A cut inside the sequence would strand the joiner and waste most of the budget.
+		expect(label).not.toMatch(/\u200D…$/u);
+		expect(Bun.stringWidth(label)).toBeLessThanOrEqual(60);
+		expect(Bun.stringWidth(label)).toBeGreaterThan(50);
 	});
 });

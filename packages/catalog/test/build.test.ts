@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-cat
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -1382,6 +1383,42 @@ describe("model cache materialized round trip", () => {
 			expect(cached.stale).toBe(false);
 			expect(fetches).toBe(2);
 		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("bounds dropped-model names and reports omitted rows when an authoritative catalog empties", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-bounded-drop-"));
+		const provider = "bounded-catalog-" + "p".repeat(1_000);
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] = Array.from({ length: 64 }, (_, index) =>
+			completionsSpec({ id: `model-${index}-${"x".repeat(1_000)}`, provider }),
+		);
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const options = {
+			providerId: provider,
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: path.join(tempDir, "models.db"),
+			fetchDynamicModels: async () => discoveredModels,
+		};
+		try {
+			await resolveProviderModels(options, "online");
+			expect(warnSpy).not.toHaveBeenCalled();
+			discoveredModels = [];
+			const emptied = await resolveProviderModels(options, "online");
+			expect(emptied.models).toEqual([]);
+			expect(emptied.stale).toBe(false);
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			const metadata = warnSpy.mock.calls[0]?.[1];
+			expect(metadata).toMatchObject({ provider: expect.any(String), droppedCount: 64, omittedCount: 54 });
+			const names = metadata?.dropped;
+			if (!Array.isArray(names)) throw new Error("expected dropped-model names");
+			expect(names).toHaveLength(10);
+			expect(names.every(name => typeof name === "string" && name.length <= 200)).toBe(true);
+			expect(String(metadata?.provider).length).toBeLessThanOrEqual(200);
+			expect(JSON.stringify(metadata).length).toBeLessThan(3_000);
+		} finally {
+			warnSpy.mockRestore();
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
