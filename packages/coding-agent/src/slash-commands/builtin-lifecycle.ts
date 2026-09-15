@@ -235,12 +235,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
-		name: "drop",
+		name: "delete",
 		icon: "trash",
 		description: "Delete the current session and start a new one",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleDropCommand();
+			await runtime.ctx.handleDeleteCommand();
 		},
 	},
 	{

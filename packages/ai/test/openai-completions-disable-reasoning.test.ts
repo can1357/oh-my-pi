@@ -48,6 +48,21 @@ function createFireworksReasoningEffortModel(): Model<"openai-completions"> {
 	} as ModelSpec<"openai-completions">);
 }
 
+function createCerebrasQwenModel(): Model<"openai-completions"> {
+	return buildModel({
+		id: "qwen-3.8-27b",
+		name: "Qwen 3.8 27B",
+		api: "openai-completions",
+		provider: "cerebras",
+		baseUrl: "https://api.cerebras.ai/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens: 32_768,
+	});
+}
+
 async function captureDisableReasoningPayload(model: Model<"openai-completions">): Promise<Record<string, unknown>> {
 	let payload: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = Object.assign(
@@ -273,6 +288,14 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 			// no reasoning requested
 		});
 		const payload = (await promise) as Record<string, unknown>;
+		expect(payload.enable_thinking).toBeUndefined();
+		expect(payload.chat_template_kwargs).toBeUndefined();
+	});
+
+	it("disables Cerebras Qwen reasoning through reasoning_effort", async () => {
+		const payload = await captureDisableReasoningPayload(createCerebrasQwenModel());
+
+		expect(payload.reasoning_effort).toBe("none");
 		expect(payload.enable_thinking).toBeUndefined();
 		expect(payload.chat_template_kwargs).toBeUndefined();
 	});

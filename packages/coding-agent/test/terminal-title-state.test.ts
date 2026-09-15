@@ -5,6 +5,7 @@ import {
 	setTerminalTitle,
 	initTerminalTitleState,
 	setSessionTerminalTitle,
+	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { isConPTYHosted } from "@oh-my-pi/pi-tui";
@@ -59,6 +60,18 @@ describe("buildTerminalTitleWithState", () => {
 		expect(buildTerminalTitleWithState(LABEL, "attention", 0, false)).toBe(`${BRAND}: ${LABEL}`);
 		expect(buildTerminalTitleWithState(undefined, "idle", 0, false)).toBe(BRAND);
 	});
+
+	it("cycles the dots and line glyph sets while working", () => {
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "linux", "dots")).toBe(`${BRAND} ⠁ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "linux", "dots")).toBe(`${BRAND} ⠂ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "linux", "line")).toBe(`${BRAND} - ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "linux", "line")).toBe(`${BRAND} \\ ${LABEL}`);
+	});
+
+	it("keeps the static colon on Windows regardless of style", () => {
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "dots")).toBe(`${BRAND} : ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "line")).toBe(`${BRAND} : ${LABEL}`);
+	});
 });
 
 // Regression coverage for the shutdown-leak bug (PR #4451): the run-state
@@ -107,6 +120,7 @@ describe("disposeTerminalTitleState", () => {
 		// tests are order-independent: the UI owns the terminal (the previous
 		// test's teardown latched it off), a fresh session base, run state idle.
 		initTerminalTitleState();
+		setTerminalTitleSpinnerStyle("braille");
 		setSessionTerminalTitle("my-project");
 		setTerminalTitleState("idle");
 		writes.length = 0;
@@ -236,6 +250,35 @@ describe("disposeTerminalTitleState", () => {
 		setSessionTerminalTitle("same-session");
 
 		expect(writes.some(payload => payload.includes("same-session"))).toBe(true);
+	});
+
+	it.skipIf(isConPTYHosted())("emits the selected glyph set on the next spinner tick", () => {
+		setTerminalTitleSpinnerStyle("line");
+		setTerminalTitleState("working");
+		writes.length = 0;
+
+		vi.advanceTimersByTime(400);
+
+		const titles = writes.map(payload => /\x1b\]0;([\s\S]*?)\x07/.exec(payload)?.[1]);
+		expect(titles.length).toBeGreaterThan(0);
+		for (const title of titles) {
+			expect(title).toContain("my-project");
+			expect(title).toMatch(/^π [-\\|/] my-project$/);
+			expect(title).not.toContain("⠋");
+		}
+	});
+
+	it.skipIf(isConPTYHosted())("falls back to braille for an unknown style", () => {
+		setTerminalTitleSpinnerStyle("line");
+		setTerminalTitleSpinnerStyle("nope");
+		setTerminalTitleState("working");
+		writes.length = 0;
+
+		vi.advanceTimersByTime(160);
+
+		const titles = writes.map(payload => /\x1b\]0;([\s\S]*?)\x07/.exec(payload)?.[1]);
+		expect(titles.length).toBeGreaterThan(0);
+		expect(titles.some(title => title?.includes("⠋") || title?.includes("⠙"))).toBe(true);
 	});
 
 	it.skipIf(isConPTYHosted())(

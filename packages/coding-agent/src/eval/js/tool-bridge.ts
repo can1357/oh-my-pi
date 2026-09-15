@@ -6,7 +6,7 @@ import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
 import { ToolError } from "../../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
-import { invokeEvalPrelude } from "../preludes";
+import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
@@ -83,13 +83,16 @@ function parsePreludeRequest(args: unknown): { name: string; parameters: unknown
 	return { name, parameters: args.parameters };
 }
 
-function summarizeToolResult(
+/** Builds the status event recorded for one bridged host call; `undefined` records nothing. */
+type StatusSummarizer = (
 	name: string,
 	args: unknown,
 	result: AgentToolResult,
 	text: string,
 	hasError: boolean,
-): JsStatusEvent {
+) => JsStatusEvent | undefined;
+
+const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasError) => {
 	const record = isRecord(args) ? args : {};
 	const details = isRecord(result.details) ? result.details : {};
 	const withError = (event: JsStatusEvent): JsStatusEvent =>
@@ -128,6 +131,19 @@ function summarizeToolResult(
 		default:
 			return withError({ op: name, chars: text.length });
 	}
+};
+
+/**
+ * Prelude calls (browser, computer) describe themselves: a bare op name with a
+ * byte count is noise, so a prelude without a `status` hook records nothing on
+ * success. Failures always surface.
+ */
+function summarizePreludeResult(session: ToolSession): StatusSummarizer {
+	return (name, args, result, text, hasError) => {
+		if (hasError) return { op: name, error: text.slice(0, 500) };
+		const detail = findEnabledEvalPrelude(session, name)?.status?.(args, result);
+		return detail === undefined ? undefined : { op: name, detail };
+	};
 }
 
 export function bridgeValueFromToolResult(
@@ -135,6 +151,7 @@ export function bridgeValueFromToolResult(
 	args: unknown,
 	result: AgentToolResult,
 	emitStatus?: (event: JsStatusEvent) => void,
+	summarize: StatusSummarizer = summarizeToolResult,
 ): ToolValue {
 	const textBlocks = result.content.filter(
 		(content): content is { type: "text"; text: string } =>
@@ -146,7 +163,10 @@ export function bridgeValueFromToolResult(
 	);
 	const text = textBlocks.map(block => block.text).join("");
 	const hasError = toolResultHasError(result);
-	emitStatus?.(summarizeToolResult(name, args, result, text, hasError));
+	if (emitStatus) {
+		const event = summarize(name, args, result, text, hasError);
+		if (event) emitStatus(event);
+	}
 	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
 	const value: Exclude<ToolValue, string> = { text, details: result.details };
 	if (imageBlocks.length > 0) {
@@ -154,15 +174,6 @@ export function bridgeValueFromToolResult(
 	}
 	if (hasError) value.hasError = true;
 	return value;
-}
-
-function normalizeAgentToolResult(
-	name: string,
-	args: unknown,
-	result: AgentToolResult,
-	options: ToolBridgeOptions,
-): ToolValue {
-	return bridgeValueFromToolResult(name, args, result, options.emitStatus);
 }
 
 function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -204,7 +215,13 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					context: options.session.getToolContext?.(),
 				}),
 			);
-			return normalizeAgentToolResult(request.name, request.parameters, result, options);
+			return bridgeValueFromToolResult(
+				request.name,
+				request.parameters,
+				result,
+				options.emitStatus,
+				summarizePreludeResult(options.session),
+			);
 		} catch (error) {
 			options.emitStatus?.({
 				op: request.name,
@@ -303,7 +320,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			const phases = committedTodoPhases(result);
 			if (phases) options.session.persistTodoPhases?.(phases);
 		}
-		return normalizeAgentToolResult(name, normalizedArgs, result, options);
+		return bridgeValueFromToolResult(name, normalizedArgs, result, options.emitStatus);
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

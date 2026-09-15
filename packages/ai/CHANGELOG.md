@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
 ### Added
 
+- Added support for Cerebras Qwen 3.8-27b with improved reasoning effort control
 - Added optional host browser-session callbacks for Perplexity SSO login, keeping browser automation out of pi-ai and preserving email and authenticator-code login.
 
 ### Fixed

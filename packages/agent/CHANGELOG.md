@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
 ### Added
 
 - Added optional queued-message preparation with cancellation-safe delivery and appended context ([#11835](https://github.com/can1357/oh-my-pi/pull/11835) by [@andrebrait](https://github.com/andrebrait)).

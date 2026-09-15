@@ -11,7 +11,7 @@ import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } fro
 import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
 import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
 import type { ToolSession } from "./index";
-import { renderFunctionRun } from "./run-code";
+import { renderCallChain, renderFunctionRun } from "./run-code";
 import { ToolError, throwIfAborted } from "./tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -145,7 +145,23 @@ export function createComputerPrelude(
 			}
 			return await invokeComputer(session, controller, parsed, context, lifetime);
 		},
+		status: describeComputerCall,
 	};
+}
+
+/** Status-tree line for a completed computer call: `desktop.window(3).focus()`, `run(fn)`, `close`. */
+function describeComputerCall(parameters: unknown): string | undefined {
+	const parsed = getComputerParamsSchema()(parameters);
+	if (parsed instanceof type.errors) return undefined;
+	switch (parsed.action) {
+		case "call":
+			return `desktop.${renderCallChain(parsed.chain)}`;
+		case "run":
+			return `run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
+		case "capabilities":
+		case "close":
+			return parsed.action;
+	}
 }
 
 interface ComputerLifetime {

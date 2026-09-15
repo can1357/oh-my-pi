@@ -613,9 +613,21 @@ export function setExtensionTerminalTitle(title: string): void {
 
 export type TerminalTitleState = "idle" | "working" | "attention";
 
+export type TerminalTitleSpinnerStyle = "braille" | "dots" | "line";
+
+/**
+ * Working-state spinner frames per `tui.titleSpinner` style. `braille` is the
+ * historical default; `dots` cycles single braille dots; `line` is plain ASCII
+ * (`- \ | /`) for fonts without braille coverage.
+ */
+export const TERMINAL_TITLE_SPINNER_STYLES: Record<TerminalTitleSpinnerStyle, readonly string[]> = {
+	braille: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+	dots: ["⠁", "⠂", "⠄", "⠠", "⠐", "⠈"],
+	line: ["-", "\\", "|", "/"],
+};
+
 /** Windows uses a static working separator instead of scheduling title animation. */
 const WINDOWS_TITLE_WORKING_SEPARATOR = ":";
-const TITLE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TITLE_SPINNER_INTERVAL_MS = 80;
 /** The user's turn: the title reads like a shell prompt awaiting input. */
 const TITLE_IDLE_SEPARATOR = ">";
@@ -627,6 +639,7 @@ const terminalTitleRuntime: {
 	state: TerminalTitleState;
 	frame: number;
 	enabled: boolean;
+	style: TerminalTitleSpinnerStyle;
 	timer: NodeJS.Timeout | undefined;
 	/** A title an extension set via `setTitle()`. While set, it owns the terminal
 	 *  title verbatim: the run-state separator never rewrites it. Cleared when the
@@ -643,6 +656,7 @@ const terminalTitleRuntime: {
 	state: "idle",
 	frame: 0,
 	enabled: true,
+	style: "braille",
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
@@ -656,6 +670,8 @@ const terminalTitleRuntime: {
  *   - `attention`:           `π ! label`;
  *   - disabled:              `π: label`.
  * Without a label the separator trails the brand (`π >`) so the state stays visible.
+ * The `working` separator cycles `TERMINAL_TITLE_SPINNER_STYLES[style]`; `style`
+ * defaults to `braille` so existing 5-arg callers keep the historical frames.
  */
 export function buildTerminalTitleWithState(
 	label: string | undefined,
@@ -663,13 +679,15 @@ export function buildTerminalTitleWithState(
 	frame: number,
 	enabled: boolean,
 	platform: NodeJS.Platform = process.platform,
+	style: TerminalTitleSpinnerStyle = "braille",
 ): string {
 	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.braille;
 	const separator =
 		state === "working"
 			? platform === "win32"
 				? WINDOWS_TITLE_WORKING_SEPARATOR
-				: TITLE_SPINNER_FRAMES[frame % TITLE_SPINNER_FRAMES.length]
+				: frames[frame % frames.length]
 			: state === "attention"
 				? TITLE_ATTENTION_SEPARATOR
 				: TITLE_IDLE_SEPARATOR;
@@ -689,6 +707,7 @@ function emitTerminalTitle(): void {
 			terminalTitleRuntime.frame,
 			terminalTitleRuntime.enabled,
 			isConPTYHosted() ? "win32" : process.platform,
+			terminalTitleRuntime.style,
 		);
 	setTerminalTitle(next);
 }
@@ -701,7 +720,8 @@ function stopTerminalTitleSpinner(): void {
 function startTerminalTitleSpinner(): void {
 	if (isConPTYHosted() || terminalTitleRuntime.disposed || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
 	terminalTitleRuntime.timer = setInterval(() => {
-		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
+		terminalTitleRuntime.frame =
+			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
 		emitTerminalTitle();
 	}, TITLE_SPINNER_INTERVAL_MS);
 	// Never keep the event loop alive for a cosmetic animation.
@@ -726,6 +746,25 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	terminalTitleRuntime.enabled = enabled;
 	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/**
+ * Select the working-state spinner glyph set (driven by `tui.titleSpinner`).
+ * Unknown values fall back to `braille`; switching style resets the frame so a
+ * shorter set never indexes out of range, and re-arms the live interval when
+ * `working` so the tick cadence stays on the new frames.
+ */
+export function setTerminalTitleSpinnerStyle(style: string | undefined): void {
+	const next: TerminalTitleSpinnerStyle =
+		style === "dots" || style === "line" || style === "braille" ? style : "braille";
+	if (next === terminalTitleRuntime.style) return;
+	terminalTitleRuntime.style = next;
+	terminalTitleRuntime.frame = 0;
+	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) {
+		stopTerminalTitleSpinner();
+		startTerminalTitleSpinner();
+	}
 	emitTerminalTitle();
 }
 
