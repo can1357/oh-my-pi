@@ -737,12 +737,21 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#appendUsageRows(lines: string[], usageRows: ReadUsageRow[], prefix: string): void {
 		for (const usageRow of usageRows) {
-			lines.push(
-				theme.fg(
-					"dim",
-					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.turnElapsedMs)}`,
-				),
+			const usage = formatUsageRow(
+				usageRow.usage,
+				usageRow.durationMs,
+				usageRow.ttftMs,
+				usageRow.timestamp,
+				usageRow.turnElapsedMs,
 			);
+			if (this.#toolOutputDetailsHidden) {
+				// Folded keeps one row per read call, so the usage rides the call row
+				// the caller just pushed instead of claiming a line of its own.
+				const index = lines.length - 1;
+				lines[index] = `${lines[index] ?? ""}${theme.fg("dim", theme.sep.dot)}${theme.fg("dim", usage)}`;
+				continue;
+			}
+			lines.push(theme.fg("dim", `${prefix}${usage}`));
 		}
 	}
 

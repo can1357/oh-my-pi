@@ -232,6 +232,54 @@ describe("tool output details", () => {
 		expect(Bun.stringWidth(plain(rows))).toBeLessThanOrEqual(40);
 	});
 
+	it("shortens a home path inside a folded label", () => {
+		const home = os.homedir();
+		const card = new ToolExecutionComponent(
+			"custom-thing",
+			{ command: "ls" },
+			{},
+			{ label: `Inspect ${home}/repo` } as never,
+			uiStub,
+		);
+		try {
+			card.setToolOutputDetailsHidden(true);
+
+			const row = plain(card.render(120));
+
+			expect(row).toContain("Inspect ~/repo");
+			expect(row).not.toContain(home);
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
+	it("keeps a folded read group to one row while usage is shown", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/usage.ts" }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "line 1" }] }, false, "read-0");
+		group.attachUsage(
+			["read-0"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(120);
+
+		expect(rows).toHaveLength(1);
+		expect(plain(rows)).toContain("usage.ts");
+		expect(plain(rows)).toContain("1.1K");
+	});
+
 	it("keeps an interrupted call neutral while folded", () => {
 		// Steering interrupts a pending call and reports `isError`; the full card
 		// renders the placeholder neutrally, so the folded row must not claim failure.

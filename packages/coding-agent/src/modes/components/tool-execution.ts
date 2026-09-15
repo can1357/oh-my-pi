@@ -892,9 +892,9 @@ export class ToolExecutionComponent extends Container {
 		// under `display.hideToolOutputDetails`, so terminal control bytes come out
 		// before styling. `sanitizeText` returns the input untouched when there is
 		// nothing to strip, but keeps tabs and newlines, which would break the
-		// one-line row; both halves collapse their whitespace afterwards, and the
-		// detail also drops any home-prefixed path it embeds (`cat /home/me/x`).
-		const label = sanitizeText(summary.label).replace(/\s+/g, " ");
+		// one-line row; both halves collapse their whitespace and drop any
+		// home-prefixed path they embed (`cat /home/me/x`).
+		const label = shortenEmbeddedPaths(sanitizeText(summary.label).replace(/\s+/g, " "));
 		const detail = summary.detail
 			? theme.fg("muted", ` · ${shortenEmbeddedPaths(sanitizeText(summary.detail).replace(/\s+/g, " "))}`)
 			: "";
