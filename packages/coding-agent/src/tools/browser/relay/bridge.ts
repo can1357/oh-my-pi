@@ -1061,6 +1061,14 @@ export class RelayBridge {
 						return undefined;
 					})
 				: undefined;
+		// The probe can outlive the root it was sent to. A surviving holder may
+		// trigger fresh-root recovery while it is pending, so wait for that
+		// recovery to finish and revalidate ownership before forwarding the add.
+		await this.#awaitTabReady(ref.tabId);
+		if (conn.sessions.get(sessionId) !== ref) {
+			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+			return;
+		}
 		// The document-state probe above is asynchronous and a surviving holder may
 		// replace the debugger root while it is pending. No mutating registration has
 		// happened yet, so rebase the fence to the root that will receive the add.

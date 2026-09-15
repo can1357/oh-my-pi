@@ -3971,7 +3971,6 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach during pre-add probe");
 		ack(bridge, ext, "detach");
 		await waitFor(() => ext.pending("attach").length === 1, "replacement attach during pre-add probe");
-		ack(bridge, ext, "attach");
 
 		const probe = ext.pending("send").find(rpc => rpc.method === "Page.getFrameTree")!;
 		ext.markAcked(probe.id);
@@ -3984,6 +3983,10 @@ describe("RelayBridge tab grouping", () => {
 				result: { frameTree: { frame: { loaderId: "replacement-loader" } } },
 			}),
 		);
+		await flush();
+		expect(ext.pending("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toEqual([]);
+
+		ack(bridge, ext, "attach");
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext, "send", { identifier: "replacement-script" });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
