@@ -1791,9 +1791,9 @@ async function streamAssistantResponse(
 				);
 			}
 
-			let partialMessage: AssistantMessage | null = null;
-			let addedPartial = false;
-			const completedToolCallIds = new Set<string>();
+			// One record for the turn in flight: its partial, whether that partial already
+			// occupies the context's last slot, and which tool calls completed.
+			const turn: StreamingTurn = { partial: null, attached: false, completedToolCallIds: new Set() };
 
 			const responseIterator = response[Symbol.asyncIterator]();
 			const finishAbortedStream = async (): Promise<AssistantMessage> => {
@@ -1803,15 +1803,7 @@ async function streamAssistantResponse(
 				} catch {
 					// Provider cancellation failures cannot change the committed aborted message.
 				}
-				const aborted = emitAbortedAssistantMessage(
-					partialMessage,
-					addedPartial,
-					completedToolCallIds,
-					context,
-					config,
-					stream,
-					requestSignal,
-				);
+				const aborted = emitAbortedAssistantMessage(turn, context, config, stream, requestSignal);
 				await finishChat(aborted);
 				return aborted;
 			};
@@ -1848,26 +1840,15 @@ async function streamAssistantResponse(
 
 					const event = next.value;
 					if (event.type === "done" || event.type === "error") {
-						let finalMessage = recoverTransientErrorToolTurn(
-							retainCompletedToolCalls(await response.result(), completedToolCallIds),
-							context.tools ?? [],
+						let finalMessage = recoverSettledTurn(
+							await response.result(),
+							turn.completedToolCallIds,
+							context.tools,
 						);
-						if (harmonyMitigationEnabled) {
-							const detection = detectHarmonyLeakInAssistantMessage(finalMessage);
-							if (detection) {
-								const recovered = recoverHarmonyToolCall(finalMessage, detection);
-								const removed = recovered?.removed ?? extractHarmonyRemoved(finalMessage, detection);
-								if (addedPartial) {
-									emitDiscardedHarmonyPartial(
-										partialMessage,
-										stream,
-										`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`,
-									);
-									context.messages.pop();
-									addedPartial = false;
-								}
-								throw new HarmonyLeakInterruption(detection, removed, recovered);
-							}
+						const leak = harmonyLeakIn(finalMessage, harmonyMitigationEnabled);
+						if (leak) {
+							discardStreamingTurn(turn, leak, context, stream);
+							throw new HarmonyLeakInterruption(leak.detection, leak.removed, leak.recovered);
 						}
 						finalMessage = snapshotAssistantMessage(finalMessage);
 						// Expand inline macros (and any other registered rewrite) on the
@@ -1887,15 +1868,7 @@ async function streamAssistantResponse(
 								await prepareToolCallDispatch(finalMessage, context, config, requestSignal),
 							);
 						}
-						if (addedPartial) {
-							context.messages[context.messages.length - 1] = finalMessage;
-						} else {
-							context.messages.push(finalMessage);
-						}
-						if (!addedPartial) {
-							stream.push({ type: "message_start", message: snapshotAssistantMessage(finalMessage) });
-						}
-						stream.push({ type: "message_end", message: snapshotAssistantMessage(finalMessage) });
+						commitSettlement(turn, { kind: "terminal", message: finalMessage }, context, stream);
 						await finishChat(finalMessage);
 						return finalMessage;
 					}
@@ -1909,25 +1882,7 @@ async function streamAssistantResponse(
 
 					switch (event.type) {
 						case "start":
-							partialMessage = event.partial;
-							if (addedPartial) {
-								context.messages[context.messages.length - 1] = partialMessage;
-								completedToolCallIds.clear();
-								// `message` and `assistantMessageEvent.partial` intentionally share one
-								// immutable snapshot of the streaming partial: every message_update
-								// consumer treats both as read-only, so cloning the identical partial
-								// twice per delta was pure waste.
-								const messageSnapshot = snapshotAssistantMessage(partialMessage);
-								stream.push({
-									type: "message_update",
-									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
-									message: messageSnapshot,
-								});
-							} else {
-								context.messages.push(partialMessage);
-								addedPartial = true;
-								stream.push({ type: "message_start", message: snapshotAssistantMessage(partialMessage) });
-							}
+							openStreamingTurn(turn, event, context, stream);
 							break;
 
 						case "text_start":
@@ -1940,24 +1895,7 @@ async function streamAssistantResponse(
 						case "toolcall_start":
 						case "toolcall_delta":
 						case "toolcall_end":
-							if (partialMessage) {
-								if (event.type === "toolcall_end") {
-									completedToolCallIds.add(event.toolCall.id);
-								}
-								partialMessage = event.partial;
-								context.messages[context.messages.length - 1] = partialMessage;
-								config.onAssistantMessageEvent?.(partialMessage, event);
-								// `message` and `assistantMessageEvent.partial` intentionally share one
-								// immutable snapshot of the streaming partial: every message_update
-								// consumer treats both as read-only, so cloning the identical partial
-								// twice per delta was pure waste.
-								const messageSnapshot = snapshotAssistantMessage(partialMessage);
-								stream.push({
-									type: "message_update",
-									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
-									message: messageSnapshot,
-								});
-							}
+							advanceStreamingTurn(turn, event, context, stream, config.onAssistantMessageEvent);
 							break;
 					}
 				}
@@ -1965,31 +1903,16 @@ async function streamAssistantResponse(
 				detachAbortListener?.();
 			}
 
-			let trailing = await response.result();
-			if (harmonyMitigationEnabled) {
-				const detection = detectHarmonyLeakInAssistantMessage(trailing);
-				if (detection) {
-					const recovered = recoverHarmonyToolCall(trailing, detection);
-					const removed = recovered?.removed ?? extractHarmonyRemoved(trailing, detection);
-					if (addedPartial) {
-						emitDiscardedHarmonyPartial(
-							partialMessage,
-							stream,
-							`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`,
-						);
-						context.messages.pop();
-						addedPartial = false;
-					}
-					throw new HarmonyLeakInterruption(detection, removed, recovered);
-				}
+			const trailing = await response.result();
+			const leak = harmonyLeakIn(trailing, harmonyMitigationEnabled);
+			if (leak) {
+				discardStreamingTurn(turn, leak, context, stream);
+				throw new HarmonyLeakInterruption(leak.detection, leak.removed, leak.recovered);
 			}
-			trailing = snapshotAssistantMessage(trailing);
-			if (addedPartial) {
-				context.messages[context.messages.length - 1] = trailing;
-				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
-			}
-			await finishChat(trailing);
-			return trailing;
+			const settled = snapshotAssistantMessage(trailing);
+			commitSettlement(turn, { kind: "trailing", message: settled }, context, stream);
+			await finishChat(settled);
+			return settled;
 		});
 	} catch (err) {
 		failChatSpan(telemetry, chatSpan, {
@@ -2087,6 +2010,159 @@ function emitDiscardedHarmonyPartial(
 	});
 }
 
+/** An event that carries the streamed partial: everything the provider emits before
+ *  its terminal `done`/`error` event. */
+type StreamingEvent = Exclude<AssistantMessageEvent, { type: "done" | "error" }>;
+
+/**
+ * The turn currently streaming from the provider: its partial message, whether that
+ * partial already occupies the last slot of `context.messages`, and the tool calls
+ * that reached `toolcall_end` — the only ones whose arguments are complete enough to
+ * replay after an error or abort.
+ */
+interface StreamingTurn {
+	partial: AssistantMessage | null;
+	attached: boolean;
+	completedToolCallIds: Set<string>;
+}
+
+/** How the provider's stream settled once its iterator was exhausted. */
+type Settlement =
+	/** A terminal `done`/`error` event ended the turn. */
+	| { readonly kind: "terminal"; readonly message: AssistantMessage }
+	/** The iterator ended without a terminal event. */
+	| { readonly kind: "trailing"; readonly message: AssistantMessage };
+
+/** A GPT-5 Harmony protocol leak in a settled message. */
+interface HarmonyLeak {
+	readonly detection: HarmonyDetection;
+	/** Fragment label reported to `onHarmonyLeak`. */
+	readonly removed: string;
+	/** Set when the leak's tool call can be salvaged and the turn resumed instead of re-sampled. */
+	readonly recovered: HarmonyRecoveredToolCall | undefined;
+}
+
+/**
+ * Scan a settled assistant message for Harmony leakage. `enabled` is the model-target
+ * check, so both scan sites cannot disagree about when the scan runs.
+ */
+function harmonyLeakIn(message: AssistantMessage, enabled: boolean): HarmonyLeak | null {
+	if (!enabled) return null;
+	const detection = detectHarmonyLeakInAssistantMessage(message);
+	if (!detection) return null;
+	const recovered = recoverHarmonyToolCall(message, detection);
+	return { detection, removed: recovered?.removed ?? extractHarmonyRemoved(message, detection), recovered };
+}
+
+/**
+ * Open the turn — or reopen it after a re-sample, which replaces the attached partial
+ * in place. `message` and `assistantMessageEvent.partial` intentionally share one
+ * immutable snapshot: every message_update consumer treats both as read-only, so
+ * cloning the same partial twice per delta was pure waste.
+ */
+function openStreamingTurn(
+	turn: StreamingTurn,
+	event: Extract<StreamingEvent, { type: "start" }>,
+	context: AgentContext,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+): void {
+	turn.partial = event.partial;
+	const messageSnapshot = snapshotAssistantMessage(event.partial);
+	if (turn.attached) {
+		context.messages[context.messages.length - 1] = event.partial;
+		turn.completedToolCallIds.clear();
+		stream.push({
+			type: "message_update",
+			assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
+			message: messageSnapshot,
+		});
+		return;
+	}
+	context.messages.push(event.partial);
+	turn.attached = true;
+	stream.push({ type: "message_start", message: messageSnapshot });
+}
+
+/** Advance the turn with a content delta, recording tool calls whose arguments completed. */
+function advanceStreamingTurn(
+	turn: StreamingTurn,
+	event: Exclude<StreamingEvent, { type: "start" }>,
+	context: AgentContext,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	onEvent: AgentLoopConfig["onAssistantMessageEvent"],
+): void {
+	if (!turn.partial) return;
+	if (event.type === "toolcall_end") {
+		turn.completedToolCallIds.add(event.toolCall.id);
+	}
+	turn.partial = event.partial;
+	context.messages[context.messages.length - 1] = event.partial;
+	onEvent?.(event.partial, event);
+	const messageSnapshot = snapshotAssistantMessage(event.partial);
+	stream.push({
+		type: "message_update",
+		assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
+		message: messageSnapshot,
+	});
+}
+
+/**
+ * Commit a settled message. A terminal message replaces the attached partial, or opens
+ * its own slot when the provider never streamed one. A trailing result — the iterator
+ * ended without a terminal event — is only committed when a partial was attached: there
+ * is nothing to replace, and announcing a turn the provider never started would invent
+ * an assistant message for a stream that produced none.
+ */
+function commitSettlement(
+	turn: StreamingTurn,
+	settlement: Settlement,
+	context: AgentContext,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+): void {
+	if (turn.attached) {
+		context.messages[context.messages.length - 1] = settlement.message;
+		stream.push({ type: "message_end", message: snapshotAssistantMessage(settlement.message) });
+		return;
+	}
+	if (settlement.kind === "terminal") {
+		context.messages.push(settlement.message);
+		stream.push({ type: "message_start", message: snapshotAssistantMessage(settlement.message) });
+		stream.push({ type: "message_end", message: snapshotAssistantMessage(settlement.message) });
+	}
+}
+
+/** Drop an attached partial after a Harmony leak: its turn is unusable, so the events
+ *  are closed as an error and the context slot is released for the re-sample. */
+function discardStreamingTurn(
+	turn: StreamingTurn,
+	leak: HarmonyLeak,
+	context: AgentContext,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+): void {
+	if (!turn.attached) return;
+	emitDiscardedHarmonyPartial(
+		turn.partial,
+		stream,
+		`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(leak.detection.signals)})`,
+	);
+	context.messages.pop();
+	turn.attached = false;
+}
+
+/**
+ * Recovery for a turn the provider settled: keep only the tool calls that completed,
+ * then reinterpret a transient stream failure over a tool turn as a resumable `toolUse`
+ * turn so its calls still run. Order matters — the transient check reads the calls the
+ * retention pass already vetted.
+ */
+function recoverSettledTurn(
+	message: AssistantMessage,
+	completedToolCallIds: ReadonlySet<string>,
+	tools: AgentContext["tools"],
+): AssistantMessage {
+	return recoverTransientErrorToolTurn(retainCompletedToolCalls(message, completedToolCallIds), tools ?? []);
+}
+
 function isStringRecord(value: unknown): value is Record<string, string> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	return Object.values(value).every(child => typeof child === "string");
@@ -2133,9 +2209,7 @@ export function abortReasonText(signal: AbortSignal | undefined): string {
 }
 
 function emitAbortedAssistantMessage(
-	partialMessage: AssistantMessage | null,
-	addedPartial: boolean,
-	completedToolCallIds: ReadonlySet<string>,
+	turn: StreamingTurn,
 	context: AgentContext,
 	config: AgentLoopConfig,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
@@ -2147,8 +2221,8 @@ function emitAbortedAssistantMessage(
 		errorMessage === "Request was aborted"
 			? AIError.create(AIError.Flag.Abort)
 			: AIError.classify(requestSignal?.reason) || undefined;
-	const base: AssistantMessage = partialMessage
-		? { ...partialMessage, stopReason: "aborted", errorMessage, errorId }
+	const base: AssistantMessage = turn.partial
+		? { ...turn.partial, stopReason: "aborted", errorMessage, errorId }
 		: {
 				role: "assistant",
 				content: [],
@@ -2171,14 +2245,14 @@ function emitAbortedAssistantMessage(
 	// Only tool calls that reached `toolcall_end` survive abort/error replay. A
 	// labeled user interrupt still surfaces through `errorMessage`, but partial
 	// tool arguments are unsafe to keep and can carry incomplete provider IDs.
-	const retained = retainCompletedToolCalls(base, completedToolCallIds);
+	const retained = retainCompletedToolCalls(base, turn.completedToolCallIds);
 	const scopedAbort = toolScopedAbortReason(requestSignal);
 	const toolCallAbortMessages = scopedAbort ? buildToolCallAbortMessages(retained, scopedAbort) : undefined;
 	if (toolCallAbortMessages) {
 		retained.toolCallAbortMessages = toolCallAbortMessages;
 	}
 	const abortedMessage = snapshotAssistantMessage(retained);
-	if (addedPartial) {
+	if (turn.attached) {
 		context.messages[context.messages.length - 1] = abortedMessage;
 	} else {
 		context.messages.push(abortedMessage);
