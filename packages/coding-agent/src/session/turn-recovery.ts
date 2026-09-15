@@ -38,6 +38,7 @@ import {
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
 } from "../thinking";
+import type { EditMode } from "../utils/edit-mode";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type {
 	InitialRetryFallbackState,
@@ -209,6 +210,15 @@ export interface TurnRecoveryHost {
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
+	/** The edit variant resolved against the currently active model, captured before a swap. */
+	resolveActiveEditMode(): EditMode;
+	/**
+	 * Re-syncs all model-dependent prompt policy after a model change that
+	 * bypassed `model-controls`: rebuilds the base system prompt when the edit
+	 * variant flipped or the model-prompt key changed (`includeModelInPrompt` /
+	 * delegation-bias policy), not just the variant.
+	 */
+	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
 	 * Spend a saved Codex reset for the blocked pool, if eligible.
@@ -1812,6 +1822,7 @@ export class TurnRecovery {
 				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
 		const previousModel = this.#host.model();
+		const previousEditMode = this.#host.resolveActiveEditMode();
 		// Mark routing BEFORE the swap: `setModelWithProviderSessionReset` moves the
 		// model and fans `model_changed` out to subscribers synchronously, and a
 		// listener reading attribution in that window must already see the incoming
@@ -1828,11 +1839,13 @@ export class TurnRecovery {
 			if (previousModel && this.#host.model() === candidate) {
 				await this.#host.setModelWithProviderSessionReset(previousModel);
 			}
+			await this.#host.syncAfterModelChange(previousEditMode);
 			return false;
 		}
 		if (this.#host.model() !== candidate) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+			await this.#host.syncAfterModelChange(previousEditMode);
 			return false;
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
@@ -1850,6 +1863,7 @@ export class TurnRecovery {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
+		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -2009,12 +2023,14 @@ export class TurnRecovery {
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
+		const previousEditMode = this.#host.resolveActiveEditMode();
 		// A capability degrade is fallback routing too, even though it arms no
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
+		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -2071,6 +2087,7 @@ export class TurnRecovery {
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
+		const previousEditMode = this.#host.resolveActiveEditMode();
 		// Clear before the swap: `setModelWithProviderSessionReset` and
 		// `setThinkingLevel` both notify subscribers, and an observer reading
 		// attribution in that window would see the restored primary still tagged
@@ -2080,6 +2097,7 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
+		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
 	}
 

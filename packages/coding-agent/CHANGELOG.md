@@ -105,6 +105,7 @@
 - Preserved pending Collab dialog answers across session-switch rollback without accepting them after commit, stop, or writer departure ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
 - Fixed prompts awaiting setup crossing a fork, branch, or tree-navigation commit, multi-question extension dialogs moving later questions to a replacement Collab room, and stale rooms blocking `/collab` or `/join` after a failed session change ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
+- Retry-fallback model swaps now re-sync the system prompt when the incoming model changes the active edit variant, so sessions falling back to a model pinned by `edit.modelVariants` stop receiving the chain head's edit instructions ([#11983](https://github.com/can1357/oh-my-pi/issues/11983)).
 - Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
 
 ## [18.1.19] - 2026-09-12

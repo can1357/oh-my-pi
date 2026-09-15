@@ -88,6 +88,8 @@ function createHost(
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
+		resolveActiveEditMode: () => "hashline",
+		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemCodexReset: async () => false,
 		runAutoCompaction: async () =>
