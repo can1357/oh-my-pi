@@ -14,6 +14,8 @@ import {
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateToolSchemaTokens,
+	getToolSchemaMetadataRevision,
+	invalidateToolSchemaMetadata,
 	renderContextUsage,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { applyToolProxy } from "../../src/extensibility/tool-proxy";
@@ -96,6 +98,53 @@ describe("estimateToolSchemaTokens", () => {
 			tokenizer,
 		);
 		expect(estimate).toBeGreaterThan(0);
+	});
+
+	it("does not reread dynamic metadata until its explicit revision changes", () => {
+		let description = "short";
+		let reads = 0;
+		const tool = {
+			name: "dynamic",
+			get description() {
+				reads++;
+				return description;
+			},
+			parameters: {},
+		};
+		const tools = [tool];
+		const first = estimateToolSchemaTokens(tools, tokenizer);
+		expect(reads).toBe(1);
+		expect(estimateToolSchemaTokens(tools, tokenizer)).toBe(first);
+		expect(reads).toBe(1);
+
+		description = "a substantially longer dynamic description after a live policy update";
+		invalidateToolSchemaMetadata(tools);
+		expect(getToolSchemaMetadataRevision(tools)).toBe(1);
+		expect(estimateToolSchemaTokens(tools, tokenizer)).toBeGreaterThan(first);
+		expect(reads).toBe(2);
+	});
+
+	it("separates array, tokenizer, and source-revision cache keys", () => {
+		let reads = 0;
+		const tool = {
+			name: "dynamic",
+			get description() {
+				reads++;
+				return "metadata";
+			},
+			parameters: {},
+		};
+		const tools = [tool];
+		estimateToolSchemaTokens(tools, tokenizer, 1);
+		estimateToolSchemaTokens(tools, tokenizer, 1);
+		expect(reads).toBe(1);
+
+		estimateToolSchemaTokens(tools, tokenizer, 2);
+		expect(reads).toBe(2);
+		estimateToolSchemaTokens([...tools], tokenizer, 2);
+		expect(reads).toBe(3);
+		estimateToolSchemaTokens(tools, new Tokenizer(), 2);
+		expect(reads).toBe(4);
 	});
 });
 
@@ -204,6 +253,25 @@ describe("computeNonMessageTokens / computeNonMessageBreakdown memoization", () 
 		expect(computeNonMessageBreakdown(session as never, tokenizer).systemPromptTokens).not.toBe(
 			breakdown.systemPromptTokens,
 		);
+	});
+
+	it("invalidates settings-backed dynamic descriptions on the settings revision", () => {
+		let description = "short";
+		const tool = {
+			name: "dynamic",
+			get description() {
+				return description;
+			},
+			parameters: {},
+		};
+		const session = {
+			...makeSession(["base"], [tool]),
+			settings: { revision: 1, get: () => true },
+		};
+		const first = computeNonMessageBreakdown(session as never, tokenizer).toolsTokens;
+		description = "a longer settings-backed description after a live update";
+		session.settings.revision++;
+		expect(computeNonMessageBreakdown(session as never, tokenizer).toolsTokens).toBeGreaterThan(first);
 	});
 });
 

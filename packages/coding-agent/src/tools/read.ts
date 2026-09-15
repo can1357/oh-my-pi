@@ -18,10 +18,12 @@ import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/p
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
+	IMAGE_METADATA_HEADER_BYTES,
 	isProbablyBinary,
 	isProbablyBinaryHeader,
 	isEnoent,
 	logger,
+	parseImageMetadata,
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
@@ -105,6 +107,7 @@ import {
 	RANGE_TRAILING_CONTEXT_LINES,
 	READ_CHUNK_SIZE,
 	readHashlineHeaderContext,
+	toReadTruncationStats,
 } from "./read-format";
 import {
 	findSuffixMatchCached,
@@ -158,8 +161,8 @@ export { readToolRenderer } from "./read-renderer";
 /** Largest profile (`*.sample.txt`, `*.cpuprofile`) converted to a bottleneck summary; bigger files read as plain text. */
 const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 const MAX_ARTIFACT_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
+/** Largest file buffered whole for the local read path and speculative snapshots. */
 export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
-
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
 const LF_BYTE = 0x0a;
 
@@ -614,7 +617,7 @@ const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
 const IMAGE_QUESTION_SELECTOR_ERROR =
 	"The ?q= selector only supports images (raster files, .svg:img, attachment://N, local:// images, PDF page screenshots).";
 
-function splitImageQuestionTarget(readPath: string): { path: string; question?: string } {
+export function splitImageQuestionTarget(readPath: string): { path: string; question?: string } {
 	const supportsQuestion =
 		!readPath.includes("://") || readPath.startsWith("attachment://") || readPath.startsWith("local://");
 	if (!supportsQuestion || parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
@@ -629,20 +632,31 @@ function splitImageQuestionTarget(readPath: string): { path: string; question?: 
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
+	path: type("string").describe("Local path, internal URI (e.g. memory://), or URL. Inline selectors are supported."),
+});
+
+const readSchemaWithSkills = type({
 	path: type("string").describe(
 		"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
 	),
 });
 
 const readSchemaWithoutMemory = type({
+	path: type("string").describe("Local path, internal URI, or URL. Inline selectors are supported."),
+});
+
+const readSchemaWithoutMemoryWithSkills = type({
 	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
 });
 
 export type ReadToolInput = typeof readSchema.infer;
 
+/** Read result metadata retains truncation statistics, not a second copy of the body. */
+export type ReadTruncationStats = Omit<TruncationResult, "content">;
+
 export interface ReadToolDetails {
 	kind?: "file" | "url";
-	truncation?: TruncationResult;
+	truncation?: ReadTruncationStats;
 	isDirectory?: boolean;
 	resolvedPath?: string;
 	suffixResolution?: { from: string; to: string };
@@ -669,8 +683,25 @@ export interface ReadToolDetails {
 	conflictCount?: number;
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
+	/**
+	 * Resolved filesystem link target for each {@link displayReadTargets} entry, aligned by index; `null` when a
+	 * delimited part has no linkable fs path. Lets the TUI hyperlink each grouped row the same way a standalone read row is.
+	 */
+	displayReadTargetLinks?: Array<string | null>;
 }
 type ReadParams = ReadToolInput;
+
+/**
+ * Resolve the filesystem path a read result should hyperlink to: the explicit
+ * `resolvedPath` when the read corrected/resolved the input, else the absolute
+ * path plain-file reads record only in `meta.source`. Returns `null` for
+ * URL/internal sources that are not fs paths.
+ */
+function readDetailsLinkPath(details: ReadToolDetails | undefined): string | null {
+	if (typeof details?.resolvedPath === "string") return details.resolvedPath;
+	const source = details?.meta?.source;
+	return source?.type === "path" && typeof source.value === "string" ? source.value : null;
+}
 
 /** Identical reads tolerated before the loop hint is appended. */
 const REPEAT_READ_HINT_THRESHOLD = 3;
@@ -822,6 +853,7 @@ async function assessLocalReadSpeculation(
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
+	readonly readsSkillUris = true;
 	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
@@ -834,7 +866,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	description: string;
 	get parameters(): typeof readSchema {
-		return this.session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
+		// `skillful: false` removes the system-prompt catalog and must also
+		// strip the provider-side `skill://` hint, matching sdk.ts:3186.
+		const hasSkills = this.session.settings.get("skillful") && (this.session.skills?.length ?? 0) > 0;
+		if (this.session.settings.get("memory.backend") === "off") {
+			return hasSkills ? readSchemaWithoutMemoryWithSkills : readSchemaWithoutMemory;
+		}
+		return hasSkills ? readSchemaWithSkills : readSchema;
 	}
 	readonly strict = true;
 
@@ -1031,6 +1069,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
+		const displayReadTargetLinks: Array<string | null> = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -1044,7 +1083,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		for (const part of parts) {
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
-				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
+				const nestedTargets = result.details?.displayReadTargets;
+				if (nestedTargets?.length) {
+					const nestedLinks = result.details?.displayReadTargetLinks;
+					for (const [index, target] of nestedTargets.entries()) {
+						displayReadTargets.push(target);
+						displayReadTargetLinks.push(nestedLinks?.[index] ?? null);
+					}
+				} else {
+					displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
+					displayReadTargetLinks.push(readDetailsLinkPath(result.details));
+				}
 				for (const block of result.content) {
 					if (block.type === "text") {
 						appendText(block.text);
@@ -1059,12 +1108,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const errorNote = `Could not read ${part}: ${message}`;
 				notes.push(errorNote);
 				displayReadTargets.push(part);
+				displayReadTargetLinks.push(null);
 				appendText(`[${errorNote}]`);
 			}
 		}
 		flushText();
 
-		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
+		return toolResult<ReadToolDetails>({ notes, displayReadTargets, displayReadTargetLinks }).content(content).done();
 	}
 
 	/**
@@ -1780,12 +1830,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			});
 		}
 
-		const imageMetadata = await readImageMetadata(absolutePath);
-		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(renderAbsolutePath).toLowerCase();
+		// Buffer once for every consumer below: the image sniff, the binary sniff,
+		// the structural summary, the rendered window, bracket context, and the
+		// snapshot hash all want the same bytes. Magic bytes come from the
+		// in-memory header whenever the file is buffered (no extra open/read),
+		// so a PNG stored as `.txt` still resolves at any size under the cap;
+		// unbuffered files keep one centralized 256KB peek regardless of
+		// extension, since only magic bytes — never the name — decide.
+		const wholeFileBytes = fileSize <= SNAPSHOT_MAX_BYTES ? await readWholeFile(absolutePath) : undefined;
+		const imageHeader = wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES);
+		const imageMetadata = isRawSelector(parsed)
+			? null
+			: imageHeader !== undefined
+				? parseImageMetadata(imageHeader)
+				: await readImageMetadata(absolutePath);
+		const mimeType = imageMetadata?.mimeType;
 		const resolvedDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
-
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
 		// replace the raw dump with a bottleneck summary (hot paths, top self
 		// time/samples). `:raw` reads the original bytes; text that merely wears
@@ -1882,12 +1944,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: conversion failed]` }];
 			}
 		} else {
-			// One read for every consumer below. The sniff, the structural summary,
-			// the rendered window, bracket context and the snapshot hash all want
-			// the same bytes; past the snapshot cap nothing wants the whole file,
-			// so the streaming reader keeps that case cheap.
-			const wholeFileBytes = fileSize <= SNAPSHOT_MAX_BYTES ? await readWholeFile(absolutePath) : undefined;
-
+			// `wholeFileBytes` was materialized once above for the image sniff;
+			// reuse it here instead of a second full read.
 			// Binary sniff before any UTF-8 text materialization. A binary file
 			// (font, object, archive, packed blob) decodes to NUL/control bytes and
 			// U+FFFD mojibake that corrupts the terminal and burns context. Images,
@@ -2122,7 +2180,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const userLimitedLines = collectedLines.length;
 
 					const totalSelectedLines = totalFileLines - startLine;
-					const wasTruncated = collectedLines.length < totalSelectedLines || stoppedByByteLimit;
+					const wasTruncated = reachedEof && (collectedLines.length < totalSelectedLines || stoppedByByteLimit);
 					const firstLineExceedsLimit = firstLineByteLength !== undefined && firstLineByteLength > maxBytesForRead;
 					const omittedSelectedLine = omittedRequestedLine(
 						byteLimitLine,
@@ -2138,17 +2196,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// ~50 KB shown on screen.
 					const previewBytes = firstLineExceedsLimit ? (firstLinePreview?.bytes ?? 0) : 0;
 
-					const truncation: TruncationResult = {
-						content: selectedContent,
-						truncated: wasTruncated,
-						truncatedBy: stoppedByByteLimit ? "bytes" : wasTruncated ? "lines" : undefined,
-						totalLines: totalSelectedLines,
-						totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : selectedBytes,
-						outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
-						outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
-						lastLinePartial: false,
-						firstLineExceedsLimit,
-					};
+					const truncation: TruncationResult | undefined = reachedEof
+						? {
+								content: selectedContent,
+								truncated: wasTruncated,
+								truncatedBy: stoppedByByteLimit ? "bytes" : wasTruncated ? "lines" : undefined,
+								totalLines: totalSelectedLines,
+								totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : selectedBytes,
+								outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
+								outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
+								lastLinePartial: false,
+								firstLineExceedsLimit,
+							}
+						: undefined;
 
 					const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 					const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -2158,7 +2218,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// model returns validates while the live file is unchanged. The
 						// buffered text is that whole file; above the snapshot cap only a
 						// non-truncated whole-file window can supply it.
-						const isWholeFile = offset === undefined && limit === undefined && !wasTruncated;
+						const isWholeFile = reachedEof && offset === undefined && limit === undefined && !wasTruncated;
 						const tag = buffered
 							? getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText)
 							: isWholeFile
@@ -2224,7 +2284,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 					let outputText: string;
 
-					if (truncation.firstLineExceedsLimit) {
+					if (firstLineExceedsLimit) {
 						const firstLineBytes = firstLineByteLength ?? 0;
 						const snippet = firstLinePreview ?? { text: "", bytes: 0 };
 
@@ -2240,17 +2300,43 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								firstLineBytes,
 							)}, exceeds ${formatBytes(maxBytesForRead)} limit. Unable to display a valid UTF-8 snippet.]`;
 						}
-						details = { truncation };
 						sourcePath = renderAbsolutePath;
-						truncationInfo = {
-							result: truncation,
-							options: {
-								direction: "head",
-								startLine: startLineDisplay,
-								totalFileLines: reachedEof ? totalFileLines : undefined,
-							},
-						};
-					} else if (truncation.truncated) {
+						if (truncation) {
+							details = { truncation: toReadTruncationStats(truncation) };
+							truncationInfo = {
+								result: truncation,
+								options: {
+									direction: "head",
+									startLine: startLineDisplay,
+									totalFileLines,
+								},
+							};
+						} else {
+							outputText += shouldAddHashLines
+								? "\n\n[File not scanned to EOF]"
+								: `\n\n[Showing line ${startLineDisplay} (partial, ${formatBytes(
+										snippet.bytes,
+									)} of ${formatBytes(firstLineBytes)}); file not scanned to EOF]`;
+							details = {};
+						}
+					} else if (!reachedEof) {
+						const nextOffset = startLine + userLimitedLines + 1;
+						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
+						if (omittedSelectedLine) {
+							const lineNumber = omittedSelectedLine.index + 1;
+							outputText += `\n\n${formatOmittedRequestedLineNotice(
+								omittedSelectedLine,
+								maxBytesForRead,
+								`:raw:${lineNumber}-${lineNumber}`,
+							)}`;
+						} else {
+							outputText += `\n\n[More lines in file (${formatBytes(
+								fileSize,
+							)} total; not scanned to EOF). Use :${nextOffset} to continue]`;
+						}
+						details = {};
+						sourcePath = renderAbsolutePath;
+					} else if (truncation?.truncated) {
 						outputText = formatBracketAwareText() ?? formatText(truncation.content, startLineDisplay);
 						if (omittedSelectedLine) {
 							const lineNumber = omittedSelectedLine.index + 1;
@@ -2260,29 +2346,29 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								`:raw:${lineNumber}-${lineNumber}`,
 							)}`;
 						}
-						details = { truncation };
+						details = { truncation: toReadTruncationStats(truncation) };
 						sourcePath = renderAbsolutePath;
 						truncationInfo = {
 							result: truncation,
 							options: {
 								direction: "head",
 								startLine: startLineDisplay,
-								totalFileLines: reachedEof ? totalFileLines : undefined,
+								totalFileLines,
 								nextOffset: omittedSelectedLine ? null : undefined,
 							},
 						};
-					} else if (startLine + userLimitedLines < totalFileLines || !reachedEof) {
+					} else if (startLine + userLimitedLines < totalFileLines) {
 						const nextOffset = startLine + userLimitedLines + 1;
 
-						outputText = formatBracketAwareText() ?? formatText(truncation.content, startLineDisplay);
-						outputText += reachedEof
-							? `\n\n[${totalFileLines - (startLine + userLimitedLines)} more lines in file. Use :${nextOffset} to continue]`
-							: `\n\n[More lines in file (${formatBytes(fileSize)} total; not scanned to EOF). Use :${nextOffset} to continue]`;
+						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
+						outputText += `\n\n[${
+							totalFileLines - (startLine + userLimitedLines)
+						} more lines in file. Use :${nextOffset} to continue]`;
 						details = {};
 						sourcePath = renderAbsolutePath;
 					} else {
 						// No truncation, no user limit exceeded
-						outputText = formatBracketAwareText() ?? formatText(truncation.content, startLineDisplay);
+						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
 						details = {};
 						sourcePath = renderAbsolutePath;
 					}
@@ -2655,7 +2741,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		if (reachedEof) details.totalLines = totalFileLines;
 		if (displayContent) details.displayContent = displayContent;
-		if (truncationInfo) details.truncation = truncationInfo.result;
+		if (truncationInfo) details.truncation = toReadTruncationStats(truncationInfo.result);
 		const resultBuilder = toolResult<ReadToolDetails>(details)
 			.text(outputText)
 			.sourcePath(artifact.path)
@@ -2800,7 +2886,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return resultBuilder.done();
 	}
 
-	/** Read directory contents as a formatted listing, sliced by a single-range or tail selector. */
+	/**
+	 * Read directory contents as a formatted listing, sliced by a single-range or tail selector.
+	 *
+	 * The root level is uncapped; long listings page through line selectors and the
+	 * byte-truncation `:N` continuation. Child directories cap at
+	 * `READ_DIRECTORY_CHILD_LIMIT` entries and render an inline `… N more` marker;
+	 * reading the sub-path expands it, so no trailing limit notice is emitted.
+	 */
 	async #readDirectory(
 		absolutePath: string,
 		parsed: ParsedSelector,
@@ -2859,21 +2952,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const remaining = allLines.length - end;
 				text += `\n\n[${remaining} more lines in listing. Use :${end + 1} to continue]`;
 			}
-			resultBuilder.text(text);
-			if (tree.truncated) {
-				resultBuilder.limits({ resultLimit: 1 });
-			}
-			return resultBuilder.done();
+			return resultBuilder.text(text).done();
 		}
 
 		const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
 		const resultBuilder = toolResult(details).text(truncation.content).sourcePath(tree.rootPath);
-		if (tree.truncated) {
-			resultBuilder.limits({ resultLimit: 1 });
-		}
 		if (truncation.truncated) {
 			resultBuilder.truncation(truncation, { direction: "head" });
-			details.truncation = truncation;
+			details.truncation = toReadTruncationStats(truncation);
 		}
 
 		return resultBuilder.done();

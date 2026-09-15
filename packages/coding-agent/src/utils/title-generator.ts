@@ -4,13 +4,21 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type Message,
+	type Model,
+	retryTransientCompletion,
+} from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
-import { resolveRoleSelection } from "../config/model-resolver";
+import { formatModelStringWithRouting } from "../config/model-resolver";
+import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
@@ -19,7 +27,7 @@ import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/m
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
-const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: true });
+const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 // Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
@@ -110,16 +118,29 @@ const LEADING_THINKING_FENCE_RE = /^\s*```(?:thinking|reasoning)\b[\s\S]*?```\s*
 const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
-function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
+function getTitleModels(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api>[] {
 	const availableModels = registry.getAvailable();
-	if (availableModels.length === 0) return undefined;
+	if (availableModels.length === 0) return [];
 
-	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels)?.model;
-	if (titleModel) return titleModel;
-
-	if (currentModel) return currentModel;
-
-	return undefined;
+	const models = collectOnlineTinyCandidates(["tiny", "commit", "smol"], settings, availableModels).map(
+		candidate => candidate.model,
+	);
+	if (
+		currentModel &&
+		(models.length === 0 || settings.get("retry.modelFallback") !== false) &&
+		!models.some(model => formatModelStringWithRouting(model) === formatModelStringWithRouting(currentModel))
+	) {
+		// Append currentModel and expand its own chain separately — never merge it
+		// into the tiny/commit/smol role collection (that would apply role defaults).
+		const seen = new Set(models.map(formatModelStringWithRouting));
+		for (const model of expandOnlineTinyModelFallbacks(currentModel, settings, availableModels)) {
+			const key = formatModelStringWithRouting(model);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			models.push(model);
+		}
+	}
+	return models;
 }
 
 /**
@@ -232,8 +253,8 @@ export async function generateTitleOnline(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 ): Promise<string | null> {
-	const model = getTitleModel(registry, settings, currentModel);
-	if (!model) {
+	const models = getTitleModels(registry, settings, currentModel);
+	if (models.length === 0) {
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
 		return null;
 	}
@@ -246,102 +267,171 @@ export async function generateTitleOnline(
 	// markers work uniformly everywhere.
 	const systemPrompt = titleSystemPrompt ? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION] : [TITLE_SYSTEM_PROMPT];
 	const userMessage = formatTitleUserMessage(firstMessage);
-	const modelName = `${model.provider}/${model.id}`;
-	const modelContext = {
-		sessionId,
-		provider: model.provider,
-		id: model.id,
-		model: modelName,
-	};
-	logger.debug("title-generator: start", modelContext);
 
-	try {
-		if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-			const foregroundCredential = registry.authStorage
-				.listOAuthAccounts(model.provider, credentialSourceSessionId)
-				.find(account => account.active);
-			if (foregroundCredential) {
-				registry.authStorage.pinSessionOAuthAccount(model.provider, sessionId, foregroundCredential.credentialId);
-			}
-		}
-		const apiKey = await registry.getApiKey(model, sessionId);
-		if (!apiKey) {
-			logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
-			return null;
-		}
-		// Resolve metadata after getApiKey so the session-sticky credential for this
-		// request is already recorded; metadataResolver can then return the correct
-		// account_uuid rather than the snapshot-at-call-site value.
-		const metadata = metadataResolver?.(model.provider);
+	for (const model of models) {
+		const modelName = `${model.provider}/${model.id}`;
+		const modelContext = {
+			sessionId,
+			provider: model.provider,
+			id: model.id,
+			model: modelName,
+		};
+		logger.debug("title-generator: start", modelContext);
 
-		// Title generation is a 3-7 word task, but the ceiling has to survive
-		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
-		const maxTokens = TITLE_MAX_TOKENS;
-		logger.debug("title-generator: request", { ...modelContext, maxTokens });
-
-		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
-					model,
-					{
-						systemPrompt,
-						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-					},
-					{
-						apiKey: registry.resolver(model, sessionId),
-						sessionId,
-						maxTokens,
-						disableReasoning: true,
-						// Greedy decode: titling is extraction, not generation. Backends that
-						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
-						// from the message ("hashline" → "HasHroshi"). Providers whose models
-						// reject sampling params drop this via `supportsSamplingParams`.
-						temperature: 0,
-						metadata,
-						signal,
-					},
-				),
-			{ signal },
-		);
-
-		if (response.stopReason === "error") {
-			logger.warn("title-generator: response error", {
+		if (signal?.aborted) {
+			logger.debug("title-generator: aborted before attempt", {
 				...modelContext,
-				reason: "provider-response-error",
-				stopReason: response.stopReason,
-				errorMessage: response.errorMessage,
+				reason: "aborted",
 			});
 			return null;
 		}
 
-		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
+		try {
+			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
+				const foregroundCredential = registry.authStorage
+					.listOAuthAccounts(model.provider, credentialSourceSessionId)
+					.find(account => account.active);
+				if (foregroundCredential) {
+					registry.authStorage.pinSessionOAuthAccount(
+						model.provider,
+						sessionId,
+						foregroundCredential.credentialId,
+					);
+				}
+			}
+			const apiKey = await registry.getApiKey(model, sessionId);
+			if (!apiKey) {
+				logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
+				continue;
+			}
+			if (signal?.aborted) {
+				logger.debug("title-generator: aborted after credential", {
+					...modelContext,
+					reason: "aborted",
+				});
+				return null;
+			}
+			// Resolve metadata after getApiKey so the session-sticky credential for this
+			// request is already recorded; metadataResolver can then return the correct
+			// account_uuid rather than the snapshot-at-call-site value.
+			const metadata = metadataResolver?.(model.provider);
 
-		if (!title) {
-			logger.debug("title-generator: no title returned", {
+			// Title generation is a 3-7 word task, but the ceiling has to survive
+			// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
+			const maxTokens = TITLE_MAX_TOKENS;
+			logger.debug("title-generator: request", { ...modelContext, maxTokens });
+
+			const messages: Message[] = [{ role: "user", content: userMessage, timestamp: Date.now() }];
+			if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
+
+			const response = await retryTransientCompletion(
+				() =>
+					completeSimple(
+						model,
+						{
+							systemPrompt,
+							messages,
+						},
+						{
+							apiKey: registry.resolver(model, sessionId),
+							sessionId,
+							maxTokens,
+							disableReasoning: true,
+							// Greedy decode: titling is extraction, not generation. Backends that
+							// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+							// from the message ("hashline" → "HasHroshi"). Providers whose models
+							// reject sampling params drop this via `supportsSamplingParams`.
+							temperature: 0,
+							metadata,
+							signal,
+						},
+					),
+				{ signal, provider: model.provider },
+			);
+
+			if (response.stopReason === "aborted" || signal?.aborted) {
+				logger.debug("title-generator: aborted", {
+					...modelContext,
+					reason: "aborted",
+					stopReason: response.stopReason,
+				});
+				return null;
+			}
+
+			if (response.stopReason === "error") {
+				logger.warn("title-generator: response error", {
+					...modelContext,
+					reason: "provider-response-error",
+					stopReason: response.stopReason,
+					errorMessage: response.errorMessage,
+				});
+				continue;
+			}
+
+			const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
+
+			if (!title) {
+				logger.debug("title-generator: no title returned", {
+					...modelContext,
+					reason: "model-returned-none",
+					usage: response.usage,
+					stopReason: response.stopReason,
+				});
+				continue;
+			}
+
+			logger.debug("title-generator: success", {
 				...modelContext,
-				reason: "model-returned-none",
+				title,
 				usage: response.usage,
 				stopReason: response.stopReason,
 			});
-			return null;
+
+			return title;
+		} catch (err) {
+			if (signal?.aborted || (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError"))) {
+				logger.debug("title-generator: aborted", {
+					...modelContext,
+					reason: "aborted",
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return null;
+			}
+			logger.warn("title-generator: error", {
+				...modelContext,
+				reason: "exception",
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
-
-		logger.debug("title-generator: success", {
-			...modelContext,
-			title,
-			usage: response.usage,
-			stopReason: response.stopReason,
-		});
-
-		return title;
-	} catch (err) {
-		logger.warn("title-generator: error", {
-			...modelContext,
-			reason: "exception",
-			error: err instanceof Error ? err.message : String(err),
-		});
-		return null;
 	}
+	return null;
+}
+
+/**
+ * Open the `<title>` marker as a trailing assistant turn on hosts that continue
+ * it verbatim (`Model.supportsAssistantPrefill`). Some Ollama chat templates
+ * (LFM2.5) open a reasoning channel regardless of the disable flag, burning the
+ * whole output budget on thinking and never emitting a title. Committing the
+ * marker first skips the reasoning channel entirely.
+ */
+function titlePrefill(model: Model<Api>): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "<title>" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
 }
 
 function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string {
@@ -474,6 +564,12 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
  * Repeating the same sanitized title is a no-op on every platform.
  */
 export function setTerminalTitle(title: string): void {
+	// The teardown latch belongs HERE, not only on the composed-state path: this
+	// is the sink every title write funnels through, and it is exported, so a
+	// direct importer firing from a delayed callback after
+	// `disposeTerminalTitleState()` would otherwise write straight into the
+	// parent shell's tab whose title teardown just restored.
+	if (terminalTitleRuntime.disposed) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
 	if (next === lastTerminalTitle) return;
@@ -484,6 +580,14 @@ export function setTerminalTitle(title: string): void {
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
 	// An authoritative session title (rename, new session, focus swap) supersedes
 	// any extension override so the base title tracks the real session again.
+	//
+	// It does NOT release the teardown latch. Every caller here is a routine
+	// session update, and several arrive from async transitions that can resume
+	// AFTER teardown restored the shell's title (an extension `newSession()`
+	// continuing past its `await`, a collab host frame) — work `stop()` cannot
+	// cancel. Releasing here would let the emit below, and a re-armed spinner,
+	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
+	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
 	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
@@ -493,10 +597,17 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * Set a terminal title from an extension's `setTitle()`. Unlike the session base
  * title, this owns the terminal verbatim: periodic and run-state updates will not
  * rewrite it. Cleared when the app next sets an authoritative session title via
- * {@link setSessionTerminalTitle}.
+ * {@link setSessionTerminalTitle}, or when the extension passes an empty or blank
+ * title to release its claim.
  */
 export function setExtensionTerminalTitle(title: string): void {
-	terminalTitleRuntime.extensionOverride = title;
+	// A title that renders to nothing RELEASES the override rather than owning the
+	// terminal with it: `emitTerminalTitle` falls through on nullish only, so a
+	// latched blank would strand the title at the bare brand and silence every
+	// subsequent run-state change. Reuse the sink's own emptiness predicate so
+	// "releases its claim" means the same thing here as it does at the sink, and
+	// so the stored override is the value that will actually render.
+	terminalTitleRuntime.extensionOverride = sanitizeTerminalTitlePart(title);
 	emitTerminalTitle();
 }
 
@@ -522,6 +633,11 @@ const terminalTitleRuntime: {
 	 *  app next establishes an authoritative session title (rename, new session,
 	 *  focus swap) via `setSessionTerminalTitle`. */
 	extensionOverride: string | undefined;
+	/** Set by `disposeTerminalTitleState()` at teardown. While set, nothing may
+	 *  re-arm the spinner or emit an OSC title — teardown restores the shell's own
+	 *  title, so a later write would land in the parent shell's tab. Cleared only
+	 *  by `initTerminalTitleState()`, when the app takes the terminal over again. */
+	disposed: boolean;
 } = {
 	label: undefined,
 	state: "idle",
@@ -529,6 +645,7 @@ const terminalTitleRuntime: {
 	enabled: true,
 	timer: undefined,
 	extensionOverride: undefined,
+	disposed: false,
 };
 
 /**
@@ -560,6 +677,8 @@ export function buildTerminalTitleWithState(
 }
 
 function emitTerminalTitle(): void {
+	// The teardown latch lives at the sink (`setTerminalTitle`), so every path
+	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
 	const next =
@@ -580,7 +699,7 @@ function stopTerminalTitleSpinner(): void {
 }
 
 function startTerminalTitleSpinner(): void {
-	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	if (isConPTYHosted() || terminalTitleRuntime.disposed || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
 		emitTerminalTitle();
@@ -610,8 +729,36 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	emitTerminalTitle();
 }
 
-/** Release terminal-title runtime resources. */
+/**
+ * Take ownership of the terminal title: the counterpart to
+ * {@link disposeTerminalTitleState}, called once when the UI claims the terminal.
+ * This is the ONLY release of the teardown latch. Routine updates — session
+ * rename, cwd change, focus swap, collab host state — must not release it: they
+ * can arrive from an async transition that resumes after teardown already handed
+ * the tab back to the shell.
+ */
+export function initTerminalTitleState(): void {
+	terminalTitleRuntime.disposed = false;
+	// A fresh claim starts from the shell's title, not whatever the previous
+	// session last emitted: the dedupe cache must not swallow the first write.
+	lastTerminalTitle = undefined;
+	// Releasing the latch alone would leave a stopped timer behind a `working`
+	// state — a frozen spinner frame. Mirror the enable path and re-arm.
+	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+}
+
+/**
+ * Stop the spinner timer and latch the runtime off; call on session/UI teardown.
+ * The latch is the load-bearing half: `shutdown()` disposes and restores the shell
+ * title BEFORE it unsubscribes the session, so a live `#handleAgentStart` in that
+ * window would otherwise re-arm the spinner and write `π ⠋ …` into the parent
+ * shell's tab. Released only by {@link initTerminalTitleState}.
+ */
 export function disposeTerminalTitleState(): void {
+	terminalTitleRuntime.disposed = true;
+	// `popTerminalTitle()` hands the terminal back to the shell, so the runtime no
+	// longer knows what is on screen: the stale dedupe cache (`lastTerminalTitle`,
+	// cleared below) must not swallow the first write after the latch releases.
 	stopTerminalTitleSpinner();
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;

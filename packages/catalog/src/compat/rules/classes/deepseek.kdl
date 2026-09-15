@@ -84,7 +84,15 @@ class "deepseek" {
 	models "*v4.1-flash*" priority=10 {
 		strip-image-input #false
 	}
-	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" {
+	// V4.1 Flash is natively multimodal (vision encoder + projector, image-text
+	// pre-training) but its release id carries no `vision` token to key on.
+	// Same priority as the V4.1 Flash carve-out: the OpenCode Go provider rule
+	// declares the same value for its `deepseek-flash` lane and would otherwise
+	// tie at equal rank.
+	models "deepseek-flash" priority=10 {
+		strip-image-input #false
+	}
+	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" "litellm" "nous" {
 		stream-markup-healing-pattern "dsml"
 	}
 	thinking-loop-guard "deepseek"

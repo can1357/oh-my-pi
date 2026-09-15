@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "../task/types";
+import type { OutputMeta } from "../tools/output-meta";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -30,23 +31,22 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
 /**
- * Adaptive ("smart") `hub` poll-wait ladder (ms). A tight poll loop climbs
- * these rungs so each immediate re-poll backs off and stops spending turns on
- * "still running" frames; the floor (first rung) is the shortest wait and the
- * top rung is the longest a smart poll will ever block. Only used when
- * `async.pollWaitDuration` is set to `smart`; fixed durations wait verbatim.
+ * Adaptive `hub` wait-window ladder (ms). A tight wait loop climbs these rungs
+ * so each immediate re-wait backs off and stops spending turns on "still
+ * running" frames; the floor (first rung) is the shortest window and the top
+ * rung is the longest a wait will ever block.
  */
-const POLL_WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+export const POLL_WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
 /**
- * Going at least this long between poll calls means the agent stepped out of
- * the poll loop to do real work — the next poll drops back to the ladder floor.
+ * Going at least this long between waits means the agent stepped out of the
+ * wait loop to do real work — the next wait drops back to the ladder floor.
  */
 const POLL_ESCALATION_RESET_MS = 60_000;
 
 interface PollEscalationState {
-	/** Index into POLL_WAIT_LADDER_MS used for the most recent poll wait. */
+	/** Index into POLL_WAIT_LADDER_MS used for the most recent wait. */
 	level: number;
-	/** Timestamp (ms) when the most recent poll wait returned. */
+	/** Timestamp (ms) when the most recent wait returned. */
 	lastPollEndAt: number;
 }
 
@@ -77,6 +77,8 @@ export class AsyncJobError extends Error {
 export interface AsyncJobDetails extends Record<string, unknown> {
 	/** Images recovered from command output, independent of text truncation. */
 	images?: ImageContent[];
+	/** Tool output metadata needed when a completion is delivered or recovered later. */
+	meta?: OutputMeta;
 }
 
 export interface AsyncJob {
@@ -458,12 +460,12 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Compute the next adaptive ("smart") wait (ms) for a blocking `hub` wait by
-	 * the given owner. Consecutive polls — those starting within
-	 * POLL_ESCALATION_RESET_MS of the previous poll returning — climb
+	 * Compute the next adaptive wait window (ms) for a blocking `hub` wait by
+	 * the given owner. Consecutive waits — those starting within
+	 * POLL_ESCALATION_RESET_MS of the previous wait returning — climb
 	 * POLL_WAIT_LADDER_MS so a tight wait loop backs off; a longer gap means the
-	 * agent left to do real work, so the wait resets to the floor. Pair each call
-	 * with `recordPollWaitEnd()` once the wait returns.
+	 * agent left to do real work, so the window resets to the floor. Pair each
+	 * call with `recordPollWaitEnd()` once the wait returns.
 	 */
 	nextPollWaitMs(ownerId: string | undefined, now: number = Date.now()): number {
 		const prev = this.#pollEscalation.get(ownerId);
@@ -474,9 +476,9 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Mark a blocking poll wait as finished so the idle-reset window is measured
-	 * from now. Polling again before POLL_ESCALATION_RESET_MS elapses keeps
-	 * climbing the ladder; waiting longer resets it to the floor.
+	 * Mark a blocking wait as finished so the idle-reset window is measured
+	 * from now. Waiting again before POLL_ESCALATION_RESET_MS elapses keeps
+	 * climbing the ladder; a longer gap resets it to the floor.
 	 */
 	recordPollWaitEnd(ownerId: string | undefined, now: number = Date.now()): void {
 		const prev = this.#pollEscalation.get(ownerId);

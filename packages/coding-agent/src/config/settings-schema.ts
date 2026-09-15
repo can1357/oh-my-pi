@@ -1,5 +1,5 @@
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
@@ -237,34 +237,47 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
 
-/** Status line segment identifiers */
-export type StatusLineSegmentId =
-	| "pi"
-	| "status"
-	| "model"
-	| "mode"
-	| "path"
-	| "git"
-	| "pr"
-	| "subagents"
-	| "token_in"
-	| "token_out"
-	| "token_total"
-	| "token_rate"
-	| "cost"
-	| "context_pct"
-	| "context_total"
-	| "time_spent"
-	| "time"
-	| "session"
-	| "hostname"
-	| "cache_read"
-	| "cache_write"
-	| "cache_hit"
-	| "session_name"
-	| "usage"
-	| "collab"
-	| "vim";
+/** Status line segment identifiers accepted by custom status-line settings. */
+export const STATUS_LINE_SEGMENT_IDS = [
+	"pi",
+	"status",
+	"model",
+	"mode",
+	"path",
+	"git",
+	"pr",
+	"subagents",
+	"token_in",
+	"token_out",
+	"token_total",
+	"token_rate",
+	"cost",
+	"context_pct",
+	"context_total",
+	"time_spent",
+	"time",
+	"session",
+	"hostname",
+	"cache_read",
+	"cache_write",
+	"cache_hit",
+	"session_name",
+	"usage",
+	"collab",
+	"vim",
+] as const;
+
+/** One identifier from the supported status-line segment catalog. */
+export type StatusLineSegmentId = (typeof STATUS_LINE_SEGMENT_IDS)[number];
+
+/** Baseline segments used when Custom is selected without segment overrides. */
+export const CUSTOM_STATUS_LINE_DEFAULTS: {
+	readonly left: StatusLineSegmentId[];
+	readonly right: StatusLineSegmentId[];
+} = {
+	left: ["vim", "model", "mode", "path", "git", "pr"],
+	right: ["session_name", "token_total", "cost", "context_pct"],
+};
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -992,9 +1005,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.leftSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.left },
 
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.rightSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.right },
 
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
 
@@ -3605,7 +3618,6 @@ export const SETTINGS_SCHEMA = {
 			condition: "hindsightActive",
 		},
 	},
-	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
 	// TTSR
@@ -4844,27 +4856,6 @@ export const SETTINGS_SCHEMA = {
 		default: 100,
 	},
 
-	"async.pollWaitDuration": {
-		type: "enum",
-		values: ["5s", "10s", "30s", "1m", "5m", "smart"] as const,
-		default: "smart",
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Max Poll Time",
-			description:
-				"How long a `hub` wait watches background jobs before returning the current state. A fixed value waits that exact duration every time. `smart` adapts: it starts at 5s and lengthens with each back-to-back wait (up to 5m), then resets to 5s after about a minute without waiting.",
-			options: [
-				{ value: "5s", label: "5 seconds" },
-				{ value: "10s", label: "10 seconds" },
-				{ value: "30s", label: "30 seconds" },
-				{ value: "1m", label: "1 minute" },
-				{ value: "5m", label: "5 minutes" },
-				{ value: "smart", label: "Smart", description: "Default — adaptive 5s→5m, resets when you stop polling" },
-			],
-		},
-	},
-
 	"irc.timeoutMs": {
 		type: "number",
 		default: 120_000,
@@ -4872,8 +4863,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Execution",
 			label: "IRC Timeout",
-			description:
-				"Default timeout for hub message waits (and send await:true) in milliseconds; 0 disables the timeout",
+			description: "Timeout for hub send await:true in milliseconds; 0 disables the timeout",
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "30000", label: "30 seconds" },
@@ -6326,7 +6316,11 @@ export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boo
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
-	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
+	const definition = SETTINGS_SCHEMA[path];
+	if (definition.type === "array" || definition.type === "record") {
+		return structuredClone(definition.default) as SettingValue<P>;
+	}
+	return definition.default as SettingValue<P>;
 }
 
 /** Check if a path has UI metadata (should appear in settings panel) */

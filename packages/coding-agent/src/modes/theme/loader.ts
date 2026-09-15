@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
-import { adjustHsv, getCustomThemesDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { adjustHsv } from "@oh-my-pi/pi-utils/color";
+import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { detectColorMode, resolveThemeColors } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
 import { defaultThemes } from "./defaults";
 import lightThemeJson from "./light.json" with { type: "json" };
-import { type ColorMode, type ThemeBg, type ThemeColor, type ThemeJson, themeJsonSchema } from "./schema";
+import type { ColorMode, ThemeBg, ThemeColor, ThemeJson } from "./schema";
 import { normalizeSpinnerFramesOverride, type SymbolPreset } from "./symbols";
 import { Theme } from "./theme-class";
 
@@ -81,10 +82,10 @@ function parseThemeJson(name: string, content: string): ThemeJson {
 	}
 	let parsed: ThemeJson;
 	try {
-		parsed = themeJsonSchema(json) as ThemeJson;
-		if (parsed instanceof type.errors) {
-			throw new Error(parsed.summary);
-		}
+		// Custom-theme-only boundary: built-in first-frame themes do not need to
+		// load or construct the omptype validation graph.
+		const { validateThemeJson } = require("./schema-validation");
+		parsed = validateThemeJson(json);
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
 		// Extract color key information if available

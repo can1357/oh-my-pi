@@ -10,9 +10,6 @@ import {
 	umansModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import modelsJson from "../src/models.json";
-
-const bundledModels = modelsJson;
 
 describe("umans provider catalog", () => {
 	it("discovers Anthropic-route models from the public models info endpoint", async () => {
@@ -162,12 +159,6 @@ describe("umans provider catalog", () => {
 		expect(coder?.input).toEqual(["text", "image"]);
 	});
 
-	it("bundles Umans GLM via-handoff models as text-only", () => {
-		const model = bundledModels.umans?.["umans-glm-5.2"];
-		expect(model, "umans-glm-5.2 should be bundled").toBeDefined();
-		expect(model.input, "umans-glm-5.2 input should be text-only").toEqual(["text"]);
-	});
-
 	it("drops stale cached GLM rows that predate the via-handoff static correction", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-umans-stale-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
@@ -271,63 +262,5 @@ describe("umans provider catalog", () => {
 			contextWindow: 262_144,
 			maxTokens: 262_144,
 		});
-	});
-
-	it("bundles the default Umans coding model", () => {
-		const model = bundledModels.umans?.["umans-coder"];
-
-		expect(model).toBeDefined();
-		expect(model).toMatchObject({
-			api: "anthropic-messages",
-			provider: "umans",
-			baseUrl: "https://api.code.umans.ai",
-			reasoning: true,
-			input: ["text", "image"],
-			contextWindow: 262_144,
-			maxTokens: 32_768,
-			compat: { escapeBuiltinToolNames: true },
-		});
-	});
-
-	it("bundles published Umans PAYG pricing", () => {
-		const models = bundledModels.umans;
-
-		expect(models?.["umans-coder"].cost).toEqual({ input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 });
-		expect(models?.["umans-kimi-k2.7"].cost).toEqual({
-			input: 0.95,
-			output: 4,
-			cacheRead: 0.19,
-			cacheWrite: 0,
-		});
-		expect(models?.["umans-glm-5.2"].cost).toEqual({ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 });
-		expect(models?.["umans-flash"].cost).toEqual({ input: 0.15, output: 1, cacheRead: 0.05, cacheWrite: 0 });
-		expect(models?.["umans-qwen3.6-35b-a3b"].cost).toEqual({
-			input: 0.15,
-			output: 1,
-			cacheRead: 0.05,
-			cacheWrite: 0,
-		});
-	});
-
-	it("bundles Umans mandatory reasoning metadata", () => {
-		const model = bundledModels.umans?.["umans-kimi-k2.7"];
-
-		expect(model).toBeDefined();
-		expect(model.maxTokens).toBe(32_768);
-		expect(model.compat?.escapeBuiltinToolNames).toBe(true);
-		expect(model.thinking).toMatchObject({
-			requiresEffort: true,
-		});
-	});
-
-	it("bundles Umans GLM 5.2 with the wire-exact high/max ladder", () => {
-		const model = bundledModels.umans?.["umans-glm-5.2"];
-
-		expect(model).toBeDefined();
-		expect(model.thinking).toMatchObject({
-			mode: "anthropic-budget-effort",
-			efforts: ["high", "max"],
-		});
-		expect("effortMap" in model.thinking).toBe(false);
 	});
 });

@@ -570,7 +570,7 @@ describe("experimental context management", () => {
 		if (!entry) throw new Error("Expected a rollover boundary");
 		const expected =
 			computeNonMessageTokens(session, agent.tokenizer) +
-			agent.tokenizer.countMessages(manager.buildSessionContext().messages);
+			agent.tokenizer.countMessages(convertToLlm(manager.buildSessionContext().messages));
 		expect(entry.tokensAfter).toBe(expected);
 		expect(entry.tokensAfter).toBeGreaterThan(agent.tokenizer.countMessages(manager.buildSessionContext().messages));
 	});

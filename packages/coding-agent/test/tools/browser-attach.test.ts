@@ -286,7 +286,16 @@ describe("pickElectronTarget", () => {
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-isolation-"));
 			const borrowedProfile = path.join(root, "borrowed");
 			const port = await findFreeCdpPort();
-			const flags = ["--headless=new", "--no-sandbox", "--no-first-run", "--no-default-browser-check"];
+			// Explicit profiles keep the real OS keystore, so bypass it here or macOS
+			// blocks each spawn on a keychain-access dialog.
+			const flags = [
+				"--headless=new",
+				"--no-sandbox",
+				"--no-first-run",
+				"--no-default-browser-check",
+				"--use-mock-keychain",
+				"--password-store=basic",
+			];
 			const child = Bun.spawn(
 				[exe, ...flags, `--user-data-dir=${borrowedProfile}`, `--remote-debugging-port=${port}`],
 				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
@@ -432,6 +441,16 @@ describe("resolveSpawnArgs", () => {
 		const args = resolveSpawnArgs("/var/lib/flatpak/exports/bin/com.google.Chrome", []);
 		expect(args.some(arg => arg.startsWith("--user-data-dir="))).toBe(true);
 		expect(resolveSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", ["--foo"])).toEqual(["--foo"]);
+	});
+
+	test("bypasses the OS keystore only for omp-owned Chromium profiles", () => {
+		const owned = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--password-store=gnome"]);
+		expect(owned).toContain("--use-mock-keychain");
+		expect(owned).toContain("--password-store=gnome");
+		expect(owned).not.toContain("--password-store=basic");
+
+		const borrowed = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
+		expect(borrowed).toEqual(["--user-data-dir=/home/me/.config/chrome"]);
 	});
 });
 

@@ -1,6 +1,10 @@
 // Provider-wire compat for "cerebras"; regenerated from the frozen census using deployment contract selectors.
 
 provider "cerebras" {
+	default-model "zai-glm-4.7"
+	env "CEREBRAS_API_KEY"
+	discovery label="Cerebras"
+
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	// Replaces the Cerebras provider branches in the completions baseline.

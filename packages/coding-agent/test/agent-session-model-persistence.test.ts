@@ -329,6 +329,7 @@ describe("AgentSession model persistence", () => {
 			persist: true,
 			codeModelBeforeNavigationHandler: async () => {
 				created.session.agent.setModel(originalModel);
+				created.session.sessionManager.appendModelChange(modelValue(originalModel));
 				return {
 					rollback: () => {
 						rollbackCalled = true;

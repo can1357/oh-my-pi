@@ -375,6 +375,15 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 	});
 
+	test("retains the startup tools array when reconciliation keeps the exact roster", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "off" }));
+		const startupTools = session.agent.state.tools;
+
+		await session.setActiveToolsByName(["eval", "read"]);
+
+		expect(session.agent.state.tools).toBe(startupTools);
+	});
+
 	test("startup reconcile survives a transiently narrow live tool set", async () => {
 		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
 		// Before the first apply, a startup-time mutation can shrink the live

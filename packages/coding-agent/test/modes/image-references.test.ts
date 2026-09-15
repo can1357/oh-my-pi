@@ -2,25 +2,33 @@ import { describe, expect, it } from "bun:test";
 import {
 	chipLabel,
 	collapseImageMarkers,
+	collapseSkillTokens,
 	compactImageMarkers,
 	type PlaceholderKind,
 	renderPlaceholders,
 	shiftImageMarkers,
+	skillChipLabel,
 } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
 
 function capture(text: string): {
 	out: string;
 	refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }>;
+	skills: string[];
 } {
 	const refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }> = [];
+	const skills: string[] = [];
 	const out = renderPlaceholders(text, {
 		renderText: t => t,
 		renderReference: (label, kind, index, form) => {
 			refs.push({ label, kind, index, form });
 			return `<${kind}:${index}>`;
 		},
+		renderSkill: (_label, name) => {
+			skills.push(name);
+			return `<skill:${name}>`;
+		},
 	});
-	return { out, refs };
+	return { out, refs, skills };
 }
 
 describe("renderPlaceholders", () => {
@@ -77,6 +85,43 @@ describe("renderPlaceholders", () => {
 
 	it("does not treat a word ending in an ascii icon as a chip token", () => {
 		expect(capture("boximg #1").refs).toHaveLength(0);
+	});
+
+	it("routes skill chips to renderSkill with the bare name, stopping at punctuation", () => {
+		const { out, skills, refs } = capture(`use ${skillChipLabel("stencil-design")}, then ${skillChipLabel("v2.1")}.`);
+		expect(skills).toEqual(["stencil-design", "v2.1"]);
+		expect(refs).toHaveLength(0);
+		expect(out).toBe("use <skill:stencil-design>, then <skill:v2.1>.");
+	});
+
+	it("recognizes skill chips from every symbol preset", () => {
+		expect(capture("\uf0eb reviewer").skills).toEqual(["reviewer"]);
+		expect(capture("SK reviewer").skills).toEqual(["reviewer"]);
+		expect(capture("TASK reviewer").skills).toHaveLength(0);
+	});
+});
+
+describe("collapseSkillTokens", () => {
+	const known = (name: string) => name === "reviewer";
+
+	it("collapses known skill tokens into chips and registers the canonical token as expansion", () => {
+		const registered: Array<[string, string]> = [];
+		const out = collapseSkillTokens("fix it /skill:reviewer now", known, (label, expansion) =>
+			registered.push([label, expansion]),
+		);
+		expect(out).toBe(`fix it ${skillChipLabel("reviewer")} now`);
+		expect(registered).toEqual([[skillChipLabel("reviewer"), "/skill:reviewer"]]);
+	});
+
+	it("leaves unknown skills and glued tokens as literal text", () => {
+		expect(collapseSkillTokens("/skill:nope and x/skill:reviewer", known, () => {})).toBe(
+			"/skill:nope and x/skill:reviewer",
+		);
+	});
+
+	it("does not collapse inside a bash or foreign slash-command draft", () => {
+		expect(collapseSkillTokens("!echo /skill:reviewer", known, () => {})).toBe("!echo /skill:reviewer");
+		expect(collapseSkillTokens("/compact /skill:reviewer", known, () => {})).toBe("/compact /skill:reviewer");
 	});
 });
 

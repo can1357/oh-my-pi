@@ -17,7 +17,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ApiKeyResolverModel } from "../config/api-key-resolver";
 import { ModelRegistry } from "../config/model-registry";
@@ -40,6 +40,14 @@ export interface BenchModelRegistry {
 	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	hasConfiguredAuth?(model: Model<Api>): boolean;
+	/**
+	 * Discovery-backed providers the catalog may still need to fetch
+	 * (models.yml discovery, ollama, llama.cpp, lm-studio). Absent on
+	 * hand-rolled test registries, which opt out of the fallback pass.
+	 */
+	getDiscoverableProviders?(): string[];
+	/** Cache-aware discovery pass; absent when the registry cannot fetch. */
+	refresh?(): Promise<void>;
 }
 
 /** Live registry plus the settings and teardown hook backing it. */
@@ -123,20 +131,40 @@ function resolveAuthenticatedAlternative(
 
 /**
  * Resolve every selector to a concrete model + thinking level, warning on
- * stderr when a selector was redirected to an authenticated provider.
+ * stderr when a selector was redirected to an authenticated provider. When any
+ * selector misses the hydrated catalog, awaits one cache-aware discovery pass
+ * and re-resolves every selector from the refreshed catalog before failing:
+ * discovery-backed providers (models.yml discovery, ollama, llama.cpp,
+ * lm-studio) ship no static models, and cached rows whose `Authorization`
+ * header cannot be re-derived from config (#5780) drop every model of that
+ * provider until a live probe runs. A refresh replaces the rows of every
+ * touched discovery provider, so only a full re-resolve keeps all targets on
+ * the same snapshot. Same lazy fallback the session boot path applies (issues
+ * #6114, #6162) — the common path, where every selector resolves, never pays
+ * for a fetch.
  *
  * @throws when any selector cannot be resolved; the message lists all failures.
  */
-export function resolveBenchTargets(
+export async function resolveBenchTargets(
 	selectors: string[],
 	modelRegistry: BenchModelRegistry,
 	settings: Settings | undefined,
 	writeStderr: (text: string) => void,
-): BenchTarget[] {
+): Promise<BenchTarget[]> {
 	const preferences = getModelMatchPreferences(settings);
-	const resolved: BenchTarget[] = [];
-	const errors: string[] = [];
-	for (const selector of selectors) {
+	// Resolution runs up to two passes (initial + post-refresh), and refresh
+	// can change how an already-resolved selector redirects, so only the
+	// final pass's warnings are real: each pass rebuilds the buffer, and it
+	// is flushed once, so a warning that no longer applies is never printed.
+	const warnings = new Map<string, string>();
+	const warn = (selector: string, kind: string, text: string): void => {
+		warnings.set(`${selector}\u0000${kind}`, text);
+	};
+	const resolvePass = (): Array<BenchTarget | string> => {
+		warnings.clear();
+		return selectors.map(selector => resolveOne(selector));
+	};
+	const resolveOne = (selector: string): BenchTarget | string => {
 		// Benchmarks intentionally resolve against the full catalog first, then
 		// apply the exact-id credential fallback below. Using the CLI resolver's
 		// authenticated default here would silently redirect non-equivalent bare
@@ -148,15 +176,9 @@ export function resolveBenchTargets(
 			settings,
 			preferences,
 		});
-		if (result.error) {
-			errors.push(`${selector}: ${result.error}`);
-			continue;
-		}
-		if (!result.model) {
-			errors.push(`${selector}: model not found`);
-			continue;
-		}
-		if (result.warning) writeStderr(`${chalk.yellow(`Warning: ${result.warning}`)}\n`);
+		if (result.error) return `${selector}: ${result.error}`;
+		if (!result.model) return `${selector}: model not found`;
+		if (result.warning) warn(selector, "resolver", result.warning);
 		let model = result.model;
 		const authSelector = result.configuredPatterns?.[result.configuredPatternIndex ?? 0] ?? selector;
 		const authenticated = resolveAuthenticatedAlternative(
@@ -166,21 +188,35 @@ export function resolveBenchTargets(
 			preferences.providerOrder,
 		);
 		if (authenticated) {
-			writeStderr(
-				`${chalk.yellow(
-					`Warning: no credentials for "${model.provider}"; benchmarking ${formatModelString(authenticated)} instead. Pin "${formatModelString(model)}" to force it.`,
-				)}\n`,
+			warn(
+				selector,
+				"redirect",
+				`no credentials for "${model.provider}"; benchmarking ${formatModelString(authenticated)} instead. Pin "${formatModelString(model)}" to force it.`,
 			);
 			model = authenticated;
 		}
-		resolved.push({
+		return {
 			selector,
 			model,
 			thinking: resolveThinkingLevelForModel(model, concreteThinkingLevel(result.thinkingLevel)),
-		});
+		};
+	};
+	let outcomes = resolvePass();
+	if (
+		outcomes.some(outcome => typeof outcome === "string") &&
+		modelRegistry.refresh &&
+		(modelRegistry.getDiscoverableProviders?.().length ?? 0) > 0
+	) {
+		await logger.time("resolveBenchTargetsDiscoveryFallback", () => modelRegistry.refresh!());
+		// Refresh replaces the catalog rows of every touched discovery provider,
+		// so re-resolve every selector — not just the misses — to keep all
+		// targets on the same snapshot.
+		outcomes = resolvePass();
 	}
+	for (const text of warnings.values()) writeStderr(`${chalk.yellow(`Warning: ${text}`)}\n`);
+	const errors = outcomes.filter((outcome): outcome is string => typeof outcome === "string");
 	if (errors.length > 0) {
 		throw new Error(`Could not resolve ${errors.length === 1 ? "model" : "models"}:\n${errors.join("\n")}`);
 	}
-	return resolved;
+	return outcomes as BenchTarget[];
 }

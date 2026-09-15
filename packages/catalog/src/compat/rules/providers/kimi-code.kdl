@@ -1,6 +1,11 @@
 // Provider-wire compat for "kimi-code"; regenerated from the frozen census using deployment contract selectors.
 
 provider "kimi-code" {
+	default-model "kimi-for-coding"
+	discovery label="Kimi Code" {
+		env "KIMI_API_KEY"
+	}
+
 	class "kimi" {
 		// Replaces the native Kimi provider thinking-format branch.
 		thinking-format "zai"
