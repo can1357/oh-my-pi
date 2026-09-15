@@ -566,6 +566,21 @@ describe("prompt-suggestions pure helpers", () => {
 		expect(result.at(-1)!.text).toBe("正常回复");
 	});
 
+	it("removes OSC hyperlink metadata while preserving its visible labels", () => {
+		const linked = "\x1b]8;;https://example.test\x07继续\x1b]8;;\x07";
+		const linkedWithSt = "\x1b]8;;https://example.test/next\x1b\\处理\x1b]8;;\x1b\\";
+		expect(cleanSuggestion(`${linked} ${linkedWithSt}`)).toBe("继续 处理");
+	});
+
+	it("removes lone surrogates without damaging valid Unicode", () => {
+		expect(cleanSuggestion("继续\ud800处理\udc00 😀")).toBe("继续处理 😀");
+	});
+
+	it("does not create a lone surrogate when clipping a valid suggestion", () => {
+		const prefix = "x".repeat(119);
+		expect(cleanSuggestion(`${prefix}😀继续`)).toBe(prefix);
+	});
+
 	it("keeps short Chinese and file paths without English sentence heuristics", () => {
 		expect(cleanSuggestion("继续")).toBe("继续");
 		expect(cleanSuggestion("检查 src/main.ts 和 src/config.ts")).toBe("检查 src/main.ts 和 src/config.ts");

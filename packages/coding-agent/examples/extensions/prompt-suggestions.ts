@@ -43,7 +43,7 @@ import { completeSimple } from "@oh-my-pi/pi-ai";
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getComposerStyle, isKeyRelease, matchesKey, parseSgrMouse, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import suggestionSystemPrompt from "./prompt-suggestions-system.md" with { type: "text" };
 import suggestionUserPrompt from "./prompt-suggestions-user.md" with { type: "text" };
 
@@ -169,14 +169,13 @@ const LABEL_PREFIX_RE =
  */
 export function cleanSuggestion(raw: unknown): string {
 	if (typeof raw !== "string") return "";
-	let text = raw.trim();
+	let text = sanitizeText(raw).trim();
 	if (text.includes(NO_SUGGESTION)) return "";
-	// Strip ANSI escapes, delete zero-width/bidi marks, whitespace-ify C0/C1
-	// control characters (incl. BEL and separators).
+	// Apply suggestion-specific invisible-mark and whitespace cleanup after
+	// the shared sanitizer handles terminal escapes and malformed Unicode.
 	text = text
-		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
 		.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, "")
-		.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+		.replace(/[\t\n\u2028\u2029]/g, " ")
 		.trim();
 	text = text.replace(/^```[a-zA-Z0-9_-]*\s*|```$/g, "").trim();
 	if (!text) return "";
@@ -199,7 +198,10 @@ export function cleanSuggestion(raw: unknown): string {
 	// Drop trailing partial punctuation pile-ups and cap.
 	text = text.replace(/[.。,，;；]+$/u, "").trim();
 	if (!text) return "";
-	if (text.length > MAX_SUGGESTION_CHARS) text = text.slice(0, MAX_SUGGESTION_CHARS).trimEnd();
+	if (text.length > MAX_SUGGESTION_CHARS) {
+		// Clipping UTF-16 can split a valid surrogate pair at the boundary.
+		text = sanitizeText(text.slice(0, MAX_SUGGESTION_CHARS)).trimEnd();
+	}
 	return text;
 }
 
