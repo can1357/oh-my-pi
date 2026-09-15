@@ -276,7 +276,9 @@ const CHROMIUM_PROCESS_SIBLINGS = ["chrome", "chromium", "chromium-browser", "ms
  * `/usr/bin/google-chrome-stable` realpaths to the wrapper script
  * `/opt/google/chrome/google-chrome`, while the live process exe is the
  * sibling ELF `chrome`. Missing that sibling relaunches onto a locked
- * profile.
+ * profile. The sibling scan runs only for Chromium-family launchers: an
+ * Electron app whose directory happens to contain a `chrome` file must not
+ * match Chrome's processes as its own.
  */
 async function processMatchPaths(exe: string): Promise<string[]> {
 	const paths = new Set<string>();
@@ -286,6 +288,8 @@ async function processMatchPaths(exe: string): Promise<string[]> {
 	};
 	await add(exe);
 	const resolved = await fs.realpath(exe).catch(() => exe);
+	const base = path.basename(resolved).replace(/\.exe$/i, "");
+	if (!CHROMIUM_BROWSER_BASENAME.test(base)) return [...paths];
 	const dir = path.dirname(resolved);
 	for (const name of CHROMIUM_PROCESS_SIBLINGS) {
 		const sibling = path.join(dir, name);

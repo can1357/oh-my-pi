@@ -6,6 +6,11 @@
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
 
+### Fixed
+
+- Attaching to an already-running Chromium no longer times out: browser reuse matching now recovers profile and debugging-port flags from Chromium's space-joined process command lines, resolves distro wrapper launchers to their browser binary instead of relaunching onto the locked profile, and rejects malformed debugging-port values.
+- Transcript retirement no longer renders stale blocks after the live child list is reordered or replaced externally.
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
@@ -85,9 +90,6 @@
 - Moved PTY log replay into the shared project launch broker, so normal CLI and Hub startup no longer load the xterm runtime while launch logs return validated rendered terminal rows.
 
 ### Fixed
-- Late non-blocking advisor notes arriving while a terminal primary turn unwinds now stay visible as advisor cards instead of starting an extra primary request ([#12154](https://github.com/can1357/oh-my-pi/pull/12154) by [@korri123](https://github.com/korri123)).
-- Attaching to an already-running Chromium no longer times out: browser reuse matching now recovers profile and debugging-port flags from Chromium's space-joined process command lines instead of argv arrays only.
-- Transcript retirement no longer renders stale blocks after the live child list is reordered or replaced externally.
 
 - Late non-blocking advisor notes arriving while a terminal primary turn unwinds now stay visible as advisor cards instead of starting an extra primary request ([#12154](https://github.com/can1357/oh-my-pi/pull/12154) by [@korri123](https://github.com/korri123)).
 - Fixed Perplexity sign-in for SSO-only accounts in `/login` and the setup wizard with isolated browser sign-in and automatic session capture, supporting both secure-prefixed and unprefixed session cookies without manual cookie copying. ([#12064](https://github.com/can1357/oh-my-pi/pull/12064) by [@lance0](https://github.com/lance0))

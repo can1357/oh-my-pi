@@ -621,4 +621,45 @@ describe("findReusableCdp executable matching", () => {
 			}
 		},
 	);
+
+	// A non-Chromium executable must not match a same-directory `chrome`
+	// sibling: that would attach the tool to the wrong application (or block
+	// the launch as "already running").
+	test.skipIf(process.platform !== "linux")("ignores a chrome sibling for non-chromium executables", async () => {
+		let python = "";
+		for (const candidate of ["/usr/bin/python3", "/bin/python3"]) {
+			try {
+				await fs.stat(candidate);
+				python = candidate;
+				break;
+			} catch {}
+		}
+		if (!python) throw new Error("Expected python3");
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-exe-app-"));
+		try {
+			const chrome = path.join(dir, "chrome");
+			const app = path.join(dir, "myapp");
+			await fs.symlink(python, chrome);
+			await Bun.write(app, `#!/bin/sh\nexec "$(dirname "$0")/chrome" -c "import time; time.sleep(30)"\n`);
+			await fs.chmod(app, 0o755);
+			const child = Bun.spawn([app], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+			try {
+				// Prove the fixture is running and visible via the sibling path
+				// before asserting the guarded lookup misses it.
+				const realChrome = await fs.realpath(chrome);
+				let visible = false;
+				for (let i = 0; i < 40 && !visible; i++) {
+					visible = Process.fromPath(realChrome).some(candidate => candidate.pid === child.pid);
+					if (!visible) await Bun.sleep(25);
+				}
+				expect(visible).toBe(true);
+				await expect(findReusableCdp(app)).resolves.toBeNull();
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });
