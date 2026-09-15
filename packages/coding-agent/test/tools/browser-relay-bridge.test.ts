@@ -4220,6 +4220,123 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	it("replays changed children even when the main frame also navigates during registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, url: "https://example.test/same" })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true, includeCommandLineAPI: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader-before" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-loader-before" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader-before" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-loader-before" } }],
+			},
+		});
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, url: "https://example.test/same", groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader-before" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-loader-before" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-before-mixed-navigation" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader-after" },
+				childFrames: [{ frame: { id: "child", loaderId: "child-loader-after" } }],
+			},
+		});
+		await waitFor(
+			() =>
+				ext2
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.method === "Runtime.evaluate" &&
+							(rpc.params as { returnByValue?: boolean } | undefined)?.returnByValue === true,
+					),
+			"main-frame marker probe",
+		);
+		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.executionContextCreated",
+				params: { context: { id: 102, name: "", auxData: { isDefault: true, frameId: "child" } } },
+			}),
+		);
+		ack(bridge, ext2, "send");
+		await waitFor(
+			() =>
+				ext2
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.method === "Runtime.evaluate" &&
+							(rpc.params as { contextId?: number } | undefined)?.contextId === 102,
+					),
+			"child-frame replay",
+		);
+		expect(
+			ext2
+				.pending("send")
+				.find(
+					rpc =>
+						rpc.method === "Runtime.evaluate" &&
+						(rpc.params as { contextId?: number } | undefined)?.contextId === 102,
+				)?.params,
+		).toMatchObject({
+			contextId: 102,
+			includeCommandLineAPI: true,
+		});
+		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		expect(
+			ext2.rpcs("send").filter(rpc => {
+				if (rpc.method !== "Page.addScriptToEvaluateOnNewDocument") return false;
+				const params = rpc.params as { source?: string; runImmediately?: boolean } | undefined;
+				return params?.runImmediately === true && params.source?.includes("window.__relayInjected");
+			}),
+		).toHaveLength(0);
+	});
+
 	it("creates and uses an OOPIF isolated world for changed-frame preload recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -5895,6 +6012,55 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext.rpcs("detach")).toHaveLength(1);
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setHardwareConcurrencyOverride"]);
+	});
+
+	it("discards deferred root-state cleanup after a user-initiated detach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "hardware override");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await flush();
+
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
+		await flush();
+		await waitFor(() => ext.pending("detach").length === 1, "late detach RPC after user detach");
+		nack(bridge, ext, "detach", "Debugger is not attached");
+		await flush();
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "tabUpdated",
+				tab: tab({ tabId: 1, url: "https://example.test/after-user-detach", groupId: -1 }),
+			}),
+		);
+		await flush();
+
+		const adopter = new FakeCdpSocket();
+		const adopterConn = bridge.cdpConnected(adopter);
+		const attach = attachPage(bridge, ext, adopter, adopterConn, 1);
+		await waitFor(() => ext.pending("attach").length === 1, "new-root attach after user detach");
+		ack(bridge, ext, "attach");
+		await attach;
+		await flush();
+
 		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setHardwareConcurrencyOverride"]);
 	});
 

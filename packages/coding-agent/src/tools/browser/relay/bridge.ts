@@ -3054,6 +3054,7 @@ export class RelayBridge {
 		tab.attachingExt = null;
 		tab.forceFreshRootBeforeReplay = false;
 		tab.refreshDetachInFlight = false;
+			this.#discardDetachedRootCleanup(tab);
 		this.#resetRuntime(tab);
 		tab.restoreRootRuntime = false;
 		tab.banned = true;
@@ -3602,7 +3603,11 @@ export class RelayBridge {
 							throw err;
 						}
 					}
-					if (!mainFrameChanged && changedChildFrames.length > 0 && applicationMarker !== undefined) {
+					if (
+						changedChildFrames.length > 0 &&
+						applicationMarker !== undefined &&
+						(!mainFrameChanged || appliedToCurrentDocument)
+					) {
 						await this.#applyPreloadToFrames(
 							tab,
 							changedChildFrames,
@@ -3611,6 +3616,11 @@ export class RelayBridge {
 							script.params.includeCommandLineAPI,
 							expectedExt,
 						);
+						// A main-frame marker probe only proves the registration covered
+						// the new main document. Child frames that navigated before the
+						// registration was accepted still need an explicit replay in their
+						// own contexts; once those changed children are covered, this
+						// navigation no longer needs the all-context fallback below.
 						appliedToCurrentDocument = true;
 					}
 					if (!appliedToCurrentDocument) {
