@@ -40,6 +40,20 @@ const SUPPORTED_PLATFORMS = [
 	"win32-arm64",
 ];
 
+let stagingEnabled = false;
+let loadedWithoutStaging = false;
+
+/**
+ * Opt the current process into Windows package-addon staging before importing
+ * the native API. This state is deliberately not inherited by child processes.
+ */
+export function enableNativeAddonStaging() {
+	if (loadedWithoutStaging) {
+		throw new Error("Native addon already loaded without staging. Run `omp update` in a fresh process.");
+	}
+	stagingEnabled = true;
+}
+
 /**
  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
  * pi-utils helper (this loader cannot depend on pi-utils). Synchronous on
@@ -110,28 +124,18 @@ export function getAddonFilenames({ tag, arch, variant }) {
 }
 
 /**
- * Decide whether the loader should mirror the package's `native/<filename>.node`
- * into the per-version cache directory (`~/.omp/natives/<version>/`) before loading.
+ * Windows package installs normally load directly from node_modules.
+ * The updater opts into a versioned cache copy so it does not lock the addon
+ * that the package manager needs to replace. Other running OMP sessions can
+ * still hold the installed addon; staging only protects the updater itself.
+ * Workspace builds, other platforms, and compiled-binary extraction are
+ * unaffected.
  *
- * Windows-only safety net for `bun install -g` updates: when a previous `omp`
- * process is running, bun cannot overwrite the locked `.node` inside
- * `node_modules/@oh-my-pi/pi-natives/native/`, leaving an old binary next to a
- * newer `index.js` and producing `<sym> is not a function` crashes on the next
- * launch. Staging into the version-pinned cache:
- *   1. Gives every package version its own filesystem path, so concurrent omp
- *      processes never collide on the same file.
- *   2. Makes the running process keep its handle on the cache copy, freeing bun
- *      to overwrite the `node_modules` copy on subsequent updates.
- * Disabled on non-Windows (no file-lock problem), in workspace dev (`nativeDir`
- * is not inside a `node_modules` segment), and for compiled binaries (handled
- * by `maybeExtractEmbeddedAddon`).
- *
- * @param {{ platform: NodeJS.Platform | string; isCompiledBinary: boolean; nativeDir: string }} input
+ * @param {{ platform: NodeJS.Platform | string; isCompiledBinary: boolean; nativeDir: string; stagingEnabled?: boolean }} input
  * @returns {boolean}
  */
-export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, nativeDir }) {
-	if (platform !== "win32") return false;
-	if (isCompiledBinary) return false;
+export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, nativeDir, stagingEnabled = false }) {
+	if (!stagingEnabled || platform !== "win32" || isCompiledBinary) return false;
 	// Check both separators independently of the host's `path.sep`: this helper
 	// is shared by the loader (running on Windows with `\`) and the test suite
 	// (typically running on POSIX hosts when CI executes the regression test).
@@ -162,6 +166,11 @@ export function resolveLoaderCandidates({
 	versionedDir,
 	userDataDir,
 }) {
+	// An updater must never fall back to an installed addon if staging fails:
+	// loading it would lock the file that the update needs to replace.
+	if (stageFromNodeModules && !isCompiledBinary) {
+		return [...new Set(addonFilenames.map(filename => path.join(versionedDir, filename)))];
+	}
 	const baseReleaseCandidates = addonFilenames.flatMap(filename => [
 		path.join(nativeDir, filename),
 		path.join(execDir, filename),
@@ -171,12 +180,9 @@ export function resolveLoaderCandidates({
 		path.join(versionedDir, filename),
 		path.join(userDataDir, filename),
 	]);
-	const stagedCandidates = stageFromNodeModules ? addonFilenames.map(filename => path.join(versionedDir, filename)) : [];
 	let releaseCandidates;
 	if (isCompiledBinary) {
 		releaseCandidates = [...compiledCandidates, ...baseReleaseCandidates];
-	} else if (stageFromNodeModules) {
-		releaseCandidates = [...stagedCandidates, ...leafCandidates, ...baseReleaseCandidates];
 	} else {
 		releaseCandidates = [...leafCandidates, ...baseReleaseCandidates];
 	}
@@ -614,11 +620,9 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 }
 
 /**
- * Mirror `leafPackageDir ?? nativeDir` addon binaries to
- * `versionedDir/<filename>.node` on Windows installs so the running process
- * cache path, never on the `node_modules` copy that bun must overwrite on
- * update. No-op on non-Windows, in workspace dev, and for compiled binaries —
- * see `shouldStageNodeModulesAddon` for the gating rules.
+ * Copy installed addons into the updater's versioned cache before loading.
+ * Failure stays fatal to the load: staged candidates never fall back to the
+ * node_modules copy. See `shouldStageNodeModulesAddon` for the gating rules.
  */
 function maybeStageNodeModulesAddon(ctx, errors) {
 	if (!ctx.stageFromNodeModules) return null;
@@ -762,6 +766,12 @@ function buildHelpMessage(ctx) {
 			`If missing, delete ${ctx.versionedDir} and re-run, or download manually:\n${downloadHints}`
 		);
 	}
+	if (ctx.stageFromNodeModules) {
+		return (
+			`The updater must load a staged addon from ${ctx.versionedDir} to avoid locking the installed copy.\n` +
+			"Check that the cache directory is writable. If its addon is damaged, remove this version directory and retry."
+		);
+	}
 	return (
 		"If installed via npm/bun, try reinstalling: bun install @oh-my-pi/pi-natives\n" +
 		"If developing locally, build with: bun --cwd=packages/natives run build\n" +
@@ -776,7 +786,7 @@ function buildHelpMessage(ctx) {
  * helpers from this file doesn't trigger AVX2 detection or filesystem probes.
  */
 /**
- * @param {{ nativeDir?: string; platform?: NodeJS.Platform | string; isCompiledBinary?: boolean; leafPackageDir?: string | null }} [overrides]
+ * @param {{ nativeDir?: string; platform?: NodeJS.Platform | string; isCompiledBinary?: boolean; leafPackageDir?: string | null; stagingEnabled?: boolean }} [overrides]
  */
 export function initLoaderContext(overrides = {}) {
 	const platform = overrides.platform ?? process.platform;
@@ -813,6 +823,7 @@ export function initLoaderContext(overrides = {}) {
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
+		stagingEnabled: overrides.stagingEnabled ?? stagingEnabled,
 	});
 
 	const selectedVariant = resolveCpuVariant(getVariantOverride());
@@ -860,6 +871,7 @@ export function initLoaderContext(overrides = {}) {
 export function loadNative() {
 	startupMarker("native:loadNative:start");
 	const ctx = initLoaderContext();
+	startupMarker(`native:mode:${ctx.isCompiledBinary ? "compiled" : ctx.stageFromNodeModules ? "staged" : "direct"}`);
 	const require_ = createRequire(import.meta.url);
 
 	const errors = [];
@@ -870,8 +882,11 @@ export function loadNative() {
 
 	for (const candidate of runtimeCandidates) {
 		try {
-			startupMarker(`native:require:${path.basename(candidate)}`);
+			startupMarker(`native:require:${candidate}`);
 			const bindings = require_(candidate);
+			if (process.platform === "win32" && !ctx.isCompiledBinary && !ctx.isWorkspaceLoad && !ctx.stageFromNodeModules) {
+				loadedWithoutStaging = true;
+			}
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });

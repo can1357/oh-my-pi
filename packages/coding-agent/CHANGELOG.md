@@ -9,6 +9,7 @@
 ### Changed
 
 - Codex Spark, all MiniMax models, and GLM-5.3-Flash now default to replace edits instead of hashline; explicit edit-mode overrides remain honored.
+- On Windows package installs, `omp update` now stages the native addon before updating so normal launches can load directly from `node_modules` ([#4385](https://github.com/can1357/oh-my-pi/issues/4385)).
 
 ## [18.2.0] - 2026-09-15
 

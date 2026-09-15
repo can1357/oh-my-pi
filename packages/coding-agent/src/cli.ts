@@ -17,6 +17,7 @@ try {
 import type * as WorkerThreads from "node:worker_threads";
 import type { MessagePort } from "node:worker_threads";
 import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import { enableNativeAddonStaging } from "@oh-my-pi/pi-natives/loader";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
 import {
@@ -583,6 +584,11 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.exitCode = 1;
 			return;
 		}
+		// Opt into Windows native-addon staging only when actually dispatching the
+		// update command — not when completions/help batch-load every command's
+		// loader (#11377). Must precede `run()` → `loadEntry()` →
+		// `import("./commands/update")`, whose theme import loads natives.
+		if (resolved.argv[0] === "update") enableNativeAddonStaging();
 		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
 	} finally {
 		stopStartupComposer?.();
