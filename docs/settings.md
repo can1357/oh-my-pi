@@ -366,6 +366,11 @@ enabledModels:
 | Key                    | Type    | Default                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ---------------------- | ------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `modelRoles`           | record  | `{}`                        | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
+| `modelRolePresets` | record | `{}` | Per-model Default role profiles plus named role presets, managed from the `/models` hub. |
+| `modelRolePresets.autoLoad` | boolean | `true` | Automatically load presets on model changes. Off preserves supporting roles regardless of saved Defaults or the built-in preset setting. Default remains active for editing; explicit preset selection still applies. |
+| `modelRolePresets.applyOnSelect` | boolean | `false` | When auto-loading is enabled and no saved Default exists, apply OMP's built-in preset on model changes. Off preserves supporting roles in that case. |
+| `modelRolePresets.keepRolesWhenUnset` | boolean | `true` | When switching default models, preserve supporting roles omitted by the selected Default profile. Turn off to clear omitted roles instead. |
+| `modelRolePresets.autoSave` | boolean | `false` | Save role changes back to the preset active in the `/models` Roles page. Off lets you press `s` to save the active preset manually. |
 | `modelRoleStorage`     | enum    | `global`                    | `global` saves model-selector role assignments in the active global/profile config; `project` saves only those role assignments in `<cwd>/.omp/config.yml`. Missing project roles fall back to global roles.                                                                                                                                                                                                     |
 | `modelTags`            | record  | `{}`                        | Custom role/tag metadata; can introduce additional roles.                                                                                                                                                                                                                                                                                                                                                        |
 | `modelProviderOrder`   | array   | `[]`                        | Preferred provider order when a model id is ambiguous.                                                                                                                                                                                                                                                                                                                                                           |
@@ -376,6 +381,84 @@ enabledModels:
 | `includeModelInPrompt` | boolean | `true`                      | Include the active model name in the system prompt.                                                                                                                                                                                                                                                                                                                                                              |
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
+
+### Model role presets
+
+The `/models` Roles page lets you explicitly apply a model's curated
+**Default** preset or one of its saved presets. Ordinary default-model
+selection applies a saved Default automatically when `modelRolePresets.autoLoad`
+is enabled. If none exists, the built-in profile applies only when
+`modelRolePresets.applyOnSelect` is also enabled. Disable **Auto load configured model role presets**
+to preserve supporting roles on all ordinary model changes. Default remains
+active for editing either way, and explicit preset selections still apply.
+The built-in profile uses exact entries from OMP's current priority lists, so
+it does not fall through to older fuzzy matches. For example, an Opus 5
+selection uses Haiku 4.5 for fast work when it is available. A loopback local
+model keeps all roles local.
+
+Each default model has a **Default** role profile. The active profile is the
+target for role edits: press `s` to save it, or enable
+`modelRolePresets.autoSave` to save role and captured fallback-chain edits automatically.
+Changing the default model does not itself auto-save carried roles over its
+saved preset.
+
+Use **Save current roles as preset…** to create and activate a named profile.
+Names start with a letter and may contain letters, digits, spaces, `-`, and `_`;
+`Default` is reserved, regardless of capitalization. Press `r` on a named preset
+to rename it — the payload moves verbatim and a Default pointer that named it
+follows; renames that would collide with an existing preset or a reserved name
+are rejected. Press `x` on the active preset to reapply it, or on an inactive
+named preset to delete it. Press `d` on a named preset to make it the model's
+Default; `d` on the Default row resets that choice to OMP's built-in profile
+only when built-ins are enabled; otherwise no built-in assignments are loaded.
+The star marks the default choice.
+
+Saved preset definitions live in the active global/profile settings under
+`modelRolePresets`, keyed by `provider/model`. Each preset is a structured
+record:
+
+```yaml
+modelRolePresets:
+  anthropic/claude-opus-5:
+    presets:
+      quality:
+        roles:
+          smol: anthropic/claude-haiku-4-5:low
+          slow: anthropic/claude-opus-5:high
+          default: anthropic/claude-opus-5:high # optional: binds the primary selector
+        fallbackChains: # optional: full snapshot of retry.fallbackChains at save time
+          task: [anthropic/claude-haiku-4-5:low, anthropic/claude-opus-5:high]
+          anthropic/*: [anthropic/claude-haiku-4-5:medium]
+```
+
+`roles` maps role names to model selectors using the standard selector grammar
+(`provider/model`, effort suffixes like `:low`, and `@upstream` routing). An
+optional `default` entry binds the primary selector itself — routing and effort
+included — so applying the preset restores the exact reasoning setup rather than
+inheriting whatever effort was active. `fallbackChains` records the entire
+`retry.fallbackChains` map as it existed in the global settings layer at save
+time: role keys, exact `provider/model-id` keys, and `provider/*` wildcards
+alike, in order and verbatim.
+
+Applying a preset restores its roles and then replaces the global-layer chain
+map wholesale with the captured snapshot, so switching between presets never
+leaves the previous profile's chains behind. Chain snapshots are captured from
+and restored to the global settings layer — the layer preset definitions live
+in — so project-file, overlay, or runtime chain values are never baked into a
+preset or persisted into global state by an apply. A preset without a
+`fallbackChains` key (role-only or built-in profiles) leaves chains untouched;
+an explicit empty snapshot (`fallbackChains: {}`) restores an empty chain map.
+`modelRoleStorage: project` still scopes role assignments to the project,
+leaving global role assignments unchanged. Chain snapshots always restore to
+the global layer, where the chain editor writes. Existing configuration
+overlays remain authoritative. Unavailable preset entries fall back to the selected model.
+
+Resetting a Default or deleting the last named preset removes the model's
+configuration entry when nothing remains. Empty `presets` containers are not
+retained by these operations. An explicitly saved `default: { roles: {} }`
+remains meaningful: it suppresses built-in fallback and follows the
+omitted-role setting. Roles preserved by that setting do not by themselves mark
+the preset as unsaved.
 
 ### Advisor
 

@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -122,6 +122,31 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 		expect(options.prewalk?.target.provider).toBe("my-provider");
 		expect(options.prewalk?.target.id).toBe("some-model");
 		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
+	});
+	test("re-expands an outer-effort alias after discovery so a literal effort-like id survives", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("my-provider", "test-provider-key");
+		const modelRegistry = new ModelRegistry(authStorage, writeDiscoveryConfig(), {
+			fetch: mockDiscovery(["coding-router", "coding-router:low"]),
+		});
+		const settings = Settings.isolated();
+		settings.setModelRole("smol", "my-provider/coding-router:low");
+
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", "@smol:high"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		// The cold-catalog expansion rewrites the literal `:low` id to `:high`, which
+		// matches the sibling base model; only re-expanding after discovery keeps the
+		// configured model and applies the outer effort to it.
+		expect(options.prewalk?.target.provider).toBe("my-provider");
+		expect(options.prewalk?.target.id).toBe("coding-router:low");
+		expect(options.prewalk?.thinkingLevel).toBe(Effort.High);
 	});
 
 	test("does not probe discovery providers for an unqualified missing target", async () => {

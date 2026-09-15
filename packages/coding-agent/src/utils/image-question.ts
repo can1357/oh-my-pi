@@ -43,7 +43,7 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	const matchPreferences = getModelMatchPreferences(session.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
-		const expanded = expandRoleAlias(pattern, session.settings);
+		const expanded = expandRoleAlias(pattern, session.settings, availableModels);
 		return resolveModelFromString(expanded, availableModels, matchPreferences);
 	};
 
@@ -122,6 +122,7 @@ export async function askImageQuestion(
 		extractExplicitThinkingSelector(selectedPattern, session.settings, {
 			isLiteralModelId: (provider, id) =>
 				availableModels.some(candidate => candidate.provider === provider && candidate.id === id),
+			availableModels,
 		}),
 	);
 	const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));

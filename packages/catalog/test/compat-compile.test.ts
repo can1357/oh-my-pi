@@ -37,6 +37,27 @@ describe("compat compiler grammar", () => {
 			compileCascade([{ file: "classes/test.kdl", text: 'class "openai" {\n\tthinking-format "sideways"\n}' }]),
 		).toThrow(/rejects value `sideways`/);
 	});
+	test.each([
+		"smol -1",
+		"slow #inf",
+		"smol #nan",
+		'slow "1"',
+		"slow #true",
+		"default 1",
+		"smol 1; smol 2",
+		"smol { slow 1; }",
+		"",
+	])("role-preset ranks reject invalid payload %s", payload => {
+		expect(() =>
+			compileCascade([
+				{
+					file: "classes/test.kdl",
+					text: `class "openai" {\n\trole-preset-priority {\n${payload}\n}\n}`,
+				},
+			]),
+		).toThrow(/malformed value/);
+	});
+
 	test("camelCase object-payload keys are rejected; kebab-case compiles to resolved keys", () => {
 		expect(() =>
 			compileCascade([

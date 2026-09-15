@@ -3262,6 +3262,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			sessionManager: this.sessionManager,
 			asyncJobManager: this.session.asyncJobManager,
 			settings: this.session.settings,
+			modelRegistry: this.session.modelRegistry,
 			// Resolve restored/switched-to workers against this session's active model
 			// (same as the spawn-path ToolSession), not the settings default. This is
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's

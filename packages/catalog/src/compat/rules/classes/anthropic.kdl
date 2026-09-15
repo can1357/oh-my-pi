@@ -1,6 +1,75 @@
 // Model-lineage compat for "anthropic"; regenerated from the frozen census using class taxonomy selectors.
 
 class "anthropic" {
+	// Family/revision taxonomy also admits arbitrary custom suffixes. These
+	// exact residues admit only reviewed canonical and deployment spellings.
+	family "haiku" {
+		revision "=4.5" {
+			models "claude-haiku-4-5" "claude-haiku-4.5" "claude-haiku-4-5-20251001" \
+				"claude-haiku-4-5@20251001" "anthropic/claude-haiku-4-5" "anthropic/claude-haiku-4.5" \
+				"au.anthropic.claude-haiku-4-5-20251001-v1:0" "eu.anthropic.claude-haiku-4-5-20251001-v1:0" \
+				"global.anthropic.claude-haiku-4-5-20251001-v1:0" "jp.anthropic.claude-haiku-4-5-20251001-v1:0" \
+				"us-gov.anthropic.claude-haiku-4-5-20251001-v1:0" "us.anthropic.claude-haiku-4-5-20251001-v1:0" {
+				role-preset-priority { smol 24; }
+			}
+		}
+	}
+	family "fable" {
+		revision "=5.1" {
+			models "claude-fable-5-1" "claude-fable-5.1" "claude-fable-5-1@default" \
+				"anthropic/claude-fable-5-1" "anthropic/claude-fable-5.1" \
+				"eu.anthropic.claude-fable-5-1" "global.anthropic.claude-fable-5-1" \
+				"us-gov.anthropic.claude-fable-5-1" "us.anthropic.claude-fable-5-1" {
+				role-preset-priority { slow 3; }
+			}
+		}
+		revision "=5" {
+			models "claude-fable-5" "claude-fable-5@default" "anthropic/claude-fable-5" \
+				"eu.anthropic.claude-fable-5" "global.anthropic.claude-fable-5" \
+				"us-gov.anthropic.claude-fable-5" "us.anthropic.claude-fable-5" {
+				role-preset-priority { slow 8; }
+			}
+		}
+	}
+	family "opus" {
+		revision "=5" {
+			models "claude-opus-5" "claude-opus-5@default" "anthropic/claude-opus-5" \
+				"anthropic.claude-opus-5" "au.anthropic.claude-opus-5" "eu.anthropic.claude-opus-5" \
+				"global.anthropic.claude-opus-5" "us-gov.anthropic.claude-opus-5" "us.anthropic.claude-opus-5" {
+				role-preset-priority { slow 18; }
+			}
+		}
+		revision "=4.8" {
+			models "claude-opus-4-8" "claude-opus-4.8" "claude-opus-4-8@default" \
+				"anthropic/claude-opus-4-8" "anthropic/claude-opus-4.8" "anthropic.claude-opus-4-8" \
+				"au.anthropic.claude-opus-4-8" "eu.anthropic.claude-opus-4-8" \
+				"global.anthropic.claude-opus-4-8" "jp.anthropic.claude-opus-4-8" \
+				"us-gov.anthropic.claude-opus-4-8" "us.anthropic.claude-opus-4-8" {
+				role-preset-priority { slow 22; }
+			}
+		}
+	}
+	on "anthropic" {
+		family "fable" {
+			revision "=5.1" {
+				models "claude-fable-5-1" "claude-fable-5.1" {
+					role-preset-priority { slow 2; }
+				}
+			}
+			revision "=5" {
+				models "claude-fable-5" {
+					role-preset-priority { slow 7; }
+				}
+			}
+		}
+		family "opus" {
+			revision "=5" {
+				models "claude-opus-5" {
+					role-preset-priority { slow 17; }
+				}
+			}
+		}
+	}
 	family "fable" {
 		revision ">=5.1" {
 			// Fable 5.1+ binds signed thinking to the exact preceding conversation.

@@ -219,7 +219,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	const matchPreferences = getModelMatchPreferences(session.settings);
 	const resolve = (pattern: string | undefined): { model: Model<Api>; selector: string } | undefined => {
 		if (!pattern) return undefined;
-		const selector = expandRoleAlias(pattern, session.settings);
+		const selector = expandRoleAlias(pattern, session.settings, available);
 		const model = resolveModelFromString(selector, available, matchPreferences);
 		return model ? { model, selector } : undefined;
 	};

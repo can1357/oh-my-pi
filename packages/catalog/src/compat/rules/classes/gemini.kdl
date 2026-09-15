@@ -1,6 +1,46 @@
 // Model-lineage compat for "gemini"; regenerated from the frozen census using class taxonomy selectors.
 
 class "gemini" {
+	// Family/revision taxonomy includes image/preview and arbitrary suffix
+	// SKUs. Exact residues keep role eligibility on the reviewed Flash ids.
+	family "flash" {
+		revision "=3.8" {
+			models "gemini-3.8-flash" "gemini-3-8-flash" "google/gemini-3.8-flash" {
+				role-preset-priority { smol 1; }
+			}
+		}
+		revision "=3.7" {
+			models "gemini-3.7-flash" "gemini-3-7-flash" "google/gemini-3.7-flash" {
+				role-preset-priority { smol 3; }
+			}
+		}
+		revision "=3.6" {
+			models "gemini-3.6-flash" "gemini-3-6-flash" "google/gemini-3.6-flash" {
+				role-preset-priority { smol 5; }
+			}
+		}
+		revision "=3.5" {
+			models "gemini-3.5-flash" "gemini-3-5-flash" "google/gemini-3.5-flash" {
+				role-preset-priority { smol 7; }
+			}
+		}
+	}
+	family "lite" {
+		revision "=3.1" {
+			models "gemini-3.1-flash-lite" "gemini-3-1-flash-lite" "google/gemini-3.1-flash-lite" {
+				role-preset-priority { smol 15; }
+			}
+		}
+	}
+	on "google-antigravity" {
+		family "flash" {
+			revision "=3.8" {
+				models "gemini-3.8-flash" "gemini-3-8-flash" {
+					role-preset-priority { smol 0; }
+				}
+			}
+		}
+	}
 	// Gemini ladders follow the model generation on every host: pre-3.0 keeps
 	// the four-tier scale, Gemini 3+ Pro exposes only low/high, and the 3+
 	// Flash/Lite lines keep the four-tier scale.

@@ -1,6 +1,16 @@
 // Model-lineage compat for "gpt-oss"; regenerated from the frozen census using class taxonomy selectors.
 
 class "gpt-oss" {
+	// The 120b family includes modified/opaque deployments; only these
+	// reviewed spellings participate, not arbitrary "oss-120b" substrings.
+	models "gpt-oss-120b" "openai/gpt-oss-120b" {
+		role-preset-priority { smol 19; }
+	}
+	on "cerebras" {
+		models "gpt-oss-120b" {
+			role-preset-priority { smol 18; }
+		}
+	}
 	// The Harmony reasoning format accepts exactly low/medium/high on
 	// OpenAI-compatible chat hosts; Baseten's router serves high/max.
 	thinking-efforts "low" "medium" "high"

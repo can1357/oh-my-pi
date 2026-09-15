@@ -1524,6 +1524,9 @@ providers:
 			"http://localhost:8080",
 			"http://[::1]:8080",
 			"http://0.0.0.0:8080",
+			// Wildcard IPv6 bind: the same host as `0.0.0.0`, and the built-in role
+			// presets classify it as local, so the probe budget must agree.
+			"http://[::]:8080",
 		]) {
 			expect(discoveryProbeTimeoutMs(host, loopbackMs)).toBe(loopbackMs);
 		}
