@@ -327,6 +327,7 @@ export class ChatTranscriptBuilder {
 				if (message.output) component.appendOutput(message.output);
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
 					images: message.images,
 					showImages: settings.get("terminal.showImages"),
 				});
@@ -336,7 +337,10 @@ export class ChatTranscriptBuilder {
 			case "pythonExecution": {
 				const component = new EvalExecutionComponent(message.code, this.deps.ui, message.excludeFromContext);
 				if (message.output) component.appendOutput(message.output);
-				component.setComplete(message.exitCode, message.cancelled, { truncation: message.meta?.truncation });
+				component.setComplete(message.exitCode, message.cancelled, {
+					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
+				});
 				this.container.addChild(component);
 				break;
 			}

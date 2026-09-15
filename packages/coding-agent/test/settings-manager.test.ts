@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -22,7 +23,7 @@ import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -207,6 +208,29 @@ describe("Settings", () => {
 			const content = await Bun.file(getConfigPath()).text();
 			expect(content).not.toMatch(/: +$/m);
 			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
+		});
+	});
+
+	describe("status line segment validation", () => {
+		it("logs each unknown configured segment once while preserving the config", async () => {
+			await writeSettings({
+				statusLine: {
+					preset: "custom",
+					leftSegments: ["modle", "git", "modle"],
+					rightSegments: ["usage", "sesion", "modle"],
+				},
+			});
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(JSON.stringify(settings.get("statusLine.leftSegments"))).toBe('["modle","git","modle"]');
+			expect(
+				warn.mock.calls.filter(([message]) => String(message).startsWith("Settings: unknown status line segment")),
+			).toEqual([
+				['Settings: unknown status line segment "modle"', { setting: "statusLine.leftSegments" }],
+				['Settings: unknown status line segment "sesion"', { setting: "statusLine.rightSegments" }],
+			]);
 		});
 	});
 
@@ -1920,6 +1944,30 @@ describe("Settings", () => {
 			expect((await readSettings()).computer).toEqual({ enabled: true });
 		});
 
+		it("maps retired local tiny title models to current equivalents", async () => {
+			await writeSettings({ providers: { tinyModel: "lfm2-350m" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.tinyModel")).toBe("lfm2.5-350m");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).providers).toMatchObject({ tinyModel: "lfm2.5-350m" });
+		});
+
+		it("promotes retired flat tiny title keys into the nested setting", async () => {
+			await Bun.write(getConfigPath(), '"providers.tinyModel": lfm2-350m\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.tinyModel")).toBe("lfm2.5-350m");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.providers).toMatchObject({ tinyModel: "lfm2.5-350m" });
+			expect("providers.tinyModel" in saved).toBe(false);
+		});
+
 		it("maps removed atom edit mode settings to hashline", async () => {
 			await writeSettings({
 				edit: {
@@ -2268,6 +2316,86 @@ describe("Settings", () => {
 			expect(fs.existsSync(jsonPath)).toBe(false);
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
+
+		it("does not resurrect agent.db settings after config.yml is deleted", async () => {
+			const dbPath = getAgentDbPath(agentDir);
+			const db = new Database(dbPath);
+			db.exec(`
+				CREATE TABLE settings (
+					key TEXT PRIMARY KEY,
+					value TEXT NOT NULL,
+					updated_at INTEGER NOT NULL DEFAULT 0
+				);
+			`);
+			db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, 1)").run(
+				"symbolPreset",
+				JSON.stringify("ascii"),
+			);
+			db.close();
+
+			const first = await Settings.init({ cwd: projectDir, agentDir });
+			expect(first.get("symbolPreset")).toBe("ascii");
+			expect((await readSettings()).symbolPreset).toBe("ascii");
+
+			const storage = await AgentStorage.open(dbPath);
+			expect(storage.getSettings()).toBeNull();
+
+			await fs.promises.unlink(getConfigPath());
+			AgentStorage.close();
+			resetSettingsForTest();
+
+			const second = await Settings.init({ cwd: projectDir, agentDir });
+			expect(second.get("symbolPreset")).toBe("unicode");
+			expect(second.isConfigured("symbolPreset")).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+		});
+
+		it("keeps settings.json when the migrated config.yml write fails", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(jsonPath, JSON.stringify({ symbolPreset: "ascii", queueMode: "all" }));
+
+			const open = fs.promises.open.bind(fs.promises);
+			vi.spyOn(fs.promises, "open").mockImplementation(async (filePath, flags, mode) => {
+				if (String(filePath).includes(`${path.sep}config.yml.`) && String(filePath).endsWith(".tmp")) {
+					throw new FsCodeError("EACCES", "injected migration write failure");
+				}
+				return open(filePath, flags, mode);
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.existsSync(jsonPath)).toBe(true);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+			expect(JSON.parse(await fs.promises.readFile(jsonPath, "utf8"))).toEqual({
+				symbolPreset: "ascii",
+				queueMode: "all",
+			});
+			expect(warnSpy).toHaveBeenCalledWith(
+				"Settings: failed to write migrated config.yml",
+				expect.objectContaining({ path: getConfigPath() }),
+			);
+		});
+
+		it("does not resurrect archived legacy settings after config.yml is removed", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(jsonPath, JSON.stringify({ symbolPreset: "ascii", queueMode: "all" }));
+
+			await Settings.init({ cwd: projectDir, agentDir });
+			expect(await Bun.file(getConfigPath()).exists()).toBe(true);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+
+			await fs.promises.rm(getConfigPath());
+			resetSettingsForTest();
+			AgentStorage.close();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(reloaded.get("symbolPreset")).not.toBe("ascii");
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+		});
+
 		it("migrates legacy power booleans with system=true to system level", async () => {
 			await writeSettings({
 				power: {

@@ -1,9 +1,11 @@
 import { toError } from "@oh-my-pi/pi-utils";
-import type {
-	SessionStorage,
-	SessionStorageStat,
-	SessionStorageWriter,
-	WriteTextAtomicOptions,
+import {
+	SessionWriteConflictError,
+	type SessionStorage,
+	type SessionStorageStat,
+	type SessionStorageWriter,
+	type SessionStorageWriteOptions,
+	type WriteTextAtomicOptions,
 } from "./session-storage";
 import {
 	overlayTitleSlotContent,
@@ -27,7 +29,17 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
-	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	/**
+	 * Replace content, atomically rejecting when the shared backend's current
+	 * UTF-8 byte length differs from `expectedSize`.
+	 */
+	writeFull(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		expectedSize?: number | null,
+	): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -45,6 +57,20 @@ interface IndexEntry {
 
 interface EnqueueOptions {
 	trackDrain: boolean;
+	/**
+	 * Chain on the uncaught per-path pending op so an op queued behind a
+	 * failed one fail-fasts instead of running. Only positional publishes
+	 * with no backend CAS token (backend.append) opt in: absolute publishes
+	 * carry their own backend validation and run to converge (e.g. a
+	 * superseding title update over a failed one).
+	 */
+	abortOnPredecessorFailure?: boolean;
+}
+
+/** Optimistic index entry a queued append installed, kept for failure rollback. */
+interface IndexAppend {
+	mtimeMs: number;
+	previous: IndexEntry | undefined;
 }
 
 const RESOLVED = Promise.resolve();
@@ -89,14 +115,36 @@ function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined 
 }
 
 export class IndexedSessionStorage implements SessionStorage {
+	/**
+	 * Sync writes only update {@link #index} and queue the remote publish, so a
+	 * caller tracking a durable byte size must wait for {@link drain}.
+	 */
+	readonly defersSyncPublish = true;
 	readonly #backend: SessionStorageBackend;
 	readonly #index = new Map<string, IndexEntry>();
 	readonly #writers = new Set<IndexedSessionStorageWriter>();
 	readonly #pathTails = new Map<string, Promise<void>>();
 	readonly #pathPending = new Map<string, Promise<void>>();
 	readonly #drainPending = new Set<Promise<void>>();
+	/**
+	 * Live optimistic index frames per path, oldest first. Every synchronous
+	 * index update whose backend op is still queued pushes a frame; settlement
+	 * drops it (success) or drops it and every frame queued behind it and
+	 * restores the earliest dropped frame's entry (failure). Rolling back to
+	 * the last durable entry instead of the immediately previous one keeps a
+	 * failed op in a chain from stranding later recovery rewrites on an
+	 * unreachable CAS token (rJDg).
+	 */
+	readonly #pendingFrames = new Map<string, IndexAppend[]>();
 	#nextMtimeMs = 0;
 	#firstDrainError: Error | undefined;
+	#assertExpectedSize(path: string, expectedSize: number | null | undefined): void {
+		if (expectedSize === undefined) return;
+		const actualSize = this.#index.get(path)?.size ?? null;
+		if (actualSize !== expectedSize) {
+			throw new SessionWriteConflictError(path, expectedSize, actualSize);
+		}
+	}
 
 	constructor(backend: SessionStorageBackend) {
 		this.#backend = backend;
@@ -141,11 +189,29 @@ export class IndexedSessionStorage implements SessionStorage {
 		return this.#index.has(path);
 	}
 
-	writeTextSync(path: string, content: string): void {
+	/**
+	 * Resolve once the publishes queued for `path` have settled, rejecting when
+	 * one failed. The path tail is installed synchronously by `#enqueuePaths`,
+	 * so a caller confirming immediately after `writeTextSync` observes its own
+	 * write rather than a later one.
+	 */
+	confirmWrites(path: string): Promise<void> {
+		return this.#awaitPath(path);
+	}
+
+	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
+		this.#assertExpectedSize(path, options?.expectedSize);
+		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
 		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
-		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), { trackDrain: true });
+		this.#pushFrame(path, { mtimeMs, previous });
+		const write = this.#enqueuePath(
+			path,
+			() => this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize),
+			{ trackDrain: true },
+		);
+		this.#trackFrame(path, mtimeMs, write);
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
@@ -161,20 +227,14 @@ export class IndexedSessionStorage implements SessionStorage {
 			mtimeMs,
 		};
 		this.#index.set(path, next);
+		this.#pushFrame(path, { mtimeMs, previous });
+		const pending = this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
+			trackDrain: false,
+		});
+		this.#trackFrame(path, mtimeMs, pending);
 		try {
-			await this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
-				trackDrain: false,
-			});
+			await pending;
 		} catch (err) {
-			const current = this.#index.get(path);
-			if (
-				current?.mtimeMs === next.mtimeMs &&
-				current.title === next.title &&
-				current.titleSource === next.titleSource &&
-				current.titleUpdatedAt === next.titleUpdatedAt
-			) {
-				this.#index.set(path, previous);
-			}
 			throw toError(err);
 		}
 	}
@@ -234,14 +294,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
 		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
-		try {
-			await this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), {
-				trackDrain: false,
-			});
-		} catch (err) {
-			this.#restoreIndex(path, previous);
-			throw toError(err);
-		}
+		this.#pushFrame(path, { mtimeMs, previous });
+		const pending = this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), {
+			trackDrain: false,
+		});
+		this.#trackFrame(path, mtimeMs, pending);
+		await pending;
 	}
 
 	async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
@@ -252,10 +310,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		// awaitPath yield and bumped the epoch. Re-check before touching the
 		// index or enqueueing the backend publish.
 		if (commitGuard && !commitGuard()) return;
+		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
 		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		this.#pushFrame(path, { mtimeMs, previous });
 		try {
 			await this.#enqueuePath(
 				path,
@@ -268,21 +328,25 @@ export class IndexedSessionStorage implements SessionStorage {
 					if (commitGuard && !commitGuard()) {
 						const current = this.#index.get(path);
 						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+						this.#dropFrame(path, mtimeMs);
 						return;
 					}
-					await this.#backend.writeFull(path, content, mtimeMs, title);
+					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
 				},
 				{ trackDrain: false },
 			);
+			this.#dropFrame(path, mtimeMs);
 		} catch (err) {
 			const error = toError(err);
 			try {
-				if ((await this.#backend.readFull(path)) === content) return;
+				if ((await this.#backend.readFull(path)) === content) {
+					this.#dropFrame(path, mtimeMs);
+					return;
+				}
 			} catch {
 				// Preserve the original write failure; verification was unavailable.
 			}
-			const current = this.#index.get(path);
-			if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+			this.#failFrame(path, mtimeMs);
 			throw error;
 		}
 	}
@@ -295,12 +359,15 @@ export class IndexedSessionStorage implements SessionStorage {
 		const dstPrevious = this.#index.get(dst);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });
+		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry });
+		this.#pushFrame(dst, { mtimeMs: entry.mtimeMs, previous: dstPrevious });
 		try {
 			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
+			this.#dropFrame(src, entry.mtimeMs);
+			this.#dropFrame(dst, entry.mtimeMs);
 		} catch (err) {
-			this.#index.delete(dst);
-			this.#restoreIndex(dst, dstPrevious);
-			this.#index.set(src, entry);
+			this.#failFrame(src, entry.mtimeMs);
+			this.#failFrame(dst, entry.mtimeMs);
 			throw toError(err);
 		}
 	}
@@ -310,10 +377,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		const previous = this.#index.get(path);
 		if (!previous) throw enoent(path);
 		this.#index.delete(path);
+		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous });
 		try {
 			await this.#enqueuePath(path, () => this.#backend.remove([path]), { trackDrain: false });
+			this.#dropFrame(path, previous.mtimeMs);
 		} catch (err) {
-			this.#index.set(path, previous);
+			this.#failFrame(path, previous.mtimeMs);
 			throw toError(err);
 		}
 	}
@@ -338,11 +407,13 @@ export class IndexedSessionStorage implements SessionStorage {
 			if (entry) previous.set(path, entry);
 			this.#index.delete(path);
 		}
+		for (const [path, entry] of previous) this.#pushFrame(path, { mtimeMs: sessionEntry.mtimeMs, previous: entry });
 
 		try {
 			await this.#enqueuePaths(paths, () => this.#backend.remove(paths), { trackDrain: false });
+			for (const [path] of previous) this.#dropFrame(path, sessionEntry.mtimeMs);
 		} catch (err) {
-			for (const [path, entry] of previous) this.#index.set(path, entry);
+			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);
 			throw toError(err);
 		}
 	}
@@ -359,12 +430,13 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	_truncateForWriter(path: string): number {
 		const mtimeMs = this.#allocMtimeMs();
+		this.#pushFrame(path, { mtimeMs, previous: this.#index.get(path) });
 		this.#setIndex(path, 0, mtimeMs, null);
 		return mtimeMs;
 	}
 
 	_queueTruncate(path: string, mtimeMs: number, getError?: () => Error | undefined): Promise<void> {
-		return this.#enqueuePath(
+		const tracked = this.#enqueuePath(
 			path,
 			async () => {
 				const error = getError?.();
@@ -373,26 +445,32 @@ export class IndexedSessionStorage implements SessionStorage {
 			},
 			{ trackDrain: true },
 		);
+		this.#trackFrame(path, mtimeMs, tracked);
+		return tracked;
 	}
 
-	_appendForWriter(path: string, line: string): number {
+	_appendForWriter(path: string, line: string): IndexAppend {
 		const mtimeMs = this.#allocMtimeMs();
-		const existing = this.#index.get(path);
-		const size = (existing?.size ?? 0) + byteLength(line);
+		const previous = this.#index.get(path);
+		const size = (previous?.size ?? 0) + byteLength(line);
 		this.#setIndex(path, size, mtimeMs);
-		return mtimeMs;
+		return { mtimeMs, previous };
 	}
 
-	_queueAppend(path: string, line: string, mtimeMs: number, getError?: () => Error | undefined): Promise<void> {
-		return this.#enqueuePath(
+	_queueAppend(path: string, line: string, append: IndexAppend, getError?: () => Error | undefined): Promise<void> {
+		const { mtimeMs } = append;
+		this.#pushFrame(path, append);
+		const tracked = this.#enqueuePath(
 			path,
 			async () => {
 				const error = getError?.();
 				if (error) throw error;
 				await this.#backend.append(path, line, mtimeMs);
 			},
-			{ trackDrain: true },
+			{ trackDrain: true, abortOnPredecessorFailure: true },
 		);
+		this.#trackFrame(path, mtimeMs, tracked);
+		return tracked;
 	}
 
 	#restoreIndex(path: string, entry: IndexEntry | undefined): void {
@@ -431,9 +509,73 @@ export class IndexedSessionStorage implements SessionStorage {
 		return this.#enqueuePaths([path], task, options);
 	}
 
+	#pushFrame(path: string, frame: IndexAppend): void {
+		const frames = this.#pendingFrames.get(path);
+		if (frames) frames.push(frame);
+		else this.#pendingFrames.set(path, [frame]);
+	}
+
+	#dropFrame(path: string, mtimeMs: number): void {
+		const frames = this.#pendingFrames.get(path);
+		if (!frames) return;
+		const index = frames.findIndex(frame => frame.mtimeMs === mtimeMs);
+		if (index >= 0) frames.splice(index, 1);
+		if (frames.length === 0) this.#pendingFrames.delete(path);
+	}
+
+	/**
+	 * Settle a failed optimistic frame. The frame drops; when newer frames
+	 * are still live their publishes will converge the backend past this
+	 * failure, so the next frame rebases onto this frame's previous instead
+	 * of restoring it. When no newer frame lives, restore this frame's
+	 * previous unless a newer mutation committed meanwhile: a failure that
+	 * settles outside the queue (the atomic write's gated readback) can
+	 * land after a newer write committed and dropped its frame, and
+	 * restoring then would clobber newer durable state (F1). Index mtimes
+	 * are unique per mutation, so a live entry carrying a different mtime
+	 * proves a newer commit won; an absent entry (unlink/rename-src
+	 * bookkeeping) or our own optimistic entry still restores. Rebased
+	 * chains stay exact: the oldest live frame's previous is always
+	 * durable state.
+	 */
+	#failFrame(path: string, mtimeMs: number): void {
+		const frames = this.#pendingFrames.get(path);
+		if (!frames) return;
+		const index = frames.findIndex(frame => frame.mtimeMs === mtimeMs);
+		if (index < 0) return;
+		const [failed] = frames.splice(index, 1);
+		if (failed === undefined) return;
+		const next = frames[index];
+		if (next === undefined) {
+			const current = this.#index.get(path);
+			if (current === undefined || current.mtimeMs === mtimeMs) this.#restoreIndex(path, failed.previous);
+		} else next.previous = failed.previous;
+		if (frames.length === 0) this.#pendingFrames.delete(path);
+	}
+
+	/**
+	 * Settle an optimistic frame when its queued backend op settles: success
+	 * drops the frame (its entry is durable), failure folds it via #failFrame.
+	 */
+	#trackFrame(path: string, mtimeMs: number, tracked: Promise<void>): void {
+		void tracked.then(
+			() => this.#dropFrame(path, mtimeMs),
+			() => this.#failFrame(path, mtimeMs),
+		);
+	}
+
 	#enqueuePaths(paths: readonly string[], task: () => Promise<void>, options: EnqueueOptions): Promise<void> {
 		const unique = uniquePaths(paths);
-		const previous = unique.map(path => this.#pathTails.get(path) ?? RESOLVED);
+		// Predecessor choice (rJDg): a positional publish with no backend CAS
+		// token (backend.append) chains on the uncaught pending op so it
+		// fail-fasts behind a failed op instead of landing on a body the
+		// backend never accepted. Absolute publishes carry their own backend
+		// validation and chain on the caught tail, so a superseding publish
+		// still runs to converge (e.g. a newer title update over a failed one).
+		const previous = unique.map(
+			path =>
+				(options.abortOnPredecessorFailure ? this.#pathPending.get(path) : this.#pathTails.get(path)) ?? RESOLVED,
+		);
 		const operation = Promise.all(previous).then(task);
 		const tracked = operation.catch(err => {
 			const error = toError(err);
@@ -521,15 +663,15 @@ class IndexedSessionStorageWriter implements SessionStorageWriter {
 		if (this.#error) throw this.#error;
 		// Local index is updated immediately; remote publish stays ordered on the
 		// path queue. Callers that need remote durability still await append()/flush().
-		const mtimeMs = this.#storage._appendForWriter(this.#path, line);
-		void this.#trackPromise(this.#storage._queueAppend(this.#path, line, mtimeMs, () => this.#error));
+		const append = this.#storage._appendForWriter(this.#path, line);
+		void this.#trackPromise(this.#storage._queueAppend(this.#path, line, append, () => this.#error));
 	}
 
 	async append(line: string): Promise<void> {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
-		const mtimeMs = this.#storage._appendForWriter(this.#path, line);
-		await this.#trackPromise(this.#storage._queueAppend(this.#path, line, mtimeMs, () => this.#error));
+		const append = this.#storage._appendForWriter(this.#path, line);
+		await this.#trackPromise(this.#storage._queueAppend(this.#path, line, append, () => this.#error));
 	}
 
 	async flush(): Promise<void> {

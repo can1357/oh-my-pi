@@ -351,7 +351,7 @@ function buildSlashCommandCompletions(
 						: isSkillCommand
 							? Math.max(
 									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
-									scoreCommandTextMatch(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
+									skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
 								)
 							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
 				const lowerDesc = staticDesc.toLowerCase();
@@ -410,16 +410,40 @@ function hasPromptTextBeforeSlash(
 
 export const SKILL_NAMESPACE = "skill:";
 
-/**
- * Match tier used to compare a skill's bare name against non-skill command
- * names when deciding whether the skill may break out of the collapsed
- * `skill:` group: exact (1000) > prefix (900) > anything weaker (0). Fuzzy
- * hits deliberately map to 0 — a fuzzy skill match is never strong enough to
- * mix skills into the command popup.
- */
-function skillBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
+/** Exact/leading-prefix tier for ordinary command names and aliases. */
+function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix === lowerTarget) return 1000;
 	if (lowerTarget.startsWith(lowerPrefix)) return 900;
+	return 0;
+}
+
+/**
+ * Match a bare skill name from the beginning of any hyphen-delimited segment.
+ * This stays allocation-free on the hot path: it scans segment boundaries
+ * in-place and never materializes split/slice arrays.
+ */
+function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
+	if (lowerPrefix.length === 0) return 0;
+	if (lowerPrefix === lowerBareName) return 1000;
+	if (lowerBareName.startsWith(lowerPrefix)) return 900;
+
+	let segmentStart = 0;
+	while (segmentStart < lowerBareName.length) {
+		while (segmentStart < lowerBareName.length && lowerBareName.charCodeAt(segmentStart) !== 45) {
+			segmentStart += 1;
+		}
+		segmentStart += 1;
+		if (segmentStart >= lowerBareName.length) break;
+
+		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) {
+			let segmentEnd = segmentStart;
+			while (segmentEnd < lowerBareName.length && lowerBareName.charCodeAt(segmentEnd) !== 45) {
+				segmentEnd += 1;
+			}
+			return lowerPrefix.length === segmentEnd - segmentStart ? 1000 : 900;
+		}
+	}
+
 	return 0;
 }
 
@@ -428,11 +452,12 @@ function skillBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
  * typed prefix has not committed to the namespace. A lone group entry (shown
  * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
  * readable. A skill breaks out of the group only when its bare name matches
- * the prefix at a strictly stronger tier than every non-skill command name
- * and alias (`/batch` → `skill:batch` while no command prefix-matches
- * `batch`); a tie keeps the popup command-only, and fuzzy-only skill hits
- * never surface. Accepting the group inserts `/skill:` without a trailing
- * space so the reopened popup expands to the individual skills.
+ * the prefix at the beginning of the name or a hyphen-delimited segment, at a
+ * strictly stronger tier than every non-skill command name and alias. Ordinary
+ * commands keep exact/leading-prefix tiers only; a tie keeps the popup
+ * command-only, and fuzzy-only skill hits never surface. Accepting the group
+ * inserts `/skill:` without a trailing space so the reopened popup expands to
+ * the individual skills.
  */
 function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
 	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
@@ -442,9 +467,9 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 		for (const cmd of commands) {
 			const name = getCommandName(cmd);
 			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
-			commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, name.toLowerCase()));
+			commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
 			for (const alias of getCommandAliases(cmd)) {
-				commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, alias.toLowerCase()));
+				commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
 			}
 			if (commandTier === 1000) break;
 		}
@@ -458,7 +483,7 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 		skillIcon ??= cmd.icon;
 		return (
 			!approachesNamespace &&
-			skillBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
+			skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
 		);
 	});
 	if (skillCount === 0) return commands;
@@ -478,7 +503,8 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
  * popup alive through fuzzy name/description hits, so a token only matches as
  * - a prefix of the `skill:` namespace (incl. the bare `/` entry point),
  * - an explicit `skill:…` query (full fuzzy name/description search), or
- * - a prefix of the skill's bare name (`/hum` → `skill:humanizer`).
+ * - a prefix at the start of the skill bare name or one of its hyphen-delimited
+ *   segments (`/hum` → `skill:humanizer`, `/last` → `skill:research-last30days`).
  * Anything else yields no items, letting the caller fall through to path
  * completion or close the popup. Shared with the editor's accept-time
  * staleness guard so Tab/Enter never accepts a skill the refreshed popup
@@ -491,7 +517,10 @@ export function midPromptSkillTokenMatches(lowerToken: string, name: string, des
 		if (scoreCommandTextMatch(lowerToken, lowerName) > 0) return true;
 		return !!description && scoreCommandTextMatch(lowerToken, description.toLowerCase()) > 0;
 	}
-	return lowerName.startsWith(SKILL_NAMESPACE) && lowerName.slice(SKILL_NAMESPACE.length).startsWith(lowerToken);
+	return (
+		lowerName.startsWith(SKILL_NAMESPACE) &&
+		skillBareNameBreakoutTier(lowerToken, lowerName.slice(SKILL_NAMESPACE.length)) > 0
+	);
 }
 
 function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {

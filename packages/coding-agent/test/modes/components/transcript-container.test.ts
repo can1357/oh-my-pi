@@ -137,6 +137,35 @@ const finalAnswer: AssistantMessage = {
 const frame = { tick: 0, now: 0 };
 
 describe("TranscriptContainer", () => {
+	it("preserves retirement while externally reordered and replaced live children settle", () => {
+		const transcript = new TranscriptContainer();
+		const archived = new Block(["archived"], true);
+		transcript.addChild(archived);
+		const history = transcript.peekFlushBatch(80);
+		if (!history) throw new Error("Expected history batch");
+		transcript.acknowledgeFinalizedBatch(history.id);
+		const first = new Block(["first"], false);
+		const second = new Block(["second"], false);
+		transcript.addChild(first);
+		transcript.addChild(second);
+		transcript.children.splice(1, 2, second, first);
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["second", "", "first"]);
+		const replacement = new Block(["replacement"], false);
+		const external = [archived, second, replacement];
+		transcript.children = external;
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["second", "", "replacement"]);
+		external[1] = first;
+		first.finalize(["first done"]);
+		replacement.finalize(["replacement done"]);
+		const final = transcript.peekFlushBatch(80);
+		expect(final?.rows).toEqual(["first done", "", "replacement done", ""]);
+		if (!final) throw new Error("Expected live retirement batch");
+		transcript.acknowledgeFinalizedBatch(final.id);
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+		transcript.beginReplay();
+		expect(transcript.peekReplayBatch(80)?.rows).toEqual(["archived", "", "first done", "", "replacement done", ""]);
+	});
+
 	it("captures mutable by default and append-only declarations permanently", () => {
 		const transcript = new TranscriptContainer();
 		const mutable = new Block(["mutable"], false) as Block & {
@@ -261,12 +290,10 @@ describe("TranscriptContainer", () => {
 		const block = new AppendBlock(["reasoning one", "reasoning two", "answer"], ["reasoning one", "reasoning two"]);
 		transcript.addChild(block);
 
+		// Under pressure the finished rows the overflow needs retire in one batch.
 		const first = transcript.peekFinalizedBatch(80, 1)!;
-		expect(first.rows).toEqual(["reasoning one"]);
+		expect(first.rows).toEqual(["reasoning one", "reasoning two"]);
 		transcript.acknowledgeFinalizedBatch(first.id);
-		const second = transcript.peekFinalizedBatch(80, 1)!;
-		expect(second.rows).toEqual(["reasoning two"]);
-		transcript.acknowledgeFinalizedBatch(second.id);
 		expect(transcript.emittedStableRows()).toEqual([2]);
 
 		// Ctrl+T hides thinking: the block now renders only its answer and drops

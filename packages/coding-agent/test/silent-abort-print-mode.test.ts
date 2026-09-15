@@ -50,6 +50,7 @@ function createMockSession(
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
+			onPersistenceError: () => () => {},
 		},
 		extensionRunner: undefined,
 		subscribe: () => () => {},

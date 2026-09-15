@@ -64,6 +64,23 @@ describe("resolveRoleAssignments", () => {
 		expect(roles.tiny?.model).toBe(smol);
 		expect(roles.tiny?.autoSelected).toBe(true);
 	});
+
+	test("shows configured slow for an unconfigured advisor role", () => {
+		const slow = makeModel("demo", "custom-slow");
+		const priorityHead = makeModel("demo", "gpt-5.6-sol");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/default",
+				slow: "demo/custom-slow",
+			},
+		});
+
+		const roles = resolveRoleAssignments(settings, [slow, priorityHead], [slow, priorityHead]);
+
+		expect(roles.slow?.model).toBe(slow);
+		expect(roles.advisor?.model).toBe(slow);
+		expect(roles.advisor?.autoSelected).toBe(true);
+	});
 });
 
 describe("ModelBrowser search ranking", () => {
@@ -311,5 +328,66 @@ describe("ModelBrowser native model metadata", () => {
 
 	test("models without upstream metadata render the plain detail line", () => {
 		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+	});
+
+	test("price rows preserve free labels and identify invalid rates", () => {
+		const zero = makeModel("fixture", "zero");
+		const missing = makeModel("fixture", "missing");
+		Object.assign(missing, { cost: undefined });
+		const partial = makeModel("fixture", "partial");
+		partial.cost.input = Number.NaN;
+		partial.cost.output = 2;
+		const negativeZero = makeModel("fixture", "negative-zero");
+		negativeZero.cost.input = -1;
+		negativeZero.cost.output = 0;
+		const invalid = makeModel("fixture", "invalid");
+		invalid.cost.input = -1;
+		invalid.cost.output = Number.POSITIVE_INFINITY;
+		const browser = makeBrowser([zero, missing, partial, negativeZero, invalid], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("fixture/zero"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/missing"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/partial"))).toContain("$?/2");
+		expect(rows.find(line => line.includes("fixture/negative-zero"))).toContain("$?/0");
+		expect(rows.find(line => line.includes("fixture/invalid"))).toContain("$?/?");
+
+		browser.setQuery("free");
+		const freeRows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(freeRows.some(line => line.includes("fixture/zero"))).toBe(true);
+		expect(freeRows.some(line => line.includes("fixture/negative-zero"))).toBe(false);
+	});
+
+	test.each([
+		[-1, 0, "$?/0"],
+		[0, -1, "$0/?"],
+		[-1, -2, "$?/?"],
+	] as const)("renders invalid rates %s/%s with per-leg markers", (input, output, expected) => {
+		const model = makeModel("demo", "invalid-rate");
+		model.cost.input = input;
+		model.cost.output = output;
+		const browser = makeBrowser([model], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("demo/invalid-rate"))).toContain(expected);
+		expect(renderDetail(model)).toContain(`${expected} per M`);
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
+	});
+
+	test("price formatting preserves integer zeros and positive sub-cent rates", () => {
+		const priced = makeModel("fixture", "priced");
+		priced.cost.input = 100;
+		priced.cost.output = 0.001;
+		const tiny = makeModel("fixture", "tiny");
+		tiny.cost.input = 0.0000001;
+		tiny.cost.output = 0.001;
+		const browser = makeBrowser([priced, tiny], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		const listRow = rows.find(line => line.includes("fixture/priced"));
+		const detailRow = rows.find(line => line.includes("$100/0.001 per M"));
+		const tinyRow = rows.find(line => line.includes("fixture/tiny"));
+		expect(listRow).toContain("$100/0.001");
+		expect(detailRow).toContain("$100/0.001 per M");
+		expect(tinyRow).toContain("$0.0000001/0.001");
+		expect(rows.every(line => Bun.stringWidth(line) <= 100)).toBe(true);
 	});
 });

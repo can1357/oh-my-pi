@@ -945,8 +945,13 @@ describe("AgentSession message pipeline", () => {
 			async enqueue() {},
 			async beforeAgentStartPrompt() {
 				if (remembered) return undefined;
-				remembered = true;
-				return injected;
+				return {
+					context: injected,
+					commit: () => {
+						remembered = true;
+						return true;
+					},
+				};
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
@@ -1423,8 +1428,13 @@ describe("AgentSession message pipeline", () => {
 			async enqueue() {},
 			async beforeAgentStartPrompt() {
 				if (remembered || !recallAvailable) return undefined;
-				remembered = true;
-				return injected;
+				return {
+					context: injected,
+					commit: () => {
+						remembered = true;
+						return true;
+					},
+				};
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
@@ -1512,8 +1522,13 @@ describe("AgentSession message pipeline", () => {
 			async enqueue() {},
 			async beforeAgentStartPrompt() {
 				if (remembered || !recallAvailable) return undefined;
-				remembered = true;
-				return injected;
+				return {
+					context: injected,
+					commit: () => {
+						remembered = true;
+						return true;
+					},
+				};
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
@@ -1605,8 +1620,13 @@ describe("AgentSession message pipeline", () => {
 			async enqueue() {},
 			async beforeAgentStartPrompt() {
 				if (remembered) return undefined;
-				remembered = true;
-				return injected;
+				return {
+					context: injected,
+					commit: () => {
+						remembered = true;
+						return true;
+					},
+				};
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);

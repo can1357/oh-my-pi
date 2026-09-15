@@ -9,8 +9,8 @@ use pi_edit::modes::hashline::{
 	mismatch::{MismatchDetails, format_mismatch_message},
 	parser::{AbsoluteRangeOp, ParseFailure, parse_patch, parse_patch_streaming},
 	prefixes::{
-		hashline_parse_text, is_read_metadata_line, strip_hashline_prefixes, strip_new_line_prefixes,
-		strip_one_leading_hashline_prefix,
+		hashline_parse_text, is_read_metadata_line, is_read_truncation_notice,
+		strip_hashline_prefixes, strip_new_line_prefixes, strip_one_leading_hashline_prefix,
 	},
 	tokenizer::{BlockTarget, Token, Tokenizer, op_labels, parse_lid, split_hashline_lines},
 	types::{BlockMode, Cursor, Edit, FileOp, PasteTarget},
@@ -666,6 +666,22 @@ fn prefix_helpers_strip_read_and_diff_shapes() {
 	assert!(is_read_metadata_line("[Showing lines 1-2 of 8. Use :3 to continue]"));
 	assert!(is_read_metadata_line("2-4: omitted …"));
 	assert!(is_read_metadata_line("..."));
+}
+
+#[test]
+fn read_truncation_notice_covers_emitted_shapes() {
+	for notice in [
+		"[Showing lines 1-20 of 60 (50.0KB limit). Use :21 to continue]",
+		"[Showing last 50.0KB across lines 4-8 of 8; line 4 is partial]",
+		"[40 more lines in notebook. Use :21 to continue]",
+		"[More lines in file (1.2MB total; not scanned to EOF). Use :21 to continue]",
+		"[...30ln elided; re-read needed ranges, e.g. a.ts:5-16,40-80]",
+		"[Line 1 is 60.0KB, exceeds 50.0KB limit. Hashline output requires full lines; cannot emit \
+		 an editable numbered preview for a truncated line.]",
+	] {
+		assert!(is_read_truncation_notice(notice), "notice was not recognized: {notice}");
+	}
+	assert!(!is_read_truncation_notice("[Showing files 1-20 of 60. Use skip=20 for the next page]"));
 }
 
 #[test]

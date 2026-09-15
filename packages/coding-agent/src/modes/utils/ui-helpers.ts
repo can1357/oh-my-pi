@@ -174,6 +174,7 @@ export class UiHelpers {
 				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
 					images: message.images,
 					showImages: settings.get("terminal.showImages"),
 				});
@@ -187,6 +188,7 @@ export class UiHelpers {
 				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
 				});
 				this.ctx.chatContainer.addChild(component);
 				break;
@@ -1281,6 +1283,9 @@ export class UiHelpers {
 				await this.#deliverQueuedMessage(message);
 			}
 			this.ctx.updatePendingMessagesDisplay();
+			// The dispatch above bypasses `getUserInput`, so nothing would schedule
+			// the next loop iteration for a prompt queued during compaction.
+			if (this.ctx.loopModeEnabled) this.ctx.armLoopAutoSubmit();
 			void promptPromise;
 		} catch (error) {
 			restoreQueue(error);

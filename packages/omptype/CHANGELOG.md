@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `trim()`, `superRefine()`, and one-argument `record()` support to the Zod compatibility facade ([#12011](https://github.com/can1357/oh-my-pi/pull/12011) by [@bnivanov](https://github.com/bnivanov)).
+
 ## [17.3.1] - 2026-08-13
 
 ### Fixed
