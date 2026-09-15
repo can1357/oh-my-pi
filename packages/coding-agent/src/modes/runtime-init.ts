@@ -106,8 +106,9 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getAllTools: () => session.getAllToolInfos(),
 			setActiveTools: (toolNames: string[]) => session.setActiveToolsByName(toolNames),
 			getCommands: () => getSessionSlashCommands(session),
-			setModel: model => runExtensionSetModel(session, model),
+			setModel: (model, options) => runExtensionSetModel(session, model, options),
 			getThinkingLevel: () => session.thinkingLevel,
+			getConfiguredThinkingLevel: () => session.configuredThinkingLevel(),
 			setThinkingLevel: level => session.setThinkingLevel(level),
 			getServiceTiers: () => session.serviceTierByFamily,
 			setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
@@ -160,5 +161,6 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 	);
 
 	runner.onError(reportRuntimeError);
+	await session.runCodeModelAfterNavigation?.();
 	await runner.emit({ type: "session_start" });
 }

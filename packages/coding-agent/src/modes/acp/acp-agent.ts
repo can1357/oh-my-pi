@@ -52,7 +52,7 @@ import {
 	type ExtensionUIDialogOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
-import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
+import { runExtensionCompact, runExtensionSetModel } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
@@ -2578,15 +2578,9 @@ export class AcpAgent implements Agent {
 				getAllTools: () => record.session.getAllToolInfos(),
 				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
 				getCommands: () => getSessionSlashCommands(record.session),
-				setModel: async model => {
-					const apiKey = await record.session.modelRegistry.getApiKey(model);
-					if (!apiKey) {
-						return false;
-					}
-					await record.session.setModel(model);
-					return true;
-				},
+				setModel: (model, options) => runExtensionSetModel(record.session, model, options),
 				getThinkingLevel: () => record.session.thinkingLevel,
+				getConfiguredThinkingLevel: () => record.session.configuredThinkingLevel(),
 				setThinkingLevel: level => record.session.setThinkingLevel(level),
 				getServiceTiers: () => record.session.serviceTierByFamily,
 				setServiceTier: (family, tier) => record.session.setServiceTierFamily(family, tier),
@@ -2637,6 +2631,7 @@ export class AcpAgent implements Agent {
 			uiContext,
 			"rpc",
 		);
+		await record.session.runCodeModelAfterNavigation?.();
 		await extensionRunner.emit({ type: "session_start" });
 		record.extensionsConfigured = true;
 	}

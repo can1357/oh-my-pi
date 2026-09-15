@@ -32,7 +32,12 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type {
+	ContextUsage,
+	ExtensionContext,
+	SessionBeforeIdleEvent,
+	SessionStopEventResult,
+} from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -177,6 +182,15 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/** Built-in code-model restoration that completes before public idle hooks run. */
+	codeModelBeforeIdleHandler?: (
+		event: SessionBeforeIdleEvent,
+		ctx: ExtensionContext,
+	) => Promise<SessionStopEventResult | undefined>;
+	/** Built-in code-model restoration that completes after public navigation acceptance and before mutation. */
+	codeModelBeforeNavigationHandler?: (ctx: ExtensionContext) => Promise<CodeModelNavigationPreparation | undefined>;
+	/** Built-in code-model recovery that completes after navigation mutates the transcript. */
+	codeModelAfterNavigationHandler?: (ctx: ExtensionContext) => Promise<void>;
 	/** Returns the current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
@@ -332,6 +346,11 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+}
+
+export interface CodeModelNavigationPreparation {
+	cancel?: boolean;
+	rollback?: () => void;
 }
 
 /** Options for AgentSession.prompt(). */

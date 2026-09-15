@@ -52,6 +52,12 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
+import {
+	createCodeModelExtension,
+	type CodeModelAfterNavigationHandler,
+	type CodeModelBeforeIdleHandler,
+	type CodeModelBeforeNavigationHandler,
+} from "./code-model";
 import { loadCapability } from "./capability";
 import {
 	MAIN_AGENT_RULE_NAME,
@@ -71,6 +77,7 @@ import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	parseModelPattern,
+	parsePersistedModelSelector,
 	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
@@ -1575,6 +1582,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		!hasExplicitModel && hasExistingSession
 			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
+	const resolveRestorableSessionModel = (selector: string) =>
+		parsePersistedModelSelector(selector, modelRegistry.getAvailable());
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
@@ -1582,18 +1591,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) {
+				const parsedModel = resolveRestorableSessionModel(sessionModelStr);
+				if (!parsedModel.model) {
 					failedSessionModel ??= sessionModelStr;
 					continue;
 				}
 
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
+				const restoredModel = parsedModel.model;
+				if (hasModelAuth(restoredModel)) {
 					model = restoredModel;
 					restoredSessionModelIndex = i;
 					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
@@ -1749,6 +1754,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const effectiveGetApiKey =
 		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
 	let session!: AgentSession;
+	let codeModelBeforeIdleHandler: CodeModelBeforeIdleHandler | undefined;
+	let codeModelBeforeNavigationHandler: CodeModelBeforeNavigationHandler | undefined;
+	let codeModelAfterNavigationHandler: CodeModelAfterNavigationHandler | undefined;
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -2168,6 +2176,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			if (!options.parentTaskPrefix) {
+				inlineExtensions.push(
+					createCodeModelExtension(settings, {
+						getRetryFallbackPrimary: () => {
+							const primary = session?.getActiveRetryFallbackPrimary();
+							return primary
+								? {
+										selector: primary.originalSelector,
+										effort: primary.originalThinkingLevel,
+										fallbackEffort: primary.lastAppliedFallbackThinkingLevel,
+									}
+								: undefined;
+						},
+						registerBeforeIdle: handler => {
+							codeModelBeforeIdleHandler = handler;
+						},
+						registerBeforeNavigation: handler => {
+							codeModelBeforeNavigationHandler = handler;
+						},
+						registerAfterNavigation: handler => {
+							codeModelAfterNavigationHandler = handler;
+						},
+					}),
+				);
+			}
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
 			}
@@ -2323,14 +2356,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
 					const sessionModelStr = sessionModelStrings[i];
-					const parsedModel = parseModelString(sessionModelStr, {
-						allowMaxSuffix: true,
-						allowAutoAlias: true,
-						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-					});
-					if (!parsedModel) continue;
-					const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-					if (restoredModel && hasModelAuth(restoredModel)) {
+					const parsedModel = resolveRestorableSessionModel(sessionModelStr);
+					if (!parsedModel.model) continue;
+					const restoredModel = parsedModel.model;
+					if (hasModelAuth(restoredModel)) {
 						model = restoredModel;
 						modelFallbackMessage = undefined;
 						restoredSessionModelIndex = i;
@@ -3874,6 +3903,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			codeModelBeforeIdleHandler,
+			codeModelBeforeNavigationHandler,
+			codeModelAfterNavigationHandler,
 			getEvalPreludes,
 			evalToolSession: toolSession,
 			customCommands: customCommandsResult.commands,

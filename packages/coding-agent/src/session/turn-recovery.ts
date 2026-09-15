@@ -1573,6 +1573,22 @@ export class TurnRecovery {
 		return getRetryFallbackRevertPolicy(this.#host.settings);
 	}
 
+	/** Primary selector and applied fallback effort retained while a retry fallback chain owns the current model. */
+	getActiveRetryFallbackPrimary():
+		| Pick<
+				ActiveRetryFallbackState,
+				"originalSelector" | "originalThinkingLevel" | "lastAppliedFallbackThinkingLevel"
+		  >
+		| undefined {
+		const state = this.#activeRetryFallback;
+		if (!state) return undefined;
+		return {
+			originalSelector: state.originalSelector,
+			originalThinkingLevel: state.originalThinkingLevel,
+			lastAppliedFallbackThinkingLevel: state.lastAppliedFallbackThinkingLevel,
+		};
+	}
+
 	/** Clears fallback ownership after an explicit model change or a restore. */
 	clearActiveRetryFallback(): void {
 		this.#activeRetryFallback = undefined;

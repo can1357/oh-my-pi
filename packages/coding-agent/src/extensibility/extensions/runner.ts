@@ -120,8 +120,7 @@ export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void 
 	sessionShutdownHandlerTimeoutMs = timeoutMs;
 }
 
-/** Per-event handler budget. Defaults to the generic cap; `session_shutdown`
- *  uses its own short cap so teardown stays prompt. */
+/** Per-event handler budget. `session_shutdown` uses its own short teardown cap. */
 function handlerTimeoutForEvent(eventType: string): number {
 	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
 }
@@ -679,6 +678,8 @@ export class ExtensionRunner {
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
+		this.runtime.getConfiguredThinkingLevel =
+			actions.getConfiguredThinkingLevel ?? (() => actions.getThinkingLevel());
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
@@ -1279,14 +1280,14 @@ export class ExtensionRunner {
 		event: TEvent,
 		ctx: ExtensionContext,
 		ext: Extension,
-		timeoutMs: number,
+		timeoutMs: number | undefined,
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
-		// gate without executing the underlying tool. Compose whichever apply.
+		// gate before the underlying tool executes.
 		const sessionStopSignal =
 			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
@@ -1297,42 +1298,42 @@ export class ExtensionRunner {
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
+		const execute = async (handlerSignal: AbortSignal, budget?: HandlerTimeoutBudget): Promise<R | undefined> => {
+			registrationScope.signal = handlerSignal;
+			let result: R | undefined;
+			try {
+				result = await this.#toolRegistrationScope.run(registrationScope, () =>
+					handler(
+						event,
+						createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
+					),
+				);
+			} catch (error) {
+				handlerFailure = { error };
+			} finally {
+				registrationScope.closed = true;
+			}
+			try {
+				await this.#flushToolRegistrations(registrationScope.pending);
+			} catch (error) {
+				handlerFailure ??= { error };
+			}
+			return result;
+		};
 		try {
-			handlerResult = await withActiveSettings(this.settings, () =>
-				raceHandlerWithTimeout(
-					async (handlerSignal, budget) => {
-						registrationScope.signal = handlerSignal;
-						let result: R | undefined;
-						try {
-							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(
-									event,
-									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
-								),
-							);
-						} catch (error) {
-							handlerFailure = { error };
-						} finally {
-							registrationScope.closed = true;
-						}
-						try {
-							await this.#flushToolRegistrations(registrationScope.pending);
-						} catch (error) {
-							handlerFailure ??= { error };
-						}
-						return result;
-					},
-					timeoutMs,
-					signal,
-				),
-			);
+			handlerResult = await withActiveSettings(this.settings, () => {
+				if (timeoutMs === undefined) {
+					return execute(signal ?? new AbortController().signal);
+				}
+				return raceHandlerWithTimeout(execute, timeoutMs, signal);
+			});
 		} catch (error) {
 			handlerFailure = { error };
 		} finally {
 			registrationScope.closed = true;
 		}
 		if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
-		if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
+		if (handlerResult === EXTENSION_HANDLER_TIMEOUT && timeoutMs !== undefined) {
 			const error = `handler timed out after ${timeoutMs}ms`;
 			logger.warn("Extension handler timed out", {
 				extensionPath: ext.path,

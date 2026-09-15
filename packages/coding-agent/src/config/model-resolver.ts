@@ -1070,6 +1070,36 @@ export function parseModelPattern(
 	);
 }
 
+/** Restore an exact provider/id, optional upstream route and explicit effort suffix. */
+export function parsePersistedModelSelector(selector: string, availableModels: Model<Api>[]): ParsedModelResult {
+	const exact = (value: string) => availableModels.find(model => `${model.provider}/${model.id}` === value);
+	const suffix = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	const candidates = suffix.level === undefined ? [selector] : [selector, suffix.base];
+	for (const candidate of candidates) {
+		let model = exact(candidate);
+		let upstream: string | undefined;
+		if (!model) {
+			const routing = splitUpstreamRouting(candidate);
+			const base = routing && exact(routing.base);
+			if (routing && base && supportsUpstreamRouting(base)) {
+				model = applyUpstreamRouting(base, routing.upstream);
+				upstream = routing.upstream;
+			}
+		}
+		if (model) {
+			const thinkingLevel = candidate === selector ? undefined : suffix.level;
+			return {
+				model,
+				upstream,
+				thinkingLevel,
+				warning: undefined,
+				explicitThinkingLevel: thinkingLevel !== undefined,
+			};
+		}
+	}
+	return { model: undefined, warning: undefined, explicitThinkingLevel: false };
+}
+
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 

@@ -3926,8 +3926,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						setActiveTools: (toolNames: string[]) =>
 							session.setActiveToolsByName(toolNames.filter(name => !isParentOwnedTool(name))),
 						getCommands: () => getSessionSlashCommands(session),
-						setModel: model => runExtensionSetModel(session, model),
+						setModel: (model, options) => runExtensionSetModel(session, model, options),
 						getThinkingLevel: () => session.thinkingLevel,
+						getConfiguredThinkingLevel: () => session.configuredThinkingLevel(),
 						setThinkingLevel: level => session.setThinkingLevel(level),
 						getServiceTiers: () => session.serviceTierByFamily,
 						setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
@@ -3950,6 +3951,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				extensionRunner.onError(err => {
 					logger.error("Extension error", { path: err.extensionPath, error: err.error });
 				});
+				await awaitAbortable(session.runCodeModelAfterNavigation?.());
 				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
 				while (pendingExtensionMessages.length > 0) {
 					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));

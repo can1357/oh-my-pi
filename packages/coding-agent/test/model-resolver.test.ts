@@ -8,6 +8,7 @@ import {
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
 	parseModelPattern,
+	parsePersistedModelSelector,
 	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAgentAdvisorSelection,
@@ -519,6 +520,65 @@ describe("parseModelPattern", () => {
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.explicitThinkingLevel).toBe(false);
 			expect(result.warning).toBeUndefined();
+		});
+	});
+	describe("persisted model selectors", () => {
+		test("restores exact provider/id identities", () => {
+			const result = parsePersistedModelSelector("anthropic/claude-sonnet-4-5", allModels);
+			expect(result.model?.id).toBe("claude-sonnet-4-5");
+			expect(result.thinkingLevel).toBeUndefined();
+		});
+
+		test("requires the complete persisted identity", () => {
+			for (const selector of ["sonnet", "anthropic/sonnet", "anthropic/sonnet:high"]) {
+				expect(parsePersistedModelSelector(selector, allModels).model).toBeUndefined();
+			}
+		});
+
+		test.each([Effort.High, Effort.Max, "auto"] as const)("restores an exact identity with %s effort", effort => {
+			const result = parsePersistedModelSelector(`anthropic/claude-sonnet-4-5:${effort}`, allModels);
+			expect(result.model?.id).toBe("claude-sonnet-4-5");
+			expect(result.thinkingLevel).toBe(effort);
+			expect(result.explicitThinkingLevel).toBe(true);
+		});
+
+		test("restores an exact routed identity with explicit effort", () => {
+			const result = parsePersistedModelSelector("openrouter/z-ai/glm-4.7@cerebras:max", allModels);
+			expect(result.model?.id).toBe("z-ai/glm-4.7");
+			expect(result.upstream).toBe("cerebras");
+			expect(result.thinkingLevel).toBe(Effort.Max);
+			expect(result.explicitThinkingLevel).toBe(true);
+			expect(parsePersistedModelSelector("openrouter/glm@cerebras:max", allModels).model).toBeUndefined();
+		});
+
+		test("preserves literal effort-bearing IDs before parsing an effort suffix", () => {
+			const base = allModels.find(model => model.provider === "anthropic" && model.id === "claude-sonnet-4-5")!;
+			const literal = { ...base, id: `${base.id}:max` };
+			const result = parsePersistedModelSelector(`anthropic/${literal.id}`, [base, literal]);
+			expect(result.model).toBe(literal);
+			expect(result.thinkingLevel).toBeUndefined();
+			expect(result.explicitThinkingLevel).toBe(false);
+			expect(parsePersistedModelSelector(`anthropic/${literal.id}:high`, [base, literal])).toMatchObject({
+				model: literal,
+				thinkingLevel: Effort.High,
+				explicitThinkingLevel: true,
+			});
+		});
+
+		test("restores an exact upstream route", () => {
+			const result = parsePersistedModelSelector("openrouter/z-ai/glm-4.7@cerebras", allModels);
+			expect(result.model?.id).toBe("z-ai/glm-4.7");
+			expect(result.upstream).toBe("cerebras");
+			expect(result.thinkingLevel).toBeUndefined();
+			expect(parsePersistedModelSelector("openrouter/glm@cerebras", allModels).model).toBeUndefined();
+		});
+
+		test("preserves literal suffixes and provider identity", () => {
+			expect(parsePersistedModelSelector("openrouter/qwen/qwen3-coder:exacto", allModels).model?.id).toBe(
+				"qwen/qwen3-coder:exacto",
+			);
+			expect(parsePersistedModelSelector("other/claude-sonnet-4-5", allModels).model).toBeUndefined();
+			expect(parsePersistedModelSelector("anthropic/claude-sonnet-4-5@cerebras", allModels).model).toBeUndefined();
 		});
 	});
 

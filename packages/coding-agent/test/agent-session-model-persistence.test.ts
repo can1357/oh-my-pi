@@ -1,17 +1,32 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { installCodeModelSession, type CodeModelSessionController } from "../src/code-model/session-mode";
+import { runExtensionSetModel } from "../src/extensibility/extensions/compact-handler";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import {
+	formatModelStringWithRouting,
+	parseModelPattern,
+	parsePersistedModelSelector,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING, resolveThinkingLevelForModel } from "@oh-my-pi/pi-coding-agent/thinking";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession model persistence", () => {
@@ -59,17 +74,28 @@ describe("AgentSession model persistence", () => {
 		return `${model.provider}/${model.id}`;
 	}
 
+	async function persistedModelChanges(sessionFile: string): Promise<string[]> {
+		const text = await Bun.file(sessionFile).text();
+		return text
+			.split("\n")
+			.filter(Boolean)
+			.map(line => JSON.parse(line) as { type?: string; model?: string })
+			.filter(entry => entry.type === "model_change")
+			.map(entry => entry.model ?? "");
+	}
+
 	async function writeRoleModelSession(
 		defaultRoleValue: string,
 		smolRoleValue: string,
 		lastRole = "smol",
+		cwd = tempDir.path(),
 	): Promise<string> {
 		const targetSessionFile = path.join(tempDir.path(), `target-${Bun.nanoseconds()}.jsonl`);
 		const timestamp = "2026-06-01T00:00:00.000Z";
 		await Bun.write(
 			targetSessionFile,
 			`${[
-				{ type: "session", version: 3, id: "target-session", timestamp, cwd: tempDir.path() },
+				{ type: "session", version: 3, id: "target-session", timestamp, cwd },
 				{
 					type: "model_change",
 					id: "default-model",
@@ -96,7 +122,12 @@ describe("AgentSession model persistence", () => {
 		initialModel?: Model<Api>;
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
+		codeModelBeforeNavigationHandler?: AgentSessionConfig["codeModelBeforeNavigationHandler"];
+		codeModelAfterNavigationHandler?: AgentSessionConfig["codeModelAfterNavigationHandler"];
 		persist?: boolean;
+		onSessionSwitch?: (ctx: ExtensionContext) => void;
+		onSessionBeforeSwitch?: () => { cancel: true };
+		sideStreamFn?: AgentSessionConfig["sideStreamFn"];
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -123,13 +154,42 @@ describe("AgentSession model persistence", () => {
 				}
 			}
 		}
+		const sessionManager = options?.persist
+			? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
+			: SessionManager.inMemory();
+		let extensionRunner: ExtensionRunner | undefined;
+		if (
+			options?.onSessionSwitch ||
+			options?.onSessionBeforeSwitch ||
+			options?.codeModelBeforeNavigationHandler ||
+			options?.codeModelAfterNavigationHandler
+		) {
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					if (options.onSessionSwitch) {
+						pi.on("session_switch", (_event, ctx) => options.onSessionSwitch?.(ctx));
+					}
+					if (options.onSessionBeforeSwitch) {
+						pi.on("session_before_switch", () => options.onSessionBeforeSwitch?.());
+					}
+				},
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+				"model-persistence-session-switch",
+			);
+			extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		}
 		session = new AgentSession({
 			agent,
-			sessionManager: options?.persist
-				? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
-				: SessionManager.inMemory(),
+			sessionManager,
 			settings: sessionSettings,
 			modelRegistry,
+			codeModelBeforeNavigationHandler: options?.codeModelBeforeNavigationHandler,
+			codeModelAfterNavigationHandler: options?.codeModelAfterNavigationHandler,
+			sideStreamFn: options?.sideStreamFn,
+			extensionRunner,
 		});
 
 		return { modelRegistry, settings: sessionSettings, session };
@@ -157,8 +217,606 @@ describe("AgentSession model persistence", () => {
 			skipPythonPreflight: true,
 		});
 		session = result.session;
+
 		return result;
 	}
+	it("awaits the internal navigation gate beyond the extension timeout", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let cancelNavigation = false;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				entered.resolve();
+				await release.promise;
+				return cancelNavigation ? { cancel: true } : undefined;
+			},
+			persist: true,
+		});
+		const beforeSessionId = created.session.sessionManager.getSessionId();
+		testSetExtensionHandlerTimeoutMs(5);
+		let settled = false;
+		const navigation = created.session.newSession().then(result => {
+			settled = true;
+			return result;
+		});
+		try {
+			await entered.promise;
+			await Bun.sleep(20);
+			expect(settled).toBe(false);
+			release.resolve();
+			expect(await navigation).toBe(true);
+			expect(created.session.sessionManager.getSessionId()).not.toBe(beforeSessionId);
+
+			cancelNavigation = true;
+			const destinationSessionId = created.session.sessionManager.getSessionId();
+			const userEntryId = created.session.sessionManager.appendMessage({
+				role: "user",
+				content: "navigation target",
+				timestamp: Date.now(),
+			});
+			expect((await created.session.branch(userEntryId)).cancelled).toBe(true);
+			expect((await created.session.navigateTree(userEntryId)).cancelled).toBe(true);
+			expect(await created.session.fork()).toBe(false);
+			const sessionFile = created.session.sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session path");
+			expect(await created.session.switchSession(sessionFile)).toBe(false);
+			expect(created.session.sessionManager.getSessionId()).toBe(destinationSessionId);
+		} finally {
+			release.resolve();
+			await navigation;
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
+	});
+
+	it.each(["newSession", "fork", "switchSession", "branch", "branchFromBtw", "navigateTree"] as const)(
+		"rolls back a cancelled code-model preparation before %s",
+		async transition => {
+			const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const originalModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!originalModel) throw new Error("Expected original model fixture");
+			let phaseRollbacks = 0;
+			const created = await createSession({
+				initialModel: codingModel,
+				persist: true,
+				codeModelBeforeNavigationHandler: async () => {
+					created.session.agent.setModel(originalModel);
+					created.session.sessionManager.appendModelChange(modelValue(originalModel));
+					return {
+						cancel: true,
+						rollback: () => {
+							phaseRollbacks++;
+						},
+					};
+				},
+			});
+			const sourceSessionId = created.session.sessionManager.getSessionId();
+			const sourceSessionFile = created.session.sessionManager.getSessionFile();
+			if (!sourceSessionFile) throw new Error("Expected a persisted session file");
+			const rootId = created.session.sessionManager.appendMessage({
+				role: "user",
+				content: "root",
+				timestamp: Date.now(),
+			});
+			const leafId = created.session.sessionManager.appendMessage({
+				role: "user",
+				content: "leaf",
+				timestamp: Date.now(),
+			});
+			let cancelled: boolean;
+			switch (transition) {
+				case "newSession":
+					cancelled = !(await created.session.newSession());
+					break;
+				case "fork":
+					cancelled = !(await created.session.fork());
+					break;
+				case "switchSession": {
+					const targetSessionFile = await writeRoleModelSession(
+						modelValue(originalModel),
+						modelValue(originalModel),
+						"default",
+					);
+					cancelled = !(await created.session.switchSession(targetSessionFile));
+					break;
+				}
+				case "branch":
+					cancelled = (await created.session.branch(leafId)).cancelled;
+					break;
+				case "branchFromBtw":
+					cancelled = (
+						await created.session.branchFromBtw(
+							"question",
+							{
+								role: "assistant",
+								content: [{ type: "text", text: "answer" }],
+								stopReason: "stop",
+							} as unknown as AssistantMessage,
+							leafId,
+							sourceSessionId,
+						)
+					).cancelled;
+					break;
+				case "navigateTree":
+					cancelled = (await created.session.navigateTree(rootId)).cancelled;
+					break;
+			}
+			expect(cancelled).toBe(true);
+			expect(phaseRollbacks).toBe(1);
+			expect(created.session.model).toBe(codingModel);
+			expect(created.session.sessionManager.getSessionId()).toBe(sourceSessionId);
+			expect(await persistedModelChanges(sourceSessionFile)).not.toContain(modelValue(originalModel));
+		},
+	);
+
+	it.each(["newSession", "branch", "branchFromBtw", "navigateTree"] as const)(
+		"rolls back code-model preparation when %s fails before commit",
+		async transition => {
+			const failure = new Error(`${transition} commit failed`);
+			const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const originalModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!originalModel) throw new Error("Expected original model fixture");
+			let phaseRollbacks = 0;
+			const created = await createSession({
+				initialModel: codingModel,
+				persist: true,
+				codeModelBeforeNavigationHandler: async () => {
+					created.session.agent.setModel(originalModel);
+					created.session.sessionManager.appendModelChange(modelValue(originalModel));
+					return {
+						rollback: () => {
+							phaseRollbacks++;
+						},
+					};
+				},
+			});
+			const sourceSessionId = created.session.sessionManager.getSessionId();
+			const sourceSessionFile = created.session.sessionManager.getSessionFile();
+			if (!sourceSessionFile) throw new Error("Expected a persisted session file");
+			const rootId = created.session.sessionManager.appendMessage({
+				role: "user",
+				content: "root",
+				timestamp: Date.now(),
+			});
+			const leafId = created.session.sessionManager.appendMessage({
+				role: "user",
+				content: "leaf",
+				timestamp: Date.now(),
+			});
+			let restoreFailure: () => void;
+			let navigation: Promise<unknown>;
+			switch (transition) {
+				case "newSession": {
+					const failureSpy = vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+					restoreFailure = () => failureSpy.mockRestore();
+					navigation = created.session.newSession();
+					break;
+				}
+				case "branch": {
+					const failureSpy = vi
+						.spyOn(created.session.sessionManager, "createBranchedSession")
+						.mockImplementationOnce(() => {
+							throw failure;
+						});
+					restoreFailure = () => failureSpy.mockRestore();
+					navigation = created.session.branch(leafId);
+					break;
+				}
+				case "branchFromBtw": {
+					const failureSpy = vi
+						.spyOn(created.session.sessionManager, "createBranchedSession")
+						.mockImplementationOnce(() => {
+							throw failure;
+						});
+					restoreFailure = () => failureSpy.mockRestore();
+					navigation = created.session.branchFromBtw(
+						"question",
+						{
+							role: "assistant",
+							content: [{ type: "text", text: "answer" }],
+							stopReason: "stop",
+						} as unknown as AssistantMessage,
+						leafId,
+						sourceSessionId,
+					);
+					break;
+				}
+				case "navigateTree": {
+					const failureSpy = vi.spyOn(created.session.sessionManager, "resetLeaf").mockImplementationOnce(() => {
+						throw failure;
+					});
+					restoreFailure = () => failureSpy.mockRestore();
+					navigation = created.session.navigateTree(rootId);
+					break;
+				}
+			}
+			try {
+				await expect(navigation).rejects.toThrow(failure);
+			} finally {
+				restoreFailure();
+			}
+			expect(phaseRollbacks).toBe(1);
+			expect(created.session.model).toBe(codingModel);
+			expect(created.session.sessionManager.getSessionId()).toBe(sourceSessionId);
+			expect(await persistedModelChanges(sourceSessionFile)).not.toContain(modelValue(originalModel));
+		},
+	);
+
+	it("commits branchFromBtw after code-model preparation advances the active leaf", async () => {
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+		let phaseRollbacks = 0;
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				created.session.sessionManager.appendModelChange(modelValue(originalModel));
+				return {
+					rollback: () => {
+						phaseRollbacks++;
+					},
+				};
+			},
+		});
+		const sourceSessionId = created.session.sessionManager.getSessionId();
+		const leafId = created.session.sessionManager.appendMessage({
+			role: "user",
+			content: "leaf",
+			timestamp: Date.now(),
+		});
+		const result = await created.session.branchFromBtw(
+			"question",
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "answer" }],
+				stopReason: "stop",
+			} as unknown as AssistantMessage,
+			leafId,
+			sourceSessionId,
+		);
+		expect(result.cancelled).toBe(false);
+		expect(created.session.sessionManager.getSessionId()).not.toBe(sourceSessionId);
+		expect(phaseRollbacks).toBe(0);
+	});
+
+	it("preserves the outgoing phase when a public navigation handler cancels", async () => {
+		let outgoingRestorations = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				outgoingRestorations++;
+				return undefined;
+			},
+			onSessionBeforeSwitch: () => ({ cancel: true }),
+		});
+		const beforeSessionId = created.session.sessionManager.getSessionId();
+		expect(await created.session.newSession()).toBe(false);
+		expect(outgoingRestorations).toBe(0);
+		expect(created.session.sessionManager.getSessionId()).toBe(beforeSessionId);
+	});
+
+	it("preserves the outgoing phase when the session has no fork file", async () => {
+		let outgoingRestorations = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				outgoingRestorations++;
+				return undefined;
+			},
+		});
+
+		expect(await created.session.fork()).toBe(false);
+		expect(outgoingRestorations).toBe(0);
+	});
+
+	it("preserves the coding model without preparing navigation when fork flush rejects", async () => {
+		let preparationCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				preparationCalled = true;
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {},
+				};
+			},
+		});
+
+		const failure = new Error("flush failed");
+		vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+
+		await expect(created.session.fork()).rejects.toThrow(failure);
+		expect(preparationCalled).toBe(false);
+		expect(created.session.model).toBe(codingModel);
+	});
+
+	it("rolls back code-model navigation preparation when fork creation rejects", async () => {
+		let rollbackCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				created.session.sessionManager.appendModelChange(modelValue(originalModel));
+				return {
+					rollback: () => {
+						rollbackCalled = true;
+					},
+				};
+			},
+		});
+
+		const failure = new Error("fork failed");
+		vi.spyOn(created.session.sessionManager, "fork").mockRejectedValueOnce(failure);
+
+		await expect(created.session.fork()).rejects.toThrow(failure);
+		expect(rollbackCalled).toBe(true);
+		expect(created.session.model).toBe(codingModel);
+
+		// The rollback must be durable: the preparation's model-change entry was
+		// already appended to the session file, so a fresh open must not observe
+		// a coding-phase model the live session rolled back.
+		const sessionFile = created.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const persistedModels = await persistedModelChanges(sessionFile);
+		expect(persistedModels).not.toContain(modelValue(originalModel));
+	});
+
+	it("rolls back code-model preparation when branch flush rejects", async () => {
+		let rollbackCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {
+						rollbackCalled = true;
+					},
+				};
+			},
+		});
+		const sessionFile = created.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "branch root" }],
+			timestamp: Date.now(),
+		});
+		const entryId = created.session.sessionManager.getLeafId();
+		if (!entryId) throw new Error("Expected a leaf entry to branch from");
+
+		const failure = new Error("branch flush failed");
+		const flushSpy = vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+
+		await expect(created.session.branch(entryId)).rejects.toThrow(failure);
+		flushSpy.mockRestore();
+		expect(rollbackCalled).toBe(true);
+		expect(created.session.model).toBe(codingModel);
+
+		const persistedModels = await persistedModelChanges(sessionFile);
+		expect(persistedModels).not.toContain(modelValue(originalModel));
+		const persisted = await Bun.file(sessionFile).text();
+		expect(persisted).toContain("branch root");
+	});
+
+	it("rolls back code-model preparation when branchFromBtw flush rejects", async () => {
+		let rollbackCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {
+						rollbackCalled = true;
+					},
+				};
+			},
+		});
+		const sessionFile = created.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "btw question" }],
+			timestamp: Date.now(),
+		});
+		const leafId = created.session.sessionManager.getLeafId();
+		const sessionId = created.session.sessionManager.getSessionId();
+		if (!leafId) throw new Error("Expected a leaf entry to branch from");
+
+		const failure = new Error("btw flush failed");
+		const flushSpy = vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+
+		const assistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "btw answer" }],
+			stopReason: "stop",
+		} as unknown as AssistantMessage;
+		await expect(created.session.branchFromBtw("btw", assistantMessage, leafId, sessionId)).rejects.toThrow(failure);
+		flushSpy.mockRestore();
+		expect(rollbackCalled).toBe(true);
+		expect(created.session.model).toBe(codingModel);
+
+		const persistedModels = await persistedModelChanges(sessionFile);
+		expect(persistedModels).not.toContain(modelValue(originalModel));
+	});
+
+	it("preserves the outgoing phase when destination cwd requires approval", async () => {
+		const targetCwd = TempDir.createSync("@pi-model-persistence-target-");
+		try {
+			const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const targetValue = modelValue(targetModel);
+			const targetSessionFile = await writeRoleModelSession(targetValue, targetValue, "default", targetCwd.path());
+			let outgoingRestorations = 0;
+			const created = await createSession({
+				codeModelBeforeNavigationHandler: async () => {
+					outgoingRestorations++;
+					return undefined;
+				},
+				persist: true,
+			});
+			const beforeSessionFile = created.session.sessionManager.getSessionFile();
+
+			expect(await created.session.switchSession(targetSessionFile)).toBe(false);
+			expect(outgoingRestorations).toBe(0);
+			expect(created.session.sessionManager.getSessionFile()).toBe(beforeSessionFile);
+		} finally {
+			targetCwd.removeSync();
+		}
+	});
+
+	it("restores the source cwd when phase recovery cancels switching", async () => {
+		const targetCwd = TempDir.createSync("@pi-model-persistence-target-");
+		try {
+			const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const targetValue = modelValue(targetModel);
+			const targetSessionFile = await writeRoleModelSession(targetValue, targetValue, "default", targetCwd.path());
+			const created = await createSession({
+				codeModelBeforeNavigationHandler: async () => ({ cancel: true }),
+				persist: true,
+			});
+			const sourceCwd = created.session.sessionManager.getCwd();
+			const cwdChanges: Array<[string, string]> = [];
+
+			expect(
+				await created.session.switchSession(targetSessionFile, {
+					onCwdChange: async (newCwd, previousCwd) => {
+						cwdChanges.push([newCwd, previousCwd]);
+						return true;
+					},
+				}),
+			).toBe(false);
+			expect(cwdChanges).toEqual([
+				[targetCwd.path(), sourceCwd],
+				[sourceCwd, targetCwd.path()],
+			]);
+			expect(created.session.sessionManager.getCwd()).toBe(sourceCwd);
+		} finally {
+			targetCwd.removeSync();
+		}
+	});
+
+	it("restores phase state when prepared session commit fails", async () => {
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+		const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const targetValue = modelValue(targetModel);
+		const targetSessionFile = await writeRoleModelSession(targetValue, targetValue, "default");
+		let phaseRollbacks = 0;
+		const created = await createSession({
+			initialModel: codingModel,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				created.session.sessionManager.appendModelChange(modelValue(originalModel));
+				return {
+					rollback: () => {
+						phaseRollbacks++;
+					},
+				};
+			},
+			persist: true,
+		});
+		const beforeSessionFile = created.session.sessionManager.getSessionFile();
+		if (!beforeSessionFile) throw new Error("Expected a persisted session file");
+		const prepareSessionFile = created.session.sessionManager.prepareSessionFile.bind(created.session.sessionManager);
+		created.session.sessionManager.prepareSessionFile = async sessionFile => {
+			const prepared = await prepareSessionFile(sessionFile);
+			return {
+				...prepared,
+				commit: async () => {
+					throw new Error("prepared session commit failed");
+				},
+			};
+		};
+
+		await expect(created.session.switchSession(targetSessionFile)).rejects.toThrow("prepared session commit failed");
+		expect(phaseRollbacks).toBe(1);
+		expect(created.session.sessionManager.getSessionFile()).toBe(beforeSessionFile);
+		expect(created.session.model).toBe(codingModel);
+		expect(await persistedModelChanges(beforeSessionFile)).not.toContain(modelValue(originalModel));
+	});
+
+	it("preserves the outgoing phase when tree summarization fails", async () => {
+		let outgoingRestorations = 0;
+		const created = await createSession({
+			codeModelBeforeNavigationHandler: async () => {
+				outgoingRestorations++;
+				return undefined;
+			},
+			sideStreamFn: () => {
+				throw new Error("summary failed");
+			},
+		});
+		const targetId = created.session.sessionManager.appendMessage({
+			role: "user",
+			content: "first branch message",
+			timestamp: Date.now(),
+		});
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: "second branch message",
+			timestamp: Date.now(),
+		});
+		const beforeLeafId = created.session.sessionManager.getLeafId();
+
+		await expect(created.session.navigateTree(targetId, { summarize: true })).rejects.toThrow("summary failed");
+		expect(outgoingRestorations).toBe(0);
+		expect(created.session.sessionManager.getLeafId()).toBe(beforeLeafId);
+	});
+
+	it("awaits destination recovery beyond the extension timeout", async () => {
+		const targetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const previousModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const targetModelValue = modelValue(targetModel);
+		const targetSessionFile = await writeRoleModelSession(targetModelValue, targetModelValue, "default");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const created = await createSession({
+			initialModel: previousModel,
+			codeModelAfterNavigationHandler: async () => {
+				entered.resolve();
+				await release.promise;
+			},
+			persist: true,
+		});
+		testSetExtensionHandlerTimeoutMs(5);
+		let settled = false;
+		const navigation = created.session.switchSession(targetSessionFile).then(result => {
+			settled = true;
+			return result;
+		});
+		try {
+			await entered.promise;
+			await Bun.sleep(20);
+			expect(settled).toBe(false);
+			release.resolve();
+			expect(await navigation).toBe(true);
+			expect(created.session.sessionManager.getSessionFile()).toBe(targetSessionFile);
+		} finally {
+			release.resolve();
+			await navigation;
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
+	});
+
 	it("switches the active model without persisting by default", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -181,6 +839,28 @@ describe("AgentSession model persistence", () => {
 
 		await created.session.setModel(nextModel);
 		expect(modelChangedCount).toBe(1);
+	});
+
+	it("records routed model identity in session history", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) throw new Error("Expected the routed OpenRouter fixture to exist");
+		const routed = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routed) throw new Error("Expected the routed OpenRouter fixture to resolve");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+		});
+
+		await created.session.setModel(routed);
+
+		expect(created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject(
+			{
+				type: "model_change",
+				model: "openrouter/z-ai/glm-4.7@cerebras",
+			},
+		);
 	});
 
 	it("persists the default role when explicitly requested", async () => {
@@ -238,6 +918,67 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(slowModel.id);
 		expect(created.settings.getModelRole("default")).toBe(defaultRoleValue);
 		expect(created.settings.getModelRole("slow")).toBe(slowRoleValue);
+	});
+
+	it("preserves named-role fallback through the extension phase switch and resume", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel), code: modelValue(defaultModel) },
+			persist: true,
+		});
+		await created.session.setModel(defaultModel, "default");
+		await created.session.setModel(slowModel, "slow");
+		const runtime = new ExtensionRuntime();
+		Object.assign(runtime, {
+			setModel: (model: Model, options?: { role?: string; ephemeral?: boolean }) =>
+				runExtensionSetModel(created.session, model, options),
+			appendEntry: (type: string, data: unknown) => created.session.sessionManager.appendCustomEntry(type, data),
+			getThinkingLevel: () => created.session.thinkingLevel,
+			getConfiguredThinkingLevel: () => created.session.configuredThinkingLevel(),
+			setThinkingLevel: (level: Parameters<AgentSession["setThinkingLevel"]>[0]) =>
+				created.session.setThinkingLevel(level),
+		});
+		let controller: CodeModelSessionController | undefined;
+		await loadExtensionFromFactory(
+			pi => {
+				controller = installCodeModelSession(pi, created.settings);
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"role-preservation-phase",
+		);
+		const ctx = {
+			sessionManager: created.session.sessionManager,
+			models: {
+				current: () => created.session.model,
+				list: () => created.modelRegistry.getAvailable(),
+				resolve: (selector: string) => parseModelPattern(selector, created.modelRegistry.getAvailable()).model,
+			},
+			ui: { notify() {} },
+		} as unknown as ExtensionContext;
+		if (!controller) throw new Error("Expected the phase controller");
+		await controller.run("start", ctx);
+		expect(created.session.sessionManager.getLastModelChangeRole()).toBe(EPHEMERAL_MODEL_CHANGE_ROLE);
+		await controller.run("finish", ctx);
+		expect(created.session.model?.id).toBe(slowModel.id);
+		expect(created.session.sessionManager.getLastModelChangeRole()).toBe("slow");
+		const models = created.session.sessionManager.buildSessionContext().models;
+		expect(models.default).toBe(modelValue(defaultModel));
+		expect(models.slow).toBe(modelValue(slowModel));
+		await created.session.sessionManager.ensureOnDisk();
+		const target = created.session.sessionManager.getSessionFile();
+		if (!target) throw new Error("Expected a persisted session");
+		const originalAvailable = created.modelRegistry.getAvailable.bind(created.modelRegistry);
+		created.modelRegistry.getAvailable = () => originalAvailable().filter(model => model.id !== slowModel.id);
+		try {
+			await expect(created.session.switchSession(target)).resolves.toBe(true);
+			expect(created.session.model?.id).toBe(defaultModel.id);
+		} finally {
+			created.modelRegistry.getAvailable = originalAvailable;
+		}
 	});
 
 	it("cycles role models backward from the current role", async () => {
@@ -306,6 +1047,59 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(smolModel.id);
 	});
 
+	it.each([Effort.High, Effort.Max, AUTO_THINKING] as const)(
+		"restores the parsed effort from an explicit %s selector when switching sessions",
+		async effort => {
+			const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const defaultRoleValue = modelValue(defaultModel);
+			const smolRoleValue = modelValue(smolModel);
+			const selector = `${smolRoleValue}:${effort}`;
+			const parsedEffort = parsePersistedModelSelector(selector, [smolModel]).thinkingLevel;
+			if (parsedEffort === undefined) throw new Error(`Expected ${selector} to contain an effort`);
+			const expectedEffort =
+				parsedEffort === AUTO_THINKING ? AUTO_THINKING : resolveThinkingLevelForModel(smolModel, parsedEffort);
+			const targetSessionFile = await writeRoleModelSession(defaultRoleValue, selector);
+			const created = await createSession({
+				initialModel: defaultModel,
+				modelRoles: { default: defaultRoleValue, smol: smolRoleValue },
+				persist: true,
+			});
+			created.settings.set("defaultThinkingLevel", Effort.Low);
+
+			await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+			expect(created.session.model?.id).toBe(smolModel.id);
+			expect(created.session.configuredThinkingLevel()).toBe(expectedEffort);
+		},
+	);
+
+	it("restores a routed temporary model before publishing session switch", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) throw new Error("Expected the routed OpenRouter fixture to exist");
+		const routed = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routed) throw new Error("Expected the routed OpenRouter fixture to resolve");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
+		const selector = formatModelStringWithRouting(routed);
+		const targetSessionFile = await writeRoleModelSession(modelValue(defaultModel), selector, "temporary");
+		let observedSelector: string | undefined;
+		const observedSession: { current?: AgentSession } = {};
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+			onSessionSwitch: () => {
+				const current = observedSession.current?.model;
+				observedSelector = current ? formatModelStringWithRouting(current) : undefined;
+			},
+		});
+		observedSession.current = created.session;
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(created.session.model && formatModelStringWithRouting(created.session.model)).toBe(selector);
+		expect(observedSelector).toBe(selector);
+	});
+
 	it("restores the last active role model during startup resume", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -316,6 +1110,23 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile);
 
 		expect(result.session.model?.id).toBe(smolModel.id);
+	});
+
+	it("restores a routed temporary model during startup resume", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) throw new Error("Expected the routed OpenRouter fixture to exist");
+		const routed = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routed) throw new Error("Expected the routed OpenRouter fixture to resolve");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
+		const selector = formatModelStringWithRouting(routed);
+		const targetSessionFile = await writeRoleModelSession(modelValue(defaultModel), selector, "temporary");
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(defaultModel));
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model && formatModelStringWithRouting(result.session.model)).toBe(selector);
 	});
 
 	it("falls back to the saved default model when switch-session role restore is unavailable", async () => {
@@ -332,6 +1143,41 @@ describe("AgentSession model persistence", () => {
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(created.session.model?.id).toBe(defaultModel.id);
+	});
+
+	it("restores the saved default when a similar model remains during session switch", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const previousModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const defaultRoleValue = modelValue(defaultModel);
+		const removedSelector = "anthropic/sonnet-4-6";
+		expect(parseModelPattern(removedSelector, sharedModelRegistry.getAvailable()).model?.id).toBe(previousModel.id);
+		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, removedSelector);
+
+		const created = await createSession({
+			initialModel: previousModel,
+			modelRoles: { default: defaultRoleValue },
+			persist: true,
+		});
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(created.session.model?.id).toBe(defaultModel.id);
+	});
+
+	it("restores the saved default when a similar model remains during startup", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const settingsFallbackModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const defaultRoleValue = modelValue(defaultModel);
+		const removedSelector = "anthropic/sonnet-4-6";
+		expect(parseModelPattern(removedSelector, sharedModelRegistry.getAvailable()).model?.id).toBe(
+			settingsFallbackModel.id,
+		);
+		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, removedSelector);
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(settingsFallbackModel));
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.id).toBe(defaultModel.id);
 	});
 
 	it("restores the saved default model when switch-session last role is fallback", async () => {

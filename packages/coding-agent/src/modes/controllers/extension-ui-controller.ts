@@ -22,6 +22,7 @@ import type {
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
+import { runExtensionSetModel } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { AskDialogComponent, boundPromptTitle, normalizeDialogQuestions } from "../../modes/components/ask-dialog";
 import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
@@ -188,13 +189,9 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
+			setModel: (model, options) => runExtensionSetModel(this.ctx.session, model, options),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
+			getConfiguredThinkingLevel: () => this.ctx.session.configuredThinkingLevel(),
 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
 			setServiceTier: (family, tier) => this.ctx.session.setServiceTierFamily(family, tier),
@@ -306,6 +303,8 @@ export class ExtensionUiController {
 		extensionRunner.onError((error: ExtensionError) => {
 			this.showExtensionError(error.extensionPath, error.error);
 		});
+
+		await this.ctx.session.runCodeModelAfterNavigation?.();
 
 		// Emit session_start event
 		await extensionRunner.emit({
@@ -419,13 +418,9 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
+			setModel: (model, options) => runExtensionSetModel(this.ctx.session, model, options),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
+			getConfiguredThinkingLevel: () => this.ctx.session.configuredThinkingLevel(),
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
 			setServiceTier: (family, tier) => this.ctx.session.setServiceTierFamily(family, tier),

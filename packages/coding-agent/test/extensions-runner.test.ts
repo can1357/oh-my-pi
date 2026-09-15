@@ -1578,6 +1578,54 @@ describe("ExtensionRunner", () => {
 			});
 		});
 
+		it("bounds public session_before_idle handlers with the generic timeout", async () => {
+			const extensionPath = path.join(tempDir.path(), "slow-before-idle.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_idle", async () => {
+							await new Promise(() => {});
+						});
+					}
+				`,
+			);
+
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const errors: ExtensionError[] = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
+			testSetExtensionHandlerTimeoutMs(10);
+
+			const startedAt = performance.now();
+			await runner.emit({ type: "session_before_idle", messages: [], willContinue: false });
+			const elapsedMs = performance.now() - startedAt;
+
+			expect(elapsedMs).toBeGreaterThanOrEqual(8);
+			expect(elapsedMs).toBeLessThan(150);
+			expect(errors).toContainEqual({
+				extensionPath,
+				event: "session_before_idle",
+				error: "handler timed out after 10ms",
+			});
+			expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+				extensionPath,
+				event: "session_before_idle",
+				timeoutMs: 10,
+			});
+
+			warnSpy.mockRestore();
+		});
+
 		it("uses the configured tool_call timeout and fails closed so a hung extension cannot block execution (#3948)", async () => {
 			const hangExtensionPath = path.join(tempDir.path(), "hang-tool-call.ts");
 			fs.writeFileSync(

@@ -27,6 +27,7 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -51,6 +52,7 @@ import type {
 	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
+	SetModelOptions,
 	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
@@ -147,6 +149,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	getThinkingLevel(): ThinkingLevel {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -317,15 +322,18 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.getCommands();
 	}
 
-	setModel(model: Model): Promise<boolean> {
-		return this.runtime.setModel(model);
+	setModel(model: Model, options?: SetModelOptions): Promise<boolean> {
+		return this.runtime.setModel(model, options);
 	}
 
 	getThinkingLevel(): ThinkingLevel | undefined {
 		return this.runtime.getThinkingLevel();
 	}
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		return this.runtime.getConfiguredThinkingLevel?.() ?? this.runtime.getThinkingLevel();
+	}
 
-	setThinkingLevel(level: ThinkingLevel, persist?: boolean): void {
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void {
 		this.runtime.setThinkingLevel(level, persist);
 	}
 

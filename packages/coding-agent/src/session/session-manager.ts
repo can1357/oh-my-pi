@@ -558,7 +558,7 @@ export type ReadonlySessionManager = Pick<
 	| "putBlobSync"
 >;
 
-interface SessionManagerStateSnapshot {
+export interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;
@@ -1697,6 +1697,28 @@ export class SessionManager {
 	}
 
 	/**
+	 * Undo to a {@link captureState} snapshot durably: restore the in-memory
+	 * state, then rewrite the session file so disk and memory agree after a
+	 * fresh open. Prepared navigation may append model changes and custom
+	 * phase state. The atomic rewrite removes those entries so a reload and
+	 * the live session observe the same transcript. The default disk-size
+	 * guard uses the active file's current size. A cross-file caller supplies
+	 * the source file's current size.
+	 */
+	async rollbackToSnapshot(
+		snapshot: SessionManagerStateSnapshot,
+		currentDiskSize: number | null = this.#expectedDiskSize,
+	): Promise<void> {
+		this.restoreState(snapshot);
+		if (this.#persist && this.#sessionFile) {
+			this.#expectedDiskSize = currentDiskSize;
+			this.#forceFileCreation = true;
+			this.#rewriteRequired = true;
+			await this.#rewriteAtomically();
+		}
+	}
+
+	/**
 	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
 	 * session and artifacts back into the captured bucket, then restore the
 	 * captured metadata (cwd, header, additionalDirectories). The captured
@@ -1718,21 +1740,51 @@ export class SessionManager {
 				`could not relocate the session back to ${snapshot.sessionDir} (${error instanceof Error ? error.message : String(error)}); the session file remains at ${movedFile}`,
 			);
 		}
-		// The inverse moveTo already rewrote the restored source file and left
-		// #expectedDiskSize describing that on-disk body. restoreState resets it
-		// to the pre-move snapshot size, so capture the post-relocation size and
-		// reapply it — otherwise the final rewrite would compare a stale size and
-		// reject an otherwise successful rollback.
-		const relocatedDiskSize = this.#expectedDiskSize;
-		this.restoreState(snapshot);
-		// Persist the captured header so disk and memory agree after a fresh open.
-		if (this.#persist && this.#sessionFile) {
-			this.#expectedDiskSize = relocatedDiskSize;
-			this.#forceFileCreation = true;
-			this.#rewriteRequired = true;
-			await this.#rewriteAtomically();
-		}
+		await this.rollbackToSnapshot(snapshot);
 	}
+	/**
+	 * Load a target session for cancellable navigation and report the cwd that
+	 * committing it will adopt. The commit reloads the target so entries appended
+	 * while navigation awaits approval or phase restoration are included.
+	 */
+	async prepareSessionFile(sessionFile: string): Promise<{
+		cwd: string;
+		recordedCwd: string;
+		commit: () => Promise<void>;
+	}> {
+		const resolvedSessionFile = path.resolve(sessionFile);
+		const currentCwd = path.resolve(this.#cwd);
+		if (!this.#storage.existsSync(resolvedSessionFile)) {
+			return {
+				cwd: currentCwd,
+				recordedCwd: currentCwd,
+				commit: () => this.setSessionFile(resolvedSessionFile),
+			};
+		}
+		const loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
+		if (loaded.invalidHeader) {
+			throw new Error(
+				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+			);
+		}
+		const header = loaded.entries[0]?.type === "session" ? loaded.entries[0] : undefined;
+		const recordedCwd = header?.cwd ? path.resolve(header.cwd) : currentCwd;
+		const cwd = recordedCwd !== currentCwd && (await directoryIsEnterable(recordedCwd)) ? recordedCwd : currentCwd;
+		return {
+			cwd,
+			recordedCwd,
+			commit: async () => {
+				const refreshed = await loadSessionFile(resolvedSessionFile, this.#storage);
+				if (refreshed.invalidHeader) {
+					throw new Error(
+						`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+					);
+				}
+				await this.#setSessionFile(resolvedSessionFile, refreshed);
+			},
+		};
+	}
+
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
 		await this.#setSessionFile(sessionFile);

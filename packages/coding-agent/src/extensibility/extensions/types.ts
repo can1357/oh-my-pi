@@ -53,6 +53,7 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -794,6 +795,15 @@ export type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../shared-events";
+/**
+ * Fired after terminal maintenance and immediately before the session publishes
+ * its idle state. Handlers are awaited so critical restoration can finish.
+ */
+export interface SessionBeforeIdleEvent {
+	type: "session_before_idle";
+	messages: AgentMessage[];
+	willContinue: boolean;
+}
 
 /** Fired when a message starts (user, assistant, or toolResult) */
 export interface MessageStartEvent {
@@ -1101,6 +1111,7 @@ export type ExtensionEvent =
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
+	| SessionBeforeIdleEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1290,6 +1301,7 @@ export interface ExtensionAPI {
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
+	on(event: "session_before_idle", handler: ExtensionHandler<SessionBeforeIdleEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
@@ -1482,13 +1494,14 @@ export interface ExtensionAPI {
 	getCommands(): SlashCommandInfo[];
 
 	/** Set the current model. Returns false if no API key available. */
-	setModel(model: Model): Promise<boolean>;
-
+	setModel(model: Model, options?: SetModelOptions): Promise<boolean>;
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel | undefined;
+	/** Get the configured thinking selector, preserving `auto` when active. */
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined;
 
 	/** Set thinking level for the current session. */
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 
 	/** Get a snapshot of the current session's per-family service tiers. */
 	getServiceTiers(): Readonly<ServiceTierByFamily>;
@@ -1702,11 +1715,18 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
-export type SetModelHandler = (model: Model) => Promise<boolean>;
+export interface SetModelOptions {
+	/** Session-history role; defaults to `default`. */
+	role?: string;
+	/** Record the switch with the reserved ephemeral role, preserving named-role selections. */
+	ephemeral?: boolean;
+}
 
+export type SetModelHandler = (model: Model, options?: SetModelOptions) => Promise<boolean>;
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
+export type GetConfiguredThinkingLevelHandler = () => ConfiguredThinkingLevel | undefined;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel, persist?: boolean) => void;
+export type SetThinkingLevelHandler = (level: ConfiguredThinkingLevel | undefined, persist?: boolean) => void;
 
 export type GetServiceTiersHandler = () => ServiceTierByFamily;
 
@@ -1735,6 +1755,7 @@ export interface ExtensionActions {
 	getCommands: GetCommandsHandler;
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
+	getConfiguredThinkingLevel?: GetConfiguredThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
 	getServiceTiers?: GetServiceTiersHandler;
 	setServiceTier?: SetServiceTierHandler;

@@ -1,0 +1,1 @@
+The coding phase has ended and the original conversation model is restored. Review the actual changes and recorded checks in this same conversation, run the smallest missing decisive check, then report the result. Re-enter the coding phase when a concrete implementation correction requires it.
