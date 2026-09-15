@@ -3,12 +3,21 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { AgentSideConnection, ndJsonStream, type Stream } from "@oh-my-pi/pi-utils/acp";
 import type { ExtensionUIContext } from "../../extensibility/extensions/types";
 import type { AgentSession } from "../../session/agent-session";
+import type { DiscoveredAgent, PersonaExplicitOverrides } from "../../session/tool-policy";
 import { AcpAgent } from "./acp-agent";
 
 /** Session and deferred tool UI hook created for an ACP client workspace. */
 export interface AcpSessionHandle {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	/**
+	 * The `--agent` launch persona resolved for THIS factory call (per-client
+	 * workspace). Stored-session flows re-assert it after loading the journal —
+	 * the CLI flag wins over the stored persona, mirroring the TUI
+	 * `--agent OTHER --resume` precedence. Absent with no flag or when the name
+	 * does not resolve in the target workspace (the documented ACP degrade).
+	 */
+	launchPersona?: { agent: DiscoveredAgent; explicit?: PersonaExplicitOverrides };
 }
 
 /**

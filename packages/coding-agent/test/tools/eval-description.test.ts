@@ -69,6 +69,20 @@ describe("eval tool description", () => {
 		expect(denied).not.toContain("agent(prompt");
 	});
 
+	it("empty-string spawn policy stays a deny-all through the nullish fallback", () => {
+		// Mirrors the sdk.ts pre-construction fallback: `spawns: ""` is a
+		// DELIBERATE deny-all (persisted-revive) and must survive the
+		// `session?.getSessionSpawns() ?? (options.spawns !== undefined ?
+		// options.spawns : "*")` chain — a truthy test would flip it to "*" and
+		// advertise agent() spawning that execution rejects.
+		const optionsSpawns = "";
+		const tool = new EvalTool({
+			...makeSession({ spawns: "*" }),
+			getSessionSpawns: () => (optionsSpawns !== undefined ? optionsSpawns : "*"),
+		} as unknown as ToolSession);
+		expect(tool.description).not.toContain("agent(prompt");
+	});
+
 	it("hides eval-defined tool guidance when eval.tools.enabled is off", () => {
 		const enabled = getEvalToolDescription({ evalTools: true });
 		const disabled = getEvalToolDescription({ evalTools: false });

@@ -145,6 +145,37 @@ describe("AgentSession extension-root discovery (post-startup)", () => {
 		expect(names).not.toContain("configured-sibling");
 	});
 
+	// Regression (Codex P2): a TUI/RPC session switch moves the manager's live
+	// cwd to workspace B, but the CLI roots provider derives per-cwd package
+	// roots. Pre-fix the AgentSession getter invoked the provider with NO
+	// argument, so the provider's launch-cwd default kept serving workspace A's
+	// roots — /agent, task-agent, and skill discovery scanned the wrong project.
+	it("passes the live session cwd to the extension-roots provider", async () => {
+		const workspaceB = path.join(tempDir, "workspace-b");
+		fs.mkdirSync(workspaceB);
+		const seenCwds: Array<string | undefined> = [];
+		const extensionRoots = (sessionCwd?: string): EffectiveExtensionRoots => {
+			seenCwds.push(sessionCwd);
+			// Mirror the CLI provider: workspace B gets B's package root.
+			return sessionCwd === workspaceB
+				? { explicit: [path.join(workspaceB, "pkg")], mode: "merge", configured: [], configuredLevel: "user" }
+				: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
+		};
+		const session = await makeSession({ extensionRoots });
+
+		const launchCwd = session.sessionManager.getCwd();
+		const roots = session.effectiveExtensionRoots;
+		expect(roots.explicit).toEqual([]);
+		expect(seenCwds).toEqual([launchCwd]);
+
+		// Simulate the session switch landing on workspace B (the manager cwd is
+		// the authority the switch moves).
+		session.sessionManager.setCwdWithoutRelocation(workspaceB);
+		const switched = session.effectiveExtensionRoots;
+		expect(seenCwds).toContain(workspaceB);
+		expect(switched.explicit).toEqual([path.join(workspaceB, "pkg")]);
+	});
+
 	it("reflects a runtime extensions override on the next refresh", async () => {
 		const configuredExt = path.join(tempDir, "configured-pkg");
 		buildSkillPackage(configuredExt, "configured-skill");
