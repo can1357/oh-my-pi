@@ -537,6 +537,13 @@ export class ExtensionRunner {
 	 * never awaited by `AgentSession`) while preserving FIFO handler order.
 	 * Kept non-rejecting so a failed pass never wedges the queue.
 	 *
+	 * FIFO holds only up to the per-handler budget: `#runHandlerWithTimeout`
+	 * resolves `EXTENSION_HANDLER_TIMEOUT` after `extensionHandlerTimeoutMs`
+	 * while a handler that ignores its abort signal keeps running detached;
+	 * the chain then advances, so a later pass can overtake the still-running
+	 * timed-out one. Handlers that depend on strict ordering must honor
+	 * `ctx.signal` and settle within the budget.
+	 *
 	 * Torn down cooperatively at shutdown: `beginShutdown` fences new appends
 	 * and `drainModelSelect` bounds the wait on the current head so teardown
 	 * stays prompt (see `emitSessionShutdownEvent`).
