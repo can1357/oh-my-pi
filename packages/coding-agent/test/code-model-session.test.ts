@@ -64,7 +64,7 @@ function harness(
 	let effectiveEffort: ThinkingLevel | undefined = effort === AUTO_THINKING ? ThinkingLevel.Medium : effort;
 	let sessionId = "session-1";
 	let setModelAllowed = options.setModelAllowed ?? true;
-	let dropEphemeral = options.dropEphemeral ?? false;
+	const dropEphemeral = options.dropEphemeral ?? false;
 	let setModelGate: Promise<void> | undefined;
 	const branch: Array<Record<string, unknown>> = [];
 	const notifications: Array<{ message: string; level: string }> = [];
