@@ -16,7 +16,7 @@ use super::{
 		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
 		json_quote,
 	},
-	parser::parse_patch,
+	parser::{detect_foreign_syntax, parse_patch},
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
@@ -32,8 +32,6 @@ static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RECOVERY_TAG_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"#([0-9A-Fa-f]{4})\s*$").expect("valid regex"));
-static UNIFIED_HUNK_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
 /// Parsed edits, optional file operation, and parser warnings for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,23 +343,33 @@ fn split_raw_sections(
 		.split('\n')
 		.map(|line| line.strip_suffix('\r').unwrap_or(line))
 		.collect();
+	let tokenizer = Tokenizer::new();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		if is_unified_header(first.trim_end()) {
-			return Err(EditError::parse(
-				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. File sections \
-				 start with `[path#HASH]`; use `replace`, `delete`, or `insert` ops.",
-			));
-		}
 		let preview: String = first.chars().take(120).collect();
-		return Err(EditError::parse(format!(
-			"input must begin with \"[PATH#HASH]\" on the first non-blank line for anchored edits; \
-			 got: {}. Example: \"[src/foo.ts#{}]\" then edit ops.",
+		let mut message = format!(
+			"Missing Hashline header: input must begin with `[PATH#HASH]` on the first non-blank \
+			 line; got {}. Copy the exact header and original line numbers from the latest \
+			 read/search output. Example: `[src/foo.ts#{}]`.",
 			json_quote(&preview),
 			HL_FILE_HASH_EXAMPLES[0]
-		)));
+		);
+		// Heuristic only: append a format hint without changing the parser's
+		// missing-header error.
+		let foreign_syntax = detect_foreign_syntax(lines.iter().copied().take_while(|line| {
+			let clean = unbracket_envelope_markers(line.trim_end());
+			!matches!(tokenizer.tokenize(clean, 0), Token::EnvelopeEnd { .. } | Token::Abort { .. })
+		}));
+		if !foreign_syntax.is_empty() {
+			message.push_str("\nPossible non-Hashline syntax: ");
+			message.push_str(&foreign_syntax);
+			message.push_str(
+				". Rewrite this body in Hashline syntax; review the edit tool instructions before \
+				 retrying.",
+			);
+		}
+		return Err(EditError::parse(message));
 	}
-	let tokenizer = Tokenizer::new();
 	let mut sections = Vec::new();
 	let mut current: Option<RawSection> = None;
 	let mut body = Vec::new();
@@ -450,7 +458,4 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Result<Vec<RawSection>
 		result.push(section);
 	}
 	Ok(result)
-}
-fn is_unified_header(line: &str) -> bool {
-	UNIFIED_HUNK_RE.is_match(line)
 }

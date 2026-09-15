@@ -29,6 +29,53 @@ const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
 static UNIFIED_HUNK_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
+const APPLY_PATCH_MARKERS: [&str; 4] =
+	["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"];
+
+fn is_apply_patch_marker(line: &str) -> bool {
+	APPLY_PATCH_MARKERS
+		.iter()
+		.any(|prefix| line.starts_with(prefix))
+}
+
+fn is_unified_hunk_line(line: &str) -> bool {
+	line
+		.strip_prefix("@@")
+		.is_some_and(|rest| rest.contains("@@"))
+}
+
+/// Best-effort labels used only to improve missing-header diagnostics.
+///
+/// False positives and false negatives affect wording only; parsing remains
+/// authoritative.
+pub(super) fn detect_foreign_syntax<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+	let mut apply_patch = false;
+	let mut unified_diff = false;
+	let mut unified_old_header = false;
+	let mut unified_new_header = false;
+	let mut search_marker = false;
+	let mut replace_marker = false;
+	for raw_line in lines {
+		let line = raw_line.trim();
+		apply_patch |= is_apply_patch_marker(line);
+		unified_diff |= line.starts_with("diff --git ") || is_unified_hunk_line(line);
+		unified_old_header |= line.starts_with("--- ");
+		unified_new_header |= line.starts_with("+++ ");
+		search_marker |= line.starts_with("<<<<<<< SEARCH");
+		replace_marker |= line.starts_with(">>>>>>> REPLACE");
+	}
+	unified_diff |= unified_old_header && unified_new_header;
+	[
+		apply_patch.then_some("apply_patch"),
+		unified_diff.then_some("unified diff"),
+		(search_marker && replace_marker).then_some("SEARCH/REPLACE"),
+	]
+	.into_iter()
+	.flatten()
+	.collect::<Vec<_>>()
+	.join(", ")
+}
+
 /// Inverted concrete range with metadata for source-aware enrichment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidAbsoluteRange {
@@ -737,10 +784,7 @@ fn parse_bare_range(text: &str) -> Option<ParsedRange> {
 }
 fn contamination_message(text: &str) -> Option<String> {
 	let trimmed = text.trim_start();
-	if ["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"]
-		.iter()
-		.any(|prefix| trimmed.starts_with(prefix))
-	{
+	if is_apply_patch_marker(trimmed) {
 		let preview = if trimmed.chars().count() > 48 {
 			format!("{}…", trimmed.chars().take(48).collect::<String>())
 		} else {
