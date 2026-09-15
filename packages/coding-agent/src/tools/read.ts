@@ -18,10 +18,12 @@ import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/p
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
+	IMAGE_METADATA_HEADER_BYTES,
 	isProbablyBinary,
 	isProbablyBinaryHeader,
 	isEnoent,
 	logger,
+	parseImageMetadata,
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
@@ -159,8 +161,8 @@ export { readToolRenderer } from "./read-renderer";
 /** Largest profile (`*.sample.txt`, `*.cpuprofile`) converted to a bottleneck summary; bigger files read as plain text. */
 const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 const MAX_ARTIFACT_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
+/** Largest file buffered whole for the local read path and speculative snapshots. */
 export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
-
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
 const LF_BYTE = 0x0a;
 
@@ -1828,12 +1830,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			});
 		}
 
-		const imageMetadata = await readImageMetadata(absolutePath);
-		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(renderAbsolutePath).toLowerCase();
+		// Buffer once for every consumer below: the image sniff, the binary sniff,
+		// the structural summary, the rendered window, bracket context, and the
+		// snapshot hash all want the same bytes. Magic bytes come from the
+		// in-memory header whenever the file is buffered (no extra open/read),
+		// so a PNG stored as `.txt` still resolves at any size under the cap;
+		// unbuffered files keep one centralized 256KB peek regardless of
+		// extension, since only magic bytes — never the name — decide.
+		const wholeFileBytes = fileSize <= SNAPSHOT_MAX_BYTES ? await readWholeFile(absolutePath) : undefined;
+		const imageHeader = wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES);
+		const imageMetadata = isRawSelector(parsed)
+			? null
+			: imageHeader !== undefined
+				? parseImageMetadata(imageHeader)
+				: await readImageMetadata(absolutePath);
+		const mimeType = imageMetadata?.mimeType;
 		const resolvedDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
-
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
 		// replace the raw dump with a bottleneck summary (hot paths, top self
 		// time/samples). `:raw` reads the original bytes; text that merely wears
@@ -1930,12 +1944,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: conversion failed]` }];
 			}
 		} else {
-			// One read for every consumer below. The sniff, the structural summary,
-			// the rendered window, bracket context and the snapshot hash all want
-			// the same bytes; past the snapshot cap nothing wants the whole file,
-			// so the streaming reader keeps that case cheap.
-			const wholeFileBytes = fileSize <= SNAPSHOT_MAX_BYTES ? await readWholeFile(absolutePath) : undefined;
-
+			// `wholeFileBytes` was materialized once above for the image sniff;
+			// reuse it here instead of a second full read.
 			// Binary sniff before any UTF-8 text materialization. A binary file
 			// (font, object, archive, packed blob) decodes to NUL/control bytes and
 			// U+FFFD mojibake that corrupts the terminal and burns context. Images,

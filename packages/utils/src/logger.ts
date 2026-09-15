@@ -289,12 +289,11 @@ function getLocalTransports(): LocalTransports {
 
 function emitLocally(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	const transports = getLocalTransports();
-	const info = normalizeLogInfo(level, message, context);
 	if (!transports.file && !transports.console) return;
-
+	const info = normalizeLogInfo(level, message, context);
 	const line = formatLogInfo(info);
 	if (transports.file) transports.file.write(line);
-	if (transports.console) fs.writeSync(1, `${formatLogInfo(info)}${os.EOL}`);
+	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 
 /**
