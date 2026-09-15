@@ -41,9 +41,13 @@ export class BtwPanelComponent extends OverlayPanel {
 	#errorMessage: string | undefined;
 	#visibleAnswer = "";
 	#closed = false;
+	#copied = false;
+	#baseTitle: string;
 
 	constructor(options: BtwPanelComponentOptions) {
-		super(`/btw ${replaceTabs(options.question)}`);
+		const baseTitle = `/btw ${replaceTabs(options.question)}`;
+		super(baseTitle);
+		this.#baseTitle = baseTitle;
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
 		this.#canFollowUp = options.canFollowUp;
@@ -54,6 +58,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (!delta || this.#closed) return;
 		this.#answer += delta;
 		this.#visibleAnswer = replaceTabs(this.#answer).trim();
+		this.#setCopied(false);
 		this.#rebuild();
 	}
 
@@ -61,6 +66,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#answer = text;
 		this.#visibleAnswer = replaceTabs(text).trim();
+		this.#setCopied(false);
 		this.#rebuild();
 	}
 
@@ -68,7 +74,20 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#state = "complete";
 		this.#errorMessage = undefined;
+		this.#setCopied(false);
 		this.#rebuild();
+	}
+
+	/** Visual confirmation that `c` copied the answer to the clipboard. */
+	markCopied(): void {
+		if (this.#closed || !this.isCopyable()) return;
+		this.#setCopied(true);
+		this.#rebuild();
+	}
+
+	#setCopied(copied: boolean): void {
+		this.#copied = copied;
+		this.title = copied ? `${this.#baseTitle} ✓ Copied` : this.#baseTitle;
 	}
 
 	/** Shows that the completed answer is being promoted into the chat session. */
@@ -76,6 +95,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#state = "branching";
 		this.#errorMessage = undefined;
+		this.#setCopied(false);
 		this.#rebuild();
 	}
 
@@ -83,6 +103,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#state = "aborted";
 		this.#errorMessage = undefined;
+		this.#setCopied(false);
 		this.#rebuild();
 	}
 
@@ -90,9 +111,9 @@ export class BtwPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#state = "error";
 		this.#errorMessage = message;
+		this.#setCopied(false);
 		this.#rebuild();
 	}
-
 	isBranchable(): boolean {
 		return this.isCopyable();
 	}
@@ -129,10 +150,13 @@ export class BtwPanelComponent extends OverlayPanel {
 				return theme.fg("muted", "Esc to cancel");
 			case "complete": {
 				const actions: string[] = [];
-				if (this.isCopyable()) actions.push("c to copy");
+				if (this.isCopyable()) actions.push(this.#copied ? "c to copy again" : "c to copy");
 				if (this.#canFollowUp?.()) actions.push("f to follow up");
 				if (this.#canBranch?.() ?? this.isBranchable()) actions.push("b to branch");
 				actions.push("Esc to close");
+				if (this.#copied) {
+					return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
+				}
 				return theme.fg("muted", actions.join(" · "));
 			}
 			case "branching":

@@ -92,7 +92,9 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 	it("wraps image references in file hyperlinks when a blob path is available", () => {
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
-		const raw = new UserMessageComponent("please inspect [Image #1]", false, [imagePath]).render(80).join("\n");
+		const raw = new UserMessageComponent("please inspect [Image #1]", { imageLinks: [imagePath] })
+			.render(80)
+			.join("\n");
 		expect(Bun.stripANSI(raw)).toContain(chipLabel("image", 1));
 		expect(raw).toContain("\x1b]8;id=");
 		expect(raw).toContain(imageUri);
@@ -101,7 +103,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 	it("renders a video marker as a video chip linked to its source", () => {
 		const videoPath = path.resolve("/tmp/omp-video.mp4");
 		const videoUri = url.pathToFileURL(videoPath).href;
-		const raw = new UserMessageComponent("please inspect [Video #1, 960x480]", false, [videoPath])
+		const raw = new UserMessageComponent("please inspect [Video #1, 960x480]", { imageLinks: [videoPath] })
 			.render(80)
 			.join("\n");
 		expect(Bun.stripANSI(raw)).toContain(chipLabel("video", 1));

@@ -811,7 +811,8 @@ fn npx_workspace_value_is_skipped_in_subcommand_detection() {
 	assert_eq!(command.program, "npx");
 	assert_eq!(command.subcommand.as_deref(), Some("jest"), "jest@latest must normalise to jest");
 
-	// scoped package leading @ is preserved; only the trailing @version is stripped
+	// scoped package leading @ is preserved; only the trailing @version is
+	// stripped
 	let command = detect("npx @scope/pkg@1.0.0 --flag").expect("scoped npx detected");
 	assert_eq!(
 		command.subcommand.as_deref(),

@@ -1,10 +1,10 @@
 // Provider-wire compat for "openrouter"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openrouter" {
-	// V4.1 Flash accepts images despite its ID lacking a vision suffix.
-	models "deepseek/deepseek-v4.1-flash" {
-		strip-image-input #false
-	}
+	default-model "openai/gpt-5.5"
+	env "OPENROUTER_API_KEY"
+	discovery label="OpenRouter" allow-unauthenticated=#true
+
 	// Replaces the OpenRouter provider wire-model-id dispatch branch.
 	wire-model-id-mode "openrouter"
 	// Replaces the strict-mode provider whitelist entry.

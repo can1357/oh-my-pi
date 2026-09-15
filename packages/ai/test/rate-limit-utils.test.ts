@@ -306,6 +306,18 @@ describe("isUsageLimit", () => {
 			isUsageLimit("401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/demo"),
 		).toBe(true);
 	});
+	it("detects OpenCode Go window limits as credential-rotatable usage limits", () => {
+		// Upstream `GoUsageLimitError` wire shape: HTTP 429
+		// `{"type":"error","error":{"type":"GoUsageLimitError","message":"… Resets in …"},"metadata":{…}}`
+		// plus a `retry-after` header, flattened by `captureOpenAIHttpError` into
+		// "429 <message>". One window fixture pins the rotation branch; the
+		// distinct reset-duration formats are covered in `fetch-retry.test.ts`.
+		const message =
+			"429 5-hour usage limit reached. Resets in 2hr 15min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go";
+		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, message)).toBe(true);
+		expect(isUsageLimit(message)).toBe(true);
+	});
 
 	it("detects Antigravity capacity-exhausted message as a usage-limit error", () => {
 		// Without this branch `markUsageLimitReached` is never invoked, so the

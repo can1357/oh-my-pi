@@ -1,6 +1,89 @@
 // Provider-wire compat for "xai-oauth"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xai-oauth" {
+	default-model "grok-4.6"
+	env "XAI_OAUTH_TOKEN" "XAI_API_KEY"
+	discovery label="xAI Grok OAuth (SuperGrok)" oauth-provider="xai-oauth"
+
+	// Source of truth for the xai-oauth chat picker. Declaration order is headline order.
+	// Context windows from hermes-agent/agent/model_metadata.py:205-220
+	// ("Values sourced from models.dev (2026-04)"). grok-build is xAI's
+	// coding-fine-tuned chat model; 512K context per user spec (2026-05-17).
+	//
+	// xai-oauth's /v1/models exposes no per-request output limit on the OAuth
+	// (Grok Build / SuperGrok) surface, so maxTokens mirrors contextWindow. The
+	// openai-responses wire clamps actual output to
+	// min(requested, model.maxTokens, OPENAI_MAX_OUTPUT_TOKENS=64000), so this is
+	// no model-specific sub-cap below 64k, not an unbounded output budget.
+	//
+	// supports-reasoning-effort=false entries reason natively but reject the wire
+	// reasoning.effort parameter (api.x.ai returns HTTP 400). The corresponding
+	// omit/include/history replay defaults live in catalog compat so every
+	// OpenAI-family endpoint consumes the same constraint.
+	seed api="openai-responses" base-url="https://api.x.ai/v1" bundle="always" {
+		model "grok-build" name="Grok Build" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=512000 max-tokens=512000
+			supports-reasoning-effort #false
+		}
+		model "grok-build-0.1" name="Grok Build 0.1" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=256000 max-tokens=256000
+			supports-reasoning-effort #false
+		}
+		model "grok-4.3" name="Grok 4.3" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=1000000
+		}
+		model "grok-4.5" name="Grok 4.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=500000 max-tokens=500000
+		}
+		model "grok-4.6" name="Grok 4.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=500000 max-tokens=500000
+		}
+		// Text-only per the bundled catalog.
+		model "grok-4.20-multi-agent-0309" name="Grok 4.20 (Multi-Agent)" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=2000000 max-tokens=2000000
+		}
+		model "grok-4.20-0309-reasoning" name="Grok 4.20 (Reasoning)" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=2000000 max-tokens=2000000
+			supports-reasoning-effort #false
+		}
+		model "grok-4.20-0309-non-reasoning" name="Grok 4.20 (Non-Reasoning)" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=2000000 max-tokens=2000000
+		}
+		// Cursor's "Composer 2.5 Fast" exposed via SuperGrok: non-reasoning,
+		// text-only, 200K context (mirrors Cursor's composer-* catalog entries).
+		// Off the Grok effort-capable allowlist; reasoning:false also hides the effort dial.
+		model "grok-composer-2.5-fast" name="Grok Composer 2.5 Fast" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=200000 max-tokens=200000
+		}
+	}
+
 	// Replaces the provider-keyed prompt-cache session-header baseline.
 	prompt-cache-session-header "x-grok-conv-id"
 	// SuperGrok shares the paid validator: leftover root anyOf/oneOf tool

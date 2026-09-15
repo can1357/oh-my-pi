@@ -62,6 +62,20 @@ export interface TodoToolDetails {
 	completedTasks?: TodoCompletionTransition[];
 }
 
+/**
+ * Phases a successful, state-changing `todo` result committed, or undefined
+ * for errors and pure `view` reads. A direct call lands these on the branch
+ * through its own toolResult entry; a caller that produces no `todo`
+ * toolResult (the eval bridge) must persist them itself or the next branch
+ * rehydration (resume, rewind, fork, /btw) silently reverts the change.
+ */
+export function committedTodoPhases(result: AgentToolResult): TodoPhase[] | undefined {
+	if (result.isError || !isRecord(result.details)) return undefined;
+	const { op, phases } = result.details;
+	if (op === "view" || !Array.isArray(phases) || !phases.every(isTodoPhase)) return undefined;
+	return phases;
+}
+
 // =============================================================================
 // Schema
 // =============================================================================

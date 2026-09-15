@@ -241,7 +241,22 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			},
 		});
 		return executablePath;
-	})().catch(err => {
+	})().catch(async err => {
+		// Cache a successful fallback too: the open preflight and the actual
+		// launch both resolve the executable. Otherwise an unavailable download
+		// is retried inside the open deadline immediately after preflight.
+		if (preferManagedChromium) {
+			const sysChrome = await resolveSystemChromium();
+			if (sysChrome) {
+				logger.warn(
+					"Chrome for Testing unavailable; falling back to the system Chrome bundle. On macOS this can let the " +
+						"headless browser daemon capture your link clicks (#8673). Set PUPPETEER_EXECUTABLE_PATH to a " +
+						"dedicated Chromium to avoid this.",
+					{ path: sysChrome, error: (err as Error).message },
+				);
+				return sysChrome;
+			}
+		}
 		chromiumExecutablePromise = undefined;
 		throw new ToolError(
 			`Failed to install Chromium for puppeteer: ${(err as Error).message}. ` +
@@ -249,22 +264,7 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 		);
 	});
 
-	try {
-		return await chromiumExecutablePromise;
-	} catch (err) {
-		if (!preferManagedChromium) throw err;
-		// Chrome for Testing could not be obtained on macOS; degrade to the
-		// system Chrome bundle rather than leaving the browser tool unusable.
-		const sysChrome = await resolveSystemChromium();
-		if (!sysChrome) throw err;
-		logger.warn(
-			"Chrome for Testing unavailable; falling back to the system Chrome bundle. On macOS this can let the " +
-				"headless browser daemon capture your link clicks (#8673). Set PUPPETEER_EXECUTABLE_PATH to a " +
-				"dedicated Chromium to avoid this.",
-			{ path: sysChrome, error: (err as Error).message },
-		);
-		return sysChrome;
-	}
+	return await chromiumExecutablePromise;
 }
 
 let resolvedChromium: string | null | undefined; // undefined = unchecked; null = not found

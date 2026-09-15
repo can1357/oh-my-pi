@@ -846,6 +846,23 @@ describe("BTW follow-up composer", () => {
 		expect(followUp).toHaveBeenCalledTimes(1);
 	});
 
+	it("switches history panes with Ctrl+/ like Tab", () => {
+		const tabbed = composer(vi.fn(async () => true));
+		tabbed.panel.handleInput("\t");
+		const tabRender = Bun.stripANSI(tabbed.panel.render(120).join("\n"));
+		const slashed = composer(vi.fn(async () => true));
+		slashed.panel.handleInput(String.fromCharCode(31));
+		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toBe(tabRender);
+		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toContain("switch pane");
+	});
+
+	it("confirms a history copy visually until the answer changes", () => {
+		const h = composer(vi.fn(async () => true));
+		h.panel.markCopied(h.record.id, h.record.answer);
+		expect(Bun.stripANSI(h.panel.render(120).join("\n"))).toContain("Copied to clipboard");
+		h.panel.update([{ ...h.record, answer: "Follow-up answer", updatedAt: 3 }]);
+		expect(Bun.stripANSI(h.panel.render(120).join("\n"))).not.toContain("Copied to clipboard");
+	});
 	it("treats f/c/x as draft text and lets Escape cancel only the composer", () => {
 		const followUp = vi.fn(async () => true);
 		const h = composer(followUp);

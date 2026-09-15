@@ -127,12 +127,6 @@ export function normalizeIrcTimeoutMs(value: number): number {
 	return Math.max(1, Math.trunc(value));
 }
 
-/** Effective message-wait timeout: explicit param wins, then `irc.timeoutMs`. */
-export function resolveMessageTimeoutMs(settings: Settings, explicit?: number): number {
-	if (explicit !== undefined) return normalizeIrcTimeoutMs(explicit);
-	return normalizeIrcTimeoutMs(settings.get("irc.timeoutMs"));
-}
-
 /** Session-buffered inbox drain used before parking a bus waiter. */
 export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
 	const session = registry.get(senderId)?.session;
@@ -222,7 +216,6 @@ export interface HubSendParams {
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
-	timeoutMs?: number;
 }
 
 export async function executeSend(
@@ -264,7 +257,7 @@ export async function executeSend(
 
 	const bus = IrcBus.global();
 	let waited: IrcMessage | null | undefined;
-	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
+	const timeoutMs = params.await ? normalizeIrcTimeoutMs(settings.get("irc.timeoutMs")) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
 	const awaitCancelled = new Error("IRC await cancelled");
 	let removeAwaitAbortListener: (() => void) | undefined;
@@ -393,15 +386,15 @@ export async function executeSend(
 	}
 }
 
-/** Pure message wait: no jobs in play, block on the bus with peer liveness. */
+/** Pure message wait: no jobs in play, block on the bus with peer liveness for `timeoutMs`. */
 export async function executeMessageWait(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
-	params: { from?: string; timeoutMs?: number },
+	deps: { registry: AgentRegistry; senderId: string },
+	params: { from?: string; timeoutMs: number },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, settings } = deps;
+	const { registry, senderId } = deps;
+	const { timeoutMs } = params;
 	const from = params.from?.trim() || undefined;
-	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
 		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
@@ -546,7 +539,6 @@ function callMeta(args: HubRenderArgs | undefined): string[] {
 		if (args.await) meta.push("await reply");
 		if (args.replyTo) meta.push("reply");
 	}
-	if (args?.op === "wait" && args.timeoutMs) meta.push(`timeout ${formatDuration(args.timeoutMs)}`);
 	if (args?.op === "inbox" && args.peek) meta.push("peek");
 	return meta;
 }

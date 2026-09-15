@@ -411,9 +411,9 @@ mod tests {
 	fn make_fifo(path: &Path) {
 		let fifo_path =
 			CString::new(path.as_os_str().as_bytes()).expect("fifo path has no NUL bytes");
-		// SAFETY: `fifo_path` is a valid CString (NUL-terminated, no interior NULs),
-		// so `as_ptr()` yields a valid C string pointer. `0o600` is a valid mode.
-		// The CString is alive for the duration of the call.
+		// SAFETY: `fifo_path` is a valid CString (NUL-terminated, no interior
+		// NULs), so `as_ptr()` yields a valid C string pointer. `0o600` is a
+		// valid mode. The CString is alive for the duration of the call.
 		let rc = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
 		assert_eq!(rc, 0, "create fifo: {}", std::io::Error::last_os_error());
 	}
