@@ -2873,7 +2873,11 @@ export class StatusLineComponent implements Component {
 				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
 				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const liveWindow = showEmbeddedContextWindow ? formatNumber(ctx.contextWindow) : "";
-			const candidatePercent = ctx.startupPlaceholder ? (embedCompactContext ? "ctx:…" : "…%") : livePercent;
+			const candidatePercent = ctx.startupPlaceholder
+				? embedCompactContext
+					? "ctx:…"
+					: "…%".padStart(livePercent.length)
+				: livePercent;
 			const candidateWindow = showEmbeddedContextWindow ? (ctx.startupPlaceholder ? "…" : liveWindow) : "";
 			const minimumLabelWidth = showEmbeddedContextWindow
 				? livePercent.length + liveWindow.length + 4
