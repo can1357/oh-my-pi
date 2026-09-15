@@ -21,7 +21,6 @@ import * as readline from "node:readline";
 import {
 	type AuthCredential,
 	AuthStorage,
-	type CredentialDisabledEvent,
 	getEnvApiKey,
 	getOAuthProviders,
 	listProvidersWithEnvKey,
@@ -175,13 +174,8 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
-	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
-		logger.warn("auth-broker credential disabled", { ...event });
-	});
-
 	const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
 		logger.info("auth-broker shutting down", { signal });
-		credentialDisabledUnsub();
 		await handle.close();
 		storage.close();
 		process.exit(0);

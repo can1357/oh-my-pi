@@ -10,10 +10,22 @@
 import * as os from "node:os";
 import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
 import {
+	copyOAuthCredentialIdentity,
+	isAutomaticDisableCause,
+	isOAuthCredentialIdentityRecovered,
+	isDeliberateRemovalCause,
+	resolveOAuthCredentialIdentity,
+} from "../auth/sqlite-credential-store";
+import {
+	providerIdForDisplay,
 	type AuthCredential,
+	authCredentialEquals,
 	type AuthCredentialSnapshotEntry,
 	type AuthCredentialStore,
+	type CredentialAccountIdentity,
+	type CredentialDisabledEvent,
 	type DisabledCredentialSummary,
+	isActionableCredentialDisable,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
@@ -40,7 +52,7 @@ import type {
 export type AuthBrokerAccountPool = ReadonlyMap<string, ReadonlySet<string>>;
 
 function isCredentialInAccountPool(
-	entry: Pick<SnapshotEntry, "provider" | "credential" | "identityKey">,
+	entry: Pick<SnapshotEntry, "provider" | "identityKey"> & { credential: Pick<SnapshotEntry["credential"], "type"> },
 	accountPool: AuthBrokerAccountPool | undefined,
 ): boolean {
 	if (entry.credential.type !== "oauth") return true;
@@ -65,6 +77,12 @@ const BACKGROUND_BACKOFF_INITIAL_MS = 500;
 const BACKGROUND_BACKOFF_MAX_MS = 30_000;
 /** Idle window after the last foreground store use before background sync parks. */
 const BACKGROUND_IDLE_MS = 20_000;
+/**
+ * How many departed credential ids stay eligible for an idempotent logout. A
+ * retry that has fallen this far behind the snapshot is no longer the request
+ * the caller is holding open.
+ */
+const VANISHED_CREDENTIAL_MEMORY = 128;
 
 function compareCredentialBlockSnapshots(a: CredentialBlockSnapshot, b: CredentialBlockSnapshot): number {
 	const provider = a.providerKey.localeCompare(b.providerKey);
@@ -247,6 +265,19 @@ export interface RemoteAuthCredentialStoreOptions {
 	backgroundIdleMs?: number;
 }
 
+interface PendingCredentialRemoval extends CredentialAccountIdentity {
+	id: number;
+	retryAfterMs: number;
+	backoffMs: number;
+	inFlight: boolean;
+	/**
+	 * API-key rows of this provider that were already live when the removal was
+	 * observed. An API key carries no identity, so only a row absent from this
+	 * set proves a replacement rather than an untouched sibling.
+	 */
+	siblingApiKeyIds?: ReadonlySet<number>;
+}
+
 export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #client: AuthBrokerClient;
 	readonly #streamSnapshots: boolean;
@@ -287,6 +318,23 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	/** Memoized `#filterUsageReports` output, keyed on (input identity, lookup identity). */
 	#usageFilterResult?: { input: UsageReport[]; byProvider: Map<Provider, OAuthCredential[]>; output: UsageReport[] };
 	#closed = false;
+	#credentialDisabledListeners = new Set<(event: CredentialDisabledEvent) => void | Promise<void>>();
+	/** Token-free removal work; a single unref'd timer also covers quiet live streams. */
+	#pendingCredentialRemovals = new Map<number, PendingCredentialRemoval>();
+	#credentialRemovalRetryTimer: Timer | undefined;
+	#credentialRemovalRetryAtMs = Infinity;
+	/**
+	 * Credential ids this client held in its own snapshot and then lost. A
+	 * deliberate removal of one of these is already complete, so it reports
+	 * success instead of a skipped logout; an id this client never held stays
+	 * refused, so an account pool cannot be used to reach outside itself.
+	 */
+	#vanishedCredentialIds = new Set<number>();
+	/** AuthStorage already announces successful disables initiated by this client. */
+	#localDisables = new Map<
+		number,
+		{ pending: number; succeeded: boolean; promise: Promise<void>; resolve: () => void }
+	>();
 	/**
 	 * `true` once the SSE consumer received its first frame and hasn't dropped
 	 * since. Writes consult this to suppress the otherwise-mandatory
@@ -326,7 +374,22 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return this.#snapshot;
 	}
 
-	#applySnapshot(snapshot: SnapshotResponse, generation: number, protectNewBlocks = true): void {
+	#applySnapshot(snapshot: SnapshotResponse, generation: number, resetFromGeneration?: number): void {
+		// Broker generations restart with the process. A pull or stream bootstrap
+		// may resync backwards only if nothing advanced while it was in flight.
+		if (generation < this.#generation && resetFromGeneration !== this.#generation) {
+			logger.debug("auth-broker snapshot older than local; ignoring", {
+				local: this.#generation,
+				incoming: generation,
+			});
+			return;
+		}
+		// Additions are keyed by the generation that streamed them, and broker
+		// generations restart with the process. A snapshot that does not advance the
+		// local generation is a restart or a resync, so entries recorded under the
+		// previous incarnation collide with this one's numbers — drop them before the
+		// removal diff below reads them, not after.
+		if (generation <= this.#generation) this.#streamAdditions.clear();
 		const nowMs = Date.now();
 		this.#replaceBrokerUsageAccounts(snapshot.credentials);
 		const previousCredentials = this.#snapshot.credentials;
@@ -334,11 +397,24 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
 			.map(entry => this.#normalizeSnapshotEntryBlocks(entry, nowMs));
 		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
-		if (protectNewBlocks) this.#protectNewSnapshotBlocks(previousCredentials, credentials, nowMs);
+		this.#protectNewSnapshotBlocks(previousCredentials, credentials, nowMs);
 		this.#snapshot = { ...snapshot, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
 		this.#refreshCredentialRevision();
+		if (previousCredentials.length > 0) {
+			const activeIds = new Set(snapshot.credentials.map(entry => entry.id));
+			const announcing = this.#credentialDisabledListeners.size > 0;
+			for (const entry of previousCredentials) {
+				if (activeIds.has(entry.id)) continue;
+				this.#noteCredentialVanished(entry.id);
+				if (announcing)
+					this.#notifyCredentialRemoved(entry, this.#siblingApiKeyIds(entry, previousCredentials, generation));
+			}
+		}
+		// A full snapshot re-bases everything; per-generation additions no longer apply.
+		this.#streamAdditions.clear();
+		this.#retryCredentialRemovalNotifications();
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
@@ -369,8 +445,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * overlays do not.
 	 */
 	#computeCredentialFingerprint(): string {
+		// `identityKey` is part of what `listAuthCredentials()` exposes and what
+		// account recovery matches on, so a snapshot that changes only the identity
+		// must count as a change — otherwise `pollExternalChanges()` reports none
+		// and the wrapping `AuthStorage` keeps matching notices to the old account.
 		const parts = this.#snapshot.credentials.map(
-			entry => `${entry.id}\u0000${entry.provider}\u0000${JSON.stringify(entry.credential)}`,
+			entry =>
+				`${entry.id}\u0000${entry.provider}\u0000${entry.identityKey ?? ""}\u0000${JSON.stringify(entry.credential)}`,
 		);
 		parts.sort();
 		return parts.join("\u0001");
@@ -423,6 +504,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				continue;
 			}
 			const watchdog = this.#startIdleWatchdog();
+			this.#retryCredentialRemovalNotifications();
 			try {
 				if (this.#streamSnapshots && !this.#streamingUnsupported) {
 					try {
@@ -436,19 +518,22 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 							logger.debug("auth-broker snapshot stream unsupported; falling back to long-poll");
 							continue;
 						}
-						logger.debug("auth-broker snapshot stream failed; backing off", { error: String(error) });
+						logger.debug("auth-broker snapshot stream failed; backing off", {
+							error: String(error),
+						});
 						await this.#backoffWait(backoffMs);
 						backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
 					}
 					continue;
 				}
 				try {
+					const previousGeneration = this.#generation;
 					const result = await this.#client.fetchSnapshot({
 						ifGenerationGt: this.#generation,
 						waitMs: BACKGROUND_WAIT_MS,
 						signal: watchdog.signal,
 					});
-					if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
+					if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation, previousGeneration);
 					backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
 				} catch (error) {
 					if (this.#closed || this.#backgroundAbort.signal.aborted) break;
@@ -466,6 +551,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	/** Record a foreground store use; wakes the parked background sync. */
 	#noteActivity(): void {
 		this.#lastActivityMs = Date.now();
+		this.#retryCredentialRemovalNotifications();
 		if (this.#activityWakeup) {
 			this.#activityWakeup.resolve();
 			this.#activityWakeup = null;
@@ -526,19 +612,21 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	async #consumeSnapshotStream(signal: AbortSignal): Promise<void> {
+		let initialGeneration: number | undefined = this.#generation;
 		const iterator = this.#client.openSnapshotStream({ signal });
 		try {
 			for await (const event of iterator) {
 				if (this.#closed || signal.aborted) break;
 				this.#streamingActive = true;
-				this.#applyStreamEvent(event);
+				this.#applyStreamEvent(event, initialGeneration);
+				initialGeneration = undefined;
 			}
 		} finally {
 			this.#streamingActive = false;
 		}
 	}
 
-	#applyStreamEvent(event: SnapshotStreamEvent): void {
+	#applyStreamEvent(event: SnapshotStreamEvent, initialGeneration?: number): void {
 		switch (event.kind) {
 			case "snapshot": {
 				// The first frame of every SSE connection is a full authoritative
@@ -548,7 +636,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				// Subsequent entry/removal frames remain guarded against reordering
 				// relative to this new baseline below.
 				const { kind: _kind, ...snapshot } = event;
-				this.#applySnapshot(snapshot, snapshot.generation);
+				this.#applySnapshot(snapshot, snapshot.generation, initialGeneration);
 				return;
 			}
 			case "entry": {
@@ -562,6 +650,43 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				return;
 			}
 		}
+	}
+
+	/**
+	 * Credential ids inserted by a stream `entry`, with the generation that
+	 * delivered them. A coalesced generation streams the replacement before the
+	 * `removed` frame, so a row added by the same generation as a removal is
+	 * part of that transition and is never one of its pre-existing siblings.
+	 */
+	#streamAdditions = new Map<number, number>();
+
+	/**
+	 * API-key rows of `provider` that were already live before this teardown,
+	 * computed from the list being diffed rather than from any retained base, so
+	 * a concurrent pull or a broker restart cannot make it stale.
+	 *
+	 * The stream adds a replacement before it removes the row it replaces, so a
+	 * pull that observes the next generation while the removal is still pending
+	 * counts that replacement as pre-existing. Deciding this exactly needs the
+	 * broker to order removals first or mark the replacement; until then the
+	 * residual keeps a teardown notice until the next full snapshot, which is
+	 * the same direction the rest of this feature biases toward — a stale
+	 * reminder over a silent sign-out.
+	 */
+	#siblingApiKeyIds(
+		entry: SnapshotEntry,
+		before: readonly SnapshotEntry[],
+		generation: number,
+	): ReadonlySet<number> | undefined {
+		if (entry.credential.type !== "api_key") return undefined;
+		const ids = new Set<number>();
+		for (const row of before) {
+			if (row.id === entry.id || row.provider !== entry.provider) continue;
+			if (row.credential.type !== "api_key") continue;
+			if (this.#streamAdditions.get(row.id) === generation) continue;
+			ids.add(row.id);
+		}
+		return ids;
 	}
 
 	#applyStreamEntry(
@@ -580,6 +705,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const previousBlocks = index === -1 ? undefined : this.#snapshot.credentials[index]?.blocks;
 		const blocksChanged = !credentialBlockSnapshotsEqual(previousBlocks, incoming.blocks);
 		if (blocksChanged) this.#invalidateUsageCache();
+		if (index === -1) this.#streamAdditions.set(incoming.id, generation);
 		const credentials =
 			index === -1
 				? [...this.#snapshot.credentials, incoming]
@@ -589,6 +715,214 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#generation = generation;
 		this.#snapshotReceivedAt = Date.now();
 		this.#refreshCredentialRevision();
+		this.#retryCredentialRemovalNotifications();
+	}
+
+	onCredentialDisabled(listener: (event: CredentialDisabledEvent) => void | Promise<void>): () => void {
+		this.#credentialDisabledListeners.add(listener);
+		return () => {
+			this.#credentialDisabledListeners.delete(listener);
+			if (this.#credentialDisabledListeners.size === 0) {
+				this.#pendingCredentialRemovals.clear();
+				this.#scheduleCredentialRemovalRetry();
+			}
+		};
+	}
+
+	/** Bounded: only the most recent departures can still be retried as logouts. */
+	#noteCredentialVanished(id: number): void {
+		this.#vanishedCredentialIds.delete(id);
+		this.#vanishedCredentialIds.add(id);
+		if (this.#vanishedCredentialIds.size > VANISHED_CREDENTIAL_MEMORY) {
+			const oldest = this.#vanishedCredentialIds.values().next().value;
+			if (oldest !== undefined) this.#vanishedCredentialIds.delete(oldest);
+		}
+	}
+
+	/** `siblingApiKeyIds` is resolved by the caller against the list it diffed. */
+	#notifyCredentialRemoved(entry: SnapshotEntry, siblingApiKeyIds: ReadonlySet<number> | undefined): void {
+		if (this.#closed || this.#credentialDisabledListeners.size === 0) return;
+		if (this.#pendingCredentialRemovals.has(entry.id)) return;
+		const identity =
+			entry.credential.type === "oauth"
+				? resolveOAuthCredentialIdentity(entry.provider, entry.credential)
+				: undefined;
+		if (identity) identity.key = entry.identityKey;
+		this.#pendingCredentialRemovals.set(entry.id, {
+			id: entry.id,
+			provider: entry.provider,
+			type: entry.credential.type,
+			identity,
+			retryAfterMs: 0,
+			backoffMs: BACKGROUND_BACKOFF_INITIAL_MS,
+			inFlight: false,
+			siblingApiKeyIds,
+		});
+		this.#retryCredentialRemovalNotifications();
+	}
+
+	/**
+	 * Whether a provider gained an API key after a teardown. An API key carries
+	 * no identity, so a row that was already live when the removal was observed
+	 * proves nothing: the pool simply lost one key. Both the fast snapshot check
+	 * and the final post-tombstone classification use this one rule.
+	 */
+	#apiKeyReplaced(provider: string, siblingApiKeyIds: ReadonlySet<number> | undefined): boolean {
+		return this.#snapshot.credentials.some(
+			row =>
+				row.provider === provider && row.credential.type === "api_key" && siblingApiKeyIds?.has(row.id) !== true,
+		);
+	}
+
+	#retryCredentialRemovalNotifications(): void {
+		if (this.#closed || this.#credentialDisabledListeners.size === 0 || this.#pendingCredentialRemovals.size === 0)
+			return;
+		const nowMs = Date.now();
+		for (const entry of this.#pendingCredentialRemovals.values()) {
+			// Retire recovery as soon as it is observed, even if another removal
+			// arrives before the failed tombstone lookup can be retried.
+			const recovered = this.#snapshot.credentials.some(active => {
+				if (active.id === entry.id) return true;
+				if (active.provider !== entry.provider) return false;
+				if (entry.type === "api_key") return this.#apiKeyReplaced(entry.provider, entry.siblingApiKeyIds);
+				if (active.credential.type !== "oauth" || !entry.identity) return false;
+				const identity = resolveOAuthCredentialIdentity(active.provider, active.credential);
+				identity.key = active.identityKey;
+				return isOAuthCredentialIdentityRecovered(entry.identity, identity);
+			});
+			if (recovered) {
+				this.#pendingCredentialRemovals.delete(entry.id);
+				continue;
+			}
+			if (entry.inFlight || entry.retryAfterMs > nowMs) continue;
+			entry.inFlight = true;
+			void this.#lookupCredentialRemoval(entry);
+		}
+		this.#scheduleCredentialRemovalRetry();
+	}
+
+	#scheduleCredentialRemovalRetry(): void {
+		let retryAfterMs = Infinity;
+		if (!this.#closed && this.#credentialDisabledListeners.size > 0) {
+			for (const entry of this.#pendingCredentialRemovals.values()) {
+				if (!entry.inFlight) retryAfterMs = Math.min(retryAfterMs, entry.retryAfterMs);
+			}
+		}
+		const delayMs = Math.max(0, retryAfterMs - Date.now());
+		// Like snapshot sync, park after foreground activity expires. A later
+		// foreground use re-arms retained work without keeping idle stores alive.
+		if (delayMs >= this.#idleRemainingMs()) retryAfterMs = Infinity;
+		if (this.#credentialRemovalRetryAtMs === retryAfterMs) return;
+		clearTimeout(this.#credentialRemovalRetryTimer);
+		this.#credentialRemovalRetryTimer = undefined;
+		this.#credentialRemovalRetryAtMs = retryAfterMs;
+		if (retryAfterMs === Infinity) return;
+		this.#credentialRemovalRetryTimer = setTimeout(() => {
+			this.#credentialRemovalRetryTimer = undefined;
+			this.#credentialRemovalRetryAtMs = Infinity;
+			this.#retryCredentialRemovalNotifications();
+		}, delayMs);
+		this.#credentialRemovalRetryTimer.unref?.();
+	}
+
+	async #lookupCredentialRemoval(entry: PendingCredentialRemoval): Promise<void> {
+		const localDisable = this.#localDisables.get(entry.id);
+		if (localDisable) {
+			// A failed local write may have lost to a peer disable; only suppress a
+			// notice when any overlapping local operation successfully disabled it.
+			await localDisable.promise;
+			if (localDisable.succeeded) {
+				this.#pendingCredentialRemovals.delete(entry.id);
+				this.#scheduleCredentialRemovalRetry();
+			}
+		}
+		if (this.#pendingCredentialRemovals.get(entry.id) !== entry) return;
+		// Removal alone also means logout, replacement, or pool exclusion. Replay
+		// only this row's automatic tombstone through the existing redacted endpoint.
+		try {
+			// Bound by the same idle window as background sync: `#backgroundAbort`
+			// alone only fires on close, so a lookup started just before the
+			// watchdog parks the loop would keep pinning the process through the
+			// client's timeout and retry.
+			const watchdog = this.#startIdleWatchdog();
+			let disabled: DisabledCredentialSummary[];
+			try {
+				disabled = await this.#fetchDisabledCredentials(
+					entry.provider,
+					AbortSignal.any([this.#backgroundAbort.signal, watchdog.signal]),
+				);
+			} finally {
+				watchdog.stop();
+			}
+			if (this.#pendingCredentialRemovals.get(entry.id) !== entry) return;
+			// Classification is final, including deliberate removals and missing
+			// tombstones. Listener failures must not replay the event.
+			this.#pendingCredentialRemovals.delete(entry.id);
+			this.#scheduleCredentialRemovalRetry();
+			const summary = disabled.find(candidate => candidate.id === entry.id);
+			if (!summary || !isAutomaticDisableCause(summary.cause)) return;
+			// Entries can arrive before removals or while the tombstone request is
+			// pending. Only the latest pool-visible snapshot can prove recovery.
+			if (summary.type === "api_key") {
+				if (this.#apiKeyReplaced(summary.provider, entry.siblingApiKeyIds)) return;
+			} else {
+				const activeAccounts: CredentialAccountIdentity[] = [];
+				for (const { provider, credential, identityKey } of this.#snapshot.credentials) {
+					if (provider !== summary.provider || credential.type !== "oauth") continue;
+					const identity = resolveOAuthCredentialIdentity(provider, credential);
+					identity.key = identityKey;
+					const account: CredentialAccountIdentity = { provider, type: "oauth", identity };
+					copyOAuthCredentialIdentity(account, credential, identity);
+					activeAccounts.push(account);
+				}
+				if (!isActionableCredentialDisable(summary, activeAccounts)) return;
+			}
+			const { id, type, cause, disabledAtMs: _disabledAtMs, ...identity } = summary;
+			// Raw, like the local emitter: in-process consumers correlate on the
+			// stored provider id. Projection happens at each external boundary.
+			const event: CredentialDisabledEvent = {
+				...identity,
+				credentialId: id,
+				credentialType: type,
+				disabledCause: cause,
+			};
+			// Attribution computed against this removal's broker generation; a
+			// consumer re-deriving it from a later snapshot would miss siblings.
+			if (type === "api_key" && entry.siblingApiKeyIds) event.siblingApiKeyIds = entry.siblingApiKeyIds;
+			const listeners = new Set(this.#credentialDisabledListeners);
+			for (const listener of listeners) {
+				// A listener may be async: its rejection has to be isolated here or
+				// Bun reports it unhandled and can take the process down. The thrown
+				// text is not recorded — it routinely echoes the event it was given.
+				const failed = (): void => {
+					if (!this.#closed) {
+						logger.debug("auth-broker credential-disabled listener failed", {
+							id: entry.id,
+							error: "credential-disabled listener rejected",
+						});
+					}
+				};
+				try {
+					const result = listener(event);
+					if (result && typeof (result as PromiseLike<void>).then === "function") {
+						(result as Promise<void>).catch(failed);
+					}
+				} catch {
+					failed();
+				}
+			}
+		} catch (error) {
+			entry.inFlight = false;
+			entry.retryAfterMs = Date.now() + entry.backoffMs;
+			entry.backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, entry.backoffMs * 2);
+			this.#scheduleCredentialRemovalRetry();
+			if (!this.#closed) {
+				logger.debug("auth-broker disable notification failed", {
+					id: entry.id,
+					error: String(error),
+				});
+			}
+		}
 	}
 
 	#removeStreamCredential(
@@ -600,19 +934,32 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	): void {
 		if (!options?.retainBrokerUsageAccount) this.#removeBrokerUsageAccount(id);
 		const removed = this.#snapshot.credentials.find(entry => entry.id === id);
+		const siblingApiKeyIds = removed
+			? this.#siblingApiKeyIds(removed, this.#snapshot.credentials, generation)
+			: undefined;
 		if (removed?.blocks && removed.blocks.length > 0) this.#invalidateUsageCache();
 		const credentials = this.#snapshot.credentials.filter(entry => entry.id !== id);
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
+		this.#streamAdditions.delete(id);
 		this.#snapshotReceivedAt = Date.now();
 		this.#refreshCredentialRevision();
+		if (removed && !options?.retainBrokerUsageAccount) {
+			// A streamed removal is a departure this client witnessed, exactly like
+			// one found by diffing a full snapshot. Record it whether or not anyone
+			// is listening for the announcement.
+			this.#noteCredentialVanished(id);
+			this.#notifyCredentialRemoved(removed, siblingApiKeyIds);
+		}
+		this.#retryCredentialRemovalNotifications();
 	}
 
-	/** Re-hydrate the in-memory snapshot from the broker. */
-	async refreshSnapshot(): Promise<SnapshotResponse> {
+	/** Re-hydrate the in-memory snapshot from the broker; `signal` bounds the fetch. */
+	async refreshSnapshot(signal?: AbortSignal): Promise<SnapshotResponse> {
 		this.#noteActivity();
-		const result = await this.#client.fetchSnapshot();
-		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
+		const previousGeneration = this.#generation;
+		const result = await this.#client.fetchSnapshot({ signal });
+		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation, previousGeneration);
 		return this.#snapshot;
 	}
 
@@ -648,16 +995,45 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				id: entry.id,
 				provider: entry.provider,
 				credential: entry.credential as AuthCredential,
+				identityKey: entry.identityKey,
 				disabledCause: null,
 			});
 		}
 		return out;
 	}
 
-	/** Broker-backed disabled tombstones; empty against brokers predating the endpoint. */
-	listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
+	/**
+	 * Tombstones follow the active view pool using their canonical projected identity.
+	 * Missing identities are excluded by explicit pools just like live entries;
+	 * unconfigured providers and API keys remain unrestricted. Older brokers return no history.
+	 */
+	async listDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+		options: { requireSupported?: boolean } = {},
+	): Promise<DisabledCredentialSummary[]> {
 		this.#noteActivity();
-		return this.#client.listDisabledCredentials(provider, signal);
+		return this.#fetchDisabledCredentials(provider, signal, options);
+	}
+
+	async #fetchDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+		options: { requireSupported?: boolean } = {},
+	): Promise<DisabledCredentialSummary[]> {
+		const disabled = await this.#client.listDisabledCredentials(provider, signal, options);
+		if (!this.#accountPool) return disabled;
+		return disabled.filter(summary => {
+			if (summary.type !== "oauth" || !this.#accountPool?.has(summary.provider)) return true;
+			return isCredentialInAccountPool(
+				{
+					provider: summary.provider,
+					credential: summary,
+					identityKey: resolveOAuthCredentialIdentity(summary.provider, summary).key,
+				},
+				this.#accountPool,
+			);
+		});
 	}
 
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
@@ -767,28 +1143,93 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#noteActivity();
 		for (const entry of this.#snapshot.credentials) {
 			if (entry.id !== id) continue;
+			if (!authCredentialEquals(entry.credential as AuthCredential, credential)) {
+				entry.identityKey =
+					credential.type === "oauth" ? resolveOAuthCredentialIdentity(entry.provider, credential).key : null;
+			}
 			entry.credential = credential as typeof entry.credential;
 			return;
 		}
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
+	/**
+	 * Optimistic local disable. Reports whether this client's snapshot still
+	 * held the row: a peer that already disabled it owns the persisted cause,
+	 * and the broker resolves the authoritative outcome asynchronously.
+	 */
+	deleteAuthCredential(id: number, disabledCause: string): boolean {
 		this.#noteActivity();
+		const held = this.#snapshot.credentials.some(entry => entry.id === id);
 		this.#removeCredentialById(id);
 		// Fire-and-forget: tell the broker to persist the disable.
 		this.#client.disableCredential(id, disabledCause).catch(error => {
 			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
 		});
+		return held;
 	}
 
-	async deleteAuthCredentialRemote(id: number, disabledCause: string): Promise<boolean> {
+	async deleteAuthCredentialRemote(id: number, disabledCause: string, signal?: AbortSignal): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
-		if (!found) return false;
-		await this.#client.disableCredential(id, disabledCause);
-		this.#removeCredentialById(id);
-		this.#maybeRefreshSnapshot("delete credential");
-		return true;
+		if (!found) {
+			if (!isDeliberateRemovalCause(disabledCause.trim())) return false;
+			// A refresh can remove a peer-disabled row before a failed logout is retried.
+			// Only tombstones visible through this client account pool may be removed.
+			const disabled = await this.listDisabledCredentials(undefined, signal);
+			// A row this client held and then lost is already removed: report the
+			// logout complete rather than telling the caller it was skipped.
+			if (!disabled.some(entry => entry.id === id)) return this.#vanishedCredentialIds.has(id);
+		}
+		const disabling = this.#client.disableCredential(id, disabledCause, signal);
+		let localDisable = this.#localDisables.get(id);
+		if (!localDisable) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			localDisable = { pending: 0, succeeded: false, promise, resolve };
+			this.#localDisables.set(id, localDisable);
+		}
+		localDisable.pending++;
+		try {
+			await disabling;
+			localDisable.succeeded = true;
+			this.#removeCredentialById(id);
+			this.#maybeRefreshSnapshot("delete credential");
+			return true;
+		} catch (error) {
+			// Two requests can exhaust the same bearer and both pass the `found`
+			// check above; the broker answers the loser with 404. That is a lost
+			// race, not a failure: report no transition and re-read authoritatively
+			// so the caller judges retryability on the real pool. Anything else
+			// propagates — a caller must not drop a row on an unknown error.
+			if (error instanceof AuthBrokerError && error.status === 404) {
+				logger.debug("auth-broker disable lost to a peer", { id, status: error.status });
+				// 404 means the row is gone server-side. Drop it from the cached
+				// snapshot — leaving it would let a failed follow-up refresh strand
+				// the retired bearer in the pool `#adoptPoolAfterDisable` falls back
+				// to — but announce the departure first. This call reports no
+				// transition, so `AuthStorage` emits nothing, and removing the row
+				// silently would also deprive the later snapshot diff of the
+				// previous entry it needs: the sign-out would vanish entirely.
+				const departed = this.#snapshot.credentials.find(entry => entry.id === id);
+				if (departed) {
+					this.#notifyCredentialRemoved(
+						departed,
+						this.#siblingApiKeyIds(departed, this.#snapshot.credentials, this.#generation),
+					);
+				}
+				this.#removeCredentialById(id);
+				// Schedule the re-read rather than awaiting it: this hook carries no
+				// caller signal, so an awaited round-trip here would hold an aborted
+				// turn open for the client's whole timeout-and-retry budget.
+				this.#maybeRefreshSnapshot("disable lost to a peer");
+				return false;
+			}
+			throw error;
+		} finally {
+			if (--localDisable.pending === 0) {
+				this.#localDisables.delete(id);
+				localDisable.resolve();
+			}
+		}
 	}
 
 	tryDisableAuthCredentialIfMatches(id: number, _expectedData: string, disabledCause: string): boolean {
@@ -807,7 +1248,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			waitMs: maxWaitMs,
 			signal: opts.signal,
 		});
-		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
+		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation, previousGeneration);
 		return this.#generation !== previousGeneration;
 	}
 
@@ -900,22 +1341,46 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Logout: disable every active credential for the provider on the broker,
-	 * then drop them from the local snapshot. Refresh fetches the authoritative
-	 * post-state in the background.
+	 * Whole-provider logout also clears prior tombstones, including unidentified
+	 * rows and history with no remaining active credentials. Reject providers
+	 * restricted by an account pool so hidden accounts and history are preserved.
+	 * Only drop the local snapshot after the broker persists the operation successfully.
 	 */
 	async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
-		const existing = this.listAuthCredentials(provider);
-		for (const entry of existing) {
-			try {
-				await this.#client.disableCredential(entry.id, disabledCause);
-			} catch (error) {
-				logger.warn("auth-broker disable during delete failed", {
-					provider,
-					id: entry.id,
-					error: String(error),
-				});
+		if (this.#accountPool?.has(provider)) {
+			throw new AIError.ConfigurationError(
+				`Cannot log out all ${provider} accounts while its broker account pool is restricted; remove individual accounts instead`,
+			);
+		}
+		this.#noteActivity();
+		try {
+			await this.#client.logoutProvider(provider);
+		} catch (error) {
+			// A broker predating this route answers 404 from its catch-all; the
+			// handler itself never does. Rather than failing whole-provider logout
+			// in a mixed-version deployment — which also breaks managed MCP
+			// credential removal during `/mcp reauth` — fall back to the
+			// per-credential disable route every broker has always supported. Old
+			// broker, old semantics: the rows go, their tombstones stay.
+			if (!(error instanceof AuthBrokerError && error.status === 404)) throw error;
+			// Attempt every row before reporting, so one unreachable credential does
+			// not strand the rest — but a failure must still surface: clearing the
+			// local snapshot on a broker that kept the credential would report a
+			// logout that did not happen, and a later refresh would resurrect it.
+			let firstFailure: unknown;
+			for (const entry of this.listAuthCredentials(provider)) {
+				try {
+					await this.#client.disableCredential(entry.id, disabledCause);
+				} catch (disableError) {
+					firstFailure ??= disableError;
+					logger.warn("auth-broker disable during provider logout fallback failed", {
+						provider: providerIdForDisplay(provider),
+						id: entry.id,
+						error: String(disableError),
+					});
+				}
 			}
+			if (firstFailure !== undefined) throw firstFailure;
 		}
 		this.#removeProviderEntries(provider);
 		this.#maybeRefreshSnapshot("delete");
@@ -1040,7 +1505,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#maybeRefreshSnapshot(reason: string): void {
 		if (this.#streamingActive) return;
 		void this.refreshSnapshot().catch(error => {
-			logger.debug("auth-broker snapshot refresh after write failed", { reason, error: String(error) });
+			logger.debug("auth-broker snapshot refresh after write failed", {
+				reason: reason,
+				error: String(error),
+			});
 		});
 	}
 
@@ -1112,18 +1580,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 		if (!this.#streamingActive) {
 			await this.refreshSnapshot().catch(error => {
-				logger.debug("auth-broker snapshot refresh after credential refresh failed", { error: String(error) });
+				logger.debug("auth-broker snapshot refresh after credential refresh failed", {
+					error: String(error),
+				});
 			});
 		}
-		const refreshed = entry.credential;
 		return {
-			access: refreshed.access,
+			...entry.credential,
 			refresh: REMOTE_REFRESH_SENTINEL,
-			expires: refreshed.expires,
-			accountId: refreshed.accountId,
-			email: refreshed.email,
-			projectId: refreshed.projectId,
-			enterpriseUrl: refreshed.enterpriseUrl,
 		};
 	}
 
@@ -1393,7 +1857,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 					logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });
 					return;
 				}
-				logger.debug("auth-broker observed usage flush failed; retrying next flush", { error: String(error) });
+				logger.debug("auth-broker observed usage flush failed; retrying next flush", {
+					error: String(error),
+				});
 				// Merge the failed group back under the (possibly refilled) buffer so
 				// nothing is lost; bounded because entries are keyed per
 				// (identity, provider, model).
@@ -1405,6 +1871,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#credentialDisabledListeners.clear();
+		this.#pendingCredentialRemovals.clear();
+		this.#scheduleCredentialRemovalRetry();
 		this.#backgroundAbort.abort();
 		this.#activityWakeup?.resolve();
 		this.#activityWakeup = null;

@@ -21,7 +21,9 @@ function makeStore(rows: StoredAuthCredential[], blocked = new Map<number, numbe
 		close() {},
 		listAuthCredentials: provider => rows.filter(row => provider === undefined || row.provider === provider),
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches: () => false,
 		replaceAuthCredentialsForProvider: () => rows,
 		upsertAuthCredentialForProvider: () => rows,

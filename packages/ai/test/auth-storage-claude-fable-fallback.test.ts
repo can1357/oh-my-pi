@@ -21,7 +21,9 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 			return rows;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

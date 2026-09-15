@@ -23,13 +23,19 @@ import type {
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
 	HealthzResponse,
+	ProviderLogoutRequest,
+	ProviderLogoutResponse,
 	SnapshotResponse,
 	SnapshotStreamEvent,
 	UsageHistoryResponse,
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
-import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
+import {
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_DISABLED_CREDENTIAL_PROJECT_ID,
+} from "./types";
 import {
 	clientUsageReportResponseSchema,
 	clientUsageSummaryResponseSchema,
@@ -40,6 +46,7 @@ import {
 	credentialUploadResponseSchema,
 	disabledCredentialsResponseSchema,
 	healthzResponseSchema,
+	providerLogoutResponseSchema,
 	snapshotResponseSchema,
 	snapshotStreamEventSchema,
 	usageHistoryResponseSchema,
@@ -58,6 +65,7 @@ const RESPONSE_SCHEMAS = {
 	credentialUploadResponseSchema,
 	disabledCredentialsResponseSchema,
 	healthzResponseSchema,
+	providerLogoutResponseSchema,
 	usageHistoryResponseSchema,
 	usageResponseSchema,
 	usageStaleResponseSchema,
@@ -342,23 +350,63 @@ export class AuthBrokerClient {
 		});
 	}
 
+	/** Remove all active credentials and prior disabled history for one provider. */
+	async logoutProvider(provider: string, signal?: AbortSignal): Promise<ProviderLogoutResponse> {
+		const body: ProviderLogoutRequest = { provider };
+		return this.#request<ProviderLogoutResponse>("POST", "/v1/provider/logout", {
+			body,
+			schema: "providerLogoutResponseSchema",
+			signal,
+		});
+	}
+
 	/**
 	 * Disabled-credential tombstones (identity + cause, no token material).
 	 * Returns an empty list against brokers predating `GET
-	 * /v1/credentials/disabled` (404).
+	 * /v1/credentials/disabled` (404), unless requireSupported is set.
 	 */
-	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
+	/** Latched once the broker answers 404/501 — the gap is permanent for this connection. */
+	#disabledHistoryUnsupported = false;
+
+	async listDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+		options: { requireSupported?: boolean } = {},
+	): Promise<DisabledCredentialSummary[]> {
 		const params = new URLSearchParams();
 		if (provider) params.set("provider", provider);
 		const path = `/v1/credentials/disabled${params.size > 0 ? `?${params.toString()}` : ""}`;
+		// 501 means this broker's store keeps no tombstones at all — a property of
+		// the connection, not of one provider — so it will not start supporting
+		// them later. Startup replay asks twice per session; without this latch
+		// both are known-useless round trips against the 2s startup budget.
+		// A 404 is deliberately NOT latched: it is per-provider, and a broker that
+		// 404s `provider=missing` still answers `provider=empty` authoritatively.
+		if (this.#disabledHistoryUnsupported) {
+			if (options.requireSupported) {
+				throw new AuthBrokerError("disabled credential history is not supported by this broker", { status: 501 });
+			}
+			return [];
+		}
 		try {
 			const response = await this.#request<DisabledCredentialsResponse>("GET", path, {
 				schema: "disabledCredentialsResponseSchema",
+				headers: { [AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_DISABLED_CREDENTIAL_PROJECT_ID },
 				signal,
 			});
 			return response.disabled;
 		} catch (error) {
-			if (error instanceof AuthBrokerError && error.status === 404) return [];
+			// 404 is per-provider: a broker that 404s one provider still answers
+			// another authoritatively, so only 501 — "this store keeps no
+			// tombstones" — is latched for the connection.
+			if (error instanceof AuthBrokerError && error.status === 501) this.#disabledHistoryUnsupported = true;
+			if (
+				!options.requireSupported &&
+				error instanceof AuthBrokerError &&
+				(error.status === 404 || error.status === 501)
+			) {
+				return [];
+			}
 			throw error;
 		}
 	}
@@ -404,6 +452,7 @@ export class AuthBrokerClient {
 			auth?: boolean;
 			body?: unknown;
 			signal?: AbortSignal;
+			headers?: Record<string, string>;
 			timeoutMs?: number;
 		},
 	): Promise<t> {

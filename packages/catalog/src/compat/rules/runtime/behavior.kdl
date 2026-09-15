@@ -93,6 +93,10 @@ behavior {
 	// time. Provider-aware retry paths append this offset before parsing.
 	retry-reset-timezone provider="zai" offset="+08:00"
 	retry-reset-timezone provider="zhipu-coding-plan" offset="+08:00"
+	// A Copilot OAuth bearer still rejected with a hard 401 after refresh and
+	// retry is revoked. Retire only the matching failed bearer, not policy or
+	// quota/concurrency denials; other providers retain suspect-and-block behavior.
+	credential-retirement provider="github-copilot" retire-oauth-on-hard401=#true
 
 	// Cloudflare AI Gateway namespace routing. The Workers AI prefix remains
 	// on the request id; the upstream namespaces are stripped.

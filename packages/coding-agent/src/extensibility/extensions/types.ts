@@ -860,8 +860,24 @@ export interface CredentialDisabledEvent {
 	type: "credential_disabled";
 	/** Provider id whose credential was disabled (e.g. "anthropic"). */
 	provider: string;
-	/** Verbatim error captured for forensics (truncated upstream). */
+	/**
+	 * Classified, display-safe reason — one of a fixed vocabulary such as
+	 * `sign-in expired`, `token revoked` or `rejected by the provider`, never the
+	 * provider's own text. A token endpoint's error body can echo the credential
+	 * that was submitted, so handlers receive the classification instead. The
+	 * verbatim cause stays in the store: read it from `listDisabledCredentials()`
+	 * or the authenticated broker history when forensics are needed.
+	 */
 	disabledCause: string;
+	/** Credential row id in the auth store. */
+	credentialId: number;
+	credentialType: "oauth" | "api_key";
+	/** OAuth account identity of the disabled credential, when known. */
+	email?: string;
+	accountId?: string;
+	projectId?: string;
+	orgId?: string;
+	orgName?: string;
 }
 
 // ============================================================================

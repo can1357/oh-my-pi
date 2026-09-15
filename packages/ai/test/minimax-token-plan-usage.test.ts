@@ -20,7 +20,9 @@ function emptyStore(): AuthCredentialStore {
 			return [];
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
