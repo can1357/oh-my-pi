@@ -513,6 +513,12 @@ type ActiveAgentContinue = {
 };
 
 type SessionTitleSource = "auto" | "user";
+type CodeModelNavigationTransaction = {
+	readonly cancelled: boolean;
+	commit(): void;
+	rollback(currentDiskSize?: number | null): Promise<void>;
+};
+
 type SessionNameTrigger = "replan";
 type SetSessionNameWithTrigger = (
 	name: string,
@@ -2180,8 +2186,28 @@ export class AgentSession {
 		return this.#codeModelBeforeNavigationHandler(this.#extensionRunner.createContext());
 	}
 
-	async #codeModelBlocksNavigation(): Promise<boolean> {
-		return (await this.#prepareCodeModelNavigation())?.cancel === true;
+	async #beginCodeModelNavigation(): Promise<CodeModelNavigationTransaction | undefined> {
+		if (!this.#codeModelBeforeNavigationHandler || !this.#extensionRunner) return undefined;
+		const pre = this.#captureCodeModelPreState();
+		const preparation = await this.#prepareCodeModelNavigation();
+		let settled = false;
+		let rollbackPromise: Promise<void> | undefined;
+		const rollback = (currentDiskSize?: number | null): Promise<void> => {
+			if (settled) return Promise.resolve();
+			rollbackPromise ??= this.#rollbackCodeModelPreparation(pre, preparation, currentDiskSize).then(() => {
+				settled = true;
+			});
+			return rollbackPromise;
+		};
+		const transaction = {
+			cancelled: preparation?.cancel === true,
+			commit: () => {
+				settled = true;
+			},
+			rollback,
+		};
+		if (transaction.cancelled) await rollback();
+		return transaction;
 	}
 
 	/** Host-side state a code-model preparation may mutate, captured before preparation runs. */
@@ -2202,9 +2228,9 @@ export class AgentSession {
 	 * Undo a prepared-but-uncommitted code-model navigation. The preparation
 	 * already restored the original model and cleared the phase, appending
 	 * entries to the session, so the rollback rewrites the captured snapshot
-	 * durably — a bare in-memory restore leaves the persisted transcript
-	 * claiming a phase end the live session reversed — then restores the
-	 * host-side model state and hands the transaction back to the extension.
+	 * durably, restores the host-side model state, and hands the transaction
+	 * back to the extension. A cross-file caller supplies the source file's
+	 * current size for the guarded rewrite.
 	 */
 	async #rollbackCodeModelPreparation(
 		pre: {
@@ -2218,8 +2244,9 @@ export class AgentSession {
 			inheritedProviderPromptCacheKey: string | undefined;
 		},
 		preparation: CodeModelNavigationPreparation | undefined,
+		currentDiskSize?: number | null,
 	): Promise<void> {
-		await this.sessionManager.rollbackToSnapshot(pre.sessionState);
+		await this.sessionManager.rollbackToSnapshot(pre.sessionState, currentDiskSize);
 		this.#freshProviderSessionId = pre.freshProviderSessionId;
 		this.#inheritedProviderPromptCacheKey = pre.inheritedProviderPromptCacheKey;
 		this.#syncAgentSessionId(pre.sessionState.sessionId, false);
@@ -8396,14 +8423,24 @@ export class AgentSession {
 				return false;
 			}
 		}
-		if (await this.#codeModelBlocksNavigation()) return false;
+		const codeModelNavigation = await this.#beginCodeModelNavigation();
+		if (codeModelNavigation?.cancelled) return false;
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
-		await this.abort();
-		this.#cancelOwnAsyncJobs();
-		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
+		try {
+			await this.abort();
+			this.#cancelOwnAsyncJobs();
+			this.#closeAllProviderSessions("new session");
+			await this.#bash.flushPending();
+		} catch (error) {
+			try {
+				await codeModelNavigation?.rollback();
+			} finally {
+				this.#reconnectToAgent();
+			}
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
@@ -8425,12 +8462,13 @@ export class AgentSession {
 					...options,
 					additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 				});
+				codeModelNavigation?.commit();
+				sessionTransitioned = true;
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
-				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -8491,6 +8529,9 @@ export class AgentSession {
 			}
 
 			return true;
+		} catch (error) {
+			if (!sessionTransitioned) await codeModelNavigation?.rollback();
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -8538,8 +8579,7 @@ export class AgentSession {
 
 		let advisorRecordersDetached = false;
 		let forkCommitted = false;
-		let codeModelPreparation: CodeModelNavigationPreparation | undefined;
-		let rollbackCodeModelPreparation: (() => Promise<void>) | undefined;
+		let codeModelNavigation: CodeModelNavigationTransaction | undefined;
 
 		try {
 			advisorRecordersDetached = true;
@@ -8547,15 +8587,8 @@ export class AgentSession {
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
 
-			const preCodeModel = this.#captureCodeModelPreState();
-
-			rollbackCodeModelPreparation = () => this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
-
-			codeModelPreparation = await this.#prepareCodeModelNavigation();
-			if (codeModelPreparation?.cancel) {
-				await rollbackCodeModelPreparation();
-				return false;
-			}
+			codeModelNavigation = await this.#beginCodeModelNavigation();
+			if (codeModelNavigation?.cancelled) return false;
 
 			const bashTransition = this.#bash.beginSessionTransition();
 
@@ -8572,10 +8605,11 @@ export class AgentSession {
 			}
 			if (!forkResult) {
 				this.#bash.finishSessionTransition(bashTransition, false);
-				await rollbackCodeModelPreparation();
+				await codeModelNavigation?.rollback();
 				return false;
 			}
 			forkCommitted = true;
+			codeModelNavigation?.commit();
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running
@@ -8605,7 +8639,7 @@ export class AgentSession {
 
 			return true;
 		} catch (error) {
-			if (!forkCommitted) await rollbackCodeModelPreparation?.();
+			if (!forkCommitted) await codeModelNavigation?.rollback();
 			throw error;
 		} finally {
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
@@ -9616,18 +9650,11 @@ export class AgentSession {
 			: undefined;
 		const targetCwd = preparedSession?.cwd ?? previousCwd;
 		const recordedCwd = preparedSession?.recordedCwd ?? this.sessionManager.getRecordedCwd() ?? previousCwd;
-		const preCodeModelSessionState = this.sessionManager.captureState();
-		const preCodeModelModel = this.model;
-		const preCodeModelThinkingLevel = this.thinkingLevel;
-		const preCodeModelAutoThinking = this.isAutoThinking;
-		const preCodeModelAutoResolvedLevel = this.autoResolvedThinkingLevel();
-		const preCodeModelServiceTierByFamily = this.serviceTierByFamily;
-		const preCodeModelFreshProviderSessionId = this.#freshProviderSessionId;
-		const preCodeModelInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const preCodeModel = this.#captureCodeModelPreState();
 		let cwdChangeTarget: string | undefined;
 		const rollBackPreparedCwd = async (cause: unknown): Promise<void> => {
-			this.sessionManager.restoreState(preCodeModelSessionState);
-			this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+			this.sessionManager.restoreState(preCodeModel.sessionState);
+			this.#syncAgentSessionId(preCodeModel.sessionState.sessionId, false);
 			let rollbackFailure: unknown;
 			try {
 				if (cwdChangeTarget && options?.onCwdChange) {
@@ -9665,31 +9692,51 @@ export class AgentSession {
 						throw error;
 					}
 					if (!cwdChangeAccepted) {
-						this.sessionManager.restoreState(preCodeModelSessionState);
-						this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+						this.sessionManager.restoreState(preCodeModel.sessionState);
+						this.#syncAgentSessionId(preCodeModel.sessionState.sessionId, false);
 						await this.#sessionSwitchReconciler?.();
 						return false;
 					}
-					this.sessionManager.restoreState(preCodeModelSessionState);
-					this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
+					this.sessionManager.restoreState(preCodeModel.sessionState);
+					this.#syncAgentSessionId(preCodeModel.sessionState.sessionId, false);
 				} else if (path.resolve(recordedCwd) !== path.resolve(previousCwd)) {
 					return false;
 				}
 			}
 		}
 		const codeModelPreparation = await this.#prepareCodeModelNavigation();
+		const rollbackPreparedCodeModel = async (): Promise<unknown | undefined> => {
+			try {
+				await this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
+				return undefined;
+			} catch (error) {
+				return error;
+			}
+		};
 		if (codeModelPreparation?.cancel) {
-			if (cwdChangeTarget) await rollBackPreparedCwd(new Error("Coding phase recovery cancelled session switching"));
+			const rollbackError = await rollbackPreparedCodeModel();
+			if (cwdChangeTarget) {
+				await rollBackPreparedCwd(rollbackError ?? new Error("Coding phase recovery cancelled session switching"));
+			}
+			if (rollbackError) throw rollbackError;
 			return false;
 		}
 
-		this.#disconnectFromAgent();
-		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
-
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
+		try {
+			this.#disconnectFromAgent();
+			await this.abort({ goalReason: "internal" });
+			await this.#sessionBeforeSwitchReconciler?.();
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+		} catch (error) {
+			const rollbackError = await rollbackPreparedCodeModel();
+			this.#reconnectToAgent();
+			if (cwdChangeTarget) await rollBackPreparedCwd(rollbackError ?? error);
+			else await this.#sessionSwitchReconciler?.();
+			if (rollbackError) throw rollbackError;
+			throw error;
+		}
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -9915,10 +9962,17 @@ export class AgentSession {
 			return true;
 		} catch (error) {
 			const restorePreCodeModelState = codeModelPreparation?.rollback !== undefined;
-			const sessionStateToRestore = restorePreCodeModelState ? preCodeModelSessionState : previousSessionState;
-			this.sessionManager.restoreState(sessionStateToRestore);
+			const sessionStateToRestore = restorePreCodeModelState ? preCodeModel.sessionState : previousSessionState;
+			if (restorePreCodeModelState) {
+				await this.sessionManager.rollbackToSnapshot(
+					preCodeModel.sessionState,
+					previousSessionState.expectedDiskSize,
+				);
+			} else {
+				this.sessionManager.restoreState(previousSessionState);
+			}
 			this.#freshProviderSessionId = restorePreCodeModelState
-				? preCodeModelFreshProviderSessionId
+				? preCodeModel.freshProviderSessionId
 				: previousFreshProviderSessionId;
 			this.#syncAgentSessionId(sessionStateToRestore.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -9938,7 +9992,7 @@ export class AgentSession {
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
 			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
 			this.#inheritedProviderPromptCacheKey = restorePreCodeModelState
-				? preCodeModelInheritedProviderPromptCacheKey
+				? preCodeModel.inheritedProviderPromptCacheKey
 				: previousInheritedProviderPromptCacheKey;
 			this.#checkpointState = previousCheckpointState;
 			this.#pendingRewindReport = previousPendingRewindReport;
@@ -9956,7 +10010,7 @@ export class AgentSession {
 			// here — before the target session's thinking level is unwound —
 			// would push a { previousModel, target-session-thinking } config that
 			// was never a real session state.
-			const modelToRestore = restorePreCodeModelState ? preCodeModelModel : previousModel;
+			const modelToRestore = restorePreCodeModelState ? preCodeModel.model : previousModel;
 			let modelRolledBack = false;
 			if (modelToRestore) {
 				const rolledBackModel = this.model;
@@ -9964,12 +10018,12 @@ export class AgentSession {
 				modelRolledBack = !modelsAreEqual(rolledBackModel, modelToRestore);
 			}
 			this.#models.restoreThinkingSnapshot(
-				restorePreCodeModelState ? preCodeModelThinkingLevel : previousThinkingLevel,
-				restorePreCodeModelState ? preCodeModelAutoThinking : previousAutoThinking,
-				restorePreCodeModelState ? preCodeModelAutoResolvedLevel : previousAutoResolvedLevel,
+				restorePreCodeModelState ? preCodeModel.thinkingLevel : previousThinkingLevel,
+				restorePreCodeModelState ? preCodeModel.autoThinking : previousAutoThinking,
+				restorePreCodeModelState ? preCodeModel.autoResolvedLevel : previousAutoResolvedLevel,
 			);
 			this.#models.restoreServiceTiers(
-				restorePreCodeModelState ? preCodeModelServiceTierByFamily : previousServiceTierByFamily,
+				restorePreCodeModelState ? preCodeModel.serviceTierByFamily : previousServiceTierByFamily,
 			);
 			codeModelPreparation?.rollback?.();
 			if (modelRolledBack) {
@@ -10050,9 +10104,8 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
-		const preCodeModel = this.#captureCodeModelPreState();
-		const codeModelPreparation = await this.#prepareCodeModelNavigation();
-		if (codeModelPreparation?.cancel) return { selectedText, selectedImages, cancelled: true };
+		const codeModelNavigation = await this.#beginCodeModelNavigation();
+		if (codeModelNavigation?.cancelled) return { selectedText, selectedImages, cancelled: true };
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -10065,11 +10118,7 @@ export class AgentSession {
 			// Flush pending writes before branching
 			await this.sessionManager.flush();
 		} catch (error) {
-			// No navigation was committed, so the preparation's model restore and
-			// phase clear must roll back too — otherwise the aborted branch leaves
-			// the live conversation on the original model with its coding phase
-			// ended.
-			await this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
+			await codeModelNavigation?.rollback();
 			throw error;
 		}
 		const bashTransition = this.#bash.beginSessionTransition();
@@ -10089,13 +10138,16 @@ export class AgentSession {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
 					await this.sessionManager.newSession({ parentSession: previousSessionFile });
+					codeModelNavigation?.commit();
+					sessionTransitioned = true;
 					if (title) await this.sessionManager.setSessionName(title, titleSource);
 				} else {
 					this.sessionManager.createBranchedSession(selectedEntry.parentId);
+					codeModelNavigation?.commit();
+					sessionTransitioned = true;
 				}
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
-				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -10130,6 +10182,9 @@ export class AgentSession {
 			advisorRecordersDetached = false;
 			await this.#reconcileModeAfterBranch();
 			return { selectedText, selectedImages, cancelled: false };
+		} catch (error) {
+			if (!sessionTransitioned) await codeModelNavigation?.rollback();
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -10176,17 +10231,17 @@ export class AgentSession {
 				return { cancelled: true, sessionFile: previousSessionFile };
 			}
 		}
-		const preCodeModel = this.#captureCodeModelPreState();
-		const codeModelPreparation = await this.#prepareCodeModelNavigation();
-		if (codeModelPreparation?.cancel) {
-			return { cancelled: true, sessionFile: previousSessionFile };
+		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
+			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
 
-		try {
-			if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
-				throw new Error("Cannot branch /btw: session changed since /btw started");
-			}
+		const codeModelNavigation = await this.#beginCodeModelNavigation();
+		if (codeModelNavigation?.cancelled) {
+			return { cancelled: true, sessionFile: previousSessionFile };
+		}
+		const preparedLeafId = this.sessionManager.getLeafId();
 
+		try {
 			await withTimeout(
 				this.#cancelPostPromptTasks(),
 				POST_PROMPT_DRAIN_TIMEOUT_MS,
@@ -10212,11 +10267,7 @@ export class AgentSession {
 			await this.#bash.flushPending();
 			await this.sessionManager.flush();
 		} catch (error) {
-			// The drain/flush window is fallible and no navigation was committed,
-			// so the preparation's model restore and phase clear must roll back —
-			// otherwise the aborted /btw branch leaves the live conversation on
-			// the original model with its coding phase ended.
-			await this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
+			await codeModelNavigation?.rollback();
 			throw error;
 		}
 		const bashTransition = this.#bash.beginSessionTransition();
@@ -10230,16 +10281,20 @@ export class AgentSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
-				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
+				if (
+					this.sessionManager.getSessionId() !== sessionId ||
+					this.sessionManager.getLeafId() !== preparedLeafId
+				) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
 				this.sessionManager.createBranchedSession(leafId);
+				codeModelNavigation?.commit();
+				sessionTransitioned = true;
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
-				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -10277,6 +10332,9 @@ export class AgentSession {
 			await this.#reconcileModeAfterBranch();
 
 			return { cancelled: false, sessionFile: this.sessionFile };
+		} catch (error) {
+			if (!sessionTransitioned) await codeModelNavigation?.rollback();
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -10501,7 +10559,8 @@ export class AgentSession {
 			summaryText = hookSummary.summary;
 			summaryDetails = hookSummary.details;
 		}
-		if (await this.#codeModelBlocksNavigation()) return { cancelled: true };
+		const codeModelNavigation = await this.#beginCodeModelNavigation();
+		if (codeModelNavigation?.cancelled) return { cancelled: true };
 
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.
@@ -10516,6 +10575,8 @@ export class AgentSession {
 		// model consumes it, mirroring a live `ask` completion (issue #6483).
 		let isAskReanswerCompletion = false;
 
+		let summaryEntry: BranchSummaryEntry | undefined;
+		let branchTransitioned = false;
 		if (isTranscriptEntry(targetEntry) && isUserRequestEntry(targetEntry)) {
 			// User request (plain prompt, or a user-invoked skill/collab prompt): leaf = parent
 			// (null if root), the draft the user typed goes back to the editor with its images.
@@ -10557,7 +10618,12 @@ export class AgentSession {
 				isError: reanswer.isError === true,
 				timestamp: Date.now(),
 			};
-			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId);
+			try {
+				newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId);
+			} catch (error) {
+				await codeModelNavigation?.rollback();
+				throw error;
+			}
 			isAskReanswerCompletion = true;
 		} else {
 			// Non-user message (or an agent/autoload skill-prompt injection): land the
@@ -10570,8 +10636,6 @@ export class AgentSession {
 		// Switch leaf (with or without summary)
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		const bashTransition = this.#bash.beginSessionTransition();
-		let summaryEntry: BranchSummaryEntry | undefined;
-		let branchTransitioned = false;
 		try {
 			if (summaryText) {
 				// Create summary at target position (can be null for root)
@@ -10587,8 +10651,12 @@ export class AgentSession {
 			} else {
 				this.sessionManager.branch(newLeafId);
 			}
-			this.#bash.markSessionTransition(bashTransition);
+			codeModelNavigation?.commit();
 			branchTransitioned = true;
+			this.#bash.markSessionTransition(bashTransition);
+		} catch (error) {
+			if (!branchTransitioned) await codeModelNavigation?.rollback();
+			throw error;
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}

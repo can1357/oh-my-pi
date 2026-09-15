@@ -1700,19 +1700,19 @@ export class SessionManager {
 	/**
 	 * Undo to a {@link captureState} snapshot durably: restore the in-memory
 	 * state, then rewrite the session file so disk and memory agree after a
-	 * fresh open. Rollback paths whose prepared navigation already appended
-	 * entries (model changes, custom phase state) must use this instead of a
-	 * bare {@link restoreState}: restoreState alone reverts memory while the
-	 * appended entries stay persisted, so a reload observes a transcript the
-	 * live session never had.
-	 * The method preserves the active file's current size across the in-memory
-	 * restore so the guarded rewrite targets the body being rolled back.
+	 * fresh open. Prepared navigation may append model changes and custom
+	 * phase state. The atomic rewrite removes those entries so a reload and
+	 * the live session observe the same transcript. The default disk-size
+	 * guard uses the active file's current size. A cross-file caller supplies
+	 * the source file's current size.
 	 */
-	async rollbackToSnapshot(snapshot: SessionManagerStateSnapshot): Promise<void> {
-		const activeDiskSize = this.#expectedDiskSize;
+	async rollbackToSnapshot(
+		snapshot: SessionManagerStateSnapshot,
+		currentDiskSize: number | null = this.#expectedDiskSize,
+	): Promise<void> {
 		this.restoreState(snapshot);
 		if (this.#persist && this.#sessionFile) {
-			this.#expectedDiskSize = activeDiskSize;
+			this.#expectedDiskSize = currentDiskSize;
 			this.#forceFileCreation = true;
 			this.#rewriteRequired = true;
 			await this.#rewriteAtomically();
