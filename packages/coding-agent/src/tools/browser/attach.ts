@@ -183,6 +183,13 @@ const CHROMIUM_FLATPAK_IDS: Record<string, true> = {
  * That profile is also what lets a second instance start beside the user's
  * running default-profile browser instead of handing off to it. Electron apps
  * are left untouched: `--user-data-dir` would relocate their app data.
+ *
+ * An omp-owned profile also bypasses the OS keystore (`--use-mock-keychain`,
+ * `--password-store=basic`, the same pair puppeteer's launcher sets): Chromium
+ * otherwise derives its cookie-encryption key from the login keychain and
+ * macOS blocks on a "wants to use your confidential information" dialog for
+ * every fresh binary. A caller-supplied profile keeps the real keystore; its
+ * existing cookies are encrypted with that key and a mock one would corrupt them.
  */
 export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
 	const args = appArgs ?? [];
@@ -209,8 +216,10 @@ export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd
 	const launchArgs = [...args];
 	// A fresh profile otherwise opens the welcome tour and default-browser
 	// prompt as extra page targets, which attach may adopt instead of ours.
-	if (!args.includes("--no-first-run")) launchArgs.push("--no-first-run");
-	if (!args.includes("--no-default-browser-check")) launchArgs.push("--no-default-browser-check");
+	for (const flag of ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"]) {
+		if (!args.includes(flag)) launchArgs.push(flag);
+	}
+	if (!args.some(arg => arg.startsWith("--password-store"))) launchArgs.push("--password-store=basic");
 	launchArgs.push(`--user-data-dir=${path.join(getBrowserProfilesDir(), `${slug}-${hash}`)}`);
 	return launchArgs;
 }

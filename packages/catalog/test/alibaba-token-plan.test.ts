@@ -1,18 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import {
 	ALIBABA_TOKEN_PLAN_BASE_URL,
-	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	alibabaTokenPlanModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
+const alibabaTokenPlanModels = seedModels<"openai-completions">("alibaba-token-plan");
+
 describe("QwenCloud Token Plan provider", () => {
 	test("ships the documented Individual text-model allowlist", () => {
-		expect(ALIBABA_TOKEN_PLAN_STATIC_MODELS.map(model => model.id)).toEqual([
+		expect(alibabaTokenPlanModels.map(model => model.id)).toEqual([
 			"qwen3.8-max-preview",
 			"qwen3.8-max",
 			"qwen3.8-flash",
@@ -23,7 +25,7 @@ describe("QwenCloud Token Plan provider", () => {
 			"deepseek-v4-pro",
 		]);
 
-		const preview = ALIBABA_TOKEN_PLAN_STATIC_MODELS[0];
+		const preview = alibabaTokenPlanModels[0];
 		expect(preview).toMatchObject({
 			provider: "alibaba-token-plan",
 			baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
@@ -40,7 +42,7 @@ describe("QwenCloud Token Plan provider", () => {
 			},
 		});
 
-		expect(ALIBABA_TOKEN_PLAN_STATIC_MODELS.find(model => model.id === "glm-5.2")?.thinking?.efforts).toEqual([
+		expect(alibabaTokenPlanModels.find(model => model.id === "glm-5.2")?.thinking?.efforts).toEqual([
 			Effort.Minimal,
 			Effort.Low,
 			Effort.Medium,
@@ -230,12 +232,12 @@ describe("QwenCloud Token Plan provider", () => {
 	});
 
 	test("uses Token Plan-specific environment keys and authoritative discovery", () => {
-		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "alibaba-token-plan");
+		const descriptor = providerEntry("alibaba-token-plan");
 		expect(descriptor).toMatchObject({
 			defaultModel: "qwen3.7-plus",
 			envVars: ["ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"],
 			dynamicModelsAuthoritative: true,
-			catalogDiscovery: { label: "QwenCloud Token Plan" },
+			discovery: { label: "QwenCloud Token Plan" },
 		});
 	});
 });

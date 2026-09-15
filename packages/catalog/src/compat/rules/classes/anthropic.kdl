@@ -198,6 +198,21 @@ class "anthropic" {
 				cache-read 1.0
 				cache-write 12.5
 			}
+			// Mythos 5.1 shares Fable 5.1's 0.025x cache-read rate ($0.25/MTok);
+			// Mythos 5 stays at the 0.1x family default.
+			// https://platform.claude.com/docs/en/about-claude/pricing
+			//
+			// `cost-patch` is an object axis, so the winning rule supplies the
+			// whole payload rather than merging field-wise over the family
+			// patch above (same shape as the fable `=5.1` override).
+			revision "=5.1" {
+				cost-patch {
+					input 10.0
+					output 50.0
+					cache-read 0.25
+					cache-write 12.5
+				}
+			}
 			limits-patch {
 				context-window 1000000
 				max-tokens 128000

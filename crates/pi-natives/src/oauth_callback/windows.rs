@@ -187,8 +187,8 @@ pub(super) fn restore(context: &Context, snapshot: &Snapshot) -> Result<()> {
 				.filter(|legacy| *legacy != normalized);
 			(normalized, legacy)
 		} else {
-			// The only way the normalized form fails while the legacy form succeeds is
-			// the shell refusal of volume/device paths; fall back so those dead
+			// The only way the normalized form fails while the legacy form succeeds
+			// is the shell refusal of volume/device paths; fall back so those dead
 			// registrations still clean up instead of wedging recovery.
 			let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)?;
 			(legacy.clone(), Some(legacy))
@@ -625,8 +625,8 @@ fn reg_type(value_type: u32) -> Result<RegType> {
 
 fn notify_association_changed() {
 	// SAFETY: SHChangeNotify with SHCNE_ASSOCCHANGED and null pointers safely
-	// notifies the Windows shell of file association changes without dereferencing
-	// invalid memory.
+	// notifies the Windows shell of file association changes without
+	// dereferencing invalid memory.
 	unsafe {
 		SHChangeNotify(
 			SHCNE_ASSOCCHANGED as i32,
@@ -644,9 +644,9 @@ fn effective_command(scheme: &str) -> Result<OsString> {
 		.collect::<Vec<_>>();
 	let mut output = vec![0u16; 32_768];
 	let mut length = output.len() as u32;
-	// SAFETY: `association` is null-terminated, `output` is allocated with `length`
-	// capacity, and AssocQueryStringW writes within the bounds specified by `&mut
-	// length`.
+	// SAFETY: `association` is null-terminated, `output` is allocated with
+	// `length` capacity, and AssocQueryStringW writes within the bounds
+	// specified by `&mut length`.
 	let result = unsafe {
 		AssocQueryStringW(
 			ASSOCF_IS_PROTOCOL | ASSOCF_NOFIXUPS | ASSOCF_VERIFY,
@@ -865,9 +865,9 @@ mod tests {
 	#[test]
 	fn recovery_accepts_legacy_verbatim_commands_written_before_the_shell_fix() {
 		let (_guard, context) = DisposableScheme::new();
-		// Pre-#11907 binaries saw canonicalized (`\\?\`) paths and registered them
-		// as-is; rebuild the same transaction in verbatim form so the legacy
-		// encoding diverges from the normalized one.
+		// Pre-#11907 binaries saw canonicalized (`\\?\`) paths and registered
+		// them as-is; rebuild the same transaction in verbatim form so the
+		// legacy encoding diverges from the normalized one.
 		let verbatim = Context::new(
 			context.home,
 			PathBuf::from(format!(r"\\?\{}", context.directory.display())),

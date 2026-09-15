@@ -1041,7 +1041,8 @@ fn ast_edit_blocking(
 	let mut files_touched = 0u32;
 	let mut limit_reached = false;
 	// Stage writes in memory so a later compute error cannot leave earlier
-	// files partially modified on disk; flush only after the whole pass succeeds.
+	// files partially modified on disk; flush only after the whole pass
+	// succeeds.
 	let mut pending_writes: Vec<PendingWrite> = Vec::new();
 
 	for resolved in &resolved_candidates {
@@ -1102,9 +1103,9 @@ fn ast_edit_blocking(
 			for matched in ast.root().find_all(compiled.clone()) {
 				ct.heartbeat()?;
 				let edit = matched.replace_by(rewrite);
-				// Multiple rules matching the same node with the same output are one
-				// deterministic edit; list and count it once instead of staging a
-				// duplicate that trips the apply-time overlap check.
+				// Multiple rules matching the same node with the same output are
+				// one deterministic edit; list and count it once instead of
+				// staging a duplicate that trips the apply-time overlap check.
 				let duplicate = file_changes.iter().any(|entry: &PendingFileChange| {
 					entry.edit.position == edit.position
 						&& entry.edit.deleted_length == edit.deleted_length
@@ -1458,11 +1459,12 @@ mod tests {
 			.as_nanos();
 		let root = std::env::temp_dir().join(format!("pi-ast-apply-fail-{unique}"));
 		fs::create_dir_all(&root).expect("temp apply-fail dir should be created");
-		// `a.ts` rewrites cleanly under both rules (one applies, the other doesn't
-		// match).
+		// `a.ts` rewrites cleanly under both rules (one applies, the other
+		// doesn't match).
 		fs::write(root.join("a.ts"), "const a = bar;\n").expect("temp file a.ts should be written");
-		// `b.ts` matches both rules with nested ranges (`foo(bar)` contains `bar`),
-		// so `apply_edits` rejects the combined edit set with an overlap error.
+		// `b.ts` matches both rules with nested ranges (`foo(bar)` contains
+		// `bar`), so `apply_edits` rejects the combined edit set with an
+		// overlap error.
 		fs::write(root.join("b.ts"), "const b = foo(bar);\n")
 			.expect("temp file b.ts should be written");
 		TempTree { root }

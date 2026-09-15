@@ -76,6 +76,21 @@ describe("CustomEditor draft restore", () => {
 		expect(chips).toHaveLength(1);
 		expect(chips[0]).toMatchObject({ kind: "paste", n: 2 });
 	});
+
+	it("reuses attachment chips until text or attachment state changes", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setDraft("[Image #1]", [image]);
+		const initial = editor.composerChips();
+		expect(editor.composerChips()).toBe(initial);
+
+		editor.handleInput("\x7f");
+		expect(editor.composerChips()).toEqual([]);
+		editor.handleInput("\x1f");
+		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: undefined }]);
+
+		editor.pendingImageLinks = ["file:///tmp/image.png"];
+		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: "file:///tmp/image.png" }]);
+	});
 });
 
 describe("cleared draft recall", () => {

@@ -4,12 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { encodeArchive } from "../src/ar";
 import {
-	Browser,
 	BrowserPlatform,
 	computeExecutablePath,
 	detectBrowserPlatform,
 	getDownloadUrl,
-	getInstalledBrowsers,
 	install,
 } from "../src/browsers";
 
@@ -79,68 +77,28 @@ describe("Chrome-for-Testing layout goldens", () => {
 
 	for (const golden of goldens) {
 		test(golden.platform, () => {
-			expect(String(getDownloadUrl(Browser.CHROME, golden.platform, BUILD_ID))).toBe(golden.url);
-			expect(
-				computeExecutablePath({
-					browser: Browser.CHROME,
-					platform: golden.platform,
-					buildId: BUILD_ID,
-					cacheDir: "/cache",
-				}),
-			).toBe(golden.executable);
+			expect(String(getDownloadUrl(golden.platform, BUILD_ID))).toBe(golden.url);
+			expect(computeExecutablePath({ platform: golden.platform, buildId: BUILD_ID, cacheDir: "/cache" })).toBe(
+				golden.executable,
+			);
 		});
 	}
 });
 
 test("Chrome-for-Testing rejects linux/arm64 before producing archive or cache paths", async () => {
 	const unsupported = "Chrome for Testing does not provide linux/arm64 builds";
-	expect(() => getDownloadUrl(Browser.CHROME, BrowserPlatform.LINUX_ARM, BUILD_ID)).toThrow(unsupported);
+	expect(() => getDownloadUrl(BrowserPlatform.LINUX_ARM, BUILD_ID)).toThrow(unsupported);
 	expect(() =>
-		computeExecutablePath({
-			browser: Browser.CHROME,
-			platform: BrowserPlatform.LINUX_ARM,
-			buildId: BUILD_ID,
-			cacheDir: "/cache",
-		}),
+		computeExecutablePath({ platform: BrowserPlatform.LINUX_ARM, buildId: BUILD_ID, cacheDir: "/cache" }),
 	).toThrow(unsupported);
 	await expect(
 		install({
-			browser: Browser.CHROME,
 			platform: BrowserPlatform.LINUX_ARM,
 			buildId: BUILD_ID,
 			cacheDir: "/cache",
 			baseUrl: "http://127.0.0.1:1",
 		}),
 	).rejects.toThrow(unsupported);
-});
-
-test("detectBrowserPlatform maps the current supported host", () => {
-	const platform = detectBrowserPlatform();
-	if (process.platform === "darwin")
-		expect(platform).toBe(process.arch === "arm64" ? BrowserPlatform.MAC_ARM : BrowserPlatform.MAC);
-	else if (process.platform === "linux")
-		expect(platform).toBe(process.arch === "arm64" ? BrowserPlatform.LINUX_ARM : BrowserPlatform.LINUX);
-	else if (process.platform === "win32")
-		expect(platform).toBe(process.arch === "ia32" ? BrowserPlatform.WIN32 : BrowserPlatform.WIN64);
-});
-
-test("getInstalledBrowsers scans only valid cache installation names", async () => {
-	const root = await makeRoot();
-	await Promise.all([
-		fs.mkdir(path.join(root, "chrome", `linux-${BUILD_ID}`), { recursive: true }),
-		fs.mkdir(path.join(root, "chrome", "not-an-install"), { recursive: true }),
-		fs.mkdir(path.join(root, "unknown", `linux-${BUILD_ID}`), { recursive: true }),
-	]);
-	const installed = await getInstalledBrowsers({ cacheDir: root });
-	expect(installed).toEqual([
-		{
-			browser: Browser.CHROME,
-			buildId: BUILD_ID,
-			platform: BrowserPlatform.LINUX,
-			path: path.join(root, "chrome", `linux-${BUILD_ID}`),
-			executablePath: path.join(root, "chrome", `linux-${BUILD_ID}`, "chrome-linux64", "chrome"),
-		},
-	]);
 });
 
 test("install streams and extracts stored, deflated, nested, executable, and symlink entries", async () => {
@@ -150,7 +108,6 @@ test("install streams and extracts stored, deflated, nested, executable, and sym
 	const progress: Array<{ downloadedBytes: number; totalBytes: number }> = [];
 	try {
 		const installed = await install({
-			browser: Browser.CHROME,
 			platform: BrowserPlatform.LINUX,
 			buildId: BUILD_ID,
 			cacheDir: root,
@@ -186,7 +143,6 @@ test("install extracts a member larger than the default 64 MiB archive cap", asy
 	const server = Bun.serve({ port: 0, fetch: () => new Response(new Blob([zip])) });
 	try {
 		const installed = await install({
-			browser: Browser.CHROME,
 			platform: BrowserPlatform.LINUX,
 			buildId: BUILD_ID,
 			cacheDir: root,
@@ -207,13 +163,7 @@ test("install rejects archive traversal", async () => {
 		// succeeds without them and the install fails its executable check —
 		// nothing may escape the cache root either way.
 		await expect(
-			install({
-				browser: Browser.CHROME,
-				platform: BrowserPlatform.LINUX,
-				buildId: BUILD_ID,
-				cacheDir: root,
-				baseUrl: String(server.url),
-			}),
+			install({ platform: BrowserPlatform.LINUX, buildId: BUILD_ID, cacheDir: root, baseUrl: String(server.url) }),
 		).rejects.toThrow("did not contain its expected executable");
 		expect(await fs.readdir(root)).not.toContain("escaped.txt");
 	} finally {
@@ -236,13 +186,7 @@ test("concurrent installs download once without replacing the winner's browser",
 			return new Response(fixture);
 		},
 	});
-	const options = {
-		browser: Browser.CHROME,
-		platform: BrowserPlatform.LINUX,
-		buildId: BUILD_ID,
-		cacheDir: root,
-		baseUrl: String(server.url),
-	};
+	const options = { platform: BrowserPlatform.LINUX, buildId: BUILD_ID, cacheDir: root, baseUrl: String(server.url) };
 	try {
 		const first = install(options);
 		const second = install(options);
@@ -280,7 +224,6 @@ test("a timed-out download releases its lock and partial archive so installation
 		},
 	});
 	const options = {
-		browser: Browser.CHROME,
 		platform: BrowserPlatform.LINUX,
 		buildId: BUILD_ID,
 		cacheDir: root,
@@ -312,7 +255,7 @@ networkTest(
 		const root = await makeRoot();
 		const platform = detectBrowserPlatform();
 		if (!platform) throw new Error("Network browser test requires a supported platform");
-		const installed = await install({ browser: Browser.CHROME, platform, buildId: BUILD_ID, cacheDir: root });
+		const installed = await install({ platform, buildId: BUILD_ID, cacheDir: root });
 		expect((await fs.stat(installed.executablePath)).isFile()).toBe(true);
 	},
 	300_000,

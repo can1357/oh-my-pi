@@ -1041,7 +1041,13 @@ export interface AssistantMessage {
 	 * providers that expose no such field.
 	 */
 	upstreamProvider?: string;
-	/** Provider-reported concrete model when a router selected one for this turn. */
+	/**
+	 * Concrete model that produced this turn when it is knowable independently
+	 * of the requested id: reported by a router that selected one, or recovered
+	 * from a signed thinking block (Anthropic signatures name the serving
+	 * model). Compared against `model` to notice a gateway serving something
+	 * other than what was requested.
+	 */
 	upstreamModel?: string;
 	usage: Usage;
 	stopReason: StopReason;

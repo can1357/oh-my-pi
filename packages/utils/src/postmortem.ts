@@ -7,8 +7,6 @@
  */
 
 import * as fs from "node:fs";
-import inspector from "node:inspector";
-import { isMainThread } from "node:worker_threads";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
 
@@ -422,22 +420,24 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 export async function fatal(error: unknown): Promise<never> {
 	const err = error instanceof Error ? error : new Error(String(error));
 	const output = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n${formatFatalRecoveryHints()}`;
-	if (!isMainThread) {
+	if (!Bun.isMainThread) {
 		process.stderr.write(output);
 		process.exit(1);
 	}
 	return exitAfterFatal(output, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
-if (isMainThread) {
+if (Bun.isMainThread) {
 	process
 		.on("SIGINT", async () => {
 			await runCleanup(Reason.SIGINT);
 			exitProcess(130); // 128 + SIGINT (2)
 		})
-		.on("SIGUSR1", () => {
+		.on("SIGUSR1", async () => {
 			if (inspectorOpened) return;
 			inspectorOpened = true;
+			// Signal-only boundary: successful startup never constructs inspector.
+			const { default: inspector } = await import("node:inspector");
 			inspector.open(undefined, undefined, false);
 			const url = inspector.url();
 			process.stderr.write(`Inspector opened: ${url}\n`);
@@ -656,7 +656,7 @@ export async function drainStdout(): Promise<void> {
 async function runQuit(code: number, exitMode: "guarded" | "native", options: QuitOptions = {}): Promise<void> {
 	await runCleanup(Reason.MANUAL);
 
-	if (!isMainThread) {
+	if (!Bun.isMainThread) {
 		return; // Workers: cleanup done, let worker exit naturally
 	}
 

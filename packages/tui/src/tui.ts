@@ -14,10 +14,14 @@
  */
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
-import { $flag, getDebugLogPath, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getDebugLogPath } from "@oh-my-pi/pi-utils/dirs";
+import { $flag } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
+import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
@@ -38,6 +42,7 @@ import {
 import {
 	Ellipsis,
 	extractSegments,
+	getWidthConfigEpoch,
 	isOsc66Line,
 	normalizeTerminalOutput,
 	osc66MaxScale,
@@ -522,7 +527,24 @@ interface HardwareCursorState {
 interface PreparedLine {
 	raw: string;
 	width: number;
+	widthEpoch: number;
+	imageProtocol: ImageProtocol | null;
 	line: string;
+	terminalContent: string;
+	asciiWidth: number | undefined;
+	isImage: boolean;
+	hasOsc8: boolean;
+}
+
+interface PreparedLines {
+	lines: string[];
+	rows: PreparedLine[];
+}
+
+interface LineClassification {
+	asciiWidth: number | undefined;
+	isImage: boolean;
+	hasOsc8: boolean;
 }
 
 // SGR coalescing. The renderer's component tree emits a styled span as
@@ -538,10 +560,14 @@ interface PreparedLine {
 // must process. On by default; `PI_NO_SGR_COALESCE=1` disables it.
 const SGR_COALESCE_ENABLED = !$flag("PI_NO_SGR_COALESCE");
 const CC_ESC = 0x1b;
+const CC_KITTY_PLACEHOLDER_HIGH = KITTY_PLACEHOLDER.charCodeAt(0);
 const CC_BRACKET = 0x5b; // [
 const CC_M = 0x6d; // m
 const CC_SEMI = 0x3b; // ;
 const CC_COLON = 0x3a; // :
+const ANSI_TEXT = 0;
+const ANSI_CSI = 1;
+const ANSI_OSC = 2;
 // Max parameter tokens per emitted merged SGR. Kept well under xterm.js's
 // 32-param cap (and the tighter limits of some real terminals) so a long
 // adjacent run is split into several valid CSIs instead of overflowing one.
@@ -726,7 +752,11 @@ export class TUI extends Container {
 	#cprColumnTags = new Map<number, number>();
 	#cprProbeSeq = 0;
 	// Prepared rows painted by the previous provider frame, for row diffing.
+	// The structured sidecar owns classification/coalescing results for reuse;
+	// #providerWindow remains the exact normalized string projection used by
+	// the established differential comparison and resize accounting.
 	#providerWindow: string[] = [];
+	#providerPreparedRows: PreparedLine[] = [];
 	#previousFrameLength = 0;
 	#previousWidth = 0;
 	#previousHeight = 0;
@@ -839,6 +869,7 @@ export class TUI extends Container {
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
 	#inlineMouseProvider: (() => boolean) | undefined;
 	#altPreviousLines: string[] = [];
+	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
 	#altEnterHeight = 0;
 	#resizeAltActive = false;
@@ -886,6 +917,7 @@ export class TUI extends Container {
 	setFrameProvider(provider: TerminalFrameProvider | undefined): void {
 		this.#frameProvider = provider;
 		this.#providerWindow = [];
+		this.#providerPreparedRows = [];
 		this.#resizeReplaySize = undefined;
 		this.requestRender(true);
 	}
@@ -1415,6 +1447,7 @@ export class TUI extends Container {
 			this.#resizeAltActive = true;
 			setAltScreenActive(true);
 			this.#altPreviousLines = [];
+			this.#altPreparedRows = [];
 			this.#forgetHardwareCursorState();
 			this.#recordHardwareCursorHidden();
 			// Blank the live region up front so a reflow-driven scroll can only push
@@ -1435,6 +1468,7 @@ export class TUI extends Container {
 				// viewport top and overwrite visible committed rows.
 				this.#resizeProbeOffset = 0;
 				this.#providerWindow = [];
+				this.#providerPreparedRows = [];
 				this.#parkedViewportOffset = 0;
 			}
 			if (this.#hasEverRendered && this.#providerWindow.length > 0 && isInsideTerminalMultiplexer()) {
@@ -1446,6 +1480,7 @@ export class TUI extends Container {
 				// settled repaint overwrites the live region at the clip-model anchor
 				// and erases below it, race-free after the quiet window.
 				this.#providerWindow = [];
+				this.#providerPreparedRows = [];
 				this.#parkedViewportOffset = 0;
 			}
 			this.#noteAltBufferToggle();
@@ -1461,6 +1496,7 @@ export class TUI extends Container {
 			this.terminal.write(`${this.#keyboardEnhancementExit()}\x1b[?1049l`);
 			setAltScreenActive(false);
 			this.#altPreviousLines = [];
+			this.#altPreparedRows = [];
 			this.#beginResizeAnchorProbe();
 		}, TUI.#RESIZE_VIEWPORT_SETTLE_MS);
 		this.requestRender(true);
@@ -1658,7 +1694,7 @@ export class TUI extends Container {
 		} while (this.#imageBudget.endPass());
 		const viewport = rendered.length > height ? rendered.slice(rendered.length - height) : Array.from(rendered);
 		this.#extractCursorMarkers(viewport);
-		this.#emitAltFrame(this.#prepareLinesArray(viewport, width), width, height);
+		this.#emitAltFrame(this.#prepareLinesArray(viewport, width, this.#altPreparedRows, height), width, height);
 	}
 
 	/**
@@ -1883,6 +1919,7 @@ export class TUI extends Container {
 			this.#altActive = false;
 			this.#mouseTracking = "off";
 			this.#altPreviousLines = [];
+			this.#altPreparedRows = [];
 			this.#pendingAltExit = "";
 		} else if (this.#mouseTracking !== "off") {
 			// Inline capture with no overlay: still owned by us at quit, so
@@ -2509,10 +2546,8 @@ export class TUI extends Container {
 		});
 	}
 
-	#terminalLine(line: string, screenRow = -1, frameRow = -1, committedTo = -1): string {
-		if (TERMINAL.isImageLine(line)) return this.#imageLineSequence(line, screenRow, frameRow, committedTo);
-		const coalesced = coalesceAdjacentSgr(line);
-		return coalesced + (line.includes("\x1b]8;") ? LINE_TERMINATOR : SEGMENT_RESET);
+	#terminalLine(line: PreparedLine): string {
+		return line.terminalContent + (line.hasOsc8 ? LINE_TERMINATOR : SEGMENT_RESET);
 	}
 	#renderProviderFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
@@ -2659,9 +2694,9 @@ export class TUI extends Container {
 			}
 		}
 		const markers = this.#extractCursorMarkers(viewport);
-		const prepared = this.#prepareLinesArray(viewport, width);
+		const prepared = this.#prepareLinesArray(viewport, width, this.#providerPreparedRows);
 		const preparedHistory = this.#prepareLinesArray(historyRows, width);
-		const rows = prepared.length;
+		const rows = prepared.lines.length;
 		// Destructive reset (session replace, /tree, explicit clear, or a settled
 		// resize in rebuild mode): erase native history and the viewport,
 		// then repaint from row zero.
@@ -2669,6 +2704,7 @@ export class TUI extends Container {
 		if (destructiveReset) {
 			this.#providerViewportTop = 0;
 			this.#providerWindow = [];
+			this.#providerPreparedRows = [];
 		}
 		// The viewport stays anchored directly below whatever history remains on
 		// screen. Appending K history rows moves the anchor down by K; the write
@@ -2709,14 +2745,23 @@ export class TUI extends Container {
 			this.#providerWindow.length > 0;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
-				if (this.#providerWindow[index] === prepared[index]) continue;
+				const previous = this.#providerPreparedRows[index];
+				const current = prepared.rows[index]!;
+				if (
+					this.#providerWindow[index] === prepared.lines[index] &&
+					previous !== undefined &&
+					previous.widthEpoch === current.widthEpoch &&
+					previous.imageProtocol === current.imageProtocol
+				) {
+					continue;
+				}
 				buffer += `\x1b[${newTop + index + 1};1H${this.#lineRewriteSequence(
-					prepared[index] ?? "",
+					current,
 					width,
 					newTop + index,
 					-1,
 					-1,
-					this.#osc66SpacerGlyphWidth(prepared, index),
+					this.#osc66SpacerGlyphWidth(prepared.lines, index),
 				)}`;
 			}
 			if (this.#providerWindow.length > rows && newTop + rows < height) {
@@ -2728,40 +2773,41 @@ export class TUI extends Container {
 			// old viewport are committed history (correct to push), but old live
 			// viewport rows are not — erase them first so a scroll can only push
 			// committed rows and blanks, never an unfinished frame.
-			const pushed = Math.max(0, startTop + preparedHistory.length + rows - height);
+			const pushed = Math.max(0, startTop + preparedHistory.lines.length + rows - height);
 			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
 				buffer += this.#eraseBelowRow(this.#providerViewportTop, height);
 			}
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;
-			for (let index = 0; index < preparedHistory.length; index++) {
+			for (let index = 0; index < preparedHistory.lines.length; index++) {
 				if (screenRow > startTop) buffer += "\r\n";
 				buffer += this.#lineRewriteSequence(
-					preparedHistory[index] ?? "",
+					preparedHistory.rows[index]!,
 					width,
 					Math.min(screenRow, height - 1),
 					-1,
 					-1,
-					this.#osc66SpacerGlyphWidth(preparedHistory, index),
+					this.#osc66SpacerGlyphWidth(preparedHistory.lines, index),
 				);
 				screenRow++;
 			}
 			for (let index = 0; index < rows; index++) {
 				if (screenRow > startTop) buffer += "\r\n";
 				buffer += this.#lineRewriteSequence(
-					prepared[index] ?? "",
+					prepared.rows[index]!,
 					width,
 					Math.min(screenRow, height - 1),
 					-1,
 					-1,
-					this.#osc66SpacerGlyphWidth(prepared, index),
+					this.#osc66SpacerGlyphWidth(prepared.lines, index),
 				);
 				screenRow++;
 			}
 			if (newTop + rows < height) buffer += `\x1b[${newTop + rows + 1};1H\x1b[J`;
 		}
 		const mutableTop = newTop + replayViewportRows;
-		const mutablePrepared = replayViewportRows > 0 ? prepared.slice(replayViewportRows) : prepared;
+		const mutablePreparedLines = replayViewportRows > 0 ? prepared.lines.slice(replayViewportRows) : prepared.lines;
+		const mutablePreparedRows = replayViewportRows > 0 ? prepared.rows.slice(replayViewportRows) : prepared.rows;
 		const marker = markers[0];
 		const target =
 			marker !== undefined && rows > 0
@@ -2780,7 +2826,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#debugPaint = {
-			lines: prepared,
+			lines: prepared.lines,
 			windowTop: this.#debugNextWindowTop,
 			altScreen: false,
 			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
@@ -2792,7 +2838,8 @@ export class TUI extends Container {
 		}
 		if (target) this.#recordHardwareCursorState(target);
 		else this.#recordHardwareCursorHidden();
-		this.#providerWindow = mutablePrepared;
+		this.#providerWindow = mutablePreparedLines;
+		this.#providerPreparedRows = mutablePreparedRows;
 		this.#providerViewportTop = mutableTop;
 		this.#providerViewportPadTop = replayViewportRows - replayPrependedBlanks;
 		this.#previousWidth = width;
@@ -2800,7 +2847,7 @@ export class TUI extends Container {
 		this.#resizeBurstGrew = false;
 		this.#resizeBurstLastHeight = undefined;
 		this.#resizeBurstPull = 0;
-		this.#previousFrameLength = mutablePrepared.length;
+		this.#previousFrameLength = mutablePreparedLines.length;
 		this.#clearScrollbackOnNextRender = false;
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#hasEverRendered = true;
@@ -2864,6 +2911,7 @@ export class TUI extends Container {
 			this.#recordHardwareCursorHidden();
 			this.#altActive = true;
 			this.#altPreviousLines = [];
+			this.#altPreparedRows = [];
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
 		} else if (!wantAlt && this.#altActive) {
@@ -2891,6 +2939,7 @@ export class TUI extends Container {
 			this.#altActive = false;
 			this.#mouseTracking = wantMouse;
 			this.#altPreviousLines = [];
+			this.#altPreparedRows = [];
 			// The alt-buffer restore put the pre-overlay normal screen back. If
 			// that buffer resized while covered, its cursor moved with width
 			// rewrap or a height-grow scrollback pull, while our viewport anchor
@@ -2935,38 +2984,115 @@ export class TUI extends Container {
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
 	}
 
-	/** Stateless variant for overlay-composited windows and alt-screen frames. */
-	#prepareLinesArray(lines: readonly string[], width: number): string[] {
+	/**
+	 * Prepare one string projection plus its structured write sidecar. A prior
+	 * sidecar entry is reusable only under identical raw content, width, width
+	 * configuration, and image protocol; those are every mutable input to
+	 * normalization, fitting, classification, and terminal coalescing.
+	 */
+	#prepareLinesArray(
+		lines: readonly string[],
+		width: number,
+		previous: readonly PreparedLine[] = [],
+		length = lines.length,
+	): PreparedLines {
 		// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
-		const prepared: string[] = new Array(lines.length);
-		for (let i = 0; i < lines.length; i++) {
-			prepared[i] = this.#prepareLine(lines[i]!, width).line;
+		const prepared: string[] = new Array(length);
+		// oxlint-disable-next-line unicorn/no-new-array -- render-frame sidecar preallocation
+		const rows: PreparedLine[] = new Array(length);
+		const widthEpoch = getWidthConfigEpoch();
+		const imageProtocol = TERMINAL.imageProtocol;
+		for (let i = 0; i < length; i++) {
+			const raw = lines[i] ?? "";
+			const cached = previous[i];
+			const row =
+				cached !== undefined &&
+				cached.raw === raw &&
+				cached.width === width &&
+				cached.widthEpoch === widthEpoch &&
+				cached.imageProtocol === imageProtocol
+					? cached
+					: this.#prepareLine(raw, width, widthEpoch, imageProtocol);
+			prepared[i] = row.line;
+			rows[i] = row;
 		}
-		return prepared;
+		return { lines: prepared, rows };
 	}
 
-	#prepareLine(raw: string, width: number): PreparedLine {
-		if (TERMINAL.isImageLine(raw)) {
-			return { raw, width, line: raw };
-		}
-		const source = this.#lineFitSource(raw, width);
-		const normalized = normalizeTerminalOutput(source);
-		const asciiWidth = this.#ansiAsciiLineWidth(normalized, width);
-		if ((asciiWidth ?? visibleWidth(normalized)) <= width) {
-			return { raw, width, line: normalized };
-		}
-		const line = truncateToWidth(normalized, width, Ellipsis.Omit);
-		return { raw, width, line };
-	}
-
-	#lineFitSource(raw: string, width: number): string {
+	#prepareLine(raw: string, width: number, widthEpoch: number, imageProtocol: ImageProtocol | null): PreparedLine {
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.trunc(width)) : 1;
 		const maxSourceLength = Math.min(
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
 		);
-		if (raw.length <= maxSourceLength) return raw;
 
+		let source: string;
+		let classification: LineClassification;
+		if (raw.length <= maxSourceLength) {
+			// The overwhelmingly common path classifies image markers, OSC 8,
+			// ANSI validity, OSC 66, non-ASCII, and exact ASCII width together.
+			classification = this.#classifyLine(raw, safeWidth);
+			if (classification.isImage) {
+				return {
+					raw,
+					width,
+					widthEpoch,
+					imageProtocol,
+					line: raw,
+					terminalContent: raw,
+					asciiWidth: undefined,
+					isImage: true,
+					hasOsc8: false,
+				};
+			}
+			source = raw;
+		} else {
+			// Fitting a giant source can discard everything after the visible
+			// prefix. Preserve image rows verbatim first, but do not scan the
+			// entire source for width/OSC metadata that will immediately vanish.
+			if (TERMINAL.isImageLine(raw)) {
+				return {
+					raw,
+					width,
+					widthEpoch,
+					imageProtocol,
+					line: raw,
+					terminalContent: raw,
+					asciiWidth: undefined,
+					isImage: true,
+					hasOsc8: false,
+				};
+			}
+			source = this.#lineFitSource(raw, safeWidth, maxSourceLength);
+			// Preserve the former lineRewriteSequence classification: fitting can
+			// move a marker from outside the raw scan window into the prepared
+			// line's window, at which point terminal image dispatch owns it.
+			classification = this.#classifyLine(source, safeWidth);
+		}
+
+		const normalized = normalizeTerminalOutput(source);
+		// Normalization only decomposes Thai/Lao AM vowels. It cannot introduce
+		// or remove ANSI/image markers, and such a row was already non-ASCII, so
+		// the source classification remains exact when normalization allocates.
+		let line = normalized;
+		if ((classification.asciiWidth ?? visibleWidth(normalized)) > width) {
+			line = truncateToWidth(normalized, width, Ellipsis.Omit);
+			classification = this.#classifyLine(line, safeWidth);
+		}
+		return {
+			raw,
+			width,
+			widthEpoch,
+			imageProtocol,
+			line,
+			terminalContent: classification.isImage ? line : coalesceAdjacentSgr(line),
+			asciiWidth: classification.asciiWidth,
+			isImage: classification.isImage,
+			hasOsc8: classification.isImage ? false : classification.hasOsc8,
+		};
+	}
+
+	#lineFitSource(raw: string, safeWidth: number, maxSourceLength: number): string {
 		let output = "";
 		let cells = 0;
 		for (let i = 0; i < raw.length && cells < safeWidth;) {
@@ -3063,57 +3189,78 @@ export class TUI extends Container {
 		);
 	}
 
-	#ansiAsciiLineWidth(line: string, maxWidth: number): number | undefined {
+	/**
+	 * One code-unit pass classifies every per-row write decision. Image markers
+	 * are checked before ANSI state consumes their bytes, preserving the legacy
+	 * "marker anywhere in the protocol window" behavior even inside malformed
+	 * control strings. Width saturates once it is known to exceed the viewport,
+	 * while the pass continues for image and OSC 8 markers.
+	 */
+	#classifyLine(line: string, maxWidth: number): LineClassification {
 		let col = 0;
-		for (let i = 0; i < line.length;) {
+		let ascii = true;
+		let hasOsc8 = false;
+		let state: typeof ANSI_TEXT | typeof ANSI_CSI | typeof ANSI_OSC = ANSI_TEXT;
+
+		for (let i = 0; i < line.length; i++) {
 			const code = line.charCodeAt(i);
+			if ((code === CC_ESC || code === CC_KITTY_PLACEHOLDER_HIGH) && TERMINAL.hasImageMarkerAt(line, i)) {
+				return { asciiWidth: undefined, isImage: true, hasOsc8 };
+			}
+			if (
+				code === 0x1b &&
+				line.charCodeAt(i + 1) === 0x5d &&
+				line.charCodeAt(i + 2) === 0x38 &&
+				line.charCodeAt(i + 3) === 0x3b
+			) {
+				hasOsc8 = true;
+			}
+
+			if (state === ANSI_CSI) {
+				if (code >= 0x40 && code <= 0x7e) state = ANSI_TEXT;
+				continue;
+			}
+			if (state === ANSI_OSC) {
+				if (code === 0x07) {
+					state = ANSI_TEXT;
+				} else if (code === 0x1b && line.charCodeAt(i + 1) === 0x5c) {
+					state = ANSI_TEXT;
+					i++;
+				}
+				continue;
+			}
 			if (code === 0x1b) {
 				const next = line.charCodeAt(i + 1);
 				if (next === 0x5b) {
-					let j = i + 2;
-					while (j < line.length) {
-						const final = line.charCodeAt(j);
-						if (final >= 0x40 && final <= 0x7e) break;
-						j++;
-					}
-					if (j >= line.length) return undefined;
-					i = j + 1;
+					state = ANSI_CSI;
+					i++;
 					continue;
 				}
 				if (next === 0x5d) {
-					// OSC 66 text-sizing spans carry visible payload inside the OSC.
-					// Fall back to visibleWidth() so scaled cells stay exact.
+					// OSC 66 text-sizing spans carry visible payload inside the
+					// control string. Defer to visibleWidth() for their scaled cells.
 					if (
 						line.charCodeAt(i + 2) === 0x36 &&
 						line.charCodeAt(i + 3) === 0x36 &&
 						line.charCodeAt(i + 4) === 0x3b
 					) {
-						return undefined;
+						ascii = false;
 					}
-					let j = i + 2;
-					while (j < line.length) {
-						const osc = line.charCodeAt(j);
-						if (osc === 0x07) {
-							i = j + 1;
-							break;
-						}
-						if (osc === 0x1b && line.charCodeAt(j + 1) === 0x5c) {
-							i = j + 2;
-							break;
-						}
-						j++;
-					}
-					if (j >= line.length) return undefined;
+					state = ANSI_OSC;
+					i++;
 					continue;
 				}
-				return undefined;
+				ascii = false;
+				continue;
 			}
-			if (code < 0x20 || code > 0x7e) return undefined;
-			col++;
-			if (col > maxWidth) return col;
-			i++;
+			if (code < 0x20 || code > 0x7e) {
+				ascii = false;
+				continue;
+			}
+			if (ascii && col <= maxWidth) col++;
 		}
-		return col;
+		if (state !== ANSI_TEXT) ascii = false;
+		return { asciiWidth: ascii ? col : undefined, isImage: false, hasOsc8 };
 	}
 
 	/**
@@ -3137,7 +3284,7 @@ export class TUI extends Container {
 	}
 
 	#lineRewriteSequence(
-		line: string,
+		line: PreparedLine,
 		width: number,
 		screenRow = -1,
 		frameRow = -1,
@@ -3154,15 +3301,14 @@ export class TUI extends Container {
 			if (spacerGlyphWidth >= width) return "";
 			return `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
 		}
-		if (TERMINAL.isImageLine(line)) {
-			return ERASE_LINE + this.#imageLineSequence(line, screenRow, frameRow, committedTo);
+		if (line.isImage) {
+			return ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, committedTo);
 		}
 		const terminalLine = this.#terminalLine(line);
-		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
-		if (asciiWidth !== undefined) {
+		if (line.asciiWidth !== undefined) {
 			// Exact width model: skip the erase only when the row truly fills
 			// the line (an EL there would eat the last cell via pending-wrap).
-			return asciiWidth >= width ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
+			return line.asciiWidth >= width ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
 		}
 		// Non-ASCII rows: the native measure can over-count combining-heavy
 		// scripts, so a row it calls "full" may render short and leave stale
@@ -3228,10 +3374,10 @@ export class TUI extends Container {
 	#renderAltFrame(width: number, height: number): void {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const base: string[] = new Array(Math.max(0, height)).fill("");
-		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
+		const lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		this.#extractCursorMarkers(lines);
-		lines = this.#prepareLinesArray(lines, width);
-		this.#emitAltFrame(lines, width, height);
+		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height);
+		this.#emitAltFrame(prepared, width, height);
 	}
 
 	/**
@@ -3239,10 +3385,7 @@ export class TUI extends Container {
 	 * brackets, a cursor home, and per-row rewrites — never ED3 or any
 	 * native-scrollback byte. The hardware cursor stays hidden here.
 	 */
-	#emitAltFrame(lines: string[], width: number, height: number): void {
-		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
-		const fitted: string[] = new Array(height);
-		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
+	#emitAltFrame(prepared: PreparedLines, width: number, height: number): void {
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
 		// paint so id-keyed placements and placeholder cells composed into this
 		// frame resolve against loaded data. The normal-screen path flushes these
@@ -3264,22 +3407,42 @@ export class TUI extends Container {
 		if (!force && this.#altPreviousLines.length === height) {
 			let same = true;
 			for (let r = 0; r < height; r++) {
-				if (fitted[r] !== this.#altPreviousLines[r]) {
+				const previous = this.#altPreparedRows[r];
+				const current = prepared.rows[r]!;
+				if (
+					prepared.lines[r] !== this.#altPreviousLines[r] ||
+					previous === undefined ||
+					previous.width !== current.width ||
+					previous.widthEpoch !== current.widthEpoch ||
+					previous.imageProtocol !== current.imageProtocol
+				) {
 					same = false;
 					break;
 				}
 			}
-			if (same) return;
+			if (same) {
+				this.#altPreviousLines = prepared.lines;
+				this.#altPreparedRows = prepared.rows;
+				return;
+			}
 		}
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
-			buffer += this.#lineRewriteSequence(fitted[r], width, r, -1, -1, this.#osc66SpacerGlyphWidth(fitted, r));
+			buffer += this.#lineRewriteSequence(
+				prepared.rows[r]!,
+				width,
+				r,
+				-1,
+				-1,
+				this.#osc66SpacerGlyphWidth(prepared.lines, r),
+			);
 		}
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
-		this.#altPreviousLines = fitted;
-		this.#debugPaint = { lines: fitted, windowTop: 0, altScreen: true };
+		this.#altPreviousLines = prepared.lines;
+		this.#altPreparedRows = prepared.rows;
+		this.#debugPaint = { lines: prepared.lines, windowTop: 0, altScreen: true };
 		this.#fullRedrawCount += 1;
 	}
 }

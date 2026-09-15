@@ -101,7 +101,7 @@ describe("google-vertex model catalog", () => {
 		expect(result.models.some(model => model.id === "gemini-1.5-pro")).toBe(false);
 	});
 
-	it("invalidates cached Gemini 3.7 Flash effort metadata on upgrade (#10543)", async () => {
+	it("invalidates cached Gemini 3.7/3.8 Flash effort metadata on upgrade (#10543)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-flash37-cache-"));
 		try {
 			for (const [providerId, options] of [
@@ -109,27 +109,32 @@ describe("google-vertex model catalog", () => {
 				["google-vertex", googleVertexModelManagerOptions()],
 			] as const) {
 				const bundledModels = getBundledModels(providerId);
-				const current = bundledModels.find(model => model.id === "gemini-3.7-flash");
-				if (!current?.thinking) throw new Error(`${providerId} Gemini 3.7 Flash is missing thinking metadata`);
-				const stale = {
-					...current,
-					thinking: {
-						...current.thinking,
-						efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
-					},
-				};
+				const currentIds = ["gemini-3.7-flash", "gemini-3.8-flash"];
+				const stale = currentIds.map(id => {
+					const current = bundledModels.find(model => model.id === id);
+					if (!current?.thinking) throw new Error(`${providerId} ${id} is missing thinking metadata`);
+					return {
+						...current,
+						thinking: {
+							...current.thinking,
+							efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+						},
+					};
+				});
 				const cacheDbPath = path.join(tempDir, `${providerId}.db`);
-				writeModelCache(providerId, Date.now(), [stale], true, "merge-v3:pre-10543", cacheDbPath);
+				writeModelCache(providerId, Date.now(), stale, true, "merge-v3:pre-10543", cacheDbPath);
 
 				const result = await resolveProviderModels(
 					{ ...options, staticModels: bundledModels, cacheDbPath },
 					"offline",
 				);
-				expect(result.models.find(model => model.id === current.id)?.thinking?.efforts).toEqual([
-					Effort.Low,
-					Effort.Medium,
-					Effort.High,
-				]);
+				for (const id of currentIds) {
+					expect(result.models.find(model => model.id === id)?.thinking?.efforts).toEqual([
+						Effort.Low,
+						Effort.Medium,
+						Effort.High,
+					]);
+				}
 			}
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
