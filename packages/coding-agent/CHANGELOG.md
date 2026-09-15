@@ -6,6 +6,10 @@
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
 
+### Fixed
+
+- Fixed `--prewalk-into @default` preserving the configured default role when an explicit `--model` selects the startup model, including ordered fallbacks and discovery-backed candidates ([#12191](https://github.com/can1357/oh-my-pi/pull/12191) by [@taibenvenuti](https://github.com/taibenvenuti)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
