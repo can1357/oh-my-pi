@@ -48,14 +48,14 @@ fn is_unified_hunk_line(line: &str) -> bool {
 ///
 /// False positives and false negatives affect wording only; parsing remains
 /// authoritative.
-pub(super) fn detect_foreign_syntax(input: &str) -> String {
+pub(super) fn detect_foreign_syntax<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
 	let mut apply_patch = false;
 	let mut unified_diff = false;
 	let mut unified_old_header = false;
 	let mut unified_new_header = false;
 	let mut search_marker = false;
 	let mut replace_marker = false;
-	for raw_line in input.lines() {
+	for raw_line in lines {
 		let line = raw_line.trim();
 		apply_patch |= is_apply_patch_marker(line);
 		unified_diff |= line.starts_with("diff --git ") || is_unified_hunk_line(line);
