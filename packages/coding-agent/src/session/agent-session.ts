@@ -250,6 +250,7 @@ import type {
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
+	ModelSwitchResult,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -1398,7 +1399,8 @@ export class AgentSession {
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
-			setModelWithProviderSessionReset: (model, source) => this.#setModelWithProviderSessionReset(model, source),
+			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			notifyModelSelect: (previousModel, model, source) => this.#notifyModelSelect(previousModel, model, source),
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
@@ -1446,7 +1448,8 @@ export class AgentSession {
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
-			setModelWithProviderSessionReset: (model, source) => this.#setModelWithProviderSessionReset(model, source),
+			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			notifyModelSelect: (previousModel, model, source) => this.#notifyModelSelect(previousModel, model, source),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
@@ -8922,14 +8925,16 @@ export class AgentSession {
 			if (!currentModel || this.#isDisposed) return;
 			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
 			if (updated && updated.contextWindow !== currentModel.contextWindow) {
-				await this.#setModelWithProviderSessionReset(updated, "set");
+				// Same model, so the switch result's `changed` is always false and no
+				// `model_select` fires; the call exists purely for the provider reset.
+				await this.#setModelWithProviderSessionReset(updated);
 			}
 		} catch (error) {
 			logger.warn("extended-context policy reapply failed", { error: String(error) });
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model, source: ModelSelectSource): Promise<void> {
+	async #setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
@@ -8952,24 +8957,31 @@ export class AgentSession {
 		// never maps it), so routing it through `#emitSessionEvent` would only
 		// add an extension-delivery await inside every model switch — including
 		// retry-fallback on the error path. The pi-compatible `model_select`
-		// notification keeps that contract: `#notifyModelSelect` dispatches it
-		// detached (fire-and-forget), never awaited on the switch path.
+		// notification keeps that contract but is NOT dispatched here: this
+		// method returns mid-transaction, before the caller has appended the
+		// model-change entry, re-applied the thinking level, and synced the
+		// prompt/tools. Callers fire `notifyModelSelect` detached as the LAST
+		// step of their switch transaction, so handlers observe the committed
+		// switch (`model_changed` above still fires synchronously here).
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
-			this.#notifyModelSelect(currentModel, model, source);
 		}
 
 		await this.#reconcileModelDependentState(currentModel, model);
+		return { changed: isChanging, previousModel: currentModel };
 	}
 
 	/**
-	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`).
-	 * Deliberately detached — the reasoning on `model_changed` above applies
-	 * unchanged: a model switch, including retry-fallback on the error path,
-	 * must not wait on extension handlers. `ExtensionRunner.emitModelSelect`
-	 * serializes deliveries FIFO (rapid switches cannot overtake each other)
-	 * while keeping them fire-and-forget; it also skips entirely when no
-	 * extension registered a handler.
+	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`)
+	 * as the last step of a committed switch transaction — model-change entry
+	 * appended, thinking level re-applied, prompt/tools synced — so handlers
+	 * observe the fully applied switch, never a state a later step can still
+	 * overwrite. Still deliberately detached: the reasoning on `model_changed`
+	 * above applies unchanged — a model switch, including retry-fallback on
+	 * the error path, must not wait on extension handlers.
+	 * `ExtensionRunner.emitModelSelect` serializes deliveries FIFO (rapid
+	 * switches cannot overtake each other) while keeping them fire-and-forget;
+	 * it also skips entirely when no extension registered a handler.
 	 */
 	#notifyModelSelect(previousModel: Model | undefined, model: Model, source: ModelSelectSource): void {
 		this.#extensionRunner?.emitModelSelect({ model, previousModel, source });
@@ -9612,7 +9624,8 @@ export class AgentSession {
 				this.#closeAllProviderSessions("session reload");
 			}
 
-			// Restore model if saved
+			let restoreResult: ModelSwitchResult | undefined;
+			let restoredModel: Model | undefined;
 			const targetModelStrings = getRestorableSessionModels(
 				sessionContext.models,
 				this.sessionManager.getLastModelChangeRole(),
@@ -9637,7 +9650,11 @@ export class AgentSession {
 								currentModel.id !== match.id ||
 								currentModel.api !== match.api));
 					if (shouldResetProviderState) {
-						await this.#setModelWithProviderSessionReset(match, "restore");
+						// Same-session reloads rebind the same model (`changed` false → no
+						// notification); a real restore defers its `model_select` to the end
+						// of the switch — see the success tail below.
+						restoreResult = await this.#setModelWithProviderSessionReset(match);
+						restoredModel = match;
 					} else {
 						this.agent.setModel(match);
 					}
@@ -9733,6 +9750,14 @@ export class AgentSession {
 			}
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
+			// First point the restore notification may fire: the target session's
+			// model-dependent state (thinking/service tiers above) is applied AND
+			// every step that could still throw into the rollback below has run.
+			// A failed switch emits its own corrective `restore` in the catch
+			// block instead, so handlers never see a switch that was unwound.
+			if (restoreResult?.changed && restoredModel) {
+				this.#notifyModelSelect(restoreResult.previousModel, restoredModel, "restore");
+			}
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

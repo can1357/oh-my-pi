@@ -37,7 +37,13 @@ import {
 } from "../thinking";
 import type { EditMode } from "../utils/edit-mode";
 import type { AgentSessionEvent } from "./agent-session-events";
-import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
+import type {
+	ModelCycleResult,
+	ModelSwitchResult,
+	ResolvedRoleModel,
+	RoleModelCycle,
+	RoleModelCycleResult,
+} from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -54,7 +60,13 @@ export interface ModelControlsHost {
 	promptGeneration(): number;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
-	setModelWithProviderSessionReset(model: Model, source: ModelSelectSource): Promise<void>;
+	setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult>;
+	/**
+	 * Dispatch the pi-compatible `model_select` notification, detached. Callers
+	 * invoke it as the LAST step of a committed switch transaction so handlers
+	 * observe the fully applied switch (see `AgentSession.#notifyModelSelect`).
+	 */
+	notifyModelSelect(previousModel: Model | undefined, model: Model, source: ModelSelectSource): void;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
@@ -231,7 +243,7 @@ export class ModelControls {
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel, "set");
+		const { changed, previousModel } = await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
@@ -252,6 +264,13 @@ export class ModelControls {
 		// configured defaultLevel; otherwise preserve the current level (or auto).
 		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
+		// Last step of the switch transaction: the model-change entry, thinking
+		// re-apply, and prompt/tool sync above have committed, so the handler
+		// observes the fully applied switch (and a `pi.setThinkingLevel` call
+		// inside it is not overwritten by `#reapplyThinkingLevel`).
+		if (changed) {
+			this.#host.notifyModelSelect(previousModel, targetModel, "set");
+		}
 		return { switched: true };
 	}
 
@@ -276,7 +295,7 @@ export class ModelControls {
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel, "set");
+		const { changed, previousModel } = await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
@@ -291,6 +310,9 @@ export class ModelControls {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
+		if (changed) {
+			this.#host.notifyModelSelect(previousModel, targetModel, "set");
+		}
 	}
 
 	/**
@@ -436,13 +458,16 @@ export class ModelControls {
 		// Apply model
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(next.model, "cycle");
+		const { changed, previousModel } = await this.#host.setModelWithProviderSessionReset(next.model);
 		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
+		if (changed) {
+			this.#host.notifyModelSelect(previousModel, next.model, "cycle");
+		}
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
@@ -467,12 +492,15 @@ export class ModelControls {
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(nextModel, "cycle");
+		const { changed, previousModel } = await this.#host.setModelWithProviderSessionReset(nextModel);
 		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
 		await this.#host.syncAfterModelChange(previousEditMode);
+		if (changed) {
+			this.#host.notifyModelSelect(previousModel, nextModel, "cycle");
+		}
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
 	}

@@ -417,6 +417,13 @@ export interface RoleModelCycleResult {
 	role: string;
 }
 
+/** Result of a provider-session-resetting model switch: whether the model
+ *  actually changed, plus the pre-switch model for the `model_select` notification. */
+export interface ModelSwitchResult {
+	changed: boolean;
+	previousModel: Model | undefined;
+}
+
 /** A configured role resolved to a concrete model. */
 export interface ResolvedRoleModel {
 	role: string;
