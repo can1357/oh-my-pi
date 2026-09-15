@@ -307,6 +307,7 @@ import type {
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
+	ModelSwitchResult,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -2116,11 +2117,13 @@ export class AgentSession implements SettingsScope {
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
-			setModelWithProviderSessionReset: async (model, source, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model, source);
+			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
+				const result = await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				return result;
 			},
+			notifyModelSelect: (previousModel, model, source) => this.#notifyModelSelect(previousModel, model, source),
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
@@ -2182,7 +2185,8 @@ export class AgentSession implements SettingsScope {
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
-			setModelWithProviderSessionReset: (model, source) => this.#setModelWithProviderSessionReset(model, source),
+			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			notifyModelSelect: (previousModel, model, source) => this.#notifyModelSelect(previousModel, model, source),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: (previousEditMode, options) =>
 				this.#tools.syncAfterModelChange(previousEditMode, options),
@@ -12325,14 +12329,16 @@ export class AgentSession implements SettingsScope {
 			// still reconciles once even though the refit already moved the row.
 			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
 			if (updated && updated.contextWindow !== baseline.contextWindow) {
-				await this.#setModelWithProviderSessionReset(updated, "set");
+				// Same model, so the switch result's `changed` is always false and no
+				// `model_select` fires; the call exists purely for the provider reset.
+				await this.#setModelWithProviderSessionReset(updated);
 			}
 		} catch (error) {
 			logger.warn("context-window policy reapply failed", { error: String(error) });
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model, source: ModelSelectSource): Promise<void> {
+	async #setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
@@ -12355,24 +12361,31 @@ export class AgentSession implements SettingsScope {
 		// never maps it), so routing it through `#emitSessionEvent` would only
 		// add an extension-delivery await inside every model switch — including
 		// retry-fallback on the error path. The pi-compatible `model_select`
-		// notification keeps that contract: `#notifyModelSelect` dispatches it
-		// detached (fire-and-forget), never awaited on the switch path.
+		// notification keeps that contract but is NOT dispatched here: this
+		// method returns mid-transaction, before the caller has appended the
+		// model-change entry, re-applied the thinking level, and synced the
+		// prompt/tools. Callers fire `notifyModelSelect` detached as the LAST
+		// step of their switch transaction, so handlers observe the committed
+		// switch (`model_changed` above still fires synchronously here).
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
-			this.#notifyModelSelect(currentModel, model, source);
 		}
 
 		await this.#reconcileModelDependentState(model);
+		return { changed: isChanging, previousModel: currentModel };
 	}
 
 	/**
-	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`).
-	 * Deliberately detached — the reasoning on `model_changed` above applies
-	 * unchanged: a model switch, including retry-fallback on the error path,
-	 * must not wait on extension handlers. `ExtensionRunner.emitModelSelect`
-	 * serializes deliveries FIFO (rapid switches cannot overtake each other)
-	 * while keeping them fire-and-forget; it also skips entirely when no
-	 * extension registered a handler.
+	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`)
+	 * as the last step of a committed switch transaction — model-change entry
+	 * appended, thinking level re-applied, prompt/tools synced — so handlers
+	 * observe the fully applied switch, never a state a later step can still
+	 * overwrite. Still deliberately detached: the reasoning on `model_changed`
+	 * above applies unchanged — a model switch, including retry-fallback on
+	 * the error path, must not wait on extension handlers.
+	 * `ExtensionRunner.emitModelSelect` serializes deliveries FIFO (rapid
+	 * switches cannot overtake each other) while keeping them fire-and-forget;
+	 * it also skips entirely when no extension registered a handler.
 	 */
 	#notifyModelSelect(previousModel: Model | undefined, model: Model, source: ModelSelectSource): void {
 		this.#extensionRunner?.emitModelSelect({ model, previousModel, source });
@@ -13313,6 +13326,8 @@ export class AgentSession implements SettingsScope {
 				this.#closeAllProviderSessions("session reload");
 			}
 
+			let restoreResult: ModelSwitchResult | undefined;
+			let restoredModel: Model | undefined;
 			if (targetModel) {
 				const currentModel = this.model;
 				const shouldResetProviderState =
@@ -13322,7 +13337,11 @@ export class AgentSession implements SettingsScope {
 							currentModel.id !== targetModel.id ||
 							currentModel.api !== targetModel.api));
 				if (shouldResetProviderState) {
-					await this.#setModelWithProviderSessionReset(targetModel, "restore");
+					// Same-session reloads rebind the same model (`changed` false → no
+					// notification); a real restore defers its `model_select` to the end
+					// of the switch — see the success tail below.
+					restoreResult = await this.#setModelWithProviderSessionReset(targetModel);
+					restoredModel = targetModel;
 				} else {
 					this.agent.setModel(targetModel);
 				}
@@ -13334,7 +13353,6 @@ export class AgentSession implements SettingsScope {
 				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
 					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
 				}
-			}
 
 			const model = this.model;
 			if (model) {
@@ -13428,6 +13446,14 @@ export class AgentSession implements SettingsScope {
 			if (modelFallbackWarning) {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
+			}
+			// First point the restore notification may fire: the target session's
+			// model-dependent state (thinking/service tiers above) is applied AND
+			// every step that could still throw into the rollback below has run.
+			// A failed switch emits its own corrective `restore` in the catch
+			// block instead, so handlers never see a switch that was unwound.
+			if (restoreResult?.changed && restoredModel) {
+				this.#notifyModelSelect(restoreResult.previousModel, restoredModel, "restore");
 			}
 			return true;
 		} catch (error) {

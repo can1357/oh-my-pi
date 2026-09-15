@@ -1,12 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type Api, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ModelSelectEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionAPI, ModelSelectEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -17,6 +17,8 @@ type GateGlobal = typeof globalThis & {
 	__ompModelSelectGate?: Promise<void>;
 	/** Park only the handler for this model id; other events pass through. */
 	__ompModelSelectParkFor?: string;
+	/** Per-test action run inside the handler before the event is recorded. */
+	__ompModelSelectAction?: (api: ExtensionAPI, event: ModelSelectEvent) => void | Promise<void>;
 };
 /**
  * Deterministic delivery signals: one resolver per expected event, resolved
@@ -24,6 +26,7 @@ type GateGlobal = typeof globalThis & {
  * of a guessed delay.
  */
 let deliveries: Array<PromiseWithResolvers<void>> = [];
+let runner: ExtensionRunner;
 
 function armDelivery(count = 1): void {
 	deliveries = Array.from({ length: count }, () => Promise.withResolvers<void>());
@@ -60,10 +63,12 @@ describe("AgentSession model_select extension event", () => {
 		const extension = await loadExtensionFromFactory(
 			pi => {
 				pi.on("model_select", async event => {
+					const gateGlobal = globalThis as GateGlobal;
+					const action = gateGlobal.__ompModelSelectAction;
+					if (action) await action(pi, event);
 					// Park on the optional gate — either unconditionally (detached
 					// test) or only for a chosen model id (FIFO test) — proving
 					// switches never wait on handlers.
-					const gateGlobal = globalThis as GateGlobal;
 					const park = gateGlobal.__ompModelSelectParkFor;
 					const gate = gateGlobal.__ompModelSelectGate;
 					if (gate && (park === undefined || park === event.model.id)) await gate;
@@ -78,7 +83,7 @@ describe("AgentSession model_select extension event", () => {
 		);
 
 		const sessionManager = SessionManager.inMemory(tempDir.path());
-		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		runner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 
 		const model = bundledAnthropicModel("claude-sonnet-4-5");
 		const agent = new Agent({
@@ -98,7 +103,7 @@ describe("AgentSession model_select extension event", () => {
 			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry,
-			extensionRunner,
+			extensionRunner: runner,
 		});
 		session.subscribe(event => {
 			if (event.type === "model_changed") modelChangedCount++;
@@ -112,6 +117,7 @@ describe("AgentSession model_select extension event", () => {
 			const gateGlobal = globalThis as GateGlobal;
 			gateGlobal.__ompModelSelectGate = undefined;
 			gateGlobal.__ompModelSelectParkFor = undefined;
+			gateGlobal.__ompModelSelectAction = undefined;
 		}
 	});
 
@@ -198,6 +204,60 @@ describe("AgentSession model_select extension event", () => {
 		expect(events.map(e => e.model.id)).toEqual([second.id, third.id]);
 		expect(events[0]?.previousModel?.id).toBe("claude-sonnet-4-5");
 		expect(events[1]?.previousModel?.id).toBe(second.id);
+	});
+
+	it("delivers after the switch transaction commits", async () => {
+		// The runtime actions (`pi.setThinkingLevel`) only exist once a host
+		// initializes the runner — the same wiring a mode controller does.
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => session.thinkingLevel,
+				setThinkingLevel: level => session.setThinkingLevel(level),
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => session.model,
+				isIdle: () => !session.isStreaming,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+		);
+		const target = bundledAnthropicModel("claude-sonnet-4-6");
+		// A defaultLevel forces `setModel` to re-apply the thinking level AFTER
+		// the swap; if the notification fired mid-transaction, this handler's
+		// `pi.setThinkingLevel("high")` would be overwritten by that re-apply.
+		if (!target.thinking) throw new Error("Expected claude-sonnet-4-6 to carry a thinking config");
+		const withDefaultLevel: Model<Api> = { ...target, thinking: { ...target.thinking, defaultLevel: Effort.Low } };
+		let observed: { modelMatches: boolean; lastModelChange: string | undefined } | undefined;
+		(globalThis as GateGlobal).__ompModelSelectAction = (pi, event) => {
+			pi.setThinkingLevel(Effort.High);
+			const lastChange = session.sessionManager.getBranch().findLast(entry => entry.type === "model_change");
+			observed = {
+				modelMatches: session.model?.id === event.model.id,
+				lastModelChange: lastChange?.type === "model_change" ? lastChange.model : undefined,
+			};
+		};
+
+		await session.setModel(withDefaultLevel);
+		await waitForDeliveries();
+
+		expect(session.thinkingLevel).toBe(Effort.High);
+		expect(observed?.modelMatches).toBe(true);
+		expect(observed?.lastModelChange).toBe("anthropic/claude-sonnet-4-6");
 	});
 });
 
