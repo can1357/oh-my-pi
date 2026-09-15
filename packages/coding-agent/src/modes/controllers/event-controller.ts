@@ -176,6 +176,8 @@ export class EventController {
 	#retryPending = false;
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#idleRecapTimer?: NodeJS.Timeout;
+	/** Idle reap clock for a working row left mounted by a settle without teardown; see #reapWorkingLoaderIfIdle. */
+	#workingLoaderReapTimer?: NodeJS.Timeout;
 	// In-flight ephemeral recap turn; aborted by #cancelIdleRecap when any
 	// activity (new turn, compaction, editor draft) supersedes the idle recap.
 	#idleRecapAbort?: AbortController;
@@ -220,6 +222,7 @@ export class EventController {
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
+	static readonly #WORKING_LOADER_REAP_MS = 2_000;
 
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
@@ -348,6 +351,7 @@ export class EventController {
 		this.#toolArgsReveal.stop();
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
+		this.#disarmWorkingLoaderReap();
 		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
@@ -915,6 +919,7 @@ export class EventController {
 		this.ctx.statusLine.markActivityStart();
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
+		this.#armWorkingLoaderReap();
 		setTerminalTitleState("working");
 		this.ctx.ui.requestRender();
 	}
@@ -1952,6 +1957,10 @@ export class EventController {
 		}
 	}
 	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+		// Keep the idle reap clock armed on every settle: superseded, deferred
+		// (`isTerminal: false`), or terminal — whichever way it goes, a missing
+		// follow-up teardown must self-heal (see #reapWorkingLoaderIfIdle).
+		this.#armWorkingLoaderReap();
 		// A superseded agent_end: the agent is already streaming a fresh turn, so
 		// this event belongs to a turn that has already been replaced. The session
 		// dispatches to listeners fire-and-forget across an async extension-emit hop
@@ -1988,16 +1997,13 @@ export class EventController {
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		this.#setTerminalProgress(false);
-		this.ctx.statusLine.markActivityEnd();
+		// The terminal settle owns every UI teardown; stop the idle reap clock in
+		// the same synchronous step so a next turn's #handleAgentStart re-arms it.
+		this.#disarmWorkingLoaderReap();
+		this.#reapWorkingUi();
 		this.#lastAgentEndAt = Date.now();
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.flushAll();
-		if (this.ctx.loadingAnimation) {
-			this.ctx.loadingAnimation.stop();
-			this.ctx.loadingAnimation = undefined;
-			this.ctx.statusContainer.disposeChildren();
-		}
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#approvalAttentionToolCallIds.clear();
@@ -2019,10 +2025,6 @@ export class EventController {
 		this.#resolveDisplaceableTodo();
 		this.ctx.flushPendingCommandOutput();
 		this.#lastAssistantComponent = undefined;
-		// When the interrupted/failed turn died on a tool call, this replaces the
-		// torn-down "Working…" row with the "F5 to Retry" affordance.
-		this.ctx.syncRetryHintRow();
-		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.#scheduleIdleRecap();
 		this.sendErrorNotification(event);
@@ -2043,6 +2045,64 @@ export class EventController {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 		}
+	}
+
+	/**
+	 * UI-convergence teardown for a settled turn: terminal progress, the activity
+	 * meter, the working row, and the retry hint. Shared by the terminal
+	 * `agent_end` path and the idle reap, so a leaked settle converges to the same
+	 * idle UI as a normal end.
+	 */
+	#reapWorkingUi(): void {
+		this.#setTerminalProgress(false);
+		this.ctx.statusLine.markActivityEnd();
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+			this.ctx.statusContainer.disposeChildren();
+		}
+		// When the interrupted/failed turn died on a tool call, this replaces the
+		// torn-down "Working…" row with the "F5 to Retry" affordance.
+		this.ctx.syncRetryHintRow();
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Idle reap clock for the working row. The row (and the status-band meter) are
+	 * event-driven: a terminal `agent_end` is the only teardown. Two session paths
+	 * can settle without one — a deferred (`isTerminal: false`) continuation whose
+	 * wake never arrives, or a dropped/superseded `agent_end` — leaving the UI
+	 * animating against an idle session. While the clock runs, any state that
+	 * legitimately owns the row (streaming, pending async work, queued messages,
+	 * maintenance overlays) keeps it waiting; an idle settle with the row still
+	 * mounted reaps it through the same UI path as a terminal end.
+	 */
+	#armWorkingLoaderReap(): void {
+		if (this.#workingLoaderReapTimer) return;
+		this.#workingLoaderReapTimer = setInterval(
+			() => this.#reapWorkingLoaderIfIdle(),
+			EventController.#WORKING_LOADER_REAP_MS,
+		);
+		this.#workingLoaderReapTimer.unref?.();
+	}
+
+	#disarmWorkingLoaderReap(): void {
+		if (!this.#workingLoaderReapTimer) return;
+		clearInterval(this.#workingLoaderReapTimer);
+		this.#workingLoaderReapTimer = undefined;
+	}
+
+	#reapWorkingLoaderIfIdle(): void {
+		const session = this.ctx.session;
+		// A live turn or a pending continuation still owns the working row.
+		if (session.isStreaming || session.hasPendingAsyncWork() || session.queuedMessageCount > 0) return;
+		// Maintenance overlays (auto-compaction / auto-retry) own the status area
+		// through loader-less windows; only a fully idle session may be reaped.
+		if (this.ctx.autoCompactionLoader || this.ctx.retryLoader) return;
+		this.#disarmWorkingLoaderReap();
+		if (!this.ctx.loadingAnimation) return;
+		logger.warn("Working row reaped: idle settle with no terminal agent_end");
+		this.#reapWorkingUi();
 	}
 
 	/**
