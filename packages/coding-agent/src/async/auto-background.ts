@@ -7,21 +7,96 @@
 
 /** Default foreground-wait threshold before a tool call auto-backgrounds. */
 export const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
-/** LLM-facing footer appended when a tool call is converted into a background job. */
-export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
+/** Longest label a job carries into notices, headers, and `hub jobs` rows. */
+const JOB_LABEL_MAX_CHARS = 120;
+
+/**
+ * One-line job label from a command or cell title: whitespace runs (including
+ * newlines) collapse to a space so the label never breaks a notice line, and
+ * anything past {@link JOB_LABEL_MAX_CHARS} is elided.
+ */
+export function formatJobLabel(raw: string): string {
+	const flat = raw.replace(/\s+/g, " ").trim();
+	return flat.length > JOB_LABEL_MAX_CHARS ? `${flat.slice(0, JOB_LABEL_MAX_CHARS - 3)}...` : flat;
+}
+
+const BACKGROUND_NOTICE_SUFFIX = "; result will be delivered automatically.";
+
+/**
+ * LLM-facing footer appended when a tool call is converted into a background
+ * job. Carries the job label so a batch of parallel calls stays attributable
+ * even when results come back in completion order (the model otherwise pairs
+ * `bg_N` positionally against its own calls and swaps them).
+ */
+export function formatBackgroundNotice(jobId: string, label: string): string {
+	return `Backgrounded as job ${jobId} (${label})${BACKGROUND_NOTICE_SUFFIX}`;
 }
 
 /**
- * How long a tool foreground-waits before backgrounding. Bounded by the call's
- * own timeout minus a small buffer so a deadline expiry resolves inline instead
- * of backgrounding moments before it fires. `0` means background immediately.
+ * The exact notice line {@link formatBackgroundNotice} appended for `jobId`,
+ * if `text` still carries it — lets a renderer strip it without knowing the
+ * label the tool used. Anchored on the id prefix and the fixed suffix so a
+ * coincidental in-output token never matches.
  */
-export function resolveAutoBackgroundWaitMs(thresholdMs: number, timeoutMs: number | undefined): number {
+export function findBackgroundNotice(text: string, jobId: string): string | undefined {
+	const prefix = `Backgrounded as job ${jobId} (`;
+	const start = text.lastIndexOf(prefix);
+	if (start === -1) return undefined;
+	const lineEnd = text.indexOf("\n", start);
+	const line = text.slice(start, lineEnd === -1 ? text.length : lineEnd);
+	return line.endsWith(BACKGROUND_NOTICE_SUFFIX) ? line : undefined;
+}
+
+/**
+ * Slack between the foreground-wait threshold and a call's own timeout: the
+ * wait ends at least this long before a deadline so an expiry resolves inline
+ * rather than backgrounding a job that dies moments later.
+ */
+export const AUTO_BACKGROUND_TIMEOUT_BUFFER_MS = 1_000;
+
+/**
+ * What a tool's `timeoutMs` bounds.
+ * - `wall-clock`: the process is killed at the deadline (bash). A deadline at
+ *   or below the threshold plus the buffer cannot meaningfully outlive the
+ *   wait, so the call runs inline to completion instead.
+ * - `runtime`: the budget pauses while the cell waits on agents or tool
+ *   bridges (eval), so wall time can legitimately exceed it — exactly what
+ *   backgrounding exists for. The wait is clamped to just before the budget.
+ */
+export type AutoBackgroundTimeoutKind = "wall-clock" | "runtime";
+
+/**
+ * How long a tool foreground-waits before backgrounding: `0` backgrounds
+ * immediately (a threshold of `0` always does), `undefined` runs inline to
+ * completion. See {@link AutoBackgroundTimeoutKind} for how `timeoutMs` is read.
+ */
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: "runtime",
+): number;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: "wall-clock",
+): number | undefined;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: AutoBackgroundTimeoutKind,
+): number | undefined;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: AutoBackgroundTimeoutKind,
+): number | undefined {
 	if (thresholdMs <= 0) return 0;
 	if (timeoutMs === undefined) return thresholdMs;
-	const timeoutBufferMs = 1_000;
-	return Math.max(0, Math.min(thresholdMs, timeoutMs - timeoutBufferMs));
+	if (timeoutKind === "runtime") {
+		return Math.max(0, Math.min(thresholdMs, timeoutMs - AUTO_BACKGROUND_TIMEOUT_BUFFER_MS));
+	}
+	if (timeoutMs <= thresholdMs + AUTO_BACKGROUND_TIMEOUT_BUFFER_MS) return undefined;
+	return thresholdMs;
 }
 
 /** Non-settled outcomes of {@link raceJobSettlement}. */
