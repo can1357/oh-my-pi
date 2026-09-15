@@ -152,6 +152,29 @@ describe("tool output details", () => {
 		}
 	});
 
+	it("keeps an interrupted call neutral while folded", () => {
+		// Steering interrupts a pending call and reports `isError`; the full card
+		// renders the placeholder neutrally, so the folded row must not claim failure.
+		const skipped = new ToolExecutionComponent("custom-thing", { command: "sleep 30" }, {}, undefined, uiStub);
+		skipped.updateResult(
+			{
+				content: [{ type: "text", text: "skipped" }],
+				isError: true,
+				details: { source: "interrupt_skipped", __synthetic: true },
+			},
+			false,
+		);
+		try {
+			skipped.setToolOutputDetailsHidden(true);
+
+			const row = plain(skipped.render(120));
+
+			expect(row.startsWith(Bun.stripANSI(formatStatusIcon("error", theme)))).toBe(false);
+		} finally {
+			skipped.stopAnimation();
+		}
+	});
+
 	it("keeps a failed call distinguishable from a successful one while folded", () => {
 		const failed = new ToolExecutionComponent("custom-thing", { command: "exit 1" }, {}, undefined, uiStub);
 		failed.updateResult({ content: [{ type: "text", text: "boom" }], isError: true }, false);

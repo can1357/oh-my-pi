@@ -908,9 +908,11 @@ export class ToolExecutionComponent extends Container {
 		);
 		if (singleRow) {
 			// A folded card is the whole row, so a settled failure has to stay
-			// legible here: the neutral bullet would read as success. The spinner
-			// keeps its own frames while the call is still running.
-			const failed = !this.#isRunning() && this.#result?.isError === true;
+			// legible here: the neutral bullet would read as success. A benign skip
+			// carries `isError` too but is normal steering flow, and the full card
+			// renders it neutrally (#7199), so it stays neutral here as well. The
+			// spinner keeps its own frames while the call is still running.
+			const failed = !this.#isRunning() && this.#result?.isError === true && !this.#isBenignSkip();
 			const styledGlyph = failed
 				? formatStatusIcon("error", theme)
 				: this.#spinnerFrame === undefined
