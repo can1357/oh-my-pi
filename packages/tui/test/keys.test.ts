@@ -315,6 +315,25 @@ describe("Raw 0x08 backspace disambiguation", () => {
 });
 
 describe("extractPrintableText", () => {
+	it("decodes shifted ASCII letters without optional alternate-key fields", () => {
+		expect(extractPrintableText("\x1b[98;2u")).toBe("B");
+		expect(extractPrintableText("\x1b[98:66;2u")).toBe("B");
+		expect(extractPrintableText("\x1b[98;1u")).toBe("b");
+	});
+
+	it("keeps explicit shifted codepoints and associated text ahead of ASCII shift fallback", () => {
+		expect(extractPrintableText("\x1b[98:946;2u")).toBe("β");
+		expect(extractPrintableText("\x1b[98:66;2;223u")).toBe("ß");
+		expect(extractPrintableText("\x1b[49;2u")).toBe("1");
+		expect(extractPrintableText("\x1b[229;2u")).toBe("å");
+	});
+
+	it("never converts released keys or modified command chords into shifted text", () => {
+		expect(extractPrintableText("\x1b[98;2:3u")).toBeUndefined();
+		expect(extractPrintableText("\x1b[98;6u")).toBeUndefined();
+		expect(extractPrintableText("\x1b[98;4u")).toBeUndefined();
+	});
+
 	it("extracts keypad digits from Kitty CSI-u sequences", () => {
 		expect(extractPrintableText("\x1b[57407u")).toBe("8");
 		expect(extractPrintableText("\x1b[57407;129u")).toBe("8");

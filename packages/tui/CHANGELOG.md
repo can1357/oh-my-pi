@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Kitty-protocol Shift+ASCII letters now retain their uppercase text when the terminal omits alternate key fields, while explicit shifted codepoints and associated text remain authoritative. ([#12139](https://github.com/can1357/oh-my-pi/pull/12139) by [@Scott-Simmons](https://github.com/Scott-Simmons))
+
 ## [18.2.0] - 2026-09-15
 
 ### Added

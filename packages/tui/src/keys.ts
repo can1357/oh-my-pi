@@ -420,6 +420,7 @@ function decodeKittyPrintable(data: string): string | undefined {
 				return undefined;
 			}
 		}
+		return undefined;
 	}
 	const keypadOperatorText = KITTY_KEYPAD_OPERATOR_TEXT[codepoint];
 	if (keypadOperatorText) return keypadOperatorText;
@@ -432,6 +433,9 @@ function decodeKittyPrintable(data: string): string | undefined {
 	let effectiveCodepoint = codepoint;
 	if (effectiveMod & KITTY_MOD_SHIFT && typeof shiftedKey === "number") {
 		effectiveCodepoint = shiftedKey;
+	} else if (effectiveMod & KITTY_MOD_SHIFT && codepoint >= 97 && codepoint <= 122) {
+		// Alternate-key reporting is optional; ASCII letters have a layout-independent shift.
+		effectiveCodepoint = codepoint - 32;
 	}
 
 	if (effectiveCodepoint >= 0xe000 && effectiveCodepoint <= 0xf8ff) {
