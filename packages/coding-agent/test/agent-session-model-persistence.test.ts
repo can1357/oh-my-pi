@@ -70,6 +70,16 @@ describe("AgentSession model persistence", () => {
 		return `${model.provider}/${model.id}`;
 	}
 
+	async function persistedModelChanges(sessionFile: string): Promise<string[]> {
+		const text = await Bun.file(sessionFile).text();
+		return text
+			.split("\n")
+			.filter(Boolean)
+			.map(line => JSON.parse(line) as { type?: string; model?: string })
+			.filter(entry => entry.type === "model_change")
+			.map(entry => entry.model ?? "");
+	}
+
 	async function writeRoleModelSession(
 		defaultRoleValue: string,
 		smolRoleValue: string,
@@ -333,6 +343,102 @@ describe("AgentSession model persistence", () => {
 		await expect(created.session.fork()).rejects.toThrow(failure);
 		expect(rollbackCalled).toBe(true);
 		expect(created.session.model).toBe(codingModel);
+
+		// The rollback must be durable: the preparation's model-change entry was
+		// already appended to the session file, so a fresh open must not observe
+		// a coding-phase model the live session rolled back.
+		const sessionFile = created.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const persistedModels = await persistedModelChanges(sessionFile);
+		expect(persistedModels).not.toContain(modelValue(originalModel));
+	});
+
+	it("rolls back code-model preparation when branch flush rejects", async () => {
+		let rollbackCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {
+						rollbackCalled = true;
+					},
+				};
+			},
+		});
+		const sessionFile = created.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "branch root" }],
+			timestamp: Date.now(),
+		});
+		const entryId = created.session.sessionManager.getLeafId();
+		if (!entryId) throw new Error("Expected a leaf entry to branch from");
+
+		const failure = new Error("branch flush failed");
+		const flushSpy = vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+
+		await expect(created.session.branch(entryId)).rejects.toThrow(failure);
+		flushSpy.mockRestore();
+		expect(rollbackCalled).toBe(true);
+		expect(created.session.model).toBe(codingModel);
+
+		const persistedModels = await persistedModelChanges(sessionFile);
+		expect(persistedModels).not.toContain(modelValue(originalModel));
+		const persisted = await Bun.file(sessionFile).text();
+		expect(persisted).toContain("branch root");
+	});
+
+	it("rolls back code-model preparation when branchFromBtw flush rejects", async () => {
+		let rollbackCalled = false;
+		const codingModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const originalModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!originalModel) throw new Error("Expected original model fixture");
+
+		const created = await createSession({
+			initialModel: codingModel,
+			persist: true,
+			codeModelBeforeNavigationHandler: async () => {
+				created.session.agent.setModel(originalModel);
+				return {
+					rollback: () => {
+						rollbackCalled = true;
+					},
+				};
+			},
+		});
+		const sessionFile = created.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "btw question" }],
+			timestamp: Date.now(),
+		});
+		const leafId = created.session.sessionManager.getLeafId();
+		const sessionId = created.session.sessionManager.getSessionId();
+		if (!leafId) throw new Error("Expected a leaf entry to branch from");
+
+		const failure = new Error("btw flush failed");
+		const flushSpy = vi.spyOn(created.session.sessionManager, "flush").mockRejectedValueOnce(failure);
+
+		const assistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "btw answer" }],
+			stopReason: "stop",
+		} as unknown as AssistantMessage;
+		await expect(created.session.branchFromBtw("btw", assistantMessage, leafId, sessionId)).rejects.toThrow(failure);
+		flushSpy.mockRestore();
+		expect(rollbackCalled).toBe(true);
+		expect(created.session.model).toBe(codingModel);
+
+		const persistedModels = await persistedModelChanges(sessionFile);
+		expect(persistedModels).not.toContain(modelValue(originalModel));
 	});
 
 	it("preserves the outgoing phase when destination cwd requires approval", async () => {

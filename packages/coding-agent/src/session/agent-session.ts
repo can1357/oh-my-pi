@@ -2138,6 +2138,60 @@ export class AgentSession {
 		return (await this.#prepareCodeModelNavigation())?.cancel === true;
 	}
 
+	/** Host-side state a code-model preparation may mutate, captured before preparation runs. */
+	#captureCodeModelPreState() {
+		return {
+			sessionState: this.sessionManager.captureState(),
+			model: this.model,
+			thinkingLevel: this.thinkingLevel,
+			autoThinking: this.isAutoThinking,
+			autoResolvedLevel: this.autoResolvedThinkingLevel(),
+			serviceTierByFamily: this.serviceTierByFamily,
+			freshProviderSessionId: this.#freshProviderSessionId,
+			inheritedProviderPromptCacheKey: this.#inheritedProviderPromptCacheKey,
+		};
+	}
+
+	/**
+	 * Undo a prepared-but-uncommitted code-model navigation. The preparation
+	 * already restored the original model and cleared the phase, appending
+	 * entries to the session, so the rollback rewrites the captured snapshot
+	 * durably — a bare in-memory restore leaves the persisted transcript
+	 * claiming a phase end the live session reversed — then restores the
+	 * host-side model state and hands the transaction back to the extension.
+	 */
+	async #rollbackCodeModelPreparation(
+		pre: {
+			sessionState: SessionManagerStateSnapshot;
+			model: Model | undefined;
+			thinkingLevel: ThinkingLevel | undefined;
+			autoThinking: boolean;
+			autoResolvedLevel: Effort | undefined;
+			serviceTierByFamily: ServiceTierByFamily;
+			freshProviderSessionId: string | undefined;
+			inheritedProviderPromptCacheKey: string | undefined;
+		},
+		preparation: CodeModelNavigationPreparation | undefined,
+	): Promise<void> {
+		await this.sessionManager.rollbackToSnapshot(pre.sessionState);
+		this.#freshProviderSessionId = pre.freshProviderSessionId;
+		this.#inheritedProviderPromptCacheKey = pre.inheritedProviderPromptCacheKey;
+		this.#syncAgentSessionId(pre.sessionState.sessionId, false);
+		let modelRolledBack = false;
+		if (pre.model) {
+			const activeModel = this.model;
+			this.agent.setModel(pre.model);
+			modelRolledBack = !modelsAreEqual(activeModel, pre.model);
+		}
+		this.#models.restoreThinkingSnapshot(pre.thinkingLevel, pre.autoThinking, pre.autoResolvedLevel);
+		if (pre.serviceTierByFamily) {
+			this.#models.restoreServiceTiers(pre.serviceTierByFamily);
+		}
+		preparation?.rollback?.();
+		this.#todo.syncFromBranch();
+		if (modelRolledBack) this.#emit({ type: "model_changed" });
+	}
+
 	async runCodeModelAfterNavigation(): Promise<void> {
 		if (!this.#codeModelAfterNavigationHandler || !this.#extensionRunner) return;
 		await this.#codeModelAfterNavigationHandler(this.#extensionRunner.createContext());
@@ -8102,7 +8156,7 @@ export class AgentSession {
 		let advisorRecordersDetached = false;
 		let forkCommitted = false;
 		let codeModelPreparation: CodeModelNavigationPreparation | undefined;
-		let rollbackCodeModelPreparation: (() => void) | undefined;
+		let rollbackCodeModelPreparation: (() => Promise<void>) | undefined;
 
 		try {
 			advisorRecordersDetached = true;
@@ -8110,43 +8164,13 @@ export class AgentSession {
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
 
-			const preCodeModelSessionState: SessionManagerStateSnapshot = this.sessionManager.captureState();
-			const preCodeModelModel = this.model;
-			const preCodeModelThinkingLevel = this.thinkingLevel;
-			const preCodeModelAutoThinking = this.isAutoThinking;
-			const preCodeModelAutoResolvedLevel = this.autoResolvedThinkingLevel();
-			const preCodeModelServiceTierByFamily = this.serviceTierByFamily;
-			const preCodeModelFreshProviderSessionId = this.#freshProviderSessionId;
-			const preCodeModelInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+			const preCodeModel = this.#captureCodeModelPreState();
 
-			rollbackCodeModelPreparation = () => {
-				if (!codeModelPreparation?.rollback) return;
-				this.sessionManager.restoreState(preCodeModelSessionState);
-				this.#freshProviderSessionId = preCodeModelFreshProviderSessionId;
-				this.#inheritedProviderPromptCacheKey = preCodeModelInheritedProviderPromptCacheKey;
-				this.#syncAgentSessionId(preCodeModelSessionState.sessionId, false);
-				let modelRolledBack = false;
-				if (preCodeModelModel) {
-					const activeModel = this.model;
-					this.agent.setModel(preCodeModelModel);
-					modelRolledBack = !modelsAreEqual(activeModel, preCodeModelModel);
-				}
-				this.#models.restoreThinkingSnapshot(
-					preCodeModelThinkingLevel,
-					preCodeModelAutoThinking,
-					preCodeModelAutoResolvedLevel,
-				);
-				if (preCodeModelServiceTierByFamily) {
-					this.#models.restoreServiceTiers(preCodeModelServiceTierByFamily);
-				}
-				codeModelPreparation.rollback();
-				this.#todo.syncFromBranch();
-				if (modelRolledBack) this.#emit({ type: "model_changed" });
-			};
+			rollbackCodeModelPreparation = () => this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
 
 			codeModelPreparation = await this.#prepareCodeModelNavigation();
 			if (codeModelPreparation?.cancel) {
-				rollbackCodeModelPreparation();
+				await rollbackCodeModelPreparation();
 				return false;
 			}
 
@@ -8165,7 +8189,7 @@ export class AgentSession {
 			}
 			if (!forkResult) {
 				this.#bash.finishSessionTransition(bashTransition, false);
-				rollbackCodeModelPreparation();
+				await rollbackCodeModelPreparation();
 				return false;
 			}
 			forkCommitted = true;
@@ -8198,7 +8222,7 @@ export class AgentSession {
 
 			return true;
 		} catch (error) {
-			if (!forkCommitted) rollbackCodeModelPreparation?.();
+			if (!forkCommitted) await rollbackCodeModelPreparation?.();
 			throw error;
 		} finally {
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
@@ -9634,7 +9658,9 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
-		if (await this.#codeModelBlocksNavigation()) return { selectedText, selectedImages, cancelled: true };
+		const preCodeModel = this.#captureCodeModelPreState();
+		const codeModelPreparation = await this.#prepareCodeModelNavigation();
+		if (codeModelPreparation?.cancel) return { selectedText, selectedImages, cancelled: true };
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -9642,9 +9668,18 @@ export class AgentSession {
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 
-		await this.#bash.flushPending();
-		// Flush pending writes before branching
-		await this.sessionManager.flush();
+		try {
+			await this.#bash.flushPending();
+			// Flush pending writes before branching
+			await this.sessionManager.flush();
+		} catch (error) {
+			// No navigation was committed, so the preparation's model restore and
+			// phase clear must roll back too — otherwise the aborted branch leaves
+			// the live conversation on the original model with its coding phase
+			// ended.
+			await this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -9749,37 +9784,48 @@ export class AgentSession {
 				return { cancelled: true, sessionFile: previousSessionFile };
 			}
 		}
-		if (await this.#codeModelBlocksNavigation()) {
+		const preCodeModel = this.#captureCodeModelPreState();
+		const codeModelPreparation = await this.#prepareCodeModelNavigation();
+		if (codeModelPreparation?.cancel) {
 			return { cancelled: true, sessionFile: previousSessionFile };
 		}
 
-		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
-			throw new Error("Cannot branch /btw: session changed since /btw started");
-		}
+		try {
+			if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
+				throw new Error("Cannot branch /btw: session changed since /btw started");
+			}
 
-		await withTimeout(
-			this.#cancelPostPromptTasks(),
-			POST_PROMPT_DRAIN_TIMEOUT_MS,
-			"Timed out draining post-prompt tasks before /btw branch",
-		);
-		if (
-			this.isStreaming ||
-			this.isBashRunning ||
-			this.isEvalRunning ||
-			this.isCompacting ||
-			this.isGeneratingHandoff ||
-			this.isRetrying
-		) {
-			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
-		}
+			await withTimeout(
+				this.#cancelPostPromptTasks(),
+				POST_PROMPT_DRAIN_TIMEOUT_MS,
+				"Timed out draining post-prompt tasks before /btw branch",
+			);
+			if (
+				this.isStreaming ||
+				this.isBashRunning ||
+				this.isEvalRunning ||
+				this.isCompacting ||
+				this.isGeneratingHandoff ||
+				this.isRetrying
+			) {
+				throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+			}
 
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.agent.replaceQueues([], []);
-		this.#queuedMessageDrainBlocked = false;
-		this.#usagePreflightReadyForNextModelCall = false;
-		await this.#bash.flushPending();
-		await this.sessionManager.flush();
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			this.agent.replaceQueues([], []);
+			this.#queuedMessageDrainBlocked = false;
+			this.#usagePreflightReadyForNextModelCall = false;
+			await this.#bash.flushPending();
+			await this.sessionManager.flush();
+		} catch (error) {
+			// The drain/flush window is fallible and no navigation was committed,
+			// so the preparation's model restore and phase clear must roll back —
+			// otherwise the aborted /btw branch leaves the live conversation on
+			// the original model with its coding phase ended.
+			await this.#rollbackCodeModelPreparation(preCodeModel, codeModelPreparation);
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();

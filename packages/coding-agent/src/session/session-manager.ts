@@ -1384,6 +1384,24 @@ export class SessionManager {
 	 * would split the transcript across a recreated source and the stranded
 	 * target) and the error names where the session file actually lives.
 	 */
+	/**
+	 * Undo to a {@link captureState} snapshot durably: restore the in-memory
+	 * state, then rewrite the session file so disk and memory agree after a
+	 * fresh open. Rollback paths whose prepared navigation already appended
+	 * entries (model changes, custom phase state) must use this instead of a
+	 * bare {@link restoreState}: restoreState alone reverts memory while the
+	 * appended entries stay persisted, so a reload observes a transcript the
+	 * live session never had.
+	 */
+	async rollbackToSnapshot(snapshot: SessionManagerStateSnapshot): Promise<void> {
+		this.restoreState(snapshot);
+		if (this.#persist && this.#sessionFile) {
+			this.#forceFileCreation = true;
+			this.#rewriteRequired = true;
+			await this.#rewriteAtomically();
+		}
+	}
+
 	async rollbackMove(snapshot: SessionManagerStateSnapshot): Promise<void> {
 		try {
 			const targetSessionDir = snapshot.sessionFile ? path.dirname(snapshot.sessionFile) : snapshot.sessionDir;
@@ -1394,15 +1412,10 @@ export class SessionManager {
 				`could not relocate the session back to ${snapshot.sessionDir} (${error instanceof Error ? error.message : String(error)}); the session file remains at ${movedFile}`,
 			);
 		}
-		this.restoreState(snapshot);
 		// The inverse moveTo already rewrote the source file with the
-		// target-filtered header. Persist the captured one so disk and memory
-		// agree after a fresh open.
-		if (this.#persist && this.#sessionFile) {
-			this.#forceFileCreation = true;
-			this.#rewriteRequired = true;
-			await this.#rewriteAtomically();
-		}
+		// target-filtered header. rollbackToSnapshot persists the captured one
+		// so disk and memory agree after a fresh open.
+		await this.rollbackToSnapshot(snapshot);
 	}
 	/**
 	 * Load a target session once and report the cwd that committing it will adopt.
