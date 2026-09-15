@@ -78,6 +78,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -740,6 +755,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
 ]
 
 [[package]]
@@ -4824,12 +4849,13 @@ dependencies = [
 
 [[package]]
 name = "lopdf"
-version = "0.44.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e2ec995d822e05cabc3f06d196ee43650af3fe4fe38012cacb35e0c3d113b68"
+checksum = "bfffda0fe1ab0157e1a13c14bebd3f28671f2fccb7922f0722ec53926e6922d3"
 dependencies = [
  "aes 0.9.2",
  "bitflags 2.13.2",
+ "brotli-decompressor",
  "cbc 0.2.1",
  "chrono",
  "ecb",
@@ -4838,7 +4864,6 @@ dependencies = [
  "getrandom 0.4.3",
  "indexmap",
  "itoa",
- "jiff",
  "log",
  "md-5 0.11.0",
  "nom 8.0.0",
@@ -4848,7 +4873,6 @@ dependencies = [
  "sha2 0.11.0",
  "stringprep",
  "thiserror 2.0.20",
- "time",
  "weezl 0.2.1",
 ]
 
@@ -5040,9 +5064,9 @@ dependencies = [
 
 [[package]]
 name = "napi"
-version = "3.12.4"
+version = "3.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2c1d080c842ec1347ebf3cfb9347c15f8c2262f143cc30eea41ddf1c7da720"
+checksum = "f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e"
 dependencies = [
  "bitflags 2.13.2",
  "ctor",
@@ -5063,9 +5087,9 @@ checksum = "860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7"
 
 [[package]]
 name = "napi-derive"
-version = "3.6.5"
+version = "3.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "350057056a30368aa76c11a0d406b0aa61321710be2c36656ab4f6efe0b785a2"
+checksum = "e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb"
 dependencies = [
  "convert_case 0.12.0",
  "ctor",
@@ -5812,9 +5836,9 @@ dependencies = [
 
 [[package]]
 name = "pdf-inspector"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41991cc4e52ee180591b21c4871b5fb5947ff1cc6898df9db2d04ef34c254c8d"
+checksum = "dfa8858423125d0d4cf7bb249a4df85fbabb3bdcdb4dcfeadee9c4d13c762277"
 dependencies = [
  "env_logger",
  "include_dir",
@@ -6055,7 +6079,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6125,7 +6149,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6210,11 +6234,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.2.0"
+version = "18.2.1"
 
 [[package]]
 name = "pi-edit"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6233,7 +6257,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6245,7 +6269,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6329,7 +6353,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6357,7 +6381,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6372,7 +6396,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "bytes",
  "flume",
@@ -6386,7 +6410,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.2.0"
+version = "18.2.1"
 dependencies = [
  "globset",
  "ignore",
@@ -10569,9 +10593,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.6.7"
+version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"
