@@ -804,6 +804,28 @@ class GitHubClient:
         )
         return _comment_from_payload(data)
 
+    async def get_issue_comment(self, repo: str, comment_id: int) -> CommentInfo:
+        """Fetch one conversation comment by id — the canonical text.
+
+        Webhook payloads carry the body as of the `created` event, so a comment
+        edited seconds later (reviewer bots post a placeholder, then rewrite it
+        with the real findings) is stale in the payload. Works on GitHub and
+        Forgejo (same REST path).
+        """
+        data = await self.request("GET", f"/repos/{repo}/issues/comments/{comment_id}")
+        return _comment_from_payload(data)
+
+    async def get_pr_review(self, repo: str, review_id: int, *, pr_number: int) -> PullRequestReviewInfo:
+        """Fetch one PR review (summary) by id — the canonical text.
+
+        Review ids are not issue-comment ids: on Forgejo a review's id 404s on
+        the issues/comments endpoint, on `pulls/comments/{id}`, AND in the
+        per-review comment walk — only `pulls/{pr}/reviews/{id}` resolves a
+        review *summary* body (approve / request-changes verdicts).
+        """
+        data = await self.request("GET", f"/repos/{repo}/pulls/{pr_number}/reviews/{review_id}")
+        return _pr_review_from_payload(data)
+
     async def open_pull_request(
         self,
         *,

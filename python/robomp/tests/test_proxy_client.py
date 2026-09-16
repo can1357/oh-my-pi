@@ -394,6 +394,16 @@ def round_trip_app(proxy_settings: Settings):
                 201,
                 json={"id": 11, "user": {"login": "bot"}, "body": "posted", "created_at": "2026-01-01T00:00:00Z"},
             )
+        if path == "/repos/octo/widget/issues/comments/14253" and req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 14253,
+                    "user": {"login": "miracodeai-bot"},
+                    "body": "canonical walkthrough",
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
         if path == "/repos/octo/widget/pulls/2/comments":
             return httpx.Response(
                 200,
@@ -420,6 +430,17 @@ def round_trip_app(proxy_settings: Settings):
                         "submitted_at": "2026-01-01T00:00:00Z",
                     }
                 ],
+            )
+        if path == "/repos/octo/widget/pulls/2/reviews/12" and req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 12,
+                    "user": {"login": "rev"},
+                    "body": "approved",
+                    "state": "APPROVED",
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                },
             )
         if path == "/repos/octo/widget/pulls/2/files":
             return httpx.Response(
@@ -515,12 +536,22 @@ async def test_round_trip_all_endpoints(round_trip_app) -> None:
     comments = await client.list_comments("octo/widget", 1)
     assert len(comments) == 1 and isinstance(comments[0], CommentInfo)
 
+    fetched_comment = await client.get_issue_comment("octo/widget", 14253)
+    assert isinstance(fetched_comment, CommentInfo)
+    assert fetched_comment.id == 14253
+    assert fetched_comment.author == "miracodeai-bot"
+    assert fetched_comment.body == "canonical walkthrough"
+
     rcs = await client.list_review_comments("octo/widget", 2)
     assert len(rcs) == 1 and isinstance(rcs[0], ReviewCommentInfo)
     assert rcs[0].line == 5
 
     prs = await client.list_pr_reviews("octo/widget", 2)
     assert len(prs) == 1 and isinstance(prs[0], PullRequestReviewInfo)
+
+    review = await client.get_pr_review("octo/widget", 12, pr_number=2)
+    assert isinstance(review, PullRequestReviewInfo)
+    assert review.id == 12 and review.state == "APPROVED"
 
     files = await client.list_pr_files("octo/widget", 2)
     assert len(files) == 1 and isinstance(files[0], PullRequestFileInfo)

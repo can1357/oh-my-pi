@@ -8,13 +8,14 @@ Review comment on PR you opened.
 
 ---
 
-## @{{comment.author}} — `{{comment.path}}`{{comment.line_range}}
+## @{{comment.author}} — {{comment_ref}}
 
 {{comment.body}}
 
 ---
 
-- MUST read diff context around cited line range before acting.
+- MUST read the diff (and the cited line range when given) before acting.
+- Comment may be a reviewer-bot summary (e.g. a Mira walkthrough); treat each concrete finding in it as actionable.
 - Address comment; push follow-up commit on `{{workspace.branch}}`.
 - Reply: single `gh_post_comment` summarizing changes, one line per concrete fix.
 - Clarification, not change? Answer with `gh_post_comment`; NEVER touch code.
