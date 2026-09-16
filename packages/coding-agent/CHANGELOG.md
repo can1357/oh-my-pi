@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Workpools now settle rejected batches and remain usable after background-job admission fails. ([#12286](https://github.com/can1357/oh-my-pi/pull/12286) by [@iliaal](https://github.com/iliaal))
 - Reduced snapshot-recording stalls when a session retains large file histories. ([#12279](https://github.com/can1357/oh-my-pi/pull/12279) by [@iliaal](https://github.com/iliaal))
 - Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
