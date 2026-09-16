@@ -301,6 +301,20 @@ export function normalizeSelector(selector: string): string {
 	return selector;
 }
 
+/**
+ * Rejects the inverted `press(selector, key)` call — Puppeteer muscle memory —
+ * with a hint naming the corrected order (#12136). Test seam: exported so the
+ * failure mode is pinned without a live page.
+ */
+export function assertTabPressArgs(key: unknown, opts?: unknown): void {
+	if (typeof opts === "string") {
+		throw new ToolError(
+			`tab.press() takes (key, options) but was called as (selector, key). ` +
+				`Did you mean tab.press(${JSON.stringify(opts)}, { selector: ${JSON.stringify(key)} })?`,
+		);
+	}
+}
+
 function isInteractiveNode(node: SerializedAXNode): boolean {
 	if (INTERACTIVE_AX_ROLES.has(node.role)) return true;
 	return (
@@ -1715,8 +1729,9 @@ export class WorkerCore {
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
-			press: (key, opts) =>
-				op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
+			press: (key, opts) => {
+				assertTabPressArgs(key, opts);
+				return op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
 					const selector = opts?.selector;
 					if (selector) {
 						if (parseAriaRefSelector(selector) !== null) {
@@ -1729,7 +1744,8 @@ export class WorkerCore {
 						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
 					}
 					await untilAborted(sig, () => page.keyboard.press(key));
-				}),
+				});
+			},
 			scroll: (deltaX, deltaY) =>
 				op("tab.scroll()", actionOpMs, sig =>
 					untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY }))),
