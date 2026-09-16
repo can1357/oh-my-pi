@@ -96,9 +96,9 @@ async function createContext() {
 		refreshAppearance();
 		resetDisplay();
 	});
-	const prompt = vi.fn(async () => { });
+	const prompt = vi.fn(async () => {});
 	const retry = vi.fn(async () => true);
-	const abort = vi.fn(async () => { });
+	const abort = vi.fn(async () => {});
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
@@ -185,7 +185,7 @@ async function createContext() {
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: () => false,
 		recordLocalSubmission(this: InteractiveModeContext, text: string, imageCount = 0) {
-			if (this.isKnownSlashCommand(text)) return () => { };
+			if (this.isKnownSlashCommand(text)) return () => {};
 			const sig = `${text}\u0000${imageCount}`;
 			this.locallySubmittedUserSignatures.add(sig);
 			let disposed = false;
@@ -717,8 +717,8 @@ describe("InputController global editor actions", () => {
 		controller.setupKeyHandlers();
 		const listeners = registeredInputListeners(context.spies.addInputListener);
 		const dialog = new AskDialogComponent([{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }], {
-			onSubmit: () => { },
-			onCancel: () => { },
+			onSubmit: () => {},
+			onCancel: () => {},
 			onPrompt: async () => undefined,
 		});
 		context.setFocused(dialog);
@@ -774,8 +774,8 @@ describe("InputController global editor actions", () => {
 				tree,
 				"root",
 				20,
-				() => { },
-				() => { },
+				() => {},
+				() => {},
 			),
 		);
 
@@ -792,8 +792,8 @@ describe("InputController global editor actions", () => {
 			context.ctx.ui,
 			"Edit",
 			undefined,
-			() => { },
-			() => { },
+			() => {},
+			() => {},
 		);
 		// The ask dialog's "Other" prompt focuses a HookEditorComponent without
 		// assigning ctx.hookEditor; the defer must recognize it structurally.
@@ -819,8 +819,8 @@ describe("InputController global editor actions", () => {
 				tree,
 				"root",
 				20,
-				() => { },
-				() => { },
+				() => {},
+				() => {},
 			),
 		);
 		const listeners = registeredInputListeners(context.spies.addInputListener);
@@ -847,7 +847,7 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 	it("toggles tool-output expansion when a non-editor prompt holds focus (#7837)", async () => {
 		const { ctx, listeners, setFocused } = await setup();
 		// An approval / select prompt owns keyboard focus, not the editor.
-		setFocused({ handleInput() { } });
+		setFocused({ handleInput() {} });
 		expect(ctx.toolOutputExpanded).toBe(false);
 
 		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
@@ -882,8 +882,8 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 				tree,
 				"root",
 				20,
-				() => { },
-				() => { },
+				() => {},
+				() => {},
 			),
 		);
 
@@ -908,8 +908,8 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 				tree,
 				"root",
 				20,
-				() => { },
-				() => { },
+				() => {},
+				() => {},
 			),
 		);
 
@@ -927,7 +927,7 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 					options: [{ label: "Option A" }, { label: "Option B" }],
 				},
 			],
-			{ onSubmit: () => { }, onCancel: () => { }, onPrompt: async () => undefined },
+			{ onSubmit: () => {}, onCancel: () => {}, onPrompt: async () => undefined },
 		);
 		const collapsed = dialog.render(80).join("\n");
 		setFocused(dialog);
@@ -944,8 +944,8 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 	it("still expands tool output when a short ask question has nothing to reveal", async () => {
 		const { ctx, listeners, setFocused } = await setup();
 		const dialog = new AskDialogComponent([{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }], {
-			onSubmit: () => { },
-			onCancel: () => { },
+			onSubmit: () => {},
+			onCancel: () => {},
 			onPrompt: async () => undefined,
 		});
 		dialog.render(80);
