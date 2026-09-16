@@ -191,11 +191,11 @@ export class InputController {
 			readText: typeof readTextFromClipboard;
 			readMacFileUrls?: typeof readMacFileUrlsFromClipboard;
 		} = {
-			readImage: readImageFromClipboard,
-			readText: readTextFromClipboard,
-			readMacFileUrls: readMacFileUrlsFromClipboard,
-		},
-	) {}
+				readImage: readImageFromClipboard,
+				readText: readTextFromClipboard,
+				readMacFileUrls: readMacFileUrlsFromClipboard,
+			},
+	) { }
 
 	/** Session-level title starts (user `/skill:` via promptCustomMessage) reuse this UI. */
 	notifyTitleGenerationStart(): (() => void) | undefined {
@@ -373,6 +373,10 @@ export class InputController {
 				}
 				if (this.ctx.keybindings.matches(data, "app.display.reset")) {
 					if (this.ctx.ui.hasOverlay()) return undefined;
+					// The tree selector rebinds Alt+L for its `labeled-only` filter
+					// and mounts inline (no overlay), so its own binding stays
+					// authoritative here — same defer as the tools toggle above.
+					if (this.ctx.ui.getFocused() instanceof TreeSelectorComponent) return undefined;
 					this.ctx.resetDisplayAfterAppearanceRefresh();
 					return { consume: true };
 				}
@@ -1359,7 +1363,7 @@ export class InputController {
 		// alive across SIGSTOP so it can deliver SIGCONT; without this handle Bun
 		// exits successfully immediately after `fg` instead of restarting the TUI
 		// (issue #8585).
-		const suspendKeepalive = setInterval(() => {}, 2 ** 30);
+		const suspendKeepalive = setInterval(() => { }, 2 ** 30);
 
 		// Capture the listener so we can detach it if the signal never fires;
 		// otherwise a failed suspend would leave a stale SIGCONT handler that
@@ -1612,8 +1616,8 @@ export class InputController {
 					remaining.length === 1
 						? `=> ${remaining[0]}`
 						: `=>\n${remaining
-								.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
-								.join("\n")}`;
+							.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
+							.join("\n")}`;
 				this.ctx.editor.setText(restored);
 			}
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
