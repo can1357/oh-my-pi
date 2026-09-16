@@ -91,6 +91,86 @@ describe("builtinCredentialSecretEntries", () => {
 			expect(args.old_string).toBe(fileLine);
 		}
 	});
+
+	it("hides vendor-prefixed credentials across built-in families and restores them in tool-call arguments", () => {
+		const obfuscator = new SecretObfuscator(builtinCredentialSecretEntries());
+		const awsKey = `AKIA${"Z9".repeat(8)}`;
+		const googleKey = `AIza${"xQ9_".repeat(8)}abc`;
+		const slackToken = `xoxb-${"1a2B".repeat(6)}`;
+		const npmToken = `npm_${"Cd34".repeat(9)}`;
+		const stripeKey = `sk_live_${"Ef56".repeat(6)}`;
+		const stripeWebhook = `whsec_${"Gh78".repeat(8)}`;
+		const hfToken = `hf_${"Ij90".repeat(8)}ab`;
+		const sendgridKey = `SG.${"K1".repeat(11)}.${"M2".repeat(21)}M`;
+		const jwt = `eyJ${"N3".repeat(10)}.eyJ${"O4".repeat(10)}.${"P5".repeat(13)}P`;
+		const lines = [
+			`aws_access_key_id = ${awsKey}`,
+			`google api key: ${googleKey}`,
+			`SLACK_BOT_TOKEN=${slackToken}`,
+			`//registry.npmjs.org/:_authToken=${npmToken}`,
+			`stripe secret: ${stripeKey}`,
+			`endpoint_secret = ${stripeWebhook}`,
+			`HF_TOKEN=${hfToken}`,
+			`SENDGRID_API_KEY=${sendgridKey}`,
+			`id_token: ${jwt}`,
+		];
+		const tokens = [awsKey, googleKey, slackToken, npmToken, stripeKey, stripeWebhook, hfToken, sendgridKey, jwt];
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			const token = tokens[i];
+			const providerView = obfuscator.obfuscate(line);
+			expect(providerView).not.toContain(token);
+			expect(obfuscator.obfuscate(providerView)).toBe(providerView);
+			const args = deobfuscateToolArguments(obfuscator, { old_string: providerView });
+			expect(args.old_string).toBe(line);
+		}
+	});
+
+	it("replaces only the token after a Bearer prefix", () => {
+		const obfuscator = new SecretObfuscator(builtinCredentialSecretEntries());
+		const token = `${"Q7w".repeat(13)}Z`;
+		const input = `Authorization: Bearer ${token}`;
+
+		const providerView = obfuscator.obfuscate(input);
+
+		expect(providerView).toContain("Authorization: Bearer ");
+		expect(providerView).not.toContain(token);
+		const args = deobfuscateToolArguments(obfuscator, { old_string: providerView });
+		expect(args.old_string).toBe(input);
+	});
+
+	it("hides a multi-line PEM private key block as a single placeholder", () => {
+		const obfuscator = new SecretObfuscator(builtinCredentialSecretEntries());
+		const dash = "-".repeat(5);
+		const bodyLine = "A".repeat(64);
+		const pem = `${dash}BEGIN RSA PRIVATE KEY${dash}\n${bodyLine}\n${bodyLine}\n${bodyLine}\n${dash}END RSA PRIVATE KEY${dash}`;
+		const input = `before line\n${pem}\nafter line`;
+
+		const providerView = obfuscator.obfuscate(input);
+
+		expect(providerView).not.toContain("BEGIN RSA PRIVATE KEY");
+		expect(providerView).not.toContain("END RSA PRIVATE KEY");
+		expect(providerView).not.toContain(bodyLine);
+		expect(providerView.match(/\$\$[^$]+\$\$/g)).toHaveLength(1);
+		expect(providerView.startsWith("before line\n")).toBe(true);
+		expect(providerView.endsWith("\nafter line")).toBe(true);
+		const args = deobfuscateToolArguments(obfuscator, { old_string: providerView });
+		expect(args.old_string).toBe(input);
+	});
+
+	it("leaves publishable keys, identifiers, and plain hashes alone", () => {
+		const obfuscator = new SecretObfuscator(builtinCredentialSecretEntries());
+		const publishable = `pk_live_${"Ab12".repeat(6)}`;
+		const gitSha = "a1b2c3d4".repeat(5);
+		const input = [
+			`publishable = ${publishable}`,
+			"token = get_token_expiry_seconds()",
+			`commit ${gitSha}`,
+			"keyboard_shortcut_secret_value",
+		].join("\n");
+
+		expect(obfuscator.obfuscate(input)).toBe(input);
+	});
 });
 
 describe("collectEnvSecrets connection URLs", () => {
