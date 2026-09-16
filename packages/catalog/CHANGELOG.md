@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `xai-api-oauth`, an API-only xAI OAuth provider that requests `api:access` without `grok-cli:access` and excludes Grok Build models from its catalog.
+- Added `xai-api-oauth`, an API-only xAI OAuth provider that requests `api:access` without `grok-cli:access` and excludes Grok Build models from its catalog ([#12280](https://github.com/can1357/oh-my-pi/pull/12280) by [@pinefin](https://github.com/pinefin)).
 - DeepSeek V4.1 Flash (`deepseek-flash`) now accepts image inputs and resolves its reasoning metadata, name, and effort ladder from upstream instead of shipping as a text-only row without them.
 
 ### Fixed
