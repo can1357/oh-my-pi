@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Long-running commands no longer accumulate promise handlers for every output chunk while retaining bounded stderr previews.
+- Long-running commands no longer accumulate promise handlers for every output chunk while retaining bounded stderr previews. ([#12291](https://github.com/can1357/oh-my-pi/pull/12291) by [@iliaal](https://github.com/iliaal))
 
 ## [18.2.2] - 2026-09-16
 
