@@ -714,6 +714,15 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 
 The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
 
+The model segment renders the serving provider as a dim `provider/` prefix by default (mirroring the model browser), so the provider is always visible without opening `/model`. Disable it with:
+
+```yaml
+statusLine:
+  segmentOptions:
+    model:
+      showProvider: false
+```
+
 ### Interaction
 
 | Key                    | Type    | Default         | Values                                                                                                  |
