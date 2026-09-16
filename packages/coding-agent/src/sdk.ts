@@ -4117,7 +4117,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
+			session.dispose = async disposeOptions => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -4141,7 +4141,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
 						await AgentLifecycleManager.global().dispose();
 					}
-					await originalDispose();
+					await originalDispose(disposeOptions);
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
