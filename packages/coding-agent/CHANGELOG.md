@@ -10,6 +10,7 @@
 ### Added
 
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
+- Added `gitBranch` to session headers: the Git branch of the session working directory, recorded for new, forked, and branched session files and re-resolved when a session moves. It is omitted outside a Git checkout, on a detached `HEAD`, and in pure Jujutsu workspaces, and is redacted in shared exports ([#12225](https://github.com/can1357/oh-my-pi/pull/12225) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
