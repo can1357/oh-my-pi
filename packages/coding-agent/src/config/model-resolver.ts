@@ -1191,14 +1191,9 @@ function matchSessionInheritedPattern(
 	return undefined;
 }
 
-function sessionModelInheritance(value: string | string[] | undefined): SessionModelInheritance | undefined {
-	const patterns = normalizeModelPatternList(value);
-	return patterns.length === 1 ? matchSessionInheritedPattern(patterns[0]!) : undefined;
-}
-
 /** {@link matchSessionInheritedPattern} for a whole selection, without the level. */
 export function modelSelectionInheritsSessionModel(value: string | string[] | undefined): boolean {
-	return sessionModelInheritance(value) !== undefined;
+	return normalizeModelPatternList(value).some(pattern => matchSessionInheritedPattern(pattern) !== undefined);
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
@@ -1358,9 +1353,7 @@ interface EffectiveAgentModelSelection {
 
 /** Point an inherited selector at an explicitly requested thinking level. */
 function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingLevel): string {
-	const suffix = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
-	if (suffix.level === ThinkingLevel.Max) return pattern + String.fromCharCode(58) + level;
-	return suffix.base + String.fromCharCode(58) + level;
+	return `${pattern}:${level}`;
 }
 
 function resolveEffectiveAgentModelSelection(
@@ -1375,14 +1368,17 @@ function resolveEffectiveAgentModelSelection(
 		return { patterns: level ? patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) : patterns };
 	};
 
-	// `@default` asks for the parent's live model, so it short-circuits to the
-	// session tail rather than expanding the `default` role — and it stays the
-	// winning source, never demoting to the agent definition below.
-	const requestedInheritance = sessionModelInheritance(requestModel);
-	if (requestedInheritance) return inheritSessionModel(requestedInheritance);
-	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
-	if (requestPatterns.length > 0) {
-		return { source: requestModel, patterns: requestPatterns };
+	let requestSource = requestModel;
+	let requestedInheritance = false;
+	const requestPatterns = normalizeModelPatternList(requestModel).flatMap((pattern, index, patterns) => {
+		const inheritance = matchSessionInheritedPattern(pattern);
+		if (!inheritance) return resolveConfiguredModelPatterns(pattern, settings);
+		if (!requestedInheritance) requestSource = index === 0 ? undefined : patterns.slice(0, index);
+		requestedInheritance = true;
+		return inheritSessionModel(inheritance).patterns;
+	});
+	if (requestPatterns.length > 0 || requestedInheritance) {
+		return { source: requestSource, patterns: requestPatterns };
 	}
 
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);

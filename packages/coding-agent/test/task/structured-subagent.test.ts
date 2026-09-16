@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -423,6 +424,29 @@ describe("structured subagent primitive", () => {
 
 		expect(policy.modelOverride).toEqual(["zai/glm-5.2:high"]);
 		// The request still outranks the agent definition; it just resolves to inheritance.
+		expect(policy.modelRole).toBeUndefined();
+	});
+
+	it("admits mixed inherited requests when configured role candidates are unavailable", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({
+				modelRoles: { default: "openai/gpt-4o", smol: "openai/gpt-4o", definition: "openai/gpt-4o" },
+			}),
+			getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+			getModelString: () => "openai/gpt-4o",
+			modelRegistry: { getAvailable: () => [MODEL] },
+		} as ToolSession;
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "@default:high,@smol" }),
+		);
+		const selected = resolveModelOverride(
+			normalizeModelPatternList(policy.modelOverride),
+			{ getAvailable: () => [MODEL] },
+			childSession.settings,
+		);
+
+		expect(selected.model).toBe(MODEL);
 		expect(policy.modelRole).toBeUndefined();
 	});
 
