@@ -186,7 +186,7 @@ const MIN_ENV_VALUE_LENGTH = 8;
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
 
 /** Extracts the password group from a `scheme://user:password@host` value. */
-const CONNECTION_URL_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/:@\s]+:([^@\s]+)@/i;
+const CONNECTION_URL_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/:@\s]*:([^@\s]+)@/i;
 
 /** Collect environment variable values that look like secrets. */
 export function collectEnvSecrets(): SecretEntry[] {

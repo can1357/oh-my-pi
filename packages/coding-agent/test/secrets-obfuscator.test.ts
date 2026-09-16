@@ -207,6 +207,19 @@ describe("collectEnvSecrets connection URLs", () => {
 		}
 	});
 
+	it("registers the password from a userless connection URL", () => {
+		const name = "OMP_TEST_CONNURL_NOUSER";
+		const pw = `pw${"0123456789ab".slice(0, 12)}`;
+		const url = `redis://:${pw}@redis.internal:6379/0`;
+		process.env[name] = url;
+		try {
+			const entries = collectEnvSecrets();
+			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
+		} finally {
+			delete process.env[name];
+		}
+	});
+
 	it("skips connection-URL passwords shorter than the minimum length", () => {
 		const name = "OMP_TEST_CONNURL_SHORT";
 		const url = "postgres://app:pw@db.internal:5432/shop";
