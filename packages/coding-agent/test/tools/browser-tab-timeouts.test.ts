@@ -3,6 +3,7 @@ import {
 	dispatchScroll,
 	normalizeSelector,
 	resolveOpTimeouts,
+	resolveWaitDuration,
 	resolveWaitTimeout,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-scope";
@@ -115,6 +116,32 @@ describe("browser wait-helper timeout resolution", () => {
 		const { budgetBound, actionOpMs } = resolveOpTimeouts(cell);
 		expect(resolveWaitTimeout(cell, -5_000)).toBe(actionOpMs);
 		expect(resolveWaitTimeout(cell, -5_000)).not.toBe(budgetBound);
+	});
+});
+
+describe("browser waitFor(ms) duration resolution", () => {
+	it("completes a zero-duration wait immediately instead of mapping it to the disable-timeout sentinel", () => {
+		// Regression (#12137 review): the selector-timeout resolver treats 0 as
+		// Puppeteer's "disable timeout" and returned ~29s — a `tab.waitFor(0)`
+		// stall instead of an immediate completion.
+		const cell = 30_000;
+		expect(resolveWaitDuration(cell, 0)).toBe(0);
+		expect(resolveWaitDuration(cell, 0)).not.toBe(resolveOpTimeouts(cell).budgetBound);
+	});
+
+	it("honors positive durations but clamps them under the cell budget", () => {
+		const cell = 30_000;
+		const { budgetBound } = resolveOpTimeouts(cell);
+		expect(resolveWaitDuration(cell, 500)).toBe(500);
+		expect(resolveWaitDuration(cell, 120_000)).toBe(budgetBound);
+		expect(resolveWaitDuration(cell, 120_000)).toBeLessThan(cell);
+	});
+
+	it("rejects non-finite and negative durations with a named error", () => {
+		const cell = 30_000;
+		for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+			expect(() => resolveWaitDuration(cell, bad)).toThrow(/non-negative duration/);
+		}
 	});
 });
 

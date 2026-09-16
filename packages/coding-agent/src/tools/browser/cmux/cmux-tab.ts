@@ -1095,7 +1095,23 @@ export class CmuxTab {
 		await this.#request("browser.scroll", { dx, dy });
 	}
 
-	async waitFor(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+	async waitFor(selector: string | number, opts?: { timeout?: number }): Promise<CmuxElementHandle | undefined> {
+		// Duration form: `tab.waitFor(ms)` is a plain bounded sleep — same contract
+		// as the Chromium worker (#12137). 0 completes immediately (a plain sleep,
+		// NOT Puppeteer's "disable timeout" sentinel); positive durations clamp to
+		// the run timeout; garbage rejects instead of hitting assertSelectorString.
+		if (typeof selector === "number") {
+			if (!Number.isFinite(selector) || selector < 0) {
+				throw new ToolError(`tab.waitFor(ms) takes a non-negative duration in ms, got ${JSON.stringify(selector)}`);
+			}
+			const ms = Math.min(selector, this.#runContext?.timeoutMs ?? 30_000);
+			if (this.#runContext) {
+				await waitForRun(ms, this.#runContext.signal);
+			} else {
+				await Bun.sleep(ms);
+			}
+			return undefined;
+		}
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		await this.#waitForSelector(selector, timeoutMs);
 		return new CmuxElementHandle(this, selector);
@@ -2395,7 +2411,8 @@ class CmuxLocator {
 	}
 
 	async waitHandle(): Promise<CmuxElementHandle> {
-		return await this.#tab.waitFor(this.#selector, { timeout: this.#timeoutMs });
+		const handle = await this.#tab.waitFor(this.#selector, { timeout: this.#timeoutMs });
+		return handle as CmuxElementHandle;
 	}
 }
 
@@ -2472,7 +2489,8 @@ class CmuxPageFacade {
 	}
 
 	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
-		return await this.#tab.waitFor(selector, opts);
+		const handle = await this.#tab.waitFor(selector, opts);
+		return handle as CmuxElementHandle;
 	}
 
 	async waitForFunction(
