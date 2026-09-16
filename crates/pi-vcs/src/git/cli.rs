@@ -516,14 +516,24 @@ pub async fn clone(
 	cancel: Option<CancellationToken>,
 ) -> Result<()> {
 	let absolute = std::path::absolute(target_dir)?;
+	let destination = absolute.clone();
+	tokio::task::spawn_blocking(move || check_clone_destination(&destination))
+		.await
+		.map_err(|err| Error::backend("git clone", err.to_string()))??;
 	let parent = absolute
 		.parent()
 		.map_or_else(|| absolute.clone(), Path::to_owned);
 	tokio::fs::create_dir_all(&parent).await?;
-	let staging = tempfile::Builder::new()
-		.prefix(".pi-clone-")
-		.tempdir_in(&parent)?;
-	let checkout_dir = staging.path().join("repo");
+	let staging_parent = parent.clone();
+	let staging = tokio::task::spawn_blocking(move || {
+		tempfile::Builder::new()
+			.prefix(".pi-clone-")
+			.tempdir_in(staging_parent)
+			.map(tempfile::TempDir::keep)
+	})
+	.await
+	.map_err(|err| Error::backend("git clone", err.to_string()))??;
+	let checkout_dir = staging.join("repo");
 
 	let shallow = options.sha.is_none();
 	let mut args = vec!["clone".to_owned()];
@@ -546,31 +556,128 @@ pub async fn clone(
 		cancel: cancel.clone(),
 		..RunOptions::default()
 	};
-	run_checked(&parent, &args, &run_options).await?;
-
-	if let Some(sha) = &options.sha {
-		let checkout =
-			run_checked(&checkout_dir, &["checkout".to_owned(), sha.clone()], &RunOptions {
-				cancel,
-				..RunOptions::default()
-			})
-			.await;
-		if checkout.is_err() {
-			return Err(Error::backend(
-				"git clone",
-				format!("failed to checkout SHA {sha} in cloned repository {url}"),
-			));
+	let outcome = async {
+		run_checked(&parent, &args, &run_options).await?;
+		if let Some(sha) = &options.sha {
+			let checkout =
+				run_checked(&checkout_dir, &["checkout".to_owned(), sha.clone()], &RunOptions {
+					cancel,
+					..RunOptions::default()
+				})
+				.await;
+			if checkout.is_err() {
+				return Err(Error::backend(
+					"git clone",
+					format!("failed to checkout SHA {sha} in cloned repository {url}"),
+				));
+			}
 		}
+		Ok(())
 	}
-	if let Err(err) = tokio::fs::rename(&checkout_dir, &absolute).await {
-		// Windows cannot replace an existing directory, even when empty.
-		if cfg!(windows) && tokio::fs::remove_dir(&absolute).await.is_ok() {
-			tokio::fs::rename(&checkout_dir, &absolute).await?;
-		} else {
-			return Err(err.into());
+	.await;
+	if let Err(err) = outcome {
+		let _ = tokio::fs::remove_dir_all(&staging).await;
+		return Err(err);
+	}
+	tokio::task::spawn_blocking(move || publish_clone(&checkout_dir, &absolute))
+		.await
+		.map_err(|err| Error::backend("git clone", err.to_string()))?
+		.map_err(|err| {
+			Error::backend(
+				"git clone",
+				format!("failed to publish checkout: {err}; staging retained at {}", staging.display()),
+			)
+		})?;
+	let _ = tokio::fs::remove_dir_all(&staging).await;
+	Ok(())
+}
+
+fn check_clone_destination(destination: &Path) -> std::io::Result<()> {
+	match std::fs::read_dir(destination) {
+		Ok(mut entries) => match entries.next().transpose()? {
+			None => Ok(()),
+			Some(_) => Err(std::io::Error::new(
+				std::io::ErrorKind::AlreadyExists,
+				format!("destination is not empty: {}", destination.display()),
+			)),
+		},
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+		Err(err) => Err(err),
+	}
+}
+
+fn publish_clone(checkout: &Path, destination: &Path) -> std::io::Result<()> {
+	match rename_clone_entry(checkout, destination) {
+		Ok(()) => return Ok(()),
+		Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {},
+		Err(err) => return Err(err),
+	}
+	check_clone_destination(destination)?;
+	let entries = std::fs::read_dir(checkout)?
+		.map(|entry| entry.map(|entry| entry.file_name()))
+		.collect::<std::io::Result<Vec<_>>>()?;
+	publish_clone_entries(checkout, destination, entries)
+}
+
+fn publish_clone_entries(
+	checkout: &Path,
+	destination: &Path,
+	entries: Vec<std::ffi::OsString>,
+) -> std::io::Result<()> {
+	let mut published = Vec::new();
+	for name in entries {
+		if let Err(err) = rename_clone_entry(&checkout.join(&name), &destination.join(&name)) {
+			for name in published.into_iter().rev() {
+				rename_clone_entry(&destination.join(&name), &checkout.join(&name)).map_err(
+					|rollback| {
+						std::io::Error::other(format!(
+							"publication failed: {err}; rollback failed for {}: {rollback}",
+							destination.join(&name).display()
+						))
+					},
+				)?;
+			}
+			return Err(err);
 		}
+		published.push(name);
 	}
 	Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn rename_clone_entry(source: &Path, destination: &Path) -> std::io::Result<()> {
+	use rustix::fs::{CWD, RenameFlags, renameat_with};
+	renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE).map_err(Into::into)
+}
+
+#[cfg(windows)]
+fn rename_clone_entry(source: &Path, destination: &Path) -> std::io::Result<()> {
+	use std::os::windows::ffi::OsStrExt;
+
+	let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+	let destination: Vec<_> = destination
+		.as_os_str()
+		.encode_wide()
+		.chain(Some(0))
+		.collect();
+	if source[..source.len() - 1].contains(&0) || destination[..destination.len() - 1].contains(&0) {
+		return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL"));
+	}
+	// SAFETY: Both paths are NUL-terminated and remain valid for the duration of
+	// the call.
+	if unsafe {
+		windows_sys::Win32::Storage::FileSystem::MoveFileW(source.as_ptr(), destination.as_ptr())
+	} == 0
+	{
+		Err(std::io::Error::last_os_error())
+	} else {
+		Ok(())
+	}
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", windows)))]
+fn rename_clone_entry(_source: &Path, _destination: &Path) -> std::io::Result<()> {
+	Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "exclusive rename is unavailable"))
 }
 
 #[cfg(test)]
@@ -580,7 +687,8 @@ mod tests {
 	fn clone_source(root: &Path) -> std::path::PathBuf {
 		let source = root.join("source");
 		std::fs::create_dir(&source).unwrap();
-		for args in [vec!["init", "-q", "-b", "main"], vec![
+		std::fs::write(source.join("tracked.txt"), b"clone content").unwrap();
+		for args in [vec!["init", "-q", "-b", "main"], vec!["add", "tracked.txt"], vec![
 			"-c",
 			"user.name=Test",
 			"-c",
@@ -600,6 +708,84 @@ mod tests {
 			);
 		}
 		source
+	}
+
+	#[tokio::test]
+	async fn clone_rejects_occupied_destination_before_contacting_remote() {
+		let root = tempfile::tempdir().unwrap();
+		let target = root.path().join("target");
+		std::fs::create_dir(&target).unwrap();
+		std::fs::write(target.join("sentinel"), b"keep").unwrap();
+		let missing = root.path().join("missing-remote");
+		let error = clone(missing.to_str().unwrap(), &target, &CloneOptions::default(), None)
+			.await
+			.unwrap_err();
+		assert!(error.to_string().contains("destination is not empty"), "{error}");
+		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep");
+	}
+
+	#[tokio::test]
+	async fn clone_preserves_existing_empty_directory_identity_and_permissions() {
+		#[cfg(unix)]
+		use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+		let root = tempfile::tempdir().unwrap();
+		let source = clone_source(root.path());
+		let target = root.path().join("target");
+		std::fs::create_dir(&target).unwrap();
+		#[cfg(unix)]
+		std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+		#[cfg(unix)]
+		let before = std::fs::metadata(&target).unwrap();
+		clone(source.to_str().unwrap(), &target, &CloneOptions::default(), None)
+			.await
+			.unwrap();
+		#[cfg(unix)]
+		{
+			let after = std::fs::metadata(&target).unwrap();
+			assert_eq!(after.ino(), before.ino());
+			assert_eq!(after.mode() & 0o7777, 0o700);
+		}
+		assert!(target.join(".git/HEAD").is_file());
+		assert_eq!(std::fs::read(target.join("tracked.txt")).unwrap(), b"clone content");
+	}
+
+	#[test]
+	fn clone_publication_collision_restores_moved_entries_and_preserves_destination() {
+		let root = tempfile::tempdir().unwrap();
+		let checkout = root.path().join("checkout");
+		let target = root.path().join("target");
+		std::fs::create_dir(&checkout).unwrap();
+		std::fs::create_dir(&target).unwrap();
+		std::fs::create_dir(checkout.join(".git")).unwrap();
+		std::fs::write(checkout.join(".git/HEAD"), b"staged HEAD").unwrap();
+		std::fs::write(checkout.join("tracked.txt"), b"staged content").unwrap();
+		std::fs::write(target.join("tracked.txt"), b"concurrent caller content").unwrap();
+		let error =
+			publish_clone_entries(&checkout, &target, vec![".git".into(), "tracked.txt".into()])
+				.unwrap_err();
+		assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+		assert_eq!(std::fs::read(target.join("tracked.txt")).unwrap(), b"concurrent caller content");
+		assert_eq!(std::fs::read(checkout.join("tracked.txt")).unwrap(), b"staged content");
+		assert_eq!(std::fs::read(checkout.join(".git/HEAD")).unwrap(), b"staged HEAD");
+		assert!(!target.join(".git").exists());
+	}
+
+	#[test]
+	fn clone_publication_rechecks_destination_after_transfer() {
+		let root = tempfile::tempdir().unwrap();
+		let checkout = root.path().join("checkout");
+		let target = root.path().join("target");
+		std::fs::create_dir(&checkout).unwrap();
+		std::fs::write(checkout.join("tracked.txt"), b"staged content").unwrap();
+		check_clone_destination(&target).unwrap();
+		std::fs::create_dir(&target).unwrap();
+		std::fs::write(target.join("sentinel"), b"caller content").unwrap();
+		let error = publish_clone(&checkout, &target).unwrap_err();
+		assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"caller content");
+		assert_eq!(std::fs::read(checkout.join("tracked.txt")).unwrap(), b"staged content");
+		assert!(!target.join("tracked.txt").exists());
 	}
 
 	#[tokio::test]
@@ -623,14 +809,12 @@ mod tests {
 		let root = tempfile::tempdir().unwrap();
 		let target = root.path().join("target");
 		std::fs::create_dir(&target).unwrap();
-		std::fs::write(target.join("sentinel"), b"keep remote failure").unwrap();
 		let missing = root.path().join("missing-remote");
-		assert!(
-			clone(missing.to_str().unwrap(), &target, &CloneOptions::default(), None)
-				.await
-				.is_err()
-		);
-		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep remote failure");
+		let error = clone(missing.to_str().unwrap(), &target, &CloneOptions::default(), None)
+			.await
+			.unwrap_err();
+		assert!(matches!(error, Error::Cli { .. }), "{error}");
+		assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
 		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
 	}
 
@@ -648,7 +832,6 @@ mod tests {
 		);
 		assert!(!target.exists());
 		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
-		std::fs::create_dir(&target).unwrap();
 		clone(source.to_str().unwrap(), &target, &CloneOptions::default(), None)
 			.await
 			.unwrap();
@@ -664,6 +847,7 @@ mod tests {
 			.output()
 			.unwrap();
 		assert_eq!(output.stdout, expected.stdout);
+		assert_eq!(std::fs::read(target.join("tracked.txt")).unwrap(), b"clone content");
 		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 	}
 
@@ -673,15 +857,13 @@ mod tests {
 		let source = clone_source(root.path());
 		let target = root.path().join("target");
 		std::fs::create_dir(&target).unwrap();
-		std::fs::write(target.join("sentinel"), b"keep").unwrap();
 		let cancel = CancellationToken::new();
 		cancel.cancel();
-		assert!(
-			clone(source.to_str().unwrap(), &target, &CloneOptions::default(), Some(cancel))
-				.await
-				.is_err()
-		);
-		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep");
+		let error = clone(source.to_str().unwrap(), &target, &CloneOptions::default(), Some(cancel))
+			.await
+			.unwrap_err();
+		assert!(matches!(error, Error::Canceled), "{error}");
+		assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
 		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 	}
 

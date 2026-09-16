@@ -22,4 +22,7 @@ tokio-util.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+rustix = { version = "1", features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
