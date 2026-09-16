@@ -726,13 +726,17 @@ export interface CreateAgentSessionOptions {
 	 *   `buildWorkspaceTree()` — so an extension or custom tool added or removed
 	 *   since launch stays wrong and the tree's nested `AGENTS.md` index stays
 	 *   stale. Omit all three so the replacement rediscovers them.
-	 * - Do NOT re-pass the `model` you LAUNCHED with. Any supplied `model` is
-	 *   treated as an explicit selection, so `sessionModelStrings` stays empty and
+	 * - Do NOT re-pass the `model` OR {@link modelPattern} you LAUNCHED with. A
+	 *   supplied `model`, or any nonempty `modelPattern`, counts as an explicit
+	 *   selection (`hasExplicitModel`), so `sessionModelStrings` stays empty and
 	 *   the transcript's last `model_change` is never restored — resetting the
-	 *   replacement to its launch-time model and discarding every `setModel()`
-	 *   switch the user made before restarting. Omit it and the active model is
-	 *   restored from the transcript, or re-pass the session's CURRENT
-	 *   `session.model` together with {@link resolveModelFromRegistry}.
+	 *   replacement to its launch-time selection and discarding every `setModel()`
+	 *   switch the user made before restarting. The factory cannot tell a
+	 *   reconstruction's re-passed pattern from a fresh `--model` override on
+	 *   resume, so it must treat both as explicit; the omission is the host's job.
+	 *   Omit both and the active model is restored from the transcript, or re-pass
+	 *   the session's CURRENT `session.model` together with
+	 *   {@link resolveModelFromRegistry}.
 	 * - Do NOT re-pass {@link thinkingLevel}, {@link openAIServiceTier}, or
 	 *   {@link resolveServiceTierByFamily} with the values you LAUNCHED with.
 	 *   Each behaves exactly like `model`: it is a launch-time option that

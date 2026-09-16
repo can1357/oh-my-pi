@@ -318,6 +318,55 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.model?.id).toBe(smolModel.id);
 	});
 
+	// A restart reconstruction must OMIT `modelPattern`, exactly like `model`:
+	// both feed `hasExplicitModel`, which gates whether the transcript's last
+	// `model_change` is restored. A host that faithfully re-passes its launch
+	// `--model` pattern during reconstruction would suppress that restore and
+	// reset the replacement to the launch-time selection, discarding the model
+	// the user later chose with `/model`. This pins the documented behavior the
+	// omission guidance rests on: the factory treats a re-passed pattern as
+	// explicit and cannot distinguish it from a fresh `--model` override, so the
+	// fix is the host omitting it, not the code special-casing reconstruction.
+	it("a re-passed modelPattern suppresses transcript model restore, unlike an omitted one", async () => {
+		const launchModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const restoredModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const targetSessionFile = await writeRoleModelSession(
+			modelValue(launchModel),
+			modelValue(restoredModel),
+			"default",
+		);
+
+		// Omitted (the correct reconstruction): the transcript's last model wins.
+		const omitted = await createStartupResumeSession(targetSessionFile);
+		expect(omitted.session.model?.id).toBe(restoredModel.id);
+		await omitted.session.dispose();
+		session = undefined;
+
+		// Re-passed launch pattern (the hazard): counts as explicit, so the
+		// restore is suppressed and the replacement resolves the launch pattern.
+		const reopened = await SessionManager.open(targetSessionFile, path.join(tempDir.path(), "startup-pattern"));
+		const rePassed = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager: reopened,
+			settings: Settings.isolated(),
+			modelPattern: modelValue(launchModel),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = rePassed.session;
+		expect(rePassed.session.model?.id).toBe(launchModel.id);
+		expect(rePassed.session.model?.id).not.toBe(restoredModel.id);
+	});
+
 	it("falls back to the saved default model when switch-session role restore is unavailable", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const previousModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
