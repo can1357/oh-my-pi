@@ -89,6 +89,8 @@ describe("isDirectMetaModelApiUrl", () => {
 		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v1")).toBe(true);
 		expect(isDirectMetaModelApiUrl("https://API.META.AI/v1")).toBe(true);
 		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v1/")).toBe(true);
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai:443/v1")).toBe(true);
+		expect(isDirectMetaModelApiUrl("https://API.META.AI:443/v1/")).toBe(true);
 		expect(isDirectMetaModelApiUrl(undefined)).toBe(false);
 		expect(isDirectMetaModelApiUrl("")).toBe(false);
 	});
@@ -99,6 +101,7 @@ describe("isDirectMetaModelApiUrl", () => {
 		expect(isDirectMetaModelApiUrl("https://proxy.example/https://api.meta.ai/v1")).toBe(false);
 		expect(isDirectMetaModelApiUrl("http://api.meta.ai/v1")).toBe(false);
 		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v2")).toBe(false);
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v1/extra")).toBe(false);
 		expect(isDirectMetaModelApiUrl("not a url")).toBe(false);
 	});
 });
