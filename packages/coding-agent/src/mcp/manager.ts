@@ -44,12 +44,13 @@ import type { McpConnectionStatusEvent } from "./startup-events";
 
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
-import type { MCPToolCache } from "./tool-cache";
+import { type MCPToolCache, toolCatalogObservedAt } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
 	MCPAuthChallenge,
 	MCPGetPromptResult,
 	MCPPrompt,
+	MCPRefreshOutcome,
 	MCPRequestOptions,
 	MCPResource,
 	MCPResourceReadResult,
@@ -67,6 +68,15 @@ export type MCPConfigLoader = (cwd: string, options?: LoadMCPConfigsOptions) => 
 type ToolLoadResult = {
 	connection: MCPServerConnection;
 	serverTools: MCPToolDefinition[];
+	/**
+	 * Apply ticket taken before this load's `tools/list`. Both consumers — the
+	 * background handler and `connectServers`' foreground apply — must make the
+	 * same ordering decision, so the ticket travels with the result rather than
+	 * being known only inside the background chain.
+	 */
+	applyTicket: number;
+	/** Catalog ordering token, claimed with the ticket before the request. */
+	observedAt: number | undefined;
 };
 
 interface AuthRefreshableMCPTransport extends MCPTransport {
@@ -153,6 +163,41 @@ const DEFAULT_RECONNECT_POLICY: MCPReconnectPolicy = {
  * cleared; subsequent frames deliver directly to attached listeners.
  */
 const NOTIFICATION_BUFFER_CAP = 100;
+
+/**
+ * In-session recovery for a *successful-but-empty* `tools/list`.
+ *
+ * An aggregating MCP gateway (e.g. LiteLLM fronting several upstream servers)
+ * answers `tools/list` with a valid `{"tools":[]}` for a ~15-20s cold-start
+ * window after (re)start — the server registry survives, but its live upstream
+ * sessions are not yet established. That is a connect *success*, so nothing on
+ * the reconnect/failure paths ever refetched: the session held zero tools for
+ * its whole lifetime. When a connected server yields an empty toolset we
+ * re-list on this bounded backoff (epoch- and connection-guarded) until tools
+ * appear or the schedule is exhausted. A per-manager override (see
+ * {@link MCPManager.setEmptyToolsetRetryScheduleForTests}) or the
+ * `OMP_MCP_EMPTY_RETRY_MS` env var overrides the base delay (tests set it
+ * small); `0` disables auto-retry entirely. The per-manager seam is preferred
+ * in tests: mutating the env is process-global and leaks into any sibling
+ * suite that constructs an MCPManager during the async window.
+ */
+const EMPTY_TOOLSET_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+const EMPTY_RETRY_ENV = "OMP_MCP_EMPTY_RETRY_MS";
+
+function resolveEmptyToolsetRetryDelays(override?: string): number[] {
+	const raw = (override ?? Bun.env[EMPTY_RETRY_ENV])?.trim();
+	if (raw === undefined || raw === "") return EMPTY_TOOLSET_RETRY_DELAYS_MS;
+	const base = Number(raw);
+	if (!Number.isFinite(base) || base < 0) {
+		logger.warn("Ignoring invalid OMP_MCP_EMPTY_RETRY_MS env value; expected a non-negative number", {
+			value: raw,
+		});
+		return EMPTY_TOOLSET_RETRY_DELAYS_MS;
+	}
+	if (base === 0) return [];
+	// Preserve the exponential shape but anchor it on the override.
+	return EMPTY_TOOLSET_RETRY_DELAYS_MS.map((_, i) => base * 2 ** i);
+}
 
 function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
 	const tracked: TrackedPromise<T> = { promise, status: "pending" };
@@ -249,10 +294,54 @@ export class MCPManager {
 		MCPManager.#instance = undefined;
 	}
 
+	/**
+	 * Override this manager's empty-toolset retry schedule. Test-only seam that
+	 * replaces mutating the process-global `OMP_MCP_EMPTY_RETRY_MS` env var: the
+	 * value uses the same string form (`"20"` to anchor the backoff at 20ms,
+	 * `"0"` to disable auto-retry). Scoped to this instance, so it cannot leak
+	 * into a sibling suite that constructs a manager during the async window.
+	 */
+	setEmptyToolsetRetryScheduleForTests(override: string | undefined): void {
+		this.#emptyRetryScheduleOverride = override;
+	}
+
 	#connections = new Map<string, MCPServerConnection>();
 	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
+	/**
+	 * Whether any server has had a toolset registered yet — set by
+	 * {@link MCPManager.#replaceServerTools}, the single funnel every
+	 * registration path (connect, reconnect, refresh) goes through. It is what
+	 * distinguishes "this manager currently holds no tools" from "this manager
+	 * has never listed anything", which `#tools.length` alone cannot: a server
+	 * that listed tools and then retired them all looks identical to one that
+	 * never connected. See {@link MCPManager.setOnToolsChanged}.
+	 */
+	#toolsRegistered = false;
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
+	/**
+	 * Per-server request ordering for `tools/list` applies. Every listing path
+	 * takes a ticket BEFORE issuing its request; a response may only write the
+	 * registry if no LATER request has already written it. Without this, a
+	 * `/mcp refresh` issued while the connection's initial load is still in
+	 * `#pendingToolLoads` runs concurrently (the refresh single-flight keys on
+	 * `#pendingToolRefresh` only), and if the refresh answers first the delayed
+	 * initial response overwrites the live registry with its older catalog —
+	 * permanently, since a non-empty stale result schedules no recovery.
+	 */
+	#toolApplyTicket = new Map<string, number>();
+	#toolApplyApplied = new Map<string, number>();
+	/**
+	 * The raw tool definitions of the WINNING apply per server — the toolset the
+	 * live registry currently holds. `listTools()` caches its result on the
+	 * shared `connection.tools` as a side effect, so a losing out-of-order
+	 * response (rejected by the apply ticket below) still leaves its obsolete
+	 * definitions on `connection.tools`, which `/status` and `listTools()`
+	 * consumers read directly. On a rejected apply the loser restores
+	 * `connection.tools` from this record so those consumers never observe a
+	 * count or roster the registry already refused.
+	 */
+	#appliedServerTools = new Map<string, MCPToolDefinition[]>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
@@ -266,6 +355,14 @@ export class MCPManager {
 	 */
 	#pendingNotifications: Array<{ server: string; method: string; params: unknown }> = [];
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>;
+	/**
+	 * Sinks collecting tools-changed firings that land while an install-time
+	 * reconcile is in flight. One array per in-flight reconcile rather than a
+	 * single shared list: a manager can have more than one consumer installing a
+	 * handler, and a shared list would let whichever reconcile drained first
+	 * steal the firings the other still has to await.
+	 */
+	#toolsChangedReconcileSinks = new Set<Promise<void>[]>();
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
 	#notificationsEnabled = false;
@@ -293,6 +390,37 @@ export class MCPManager {
 	 * attempt is pending.
 	 */
 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
+	/**
+	 * Servers with an in-flight empty-toolset re-list loop, mapped to the
+	 * connection that owns the loop. Keyed by name to avoid stacking duplicates;
+	 * valued by connection so a loop scheduled under a name that was
+	 * disconnected+reconnected can detect it now targets a replacement and stop.
+	 */
+	#pendingEmptyRetries = new Map<string, MCPServerConnection>();
+	/**
+	 * Cancellers for the in-flight backoff wait of each empty-toolset re-list
+	 * loop, keyed by server name and guarded by the owning connection. The
+	 * timer behind each wait is `unref()`'d so a pending backoff never holds the
+	 * event loop alive; cancelling it (from either disconnect path) settles the
+	 * wait early so a one-shot/SDK consumer shutting down via `disconnectAll()`
+	 * does not block for up to the full backoff schedule.
+	 */
+	#emptyRetryWaits = new Map<string, { connection: MCPServerConnection; cancel: () => void }>();
+	/**
+	 * In-flight per-server `refreshServerTools` calls, so a manual `/mcp refresh`
+	 * and an automatic empty-toolset re-list serialize onto one `tools/list`
+	 * instead of racing — an older empty response must never overwrite tools a
+	 * concurrent refresh already recovered.
+	 */
+	#pendingToolRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void>; dirty: boolean }>();
+	/**
+	 * Per-manager override for the empty-toolset retry schedule, in the same
+	 * `OMP_MCP_EMPTY_RETRY_MS` string form. When set it takes precedence over
+	 * the process-global env var, so a test can shrink or disable the backoff
+	 * for one manager without mutating `Bun.env` (which would leak into any
+	 * sibling suite that constructs a manager during the async window).
+	 */
+	#emptyRetryScheduleOverride?: string;
 
 	constructor(
 		private cwd: string,
@@ -410,9 +538,148 @@ export class MCPManager {
 	 * handler (`session.refreshMCPTools`). Other callsites (initial connect,
 	 * disconnect, reconnect) invoke the handler synchronously — their downstream
 	 * chains don't need to serialize on the rebind.
+	 *
+	 * Fires immediately once any toolset has been registered, mirroring
+	 * {@link setOnPromptsChanged}. Installation can land arbitrarily late: a
+	 * non-UI/SDK session runs MCP discovery in `sdk.ts` before its
+	 * `AgentSession` exists, so every tool change between `connectServers`
+	 * returning and this call has no handler to notify. A change landing in
+	 * that window — most acutely an empty-toolset recovery re-list, which then
+	 * terminates *because* tools appeared and never fires again — would leave
+	 * the session bound to the earlier empty snapshot for its whole lifetime.
+	 * Reconciling here makes the binding depend on the manager's current state
+	 * rather than on install order.
+	 *
+	 * The reconcile fires for an EMPTY current snapshot too, which is why it
+	 * gates on {@link #toolsRegistered} rather than on `#tools.length`. The
+	 * window cuts both ways: discovery can list tools, the session be
+	 * constructed from that non-empty snapshot, and a `tools/list_changed`
+	 * refresh then retire every tool before this call lands. Skipping an empty
+	 * snapshot skips the only notification that would retract them, so the
+	 * session keeps exposing retired tools — permanently, if the server
+	 * legitimately stays empty. `#toolsRegistered` still suppresses the
+	 * no-op fire before anything has ever been listed.
+	 *
+	 * The returned promise settles when that install-time reconcile has
+	 * completed, and MUST be awaited by a caller that is about to expose the
+	 * session it just bound. `session.refreshMCPTools()` rebinds the tool
+	 * registry AND rebuilds the system prompt, both asynchronously, so a caller
+	 * that drops this promise can hand back a session whose first prompt still
+	 * carries the pre-reconcile roster and prompt — the very snapshot the
+	 * reconcile exists to replace. It resolves already-settled when nothing has
+	 * been listed yet, so awaiting it costs a microtask on the common path.
+	 * Only the install-time reconcile is awaitable here; the ongoing
+	 * notification firings keep their existing per-callsite ordering, so a
+	 * server that changes its toolset mid-session never serializes on session
+	 * startup.
+	 *
+	 * "The install-time reconcile" spans more than the one call below. The
+	 * handler rebuilds the session asynchronously, and a `tools/list` already in
+	 * flight can complete while it does — landing a NEWER snapshot that fires
+	 * the handler a second time. Registry mutations are serialized, so the
+	 * caller resuming on the first firing alone can be released between the two
+	 * mutations and expose a session bound to the snapshot the second one
+	 * supersedes. So every firing that lands during this reconcile is collected
+	 * and awaited too, until no more arrive; the window closes only once the
+	 * session's roster is settled. Firings after that window belong to the
+	 * mid-session path and are not waited on.
 	 */
-	setOnToolsChanged(handler: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>): void {
+	async setOnToolsChanged(
+		handler: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>,
+	): Promise<void> {
 		this.#onToolsChanged = handler;
+		if (!this.#toolsRegistered) return;
+		// Registered before the first firing so a callback triggered synchronously
+		// inside it is already collected rather than escaping the window.
+		const sink = this.openToolsChangedReconcile();
+		try {
+			await this.#fireToolsChanged();
+			// Drain until a close actually succeeds. `drain()` can return with the
+			// sink empty and still have a queued listing callback fire before the
+			// close runs, so one drain/close pair leaves exactly the window this
+			// reconcile exists to remove. Terminates on the same argument as the
+			// drain loop itself: every firing is a completed registry mutation, and
+			// a settled roster produces none.
+			while (!sink.close()) await sink.drain();
+		} finally {
+			sink.close(true);
+		}
+	}
+
+	/**
+	 * Open a collection window for tools-changed firings and hand back its
+	 * controls.
+	 *
+	 * Startup's reconcile does not end when the install-time firing settles: a
+	 * connection-time `tools/list` still in flight fires this handler afterwards,
+	 * and that firing's promise is discarded at its own callsite. A caller with
+	 * further asynchronous startup left to do — Code Mode's initial tool-surface
+	 * routing, whose registry mutation the late refresh then queues behind — can
+	 * hold the window across it and drain again before releasing the session, so
+	 * a first prompt cannot go out against a roster a completed listing has
+	 * already superseded.
+	 */
+	openToolsChangedReconcile(): { drain: () => Promise<void>; close: (force?: boolean) => boolean } {
+		const sink: Promise<void>[] = [];
+		this.#toolsChangedReconcileSinks.add(sink);
+		return {
+			// Draining rather than a single pass: awaiting one collected firing can
+			// admit the next, and the roster is only settled when a drain adds none.
+			//
+			// A listing still IN FLIGHT is deliberately not waited on. It has fired
+			// nothing yet, but waiting for it would re-gate startup on the slowest
+			// server's timeout — the whole point of leaving pending connects in the
+			// background (`connectServers`, issue #2100) — and a server configured
+			// `timeout: 0` could block session creation forever. What this closes is
+			// the narrower window the caller actually creates: a listing that
+			// ALREADY answered during the caller's own await, whose handler is
+			// running with its promise discarded.
+			drain: async () => {
+				while (sink.length > 0) {
+					const pending = sink.splice(0);
+					await Promise.all(pending);
+				}
+			},
+			// Closing is CONDITIONAL, because `drain()` returning is not the same as
+			// the window being finished: its final emptiness check is followed by a
+			// microtask boundary, and a connection-time `tools/list` callback already
+			// queued behind it runs in that gap, appending its rebind to this sink.
+			// Deleting the sink regardless would drop that firing's promise, so the
+			// caller resumes while `refreshMCPTools()` is still pending and the first
+			// prompt can use the stale roster. Refusing to close tells the caller to
+			// drain again; `force` is the leak-proof exit for the `finally`.
+			close: (force = false) => {
+				if (!force && sink.length > 0) return false;
+				this.#toolsChangedReconcileSinks.delete(sink);
+				return true;
+			},
+		};
+	}
+
+	/**
+	 * Invoke the tools-changed handler for the manager's current toolset.
+	 *
+	 * The single funnel every firing goes through — connect, disconnect,
+	 * reconnect, refresh, and the install-time reconcile — so a reconcile in
+	 * flight observes a concurrent change from ANY of them. Routing only some
+	 * callsites through it would leave exactly the gap the reconcile window
+	 * exists to close. The returned promise is handed to each open sink as well
+	 * as to the caller, so a callsite that already awaits its own firing keeps
+	 * that ordering unchanged.
+	 */
+	#fireToolsChanged(): Promise<void> {
+		const handler = this.#onToolsChanged;
+		if (!handler) return Promise.resolve();
+		// Rejections stay on the caller's copy. A reconcile must not fail because
+		// an unrelated concurrent rebind threw; the firing's own callsite (or the
+		// handler) owns that error, exactly as it did before the sinks existed.
+		const fired = Promise.resolve(handler(this.#tools));
+		const settled = fired.then(
+			() => {},
+			() => {},
+		);
+		for (const sink of this.#toolsChangedReconcileSinks) sink.push(settled);
+		return fired;
 	}
 
 	/**
@@ -719,9 +986,19 @@ export class MCPManager {
 			this.#pendingConnections.set(name, connectionPromise);
 
 			const toolsPromise = connectionPromise.then(async connection => {
+				// Claim the cache's ordering token BEFORE the `tools/list` this
+				// response answers. Sampling it inside `set()` would order two
+				// sessions by response latency, so a delayed answer to THIS request
+				// could overwrite a newer catalog another session already persisted.
+				const observedAt = this.#claimCatalogOrder(name);
+				// Ordering ticket taken with the catalog token, before the request:
+				// a `/mcp refresh` issued while this load is still pending runs
+				// concurrently, and whichever response lands second must not be able
+				// to overwrite a newer one already applied.
+				const applyTicket = this.#nextToolApplyTicket(name);
 				try {
 					const serverTools = await listTools(connection);
-					return { connection, serverTools };
+					return { connection, serverTools, observedAt, applyTicket };
 				} catch (error) {
 					// Detach and delete synchronously, then close in the background:
 					// awaiting a slow HTTP close (session DELETE) here would keep
@@ -739,15 +1016,39 @@ export class MCPManager {
 			connectionTasks.push({ name, config, tracked, toolsPromise });
 
 			void toolsPromise
-				.then(async ({ connection, serverTools }) => {
+				.then(async ({ connection, serverTools, observedAt, applyTicket }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
+					// A later request already wrote the registry (a `/mcp refresh`
+					// that overlapped this load and answered first). Applying now
+					// would replace the newer catalog with this older one and, being
+					// non-empty, would schedule no recovery — the session would stay
+					// on the obsolete roster. `listTools()` cached this loser's
+					// obsolete definitions on `connection.tools`; restore the
+					// winning roster so `/status` and `listTools(connection)`
+					// consumers do not read a count the registry already refused.
+					if (!this.#claimToolApply(name, applyTicket)) {
+						this.#restoreAppliedServerTools(name, connection);
+						notify({ type: "connected", serverName: name });
+						await this.#loadServerResourcesAndPrompts(name, connection);
+						return;
+					}
 					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+					this.#recordAppliedServerTools(name, connection, serverTools);
 					this.#replaceServerTools(name, customTools);
-					void this.#onToolsChanged?.(this.#tools);
-					void this.toolCache?.set(name, config, serverTools);
+					void this.#fireToolsChanged();
+					void this.toolCache?.set(name, config, serverTools, observedAt);
+					// Connected but the server advertised no tools. A tools-capable
+					// server listing `[]` is likely a gateway still warming up —
+					// re-list on a backoff so the session self-heals. A server
+					// WITHOUT the tools capability (resource-only/prompt-only) lists
+					// `[]` permanently by design; scheduling would run the full retry
+					// and session-wide rebind forever, so gate on the capability too.
+					if (connection.capabilities.tools && serverTools.length === 0) {
+						this.#scheduleEmptyToolsetRetry(name);
+					}
 
 					notify({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
@@ -817,8 +1118,18 @@ export class MCPManager {
 				if (task.tracked.status === "fulfilled") {
 					const value = task.tracked.value;
 					if (!value) continue;
-					const { connection, serverTools } = value;
+					const { connection, serverTools, applyTicket } = value;
+					// A disconnect during the race clears the apply ticket too, so the
+					// guard below no longer refuses this outstanding response. Re-check
+					// identity, as the background and reconnect apply paths do.
+					if (this.#connections.get(name) !== connection) continue;
 					connectedServers.add(name);
+					// Same ordering decision the background handler makes. A
+					// `tools/list_changed` that arrived while this initial list was
+					// pending can answer first, and without this check the fulfilled
+					// task was applied unconditionally here and restored the older
+					// roster the background handler had just correctly refused.
+					if (this.#toolApplySuperseded(name, applyTicket)) continue;
 					const reconnect = () => this.reconnectServer(name);
 					this.#replaceServerTools(name, MCPTool.fromTools(connection, serverTools, reconnect));
 				} else if (task.tracked.status === "rejected") {
@@ -856,7 +1167,72 @@ export class MCPManager {
 	 * can prefix another's (`atlassian` vs `atlassian:atlassian`) and a name
 	 * with sanitized characters never prefix-matches its own tools at all.
 	 */
+	/** Take the next apply ticket for `name`; call before issuing `tools/list`. */
+	#nextToolApplyTicket(name: string): number {
+		const ticket = (this.#toolApplyTicket.get(name) ?? 0) + 1;
+		this.#toolApplyTicket.set(name, ticket);
+		return ticket;
+	}
+
+	/**
+	 * Record that `ticket`'s response is being applied, or refuse it because a
+	 * later request already wrote the registry. Ties lose: an equal ticket means
+	 * the same request already applied.
+	 */
+	/**
+	 * Whether a LATER request's response already wrote the registry, so this
+	 * ticket's tools are stale. Read-only, unlike {@link #claimToolApply}: the
+	 * foreground startup apply must consult the same decision without consuming
+	 * the claim the background handler needs for its own follow-up work (cache
+	 * write, empty-toolset retry, tools-changed fire).
+	 *
+	 * An EQUAL ticket is not superseded: that is this same response, already
+	 * applied by the background handler, so re-applying is idempotent.
+	 */
+	#toolApplySuperseded(name: string, ticket: number): boolean {
+		return ticket < (this.#toolApplyApplied.get(name) ?? 0);
+	}
+
+	#claimToolApply(name: string, ticket: number): boolean {
+		const applied = this.#toolApplyApplied.get(name) ?? 0;
+		if (ticket <= applied) return false;
+		this.#toolApplyApplied.set(name, ticket);
+		return true;
+	}
+
+	/**
+	 * Record the raw definitions a WINNING apply installed, and reset the
+	 * shared `connection.tools` cache to them. `listTools()` populates
+	 * `connection.tools` as a side effect of every request, so this is also the
+	 * point that makes the winner's roster the one that cache holds.
+	 */
+	#recordAppliedServerTools(name: string, connection: MCPServerConnection, serverTools: MCPToolDefinition[]): void {
+		this.#appliedServerTools.set(name, serverTools);
+		connection.tools = serverTools;
+	}
+
+	/**
+	 * Restore `connection.tools` to the roster the live registry holds after a
+	 * LOSING out-of-order response. `listTools()` cached the loser's obsolete
+	 * definitions on the shared `connection.tools`; the apply ticket then
+	 * refused them for the registry but left `connection.tools` stale, so
+	 * `/status` (`command-controller.ts` reads `conn.tools`) and any
+	 * `listTools(connection)` consumer would report the superseded count until
+	 * an explicit refresh. Only touches the still-current connection: a
+	 * replaced one is being discarded, and its cache no longer feeds a consumer.
+	 */
+	#restoreAppliedServerTools(name: string, connection: MCPServerConnection): void {
+		if (this.#connections.get(name) !== connection) return;
+		const applied = this.#appliedServerTools.get(name);
+		if (applied !== undefined) connection.tools = applied;
+	}
+
 	#replaceServerTools(name: string, tools: CustomTool<TSchema, MCPToolDetails>[]): void {
+		// Every registration path (connect, reconnect, refresh) funnels here, so
+		// this is the one place that can record "a toolset has been listed" —
+		// including a listing of `[]`, which `#tools.length` cannot distinguish
+		// from never having connected. `setOnToolsChanged` reads it.
+		this.#toolsRegistered = true;
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
 		this.#tools.push(...tools);
 		// Stable sort by name so reconnect order does not perturb the array.
@@ -868,7 +1244,7 @@ export class MCPManager {
 		const refresh = (() => {
 			switch (kind) {
 				case "tools":
-					return this.refreshServerTools(serverName);
+					return this.refreshServerTools(serverName, { notification: true });
 				case "resources":
 					return this.refreshServerResources(serverName);
 				case "prompts":
@@ -980,6 +1356,16 @@ export class MCPManager {
 	 */
 	getConnection(name: string): MCPServerConnection | undefined {
 		return this.#connections.get(name);
+	}
+
+	/**
+	 * Whether an empty-toolset recovery loop is currently armed for `name`.
+	 * Exposes the synchronously-set `#pendingEmptyRetries` marker so the
+	 * scheduling decision can be asserted deterministically without waiting out
+	 * the backoff.
+	 */
+	hasPendingEmptyToolsetRetry(name: string): boolean {
+		return this.#pendingEmptyRetries.has(name);
 	}
 
 	/**
@@ -1122,8 +1508,16 @@ export class MCPManager {
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
 		this.#forgetLostServer(name);
+		this.#pendingEmptyRetries.delete(name);
+		this.#pendingToolRefresh.delete(name);
+		this.#appliedServerTools.delete(name);
 
 		const connection = this.#connections.get(name);
+
+		// Cancel any in-flight empty-toolset backoff for this connection so its
+		// loop exits now instead of after the current delay, and its unref'd
+		// timer is cleared.
+		if (connection) this.#cancelEmptyRetryWait(name, connection);
 
 		const subscribedUris = this.#subscribedResources.get(name);
 		if (subscribedUris && subscribedUris.size > 0 && connection) {
@@ -1138,7 +1532,7 @@ export class MCPManager {
 		// Remove tools from this server and notify consumers
 		const hadTools = this.#tools.some(t => t.mcpServerName === name);
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
-		if (hadTools) void this.#onToolsChanged?.(this.#tools);
+		if (hadTools) void this.#fireToolsChanged();
 
 		// Notify prompt consumers so stale commands are cleared
 		if (connection?.prompts?.length) this.#onPromptsChanged?.(name);
@@ -1156,16 +1550,31 @@ export class MCPManager {
 		for (const name of this.#lostRemoteServers.keys()) this.#forgetLostServer(name);
 		const promises = Array.from(this.#connections, ([name, connection]) => this.#discardConnection(name, connection));
 		await Promise.allSettled(promises);
+		for (const [name, wait] of this.#emptyRetryWaits) this.#cancelEmptyRetryWait(name, wait.connection);
 
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
+		// Safe to reset only because every listing path also re-checks identity
+		// (`#connections.get(name) !== connection`, or the `#pendingToolLoads`
+		// entry), so a response outliving this teardown is already dropped before
+		// its ticket is consulted.
+		this.#toolApplyTicket.clear();
+		this.#toolApplyApplied.clear();
+		this.#appliedServerTools.clear();
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
 		this.#serverConfigs.clear();
 		this.#tools = [];
+		// Back to a pristine manager: nothing has been listed, so a listener
+		// installing after teardown must not be handed a reconcile for an empty
+		// snapshot it was never bound to. A later `connectServers` re-registers
+		// and fires on its own.
+		this.#toolsRegistered = false;
 		this.#subscribedResources.clear();
 		this.#reconnectHistory.clear();
+		this.#pendingEmptyRetries.clear();
+		this.#pendingToolRefresh.clear();
 	}
 
 	/**
@@ -1183,6 +1592,21 @@ export class MCPManager {
 	 *   earlier storm. Defaults to `false`; the transport `onClose` callback
 	 *   and the per-tool-call retry path in `tool-bridge` MUST NOT set it.
 	 */
+	/**
+	 * The ordering token for a `tools/list` about to be issued for `serverName`.
+	 *
+	 * With a cache, the claim's result is returned VERBATIM — including the
+	 * `undefined` that means "could not reserve". Falling back to a fresh
+	 * reading there would replace a deliberate skip sentinel with an unreserved
+	 * token, and `MCPToolCache.set()` would then persist a write whose order was
+	 * never established. Only the cache-less case samples: with nothing to
+	 * write, the token is just the caller's own bookkeeping.
+	 */
+	#claimCatalogOrder(serverName: string): number | undefined {
+		const cache = this.toolCache;
+		return cache ? cache.observeCatalogAt(serverName) : toolCatalogObservedAt();
+	}
+
 	async reconnectServer(
 		name: string,
 		options?: { manual?: boolean; authChallenge?: MCPAuthChallenge },
@@ -1448,13 +1872,49 @@ export class MCPManager {
 			void this.reconnectServer(name);
 		};
 		try {
+			// Token claimed before the request, not after the response: see the
+			// same capture on the connect path.
+			const observedAt = this.#claimCatalogOrder(name);
+			const applyTicket = this.#nextToolApplyTicket(name);
 			const serverTools = await listTools(connection);
+			// The reconnect may have been torn down (a `/mcp reload` ran
+			// `disconnectAll`, which bumps the epoch and CLEARS the per-server
+			// apply-ticket counters) or replaced under the same name while
+			// `tools/list` was in flight. The apply ticket cannot guard this on its
+			// own: once the counters are reset a replacement connection restarts at
+			// a LOWER ticket than this still-outstanding request, so a stale
+			// response settling after the teardown would out-rank it and restore the
+			// disconnected roster — or, with no replacement, resurrect a roster on a
+			// manager that was fully disconnected. Re-check identity here, the same
+			// guard the connect and refresh apply paths already run after their own
+			// `await` (see `#pendingToolLoads`/`#connections` checks above).
+			if (this.#connections.get(name) !== connection || this.#epoch !== reconnectEpoch) {
+				throw new Error(`Server "${name}" was disconnected during reconnection`);
+			}
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-			void this.toolCache?.set(name, config, serverTools);
-			this.#replaceServerTools(name, customTools);
-			void this.#onToolsChanged?.(this.#tools);
+			void this.toolCache?.set(name, config, serverTools, observedAt);
+			// A reconnect is a fresh connection, so its listing is the newest thing
+			// there is — but it still takes a ticket, so a response from the
+			// connection it replaced cannot be applied after it. On the losing
+			// branch `listTools()` still cached this response on `connection.tools`;
+			// restore the winning roster so consumers reading `conn.tools` do not
+			// report a superseded count.
+			if (this.#claimToolApply(name, applyTicket)) {
+				this.#recordAppliedServerTools(name, connection, serverTools);
+				this.#replaceServerTools(name, customTools);
+				void this.#fireToolsChanged();
+			} else {
+				this.#restoreAppliedServerTools(name, connection);
+			}
 			void this.#loadServerResourcesAndPrompts(name, connection);
+			// A reconnect that lands mid-warmup can also see an empty toolset;
+			// re-list on a backoff so tools appear once the server populates. Only
+			// tools-capable servers can ever advertise tools — a resource-only
+			// server always lists `[]`, so gate scheduling on the capability.
+			if (connection.capabilities.tools && serverTools.length === 0) {
+				this.#scheduleEmptyToolsetRetry(name);
+			}
 			return connection;
 		} catch (error) {
 			// Detach synchronously and close in the background so a slow close
@@ -1490,30 +1950,271 @@ export class MCPManager {
 	/**
 	 * Refresh tools from a specific server.
 	 */
-	async refreshServerTools(name: string): Promise<void> {
+	async refreshServerTools(name: string, options?: { notification?: boolean }): Promise<void> {
 		const connection = this.#connections.get(name);
 		if (!connection) return;
 
-		// Clear cached tools
-		connection.tools = undefined;
+		// Coalesce concurrent refreshes for the same connection onto one
+		// `tools/list`. A manual `/mcp refresh` overlapping an automatic
+		// empty-toolset re-list would otherwise each clear `connection.tools` and
+		// apply their own response unconditionally — an older empty response could
+		// land after the other recovered populated tools and overwrite them with
+		// `[]`. Sharing the in-flight promise makes both callers observe the same
+		// single result.
+		//
+		// A `notifications/tools/list_changed` that arrives mid-flight is the one
+		// exception: its whole point is that the toolset changed AGAIN, so the
+		// in-flight `tools/list` (which predates it) may already be stale. Rather
+		// than fire a second concurrent list (reintroducing the overwrite race the
+		// single-flight fixed), it marks the pending entry dirty so exactly ONE
+		// follow-up refresh runs after the current one settles. A plain concurrent
+		// `/mcp refresh` never sets dirty, so manual refreshes still coalesce to
+		// one.
+		const existing = this.#pendingToolRefresh.get(name);
+		if (existing && existing.connection === connection) {
+			if (options?.notification) existing.dirty = true;
+			return existing.promise;
+		}
 
-		// Reload tools
-		const serverTools = await listTools(connection);
-		const reconnect = () => this.reconnectServer(name);
-		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		const doRefresh = async (): Promise<void> => {
+			// Clear cached tools
+			connection.tools = undefined;
 
-		// Replace tools from this server
-		this.#replaceServerTools(name, customTools);
-		await this.#onToolsChanged?.(this.#tools);
+			// Reload tools. Token claimed before the request, not after the
+			// response: a `/mcp refresh` whose `tools/list` is delayed must not
+			// outrank a newer catalog another session already persisted.
+			const observedAt = this.#claimCatalogOrder(name);
+			// Ordering ticket, same rule: this refresh can run concurrently with a
+			// connection-time load still in `#pendingToolLoads` (the single-flight
+			// above keys on `#pendingToolRefresh` only), so whichever response is
+			// applied second must lose rather than overwrite the newer catalog.
+			const applyTicket = this.#nextToolApplyTicket(name);
+			const serverTools = await listTools(connection);
+
+			// The connection may have been replaced (disconnect+reconnect under the
+			// same name) while `tools/list` was in flight. Applying a stale
+			// response would clobber the replacement's tools, so it is dropped —
+			// but dropping it is not a refresh. Nothing was applied, so the
+			// registry still holds the pre-refresh catalog; resolving here made
+			// `refreshAllTools()` report `{ ok: true }` and `/mcp refresh`
+			// announce success while the replacement was still connecting (or its
+			// own tool load had failed), leaving the stale catalog standing with
+			// no signal to the user. Reject so the unapplied response surfaces as
+			// a failed outcome. The replacement's own `tools/list` — on the
+			// connect/reconnect path, or a re-run refresh — is what repopulates.
+			if (this.#connections.get(name) !== connection) {
+				throw new Error(`Server "${name}" was replaced while refreshing tools`);
+			}
+
+			// A later request already applied (the overlapping initial load, or a
+			// re-run refresh). This response is older than what the registry
+			// holds, so drop it rather than regress the roster. `listTools()`
+			// cached this loser's obsolete definitions on `connection.tools`
+			// (which `#doRefresh` cleared, then it repopulated); restore the
+			// winning roster so `/status` and `listTools(connection)` consumers do
+			// not read a count the registry already refused.
+			if (!this.#claimToolApply(name, applyTicket)) {
+				this.#restoreAppliedServerTools(name, connection);
+				return;
+			}
+
+			const reconnect = () => this.reconnectServer(name);
+			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+			void this.toolCache?.set(name, connection.config, serverTools, observedAt);
+
+			// Replace tools from this server
+			this.#recordAppliedServerTools(name, connection, serverTools);
+			this.#replaceServerTools(name, customTools);
+			await this.#fireToolsChanged();
+
+			// A refresh (notification- or user-driven) that lands mid-warmup — or
+			// while the server's upstream sessions restart — can list `[]` on a
+			// still-connected server, just like the initial connect and reconnect
+			// paths. Without re-arming the recovery loop here, a populated server
+			// that momentarily lists empty would stay toolless until the next
+			// notification or manual refresh. The scheduler dedups against a loop
+			// already running for this connection, so overlapping refreshes cannot
+			// stack loops. A resource-only server (no tools capability) always
+			// lists `[]`, so gate scheduling on the capability to avoid an endless
+			// no-op retry loop and session-wide rebind.
+			if (connection.capabilities.tools && serverTools.length === 0) {
+				this.#scheduleEmptyToolsetRetry(name);
+			}
+		};
+
+		const settle = async (error: unknown): Promise<void> => {
+			const pending = this.#pendingToolRefresh.get(name);
+			if (pending?.promise === promise) {
+				this.#pendingToolRefresh.delete(name);
+				// A `list_changed` landed mid-flight: run exactly one follow-up so
+				// the newer toolset is not lost until the next notification. Only
+				// re-list if the connection is still the current one. Awaiting the
+				// follow-up preserves `#handleServerNotification`'s post-refresh
+				// ordering contract for the second notification and lets its outcome
+				// replace a failed original refresh when recovery succeeds.
+				if (pending.dirty && this.#connections.get(name) === connection) {
+					await this.refreshServerTools(name, { notification: true });
+					return;
+				}
+			}
+			if (error !== undefined) throw error;
+		};
+
+		const promise = doRefresh().then(
+			() => settle(undefined),
+			(error: unknown) => settle(error),
+		);
+		this.#pendingToolRefresh.set(name, { connection, promise, dirty: false });
+		return promise;
 	}
 
 	/**
-	 * Refresh tools from all servers.
+	 * Refresh tools from all connected servers. Returns each server's outcome so
+	 * a caller can surface partial failure — `Promise.allSettled` alone hides a
+	 * server that rejected `tools/list`, which would let `/mcp refresh` report
+	 * success while a stale or empty toolset stood.
 	 */
-	async refreshAllTools(): Promise<void> {
-		const promises = Array.from(this.#connections.keys()).map(name => this.refreshServerTools(name));
-		await Promise.allSettled(promises);
+	async refreshAllTools(): Promise<MCPRefreshOutcome[]> {
+		const names = Array.from(this.#connections.keys());
+		const settled = await Promise.allSettled(names.map(name => this.refreshServerTools(name)));
+		return settled.map((result, index) => {
+			const name = names[index] as string;
+			if (result.status === "fulfilled") return { name, ok: true };
+			const error = result.reason;
+			return { name, ok: false, error: error instanceof Error ? error.message : String(error) };
+		});
+	}
+
+	/**
+	 * Count of registered tools currently attributed to `name`. Ownership is
+	 * matched via `mcpServerName`, never a `mcp__${name}_` name prefix — tool
+	 * names are lossy-sanitized (see {@link #replaceServerTools}), so a prefix
+	 * match misses any server whose raw name mutates under sanitization and can
+	 * false-match a sibling.
+	 */
+	#serverToolCount(name: string): number {
+		let count = 0;
+		for (const tool of this.#tools) {
+			if (tool.mcpServerName === name) count++;
+		}
+		return count;
+	}
+
+	/**
+	 * Recover from a successful-but-empty `tools/list` on a *connected* server.
+	 *
+	 * A gateway mid-warmup (or any server still populating) can answer the
+	 * initial `tools/list` with `[]`. That is a connect success, so no reconnect
+	 * or failure path ever refetches — the session would hold zero tools for its
+	 * whole lifetime. Re-list on a bounded backoff until tools appear, the
+	 * server disconnects, another path registers tools, or the schedule is
+	 * abandons a stale loop, and on the originating connection so a
+	 * disconnect+reconnect under the same name (which does not bump `#epoch`)
+	 * abandons the old loop rather than letting it re-list against the
+	 * replacement. No-op when auto-retry is disabled (`OMP_MCP_EMPTY_RETRY_MS=0`)
+	 * or a loop for this server is already running.
+	 */
+	#scheduleEmptyToolsetRetry(name: string): void {
+		const delays = resolveEmptyToolsetRetryDelays(this.#emptyRetryScheduleOverride);
+		if (delays.length === 0) return;
+		const connection = this.#connections.get(name);
+		if (!connection) return;
+		// Dedup only against a loop already running for THIS connection. A stale
+		// loop still holding the marker for a since-replaced connection must not
+		// suppress the replacement's own loop.
+		if (this.#pendingEmptyRetries.get(name) === connection) return;
+		this.#pendingEmptyRetries.set(name, connection);
+		const startEpoch = this.#epoch;
+		void (async () => {
+			try {
+				for (const wait of delays) {
+					// Cancellable so a disconnect during this backoff settles the
+					// wait immediately instead of pinning the event loop (and any
+					// one-shot/SDK consumer awaiting `disconnectAll()`) for up to
+					// the full remaining schedule. A cancelled wait means the loop
+					// must exit without re-listing a torn-down connection.
+					if (!(await this.#waitEmptyRetryBackoff(name, connection, wait))) return;
+					if (this.#epoch !== startEpoch) return;
+					// Stop if this name now maps to a different (or no) connection:
+					// a disconnect+reconnect replaced our target, and a fresh loop
+					// owns the replacement. Continuing would re-list the wrong
+					// connection and let this loop's cleanup clear the new marker.
+					if (this.#connections.get(name) !== connection) return;
+					if (this.#serverToolCount(name) > 0) return;
+					try {
+						await this.refreshServerTools(name);
+					} catch (error) {
+						logger.debug("MCP empty-toolset retry re-list failed", {
+							path: `mcp:${name}`,
+							error: error instanceof Error ? error.message : String(error),
+						});
+						continue;
+					}
+					if (this.#serverToolCount(name) > 0) {
+						logger.debug("MCP empty-toolset retry recovered tools", {
+							path: `mcp:${name}`,
+							tools: this.#serverToolCount(name),
+						});
+						return;
+					}
+				}
+				logger.debug("MCP empty-toolset retry exhausted; server still advertises no tools", {
+					path: `mcp:${name}`,
+				});
+			} finally {
+				// Clear only the marker this loop owns — a replacement connection's
+				// loop may have taken the slot while we were running.
+				if (this.#pendingEmptyRetries.get(name) === connection) {
+					this.#pendingEmptyRetries.delete(name);
+				}
+				if (this.#emptyRetryWaits.get(name)?.connection === connection) {
+					this.#emptyRetryWaits.delete(name);
+				}
+			}
+		})();
+	}
+
+	/**
+	 * Sleep `ms` for the empty-toolset retry loop, cancellable per server.
+	 *
+	 * Resolves `true` when the full delay elapsed (loop should continue) or
+	 * `false` when the wait was cancelled by a disconnect (loop should exit
+	 * without re-listing). The backing timer is `unref()`'d so a pending backoff
+	 * never keeps the event loop alive on its own — a one-shot/SDK consumer that
+	 * shuts down via `disconnectAll()` returns promptly instead of blocking on
+	 * the timer, and the disconnect path also cancels early to settle the wait.
+	 */
+	#waitEmptyRetryBackoff(name: string, connection: MCPServerConnection, ms: number): Promise<boolean> {
+		const gate = Promise.withResolvers<boolean>();
+		const timer = setTimeout(() => {
+			if (this.#emptyRetryWaits.get(name)?.connection === connection) {
+				this.#emptyRetryWaits.delete(name);
+			}
+			gate.resolve(true);
+		}, ms);
+		timer.unref();
+		this.#emptyRetryWaits.set(name, {
+			connection,
+			cancel: () => {
+				clearTimeout(timer);
+				gate.resolve(false);
+			},
+		});
+		return gate.promise;
+	}
+
+	/**
+	 * Cancel the in-flight empty-toolset backoff wait for `name` when its owning
+	 * connection matches. The loop's own `finally` clears the map entry, so this
+	 * only fires the canceller and drops the reference the disconnect is
+	 * invalidating.
+	 */
+	#cancelEmptyRetryWait(name: string, connection: MCPServerConnection): void {
+		const wait = this.#emptyRetryWaits.get(name);
+		if (wait?.connection === connection) {
+			this.#emptyRetryWaits.delete(name);
+			wait.cancel();
+		}
 	}
 
 	/**

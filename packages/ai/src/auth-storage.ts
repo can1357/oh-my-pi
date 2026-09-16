@@ -9,7 +9,8 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import type { CasOutcome } from "./auth/sqlite-credential-store";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -78,6 +79,7 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
+export type { CasOutcome } from "./auth/sqlite-credential-store";
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
@@ -429,6 +431,38 @@ export interface AuthCredentialStore {
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void;
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null;
 	setCache(key: string, value: string, expiresAtSec: number): void;
+	/**
+	 * Compare-and-set on a cache row: writes only when the currently visible
+	 * value is still `expectedValue` (`null` meaning no visible row), and
+	 * reports whether it wrote.
+	 *
+	 * `getCache` + `setCache` are two statements, so a caller that decides what
+	 * to write from what it read can be overtaken between them by a writer in
+	 * another process sharing the same database. Folding the expectation into
+	 * the write makes that decision hold at write time.
+	 *
+	 * Optional: stores whose cache is private to one process have no such
+	 * window, and callers fall back to a plain read-then-`setCache`.
+	 */
+	setCacheIfMatches?(
+		key: string,
+		expectedValue: string | null,
+		value: string,
+		expiresAtSec: number,
+		options?: {
+			/**
+			 * Do not wait on a lock another process holds: report `"unavailable"`
+			 * at once instead of paying the store's busy timeout.
+			 *
+			 * For a BEST-EFFORT write whose caller already treats `"unavailable"`
+			 * as "skip this". The default blocking behaviour charges that timeout
+			 * on the calling thread, and a caller that makes one such write per
+			 * item multiplies it — which is how a handful of MCP servers turned a
+			 * held lock into tens of seconds of frozen startup.
+			 */
+			nonblocking?: boolean;
+		},
+	): CasOutcome;
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix?(prefix: string): void;
 	cleanExpiredCache(): void;

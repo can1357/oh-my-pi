@@ -544,6 +544,27 @@ describe("sanitizeDisplayWarning", () => {
 		expect(warning).not.toContain("\t");
 		expect(warning).not.toContain("\n");
 	});
+
+	it("keeps a lone CR between words a separator, not a fusing control", () => {
+		// A lone \r is a control char: stripping it before collapsing line
+		// endings would glue "two" and "three" together.
+		expect(sanitizeDisplayWarning("line-one\nline-two\rline-three")).toBe("line-one line-two line-three");
+	});
+
+	it("caps the result to maxWidth when given", () => {
+		const warning = sanitizeDisplayWarning(`overflow-${"x".repeat(300)}-end`, { maxWidth: 40 });
+		expect(Bun.stringWidth(warning)).toBeLessThanOrEqual(40);
+		expect(warning).toContain("overflow-");
+		expect(warning).not.toContain("x".repeat(300));
+	});
+
+	it("charges reservedWidth against the width budget", () => {
+		const text = "x".repeat(300);
+		const full = sanitizeDisplayWarning(text, { maxWidth: 40 });
+		const reserved = sanitizeDisplayWarning(text, { maxWidth: 40, reservedWidth: 10 });
+		expect(Bun.stringWidth(reserved)).toBeLessThanOrEqual(30);
+		expect(Bun.stringWidth(reserved)).toBeLessThan(Bun.stringWidth(full));
+	});
 });
 
 describe("shortenEmbeddedPaths", () => {

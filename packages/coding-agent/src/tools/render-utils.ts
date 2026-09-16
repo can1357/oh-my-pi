@@ -889,20 +889,30 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 		.join(" ");
 }
 
-/** Sanitize warning text before showing it in TUI, including embedded home paths. */
-export function sanitizeDisplayWarning(text: string): string {
-	return shortenEmbeddedPaths(
-		replaceTabs(sanitizeText(text))
-			.replace(/[\r\n]+/g, " ")
-			.trim(),
-	);
+/**
+ * Sanitize warning text before showing it in TUI: flatten newlines/CRs to
+ * spaces, strip terminal controls, expand tabs, and shorten embedded home
+ * paths. Collapsing line endings BEFORE control stripping keeps a lone CR
+ * between words a separator rather than fusing the words it divided (a control
+ * strip drops the CR outright, gluing them together).
+ *
+ * With `maxWidth`, the result is capped to that visible width; `reservedWidth`
+ * subtracts a caller's own prefix/indent from the budget so the complete
+ * printed row still fits. Path shortening runs before the cap, so the budget is
+ * spent on the text that prints rather than a home prefix about to be replaced.
+ */
+export function sanitizeDisplayWarning(text: string, options?: { maxWidth?: number; reservedWidth?: number }): string {
+	const normalized = shortenEmbeddedPaths(replaceTabs(sanitizeText(text.replace(/[\r\n]+/g, " "))).trim());
+	const maxWidth = options?.maxWidth;
+	if (maxWidth === undefined) return normalized;
+	return truncateToWidth(normalized, Math.max(1, maxWidth - (options?.reservedWidth ?? 0)));
 }
 
 /** Sanitize and bound warning text before showing it in TUI. */
 export function sanitizeDisplayWarnings(warnings: readonly string[]): string[] {
 	const visible = warnings
 		.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
-		.map(warning => truncateToWidth(sanitizeDisplayWarning(warning), TRUNCATE_LENGTHS.LONG));
+		.map(warning => sanitizeDisplayWarning(warning, { maxWidth: TRUNCATE_LENGTHS.LONG }));
 	const hidden = warnings.length - visible.length;
 	if (hidden > 0) visible.push(`… ${hidden} more ${pluralize("warning", hidden)}`);
 	return visible;
