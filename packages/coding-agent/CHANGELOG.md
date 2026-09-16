@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a per-call `model` selector to task items, eval `agent()`, and `workpool()`: a `provider/model[:level]` pattern or role alias, or an ordered array of them, that takes precedence over `task.agentModelOverrides` and the agent definition. Selection is an ordered preference — requested candidates are tried before configured fallbacks — and the spawn fails at preflight instead of silently routing elsewhere when the selector is the ambiguous literal `default`/`inherit` (use `@default`), is blank or comma-only, carries an invalid thinking suffix, matches no available model, or sits on the batch container instead of a `tasks[]` item. A pool applies its selector to each worker's first turn and reuses that worker's session afterwards ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+
 ### Fixed
 
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
+- Subagent model resolution now tries every requested candidate, including role-expanded alternatives, for working credentials before falling back to the parent's model — also when no parent model is supplied — and accepts keyless parent providers.
+- Task preflight failures are reported as tool errors and render with an error status.
 
 ## [18.2.2] - 2026-09-16
 
@@ -37,8 +43,6 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
-- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
-- Added a per-call `model` selector to task items and eval `agent()`: it takes precedence over `task.agentModelOverrides` and the agent definition, accepts `provider/model[:level]` patterns and role aliases, and fails the spawn when the selector is the ambiguous literal `default`/`inherit` (use `@default`) or matches no available model, instead of silently routing elsewhere ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
 
 ## [18.2.1] - 2026-09-15
 

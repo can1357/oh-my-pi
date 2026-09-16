@@ -1566,3 +1566,22 @@ describe("runEvalAgent isolation", () => {
 		expect(removedArtifactsDir).toBe(false);
 	});
 });
+
+describe("agent model arrays", () => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		AgentRegistry.resetGlobalForTests();
+		resetRegisteredArtifactDirsForTests();
+		await Promise.all([...jobManagers].map(manager => manager.dispose()));
+		jobManagers.clear();
+	});
+	it("routes an ordered model array without substituting the agent definition", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		await runEvalAgentAndWait(
+			{ prompt: "work", agent: "reviewer", model: ["p/preferred:high", "p/alternative"] },
+			{ session: makeSession() },
+		);
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/preferred:high", "p/alternative"]);
+	});
+});

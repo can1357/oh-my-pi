@@ -181,6 +181,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 	return {
+		isError: true,
 		content: [{ type: "text", text }],
 		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 	};
@@ -192,6 +193,10 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * `schema` remains an eval-only alias and is rejected.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
+	if (params.tasks !== undefined && Object.hasOwn(params, "model")) {
+		return "Put each model selector on its tasks[] item, not on the batch container.";
+	}
+
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}

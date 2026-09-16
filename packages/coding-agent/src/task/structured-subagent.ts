@@ -272,16 +272,22 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
  * because it reads as "leave the agent's model alone" while resolving as the
  * `default` role — the ambiguity that got the previous per-call override
  * removed (#6438). `@default` states the inherit intent explicitly.
- * Shared so the task wire schema and the eval `agent()` bridge reject
- * identically.
+ * Shared so task, eval `agent()` and `workpool()` reject malformed input
+ * identically before dispatch.
  */
-export function invalidModelSelectorReason(model: string | undefined, label: string): string | undefined {
+export function invalidModelSelectorReason(model: unknown, label: string): string | undefined {
 	if (model === undefined) return undefined;
-	if (typeof model !== "string" || model.trim() === "") {
-		return `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use a selector like "openai/gpt-5.4:high" or a role alias like "@smol".`;
+	const values: unknown[] = Array.isArray(model) ? model : [model];
+	const patterns: string[] = [];
+	const invalid = `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use a selector or a non-empty array of selectors such as "openai/gpt-5.4:high" or "@smol".`;
+	for (const value of values) {
+		if (typeof value !== "string") return invalid;
+		const normalized = normalizeModelPatternList(value);
+		if (normalized.length === 0) return invalid;
+		patterns.push(...normalized);
 	}
-	const normalized = model.trim().toLowerCase();
-	if (normalized === "default" || normalized === "inherit") {
+	if (patterns.length === 0) return invalid;
+	if (patterns.some(pattern => ["default", "inherit"].includes(pattern.toLowerCase()))) {
 		return `${label} has an ambiguous \`model\` value ${JSON.stringify(model)}. Use "@default" to inherit the parent session's model, or name a model explicitly.`;
 	}
 	return undefined;
@@ -359,27 +365,46 @@ export async function resolveEffectiveSubagentPolicy(
 	// checks below would validate whichever lower-precedence source won.
 	const requestPatterns = normalizeModelPatternList(request.model);
 	if (requestPatterns.length > 0) {
+		const { settings, modelRegistry } = request.session;
+		// A cold registry (discovery races startup) must never reject a valid
+		// selector; only syntax and empty expansions are judged without one.
+		const warmRegistry = modelRegistry && modelRegistry.getAvailable().length > 0 ? modelRegistry : undefined;
 		for (const pattern of requestPatterns) {
 			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
 			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
+			// `@default` asks for the parent's live model, not a pattern to look up.
+			if (!warmRegistry || modelSelectionInheritsSessionModel(pattern)) continue;
+			// Validate every concrete candidate, even beside @default or another
+			// usable candidate: a successful alternative must not hide a typo'd
+			// suffix that the resolver would otherwise recover from with a warning.
+			for (const candidate of resolveConfiguredModelPatterns(pattern, settings)) {
+				const strict = resolveModelOverride([candidate], warmRegistry, settings, {
+					allowInvalidThinkingSelectorFallback: false,
+				});
+				if (strict.model) continue;
+				const recovered = resolveModelOverride([candidate], warmRegistry, settings);
+				if (recovered.model && recovered.warning) {
+					throw new StructuredSubagentError(
+						"preflight",
+						`Invalid thinking suffix in model selector ${JSON.stringify(candidate)}. Use a supported thinking level or a literal model ID.`,
+					);
+				}
+			}
 		}
-		// `@default` asks for the parent's live model, not a pattern to look up:
-		// the resolver already answered with the inherited selection, and the
-		// parent is running it, so there is nothing left to expand or match.
+		// With `@default` in the selection the resolver already answered with the
+		// inherited model the parent is running; there is nothing left to match.
 		if (!modelSelectionInheritsSessionModel(request.model)) {
 			// Role-expand the request's own patterns: `modelOverride` may come
 			// from a lower-precedence source, and blaming `model` for its
-			// failure misleads.
-			const resolvedRequest = resolveConfiguredModelPatterns(request.model, request.session.settings);
-			const modelRegistry = request.session.modelRegistry;
-			// A cold registry (discovery races startup) must never reject a valid
-			// selector, but an empty expansion is a config/shape failure no amount
-			// of discovery can fix.
+			// failure misleads. An empty expansion is a config/shape failure no
+			// amount of discovery can fix, so it is rejected even on a cold registry.
+			const resolvedRequest = resolveConfiguredModelPatterns(request.model, settings);
 			const unmatched =
 				resolvedRequest.length === 0 ||
-				(modelRegistry !== undefined &&
-					modelRegistry.getAvailable().length > 0 &&
-					!resolveModelOverride(resolvedRequest, modelRegistry, request.session.settings).model);
+				(warmRegistry !== undefined &&
+					!resolveModelOverride(resolvedRequest, warmRegistry, settings, {
+						allowInvalidThinkingSelectorFallback: false,
+					}).model);
 			if (unmatched) {
 				throw new StructuredSubagentError(
 					"preflight",

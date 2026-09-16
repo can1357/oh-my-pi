@@ -371,8 +371,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"workpool",
 			opts,
 			rest,
-			["name", "context", "tools"],
-			"{ name, context, tools }",
+			["name", "context", "tools", "model"],
+			"{ name, context, tools, model }",
 		);
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
 			op: "create",

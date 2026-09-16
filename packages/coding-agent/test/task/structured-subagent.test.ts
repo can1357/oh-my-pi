@@ -16,6 +16,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
 	buildStructuredSubagentRecoveryHint,
+	invalidModelSelectorReason,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
@@ -905,4 +906,28 @@ describe("structured subagent primitive", () => {
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+});
+
+describe("per-call selector syntax", () => {
+	it("rejects a comma-only selector instead of treating it as no selector", () => {
+		expect(invalidModelSelectorReason(" , ", "The call")).toMatch(/invalid .*model/);
+	});
+
+	for (const model of [
+		"anthropic/claude-sonnet-4-5:heigh",
+		["anthropic/claude-sonnet-4-5:heigh", "anthropic/claude-sonnet-4-5"],
+		"@default,anthropic/claude-sonnet-4-5:heigh",
+	]) {
+		it(`rejects an invalid thinking suffix instead of silently dropping it: ${JSON.stringify(model)}`, async () => {
+			mockDiscovery();
+			const childSession = {
+				...session(),
+				getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+				modelRegistry: { getAvailable: () => [MODEL] },
+			} as ToolSession;
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/Invalid thinking suffix/,
+			);
+		});
+	}
 });
