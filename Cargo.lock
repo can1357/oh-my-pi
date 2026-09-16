@@ -6360,10 +6360,12 @@ dependencies = [
  "jj-lib",
  "libc",
  "pi-iso",
+ "rustix 1.1.4",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
