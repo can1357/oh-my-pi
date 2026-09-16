@@ -141,6 +141,14 @@ async function runPrintModeCore(
 			writeStdoutLine(`${JSON.stringify(header)}\n`);
 		}
 	}
+
+	// Always subscribe to enable session persistence via _handleAgentEvent
+	session.subscribe(event => {
+		// In JSON mode, output all events
+		if (mode === "json") {
+			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+		}
+	});
 	// Set up extensions for print mode (no UI, no command context)
 	await initializeExtensions(session, {
 		mode: mode === "json" ? "json" : "print",
@@ -173,14 +181,6 @@ async function runPrintModeCore(
 			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
 		);
 	}
-
-	// Always subscribe to enable session persistence via _handleAgentEvent
-	session.subscribe(event => {
-		// In JSON mode, output all events
-		if (mode === "json") {
-			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		}
-	});
 
 	// process.stderr.write is fire-and-forget as well: a diagnostic buffered
 	// behind a backpressured pipe would still be undelivered when runPrintMode
