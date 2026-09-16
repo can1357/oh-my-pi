@@ -96,7 +96,7 @@ describe("/effort slash command", () => {
 		const effort = buildTuiBuiltinSlashCommands(h.tuiRuntime).find(item => item.name === "effort");
 		const completions = await Promise.resolve(effort?.getArgumentCompletions?.(""));
 		expect(completions?.map(item => item.label)).toEqual(["off", "auto", "low", "medium"]);
-		expect(completions?.map(item => item.label)).toEqual((h.tuiRuntime.ctx.session as any).getAvailableEffortSelectors());
+		expect(completions?.map(item => item.label)).toEqual(h.tuiRuntime.ctx.session.getAvailableEffortSelectors());
 		expect(completions?.map(item => item.label)).not.toContain("xhigh");
 		expect(effort?.getInlineHint?.("x")).toBeNull();
 	});
