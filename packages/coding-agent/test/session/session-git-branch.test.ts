@@ -74,6 +74,20 @@ describe("session header gitBranch", () => {
 		expect(detached.gitBranch).toBeUndefined();
 	});
 
+	it("omits the branch in a pure-jj workspace nested inside a git checkout", async () => {
+		using tempDir = TempDir.createSync("@omp-session-branch-purejj-");
+		const outer = await createRepo(tempDir.path(), "outer", "main");
+		// `vcs.git` walks upward, so this workspace's nearest git repository is
+		// the surrounding checkout — a branch the session never runs on.
+		const inner = path.join(outer, "nested-jj");
+		await fs.mkdir(path.join(inner, ".jj", "repo", "store"), { recursive: true });
+
+		const header = await persistedHeader(SessionManager.create(inner, path.join(tempDir.path(), "s-jj")));
+
+		expect(header.gitBranch).toBeUndefined();
+		expect(Object.hasOwn(header, "gitBranch")).toBe(false);
+	});
+
 	it("re-resolves the branch for sessions derived from a session that has moved on", async () => {
 		using tempDir = TempDir.createSync("@omp-session-branch-derived-");
 		const repo = await createRepo(tempDir.path(), "project", "main");
