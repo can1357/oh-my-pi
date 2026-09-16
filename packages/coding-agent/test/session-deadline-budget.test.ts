@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { hasEligibleRetryFallbackHop } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
-import { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "../src/session/session-deadline.ts";
+import { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "@oh-my-pi/pi-coding-agent/session/session-deadline";
 
 describe("session deadline budget", () => {
 	it("reports remaining --max-time as a non-negative millisecond budget", () => {
