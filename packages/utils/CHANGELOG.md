@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `fetchWithRetry` accepts `rateLimitBudget`, which caps same-route 429 retries at two and only replays when the response promises recovery within 5s; callers without it keep the existing retry behaviour ([#11701](https://github.com/can1357/oh-my-pi/pull/11701) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

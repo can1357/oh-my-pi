@@ -47,7 +47,7 @@ export interface RetryHintOptions {
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
  *
- * Header sources (checked in order):
+ * Header sources (merged conservatively with each other and the body):
  *  - `retry-after-ms` (milliseconds)
  *  - `Retry-After` (numeric seconds, or HTTP date)
  *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms/s for large values)
@@ -69,23 +69,51 @@ export interface RetryHintOptions {
  * reset timestamp that has already elapsed).
  */
 export function extractRetryHint(
-	source: Response | Headers | null | undefined,
+	source: Response | Headers | Readonly<Record<string, string | undefined>> | null | undefined,
 	body?: string,
 	options?: RetryHintOptions,
 ): number | undefined {
-	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
+	let longestMs: number | undefined;
+	// A parsed-but-non-positive signal is a provider "retry now": an explicit
+	// `retry-after…=0` or an absolute reset that already elapsed. It must
+	// survive as 0 rather than collapse into "no hint found" — consumers
+	// substitute a heuristic wait when the parse returns undefined.
+	let retryNow = false;
+	const consider = (ms: number | undefined): void => {
+		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
+	};
+	const considerClamped = (ms: number | undefined): void => {
+		if (ms === undefined) return;
+		if (ms > 0) consider(ms);
+		else retryNow = true;
+	};
+
+	let headers: Headers | undefined;
+	if (source instanceof Headers) {
+		headers = source;
+	} else if (source instanceof Response) {
+		headers = source.headers;
+	} else if (source) {
+		headers = new Headers();
+		for (const [name, value] of Object.entries(source)) {
+			if (typeof value === "string") headers.set(name, value);
+		}
+	}
 	if (headers) {
 		const retryAfterMs = headers.get("retry-after-ms");
 		if (retryAfterMs) {
 			const ms = Number(retryAfterMs);
-			if (Number.isFinite(ms) && ms >= 0) return ms;
+			if (Number.isFinite(ms) && ms >= 0) considerClamped(ms);
 		}
 		const retryAfter = headers.get("retry-after");
 		if (retryAfter) {
 			const seconds = Number(retryAfter);
-			if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-			const parsedDate = Date.parse(retryAfter);
-			if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+			if (Number.isFinite(seconds)) {
+				considerClamped(seconds * 1000);
+			} else {
+				const parsedDate = Date.parse(retryAfter);
+				if (!Number.isNaN(parsedDate)) considerClamped(parsedDate - Date.now());
+			}
 		}
 		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
 		if (rateLimitResetMs) {
@@ -93,9 +121,11 @@ export function extractRetryHint(
 			if (Number.isFinite(value) && value > 0) {
 				// > 1e12 → epoch ms; > 1e9 → epoch s; otherwise a delta in ms.
 				const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
-				if (targetMs === undefined) return value;
-				const delta = targetMs - Date.now();
-				if (delta > 0) return delta;
+				if (targetMs === undefined) consider(value);
+				else {
+					const delta = targetMs - Date.now();
+					if (delta > 0) consider(delta);
+				}
 			}
 		}
 		const rateLimitReset = headers.get("x-ratelimit-reset");
@@ -103,31 +133,21 @@ export function extractRetryHint(
 			const resetSeconds = Number.parseInt(rateLimitReset, 10);
 			if (!Number.isNaN(resetSeconds)) {
 				const delta = resetSeconds * 1000 - Date.now();
-				if (delta > 0) return delta;
+				if (delta > 0) consider(delta);
 			}
 		}
 		const rateLimitResetAfter = headers.get("x-ratelimit-reset-after");
 		if (rateLimitResetAfter) {
 			const seconds = Number(rateLimitResetAfter);
-			if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+			if (Number.isFinite(seconds) && seconds > 0) consider(seconds * 1000);
 		}
 	}
 
-	if (!body) return undefined;
+	if (!body) return longestMs ?? (retryNow ? 0 : undefined);
 
-	// A body can carry several timing signals at once: the account-reset
-	// window plus header timing folded into the message text (already the
-	// max across response headers — see getRetryAfterMsFromHeaders in
-	// pi-ai). Honor the longest: retrying before either window clears
-	// re-hits a still-blocked credential and burns the retry budget.
-	let longestMs: number | undefined;
-	// A parsed-but-non-positive signal is a provider "retry now": an explicit
-	// `retry-after…=0` or an absolute reset that already elapsed. It must
-	// survive as 0 rather than collapse into "no hint found" — consumers
-	// substitute a heuristic wait (30-minute quota guess, default backoff)
-	// when the parse returns undefined, which would sleep a session the
-	// provider told to retry immediately.
-	let retryNow = false;
+	// Headers and a body can each carry several timing signals. Honor the
+	// longest: retrying before any promised window clears re-hits a still-blocked
+	// route and burns the retry budget.
 
 	// Timezone-naive `reset at` stamps (no `Z`/offset) are the provider's
 	// wall clock in an unknown zone — converting them to a delay requires
@@ -136,14 +156,6 @@ export function extractRetryHint(
 	let longestNaiveMs: number | undefined;
 	const considerNaive = (ms: number | undefined): void => {
 		if (ms !== undefined && ms > 0 && (longestNaiveMs === undefined || ms > longestNaiveMs)) longestNaiveMs = ms;
-	};
-	const consider = (ms: number | undefined): void => {
-		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
-	};
-	const considerClamped = (ms: number | undefined): void => {
-		if (ms === undefined) return;
-		if (ms > 0) consider(ms);
-		else retryNow = true;
 	};
 
 	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
@@ -308,6 +320,19 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
 	/**
+	 * Opt into the bounded 429 policy: at most {@link MAX_RATE_LIMIT_ATTEMPTS}
+	 * same-route attempts, and only while the response promises recovery within
+	 * {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+	 *
+	 * Enable it for LLM provider transports, whose caller (session turn
+	 * recovery) can rotate credentials or fall back to another model — recovery
+	 * a same-route replay can never achieve, and which the replay only delays.
+	 * Leave it off (the default) for generic helpers — embeddings, local-model
+	 * probes, catalog listings, web scrapers — where in-transport backoff is
+	 * the only recovery there is.
+	 */
+	rateLimitBudget?: boolean;
+	/**
 	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
 	 * disables Bun's native ~300s pre-response timeout (callers that own a
 	 * configurable first-event/idle watchdog or an external `AbortSignal`
@@ -321,11 +346,37 @@ const DEFAULT_MAX_DELAY_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 
 /**
+ * Same-route attempts (initial + retries) a 429 may spend.
+ *
+ * A rate limit is a property of the route — endpoint plus credential — not a
+ * glitch in one request: replaying the same request cannot clear it. Every
+ * extra attempt delays the layers that *can* recover (credential rotation,
+ * model fallback) and, under parallel subagents, re-applies the very load that
+ * tripped the limit. One retry is kept for the single case where replaying is
+ * justified: the provider itself promised the window clears within
+ * {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+ */
+export const MAX_RATE_LIMIT_ATTEMPTS = 2;
+
+/**
+ * Longest provider-supplied recovery hint still worth waiting out on the same
+ * route. A longer hint (or no hint at all) is not a credible short recovery
+ * signal, so the 429 surfaces immediately and session recovery decides.
+ */
+export const CREDIBLE_RATE_LIMIT_HINT_MS = 5_000;
+
+/**
  * Fetch with bounded retries and sensible defaults. Retries on any
  * `isRetryableStatus` (5xx, 408, 429) and on transient network errors. Server
  * `Retry-After`/quota hints are honoured up to `maxDelayMs`; a hint that exceeds
  * the cap returns the current response so the caller can fail fast. Aborts on
  * `init.signal` propagate as `"Request was aborted"`.
+ *
+ * Callers that pass `rateLimitBudget` budget 429s separately: at most
+ * {@link MAX_RATE_LIMIT_ATTEMPTS} same-route attempts, and only while the
+ * response promises recovery within {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+ * Capacity (5xx) and timeout (408) failures always keep the full `maxAttempts`
+ * budget, as does a 429 when the option is off (the default).
  *
  * The caller is responsible for inspecting `!response.ok` once the call returns.
  */
@@ -339,11 +390,13 @@ export async function fetchWithRetry(
 		defaultDelayMs,
 		prepareInit,
 		shouldRetryResponse,
+		rateLimitBudget = false,
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
+	let rateLimitAttempts = 0;
 
 	for (let attempt = 0; ; attempt++) {
 		if (signal?.aborted) throw new Error("Request was aborted");
@@ -373,13 +426,21 @@ export async function fetchWithRetry(
 		}
 
 		if (!isRetryableStatus(response.status)) return response;
+		const rateLimited = rateLimitBudget && response.status === 429;
+		if (rateLimited) rateLimitAttempts++;
 		if (attempt + 1 >= maxAttempts) return response;
+		if (rateLimited && rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS) return response;
 
 		const retryBody = await response.clone().text();
 		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
 
 		const hint = extractRetryHint(response, retryBody);
 		if (hint !== undefined && hint > maxDelayMs) return response;
+		// A 429 is only replayed on the provider's own short-recovery promise;
+		// blind backoff here just hides the limit from session recovery.
+		if (rateLimited && (hint === undefined || hint > Math.min(maxDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS))) {
+			return response;
+		}
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
 		await waitForRetry(delayMs, signal);

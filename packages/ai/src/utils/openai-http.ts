@@ -2,10 +2,12 @@
  * JSON-POST → SSE transport for OpenAI-wire streaming endpoints (chat
  * completions, responses, azure responses). Replaces the `openai` SDK client:
  *
- * - Retries: `fetchWithRetry` (Retry-After/quota-hint aware; 5xx/408/429 and
+ * - Retries: `fetchWithRetry` (Retry-After/quota-hint aware; 5xx/408 and
  *   transient network errors). Default 6 total attempts — parity with the
- *   SDK's former `maxRetries: 5`.
- * - SSE decode: `readSseJson` (spec-compliant framing, `[DONE]`-aware).
+ *   SDK's former `maxRetries: 5`. A 429 instead gets the transport's small
+ *   rate-limit budget (`MAX_RATE_LIMIT_ATTEMPTS`), so a limited route reaches
+ *   credential rotation and model fallback instead of being replayed.
+ * - SSE decode: `readSseJsonOrText` (spec-compliant framing, `[DONE]`-aware).
  *   `onSseEvent` observers now receive real wire frames instead of events
  *   re-synthesized from decoded SDK objects.
  * - Errors: {@link OpenAIHttpError} exposes `status`/`headers`/`code`
@@ -24,11 +26,12 @@ import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 
 /**
- * Total attempts (initial + retries). Parity with the removed SDK clients'
- * `maxRetries: 5`, i.e. 6 requests. Callers arming a first-event watchdog
- * stay bounded: the watchdog aborts the request `signal`, which
- * `fetchWithRetry` races on every attempt and every backoff sleep, so
- * transient 408/429/5xx retries can never extend the caller's deadline.
+ * Total attempts (initial + retries) for capacity/timeout/transport failures.
+ * Parity with the removed SDK clients' `maxRetries: 5`, i.e. 6 requests; 429s
+ * are bounded separately by `MAX_RATE_LIMIT_ATTEMPTS`. Callers arming a
+ * first-event watchdog stay bounded: the watchdog aborts the request `signal`,
+ * which `fetchWithRetry` races on every attempt and every backoff sleep, so
+ * transient 408/5xx retries can never extend the caller's deadline.
  */
 const DEFAULT_MAX_ATTEMPTS = 6;
 
@@ -46,7 +49,8 @@ const MAX_DETAIL_CHARS = 4096;
  * that `TurnRecovery` already owns, stalling one turn for up to ~300s
  * (issue #8854). {@link isConcurrencyAdmissionRejection} lets the transport
  * surface it on the first attempt so session recovery runs promptly. Genuine
- * RPM/quota 429s carry no such marker and keep honoring `Retry-After`.
+ * RPM 429s keep their bounded `Retry-After` path; quota failures surface
+ * immediately.
  */
 const CONCURRENCY_ADMISSION_LIMITER = "max_parallel_requests";
 
@@ -97,11 +101,16 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		signal: init.signal,
 		fetch: init.fetch,
 		maxAttempts: DEFAULT_MAX_ATTEMPTS,
-		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
-		// surfaces immediately instead of being slept-and-retried here; session
-		// recovery owns its backoff/fallback (issue #8854).
+		// Session turn recovery owns rate limits: rotate the credential or fall
+		// back to another model rather than replaying a saturated route.
+		rateLimitBudget: true,
+		// Concurrency admission and explicit account quota failures belong to
+		// session recovery even when the body also carries a short retry hint.
+		// An opaque 429 body is only conservative quota evidence after transport
+		// recovery has had a chance to honor a credible header hint.
 		shouldRetryResponse: async (response, bodyText) =>
 			!isConcurrencyAdmissionRejection(response, bodyText) &&
+			!(!AIError.isOpaqueStatusBody(bodyText) && AIError.isUsageLimitOutcome(response.status, bodyText)) &&
 			(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's

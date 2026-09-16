@@ -13,7 +13,7 @@ import type {
 } from "../types";
 import { resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
-import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { resolveInBandRateLimitRetry, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -249,6 +249,7 @@ const streamAzureOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			AIError.transferInBandProviderErrorProvenance(error, output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -274,6 +275,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	return withReplaySafeStreamRetry(model, context, options, streamAzureOpenAIResponsesOnce, {
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
+		resolveProviderErrorRetry: message => resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
 	});
 };
 

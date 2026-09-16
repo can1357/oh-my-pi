@@ -2302,6 +2302,64 @@ describe("openai-codex streaming", () => {
 		expect(result.errorMessage).not.toContain("Body already used");
 	});
 
+	it("does not retry Codex usage-limit 429s with short hints", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(
+					JSON.stringify({
+						error: {
+							code: "usage_limit_reached",
+							message: "You have hit your ChatGPT usage limit",
+						},
+					}),
+					{
+						status: 429,
+						headers: {
+							"content-type": "application/json",
+							"retry-after": "0.001",
+						},
+					},
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			fetch: fetchMock as FetchImpl,
+		}).result();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect((result.errorMessage ?? "").toLowerCase()).toContain("usage limit");
+	});
+
 	it.each([
 		[
 			"model_error",
@@ -2553,6 +2611,38 @@ describe("openai-codex streaming", () => {
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain("socket connection was closed unexpectedly");
 		}
+	});
+
+	it("spends one provider retry on a persistent short-hinted HTTP-200 Codex rate limit", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const sse = `data: ${JSON.stringify({
+			type: "error",
+			error: {
+				type: "rate_limit_error",
+				message: "Too many requests. Please retry in 20ms",
+			},
+		})}\n\n`;
+		let requestCount = 0;
+		const fetchMock: FetchImpl = async () => {
+			requestCount += 1;
+			return new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+		}).result();
+
+		expect(requestCount).toBe(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
 	});
 
 	it("does not retry a caller abort before response headers", async () => {
@@ -4919,6 +5009,97 @@ describe("openai-codex streaming", () => {
 		expect(JSON.stringify(retryInput)).toContain("Second question");
 		expect(JSON.stringify(retryInput)).not.toContain("First answer");
 		expect(JSON.stringify(retryInput)).not.toContain("Partial answer");
+	});
+
+	it("preserves websocket continuation during the bounded in-band 429 retry", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+
+		class RetriedContinuationWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				sentRequests.push(request);
+				const requestIndex = sentRequests.length;
+
+				if (requestIndex === 1) {
+					this.emitCodexResponse({
+						messageId: "msg_1",
+						responseId: "resp_1",
+						text: "First answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				if (requestIndex === 2) {
+					this.sendJson({
+						type: "error",
+						code: "rate_limit_exceeded",
+						message: "Too many requests. Please retry in 20ms",
+					});
+					return;
+				}
+
+				if (requestIndex === 3) {
+					this.emitCodexResponse({
+						messageId: "msg_3",
+						responseId: "resp_3",
+						text: "Second answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				throw new Error(`Unexpected websocket request index: ${requestIndex}`);
+			}
+		}
+
+		global.WebSocket = RetriedContinuationWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "First question", timestamp: Date.now() }],
+		};
+		const options = {
+			fetch: fetchMock as FetchImpl,
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-bounded-rate-limit-continuation-session",
+			providerSessionState,
+		};
+		const firstResponse = await streamOpenAICodexResponses(model, firstContext, options).result();
+		const secondContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [
+				...firstContext.messages,
+				firstResponse,
+				{ role: "user", content: "Second question", timestamp: Date.now() + 1 },
+			],
+		};
+
+		const secondResponse = await streamOpenAICodexResponses(model, secondContext, options).result();
+
+		expect(secondResponse.stopReason).toBe("stop");
+		expect(secondResponse.content.find(block => block.type === "text")?.text).toBe("Second answer");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentRequests).toHaveLength(3);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[2]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[2]?.input).toEqual(sentRequests[1]?.input);
+		expect(JSON.stringify(sentRequests[2]?.input)).toContain("Second question");
+		expect(JSON.stringify(sentRequests[2]?.input)).not.toContain("First answer");
 	});
 
 	it("retries websocket continuations when a proxy reports a stale previous response anchor", async () => {

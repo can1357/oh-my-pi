@@ -14,6 +14,7 @@
  * classifier and are separately bounded by the caller's policy.
  */
 import { scheduler } from "node:timers/promises";
+import { CREDIBLE_RATE_LIMIT_HINT_MS, extractRetryHint } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
@@ -63,6 +64,12 @@ interface StreamRetryOptions {
 	acceptEmptyResponse?: boolean;
 }
 
+/** Caller override for provider-error replay when the caller owns additional provenance. */
+export type ReplaySafeProviderErrorRetryDecision =
+	| { readonly _tag: "default" }
+	| { readonly _tag: "deny" }
+	| { readonly _tag: "retry"; readonly delayMs?: number };
+
 /** Controls which replay-safe provider results may issue a fresh request. */
 export interface ReplaySafeStreamRetryPolicy {
 	/** Retry benign terminal stops that contain no visible output. */
@@ -71,6 +78,50 @@ export interface ReplaySafeStreamRetryPolicy {
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
 	maxProviderErrorRetries?: number;
+	/** Resolve provider-error retryability when the caller owns additional provenance. */
+	resolveProviderErrorRetry?: (message: AssistantMessage) => ReplaySafeProviderErrorRetryDecision;
+}
+
+function resolveTaggedInBandRateLimitRetry(
+	source: unknown,
+	status: number | undefined,
+	message: string | undefined,
+	maxRetryDelayMs: number,
+): ReplaySafeProviderErrorRetryDecision {
+	if (!AIError.hasInBandProviderErrorProvenance(source) || status !== 429) return { _tag: "default" };
+	if (message === undefined) return { _tag: "deny" };
+	const retryHintMs = extractRetryHint(undefined, message);
+	const retryHintCapMs =
+		maxRetryDelayMs > 0 ? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS) : CREDIBLE_RATE_LIMIT_HINT_MS;
+	if (AIError.isUsageLimitOutcome(status, message) || retryHintMs === undefined || retryHintMs > retryHintCapMs) {
+		return { _tag: "deny" };
+	}
+	return { _tag: "retry", delayMs: retryHintMs };
+}
+
+/**
+ * Allows one replay only for a classifier-proven in-band 429 with a credible
+ * short recovery hint. Wire 429s have no provenance and retain the transport
+ * budget's terminal result.
+ */
+export function resolveInBandRateLimitRetry(
+	message: AssistantMessage,
+	maxRetryDelayMs = 60_000,
+): ReplaySafeProviderErrorRetryDecision {
+	return resolveTaggedInBandRateLimitRetry(message, message.errorStatus, message.errorMessage, maxRetryDelayMs);
+}
+
+/** Applies the same in-band 429 policy before a provider finalizes its error. */
+export function resolveInBandRateLimitErrorRetry(
+	error: unknown,
+	maxRetryDelayMs = 60_000,
+): ReplaySafeProviderErrorRetryDecision {
+	return resolveTaggedInBandRateLimitRetry(
+		error,
+		AIError.status(error),
+		error instanceof Error ? error.message : undefined,
+		maxRetryDelayMs,
+	);
 }
 
 class FinalizedProviderStreamError extends Error {
@@ -148,22 +199,32 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!hasVisibleAssistantContent(completedMessage) &&
 				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
+			const providerErrorRetryDecision: ReplaySafeProviderErrorRetryDecision =
+				failedMessage === undefined
+					? { _tag: "deny" }
+					: (policy.resolveProviderErrorRetry?.(failedMessage) ?? { _tag: "default" });
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
 				!committed &&
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
-				AIError.isProviderRetryableError(
-					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
-				);
+				(providerErrorRetryDecision._tag === "retry" ||
+					(providerErrorRetryDecision._tag === "default" &&
+						AIError.isProviderRetryableError(
+							new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
+						)));
 
 			let delayMs: number | undefined;
 			if (retryEmpty) {
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
 				emptyRetries++;
 			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
+				const backoffDelayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
+				delayMs =
+					providerErrorRetryDecision._tag === "retry" && providerErrorRetryDecision.delayMs !== undefined
+						? Math.max(providerErrorRetryDecision.delayMs, backoffDelayMs)
+						: backoffDelayMs;
 				providerErrorRetries++;
 			}
 

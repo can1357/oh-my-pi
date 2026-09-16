@@ -945,6 +945,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							body: requestBodyJson,
 							signal: watchdog.signal,
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
+							rateLimitBudget: true,
+							shouldRetryResponse: (response, bodyText) =>
+								!AIError.isUsageLimitOutcome(response.status, bodyText),
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 							fetch: options?.fetch,

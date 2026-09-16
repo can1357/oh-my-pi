@@ -118,6 +118,30 @@ const NON_RETRYABLE_CODE_PATTERN =
 /** Flags this module asserts for a body it has itself recognised as shed-and-retry. */
 const IN_BAND_FLAGS = create(Flag.Transient);
 
+/** Explicit provenance carried only by values created from an HTTP 200 body. */
+const kInBandProviderError = Symbol("inBandProviderError");
+
+type InBandProviderErrorTagged = {
+	[kInBandProviderError]?: true;
+};
+
+function tagInBandProviderError<TValue extends object>(value: TValue): TValue {
+	Object.defineProperty(value, kInBandProviderError, { value: true });
+	return value;
+}
+
+/** Whether a value carries provenance from the in-band classifier rather than an HTTP status line. */
+export function hasInBandProviderErrorProvenance(value: unknown): boolean {
+	return (
+		typeof value === "object" && value !== null && (value as InBandProviderErrorTagged)[kInBandProviderError] === true
+	);
+}
+
+/** Carries classifier provenance through finalized assistant-message errors. */
+export function transferInBandProviderErrorProvenance(source: unknown, target: object): void {
+	if (hasInBandProviderErrorProvenance(source)) tagInBandProviderError(target);
+}
+
 function normalizeCodeToken(value: unknown): string | undefined {
 	if (typeof value === "number" && Number.isFinite(value)) return String(value);
 	if (typeof value !== "string") return undefined;
@@ -277,17 +301,21 @@ export function createInBandProviderError(frame: unknown): Error | undefined {
 	if (!signal) return undefined;
 	const { status, code, detail } = signal;
 	if (isRetryableStatus(status)) {
-		return attach(new ProviderHttpError(formatInBandMessage(status, detail, code), status, { code }), IN_BAND_FLAGS);
+		return tagInBandProviderError(
+			attach(new ProviderHttpError(formatInBandMessage(status, detail, code), status, { code }), IN_BAND_FLAGS),
+		);
 	}
 	if (detail === undefined && code === undefined) return undefined;
 	// Keep the upstream code visible (`(<code>)`) — it is real provider data and
 	// the same convention the Anthropic provider already uses for its
 	// `(<errorType>)` suffix.
-	return attach(
-		new ProviderResponseError(`${detail ?? IN_BAND_DETAIL_PLACEHOLDER}${code ? ` (${code})` : ""}`, {
-			kind: "runtime",
-		}),
-		IN_BAND_FLAGS,
+	return tagInBandProviderError(
+		attach(
+			new ProviderResponseError(`${detail ?? IN_BAND_DETAIL_PLACEHOLDER}${code ? ` (${code})` : ""}`, {
+				kind: "runtime",
+			}),
+			IN_BAND_FLAGS,
+		),
 	);
 }
 
@@ -302,9 +330,11 @@ export function createInBandProviderErrorFromText(text: string): Error | undefin
 	if (detail === undefined || !IN_BAND_RETRYABLE_TEXT_PATTERN.test(detail)) return undefined;
 	const status = readLeadingStatus(detail);
 	if (isRetryableStatus(status)) {
-		return attach(new ProviderHttpError(formatInBandMessage(status, detail, undefined), status), IN_BAND_FLAGS);
+		return tagInBandProviderError(
+			attach(new ProviderHttpError(formatInBandMessage(status, detail, undefined), status), IN_BAND_FLAGS),
+		);
 	}
 	// A proxy status line with no machine code to preserve: report the upstream
 	// text verbatim rather than padding it with wording of ours.
-	return attach(new ProviderResponseError(detail, { kind: "runtime" }), IN_BAND_FLAGS);
+	return tagInBandProviderError(attach(new ProviderResponseError(detail, { kind: "runtime" }), IN_BAND_FLAGS));
 }

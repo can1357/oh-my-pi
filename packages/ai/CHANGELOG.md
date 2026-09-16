@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rate-limited models now fail over quickly: wire 429s receive at most two transport requests and no provider replay, while in-band 429s receive at most one replay and only with a server-promised recovery within 5s; quota, hintless, and long-hint limits surface immediately so fallback can take over promptly ([#11701](https://github.com/can1357/oh-my-pi/pull/11701) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

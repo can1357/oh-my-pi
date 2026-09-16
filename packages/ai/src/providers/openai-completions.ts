@@ -30,7 +30,11 @@ import type {
 import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
-import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import {
+	hasVisibleAssistantContent,
+	resolveInBandRateLimitRetry,
+	withReplaySafeStreamRetry,
+} from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -1523,6 +1527,10 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			// Only the shared HTTP-200 body classifier carries this provenance.
+			// A wire 429 has the same status, but already spent its transport budget
+			// and must not receive another replay at the provider layer.
+			AIError.transferInBandProviderErrorProvenance(error, output);
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -1545,6 +1553,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
+		resolveProviderErrorRetry: message => resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
 	});
 
 function createRequestSetup(
