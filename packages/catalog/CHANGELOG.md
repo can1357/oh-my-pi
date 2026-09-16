@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Devin (SWE-2, SWE-1.7, GLM-5.2 High) and Kimi Code models now report API-equivalent token pricing when upstream discovery omits cost dimensions; SWE-2 reflects the promotional rate through 2026-12-31 and switches to list price from 2027-01-01.
+- Devin Fusion composites now record their own headline rate instead of a dispatched component's rate when upstream flattens multiple rate cards into one config, and harness-backed Fusion lanes chat directly instead of failing through the `AssignModel` router path.
+
 ## [18.2.1] - 2026-09-15
 
 ### Added
