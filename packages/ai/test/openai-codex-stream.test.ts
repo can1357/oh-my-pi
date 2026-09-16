@@ -2613,6 +2613,38 @@ describe("openai-codex streaming", () => {
 		}
 	});
 
+	it("spends one provider retry on a persistent short-hinted HTTP-200 Codex rate limit", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const sse = `data: ${JSON.stringify({
+			type: "error",
+			error: {
+				type: "rate_limit_error",
+				message: "Too many requests. Please retry in 20ms",
+			},
+		})}\n\n`;
+		let requestCount = 0;
+		const fetchMock: FetchImpl = async () => {
+			requestCount += 1;
+			return new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+		}).result();
+
+		expect(requestCount).toBe(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+	});
+
 	it("does not retry a caller abort before response headers", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

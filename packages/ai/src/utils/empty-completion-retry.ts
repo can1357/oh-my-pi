@@ -14,6 +14,7 @@
  * classifier and are separately bounded by the caller's policy.
  */
 import { scheduler } from "node:timers/promises";
+import { CREDIBLE_RATE_LIMIT_HINT_MS, extractRetryHint } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
@@ -79,6 +80,53 @@ export interface ReplaySafeStreamRetryPolicy {
 	maxProviderErrorRetries?: number;
 	/** Resolve provider-error retryability when the caller owns additional provenance. */
 	resolveProviderErrorRetry?: (message: AssistantMessage) => ReplaySafeProviderErrorRetryDecision;
+}
+
+function resolveTaggedInBandRateLimitRetry(
+	source: unknown,
+	status: number | undefined,
+	message: string | undefined,
+	maxRetryDelayMs: number,
+): ReplaySafeProviderErrorRetryDecision {
+	if (!AIError.hasInBandProviderErrorProvenance(source)) return { _tag: "default" };
+	if (status !== 429 || message === undefined) return { _tag: "deny" };
+	const retryHintMs = extractRetryHint(undefined, message);
+	const retryHintCapMs =
+		maxRetryDelayMs > 0 ? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS) : CREDIBLE_RATE_LIMIT_HINT_MS;
+	if (AIError.isUsageLimitOutcome(status, message) || retryHintMs === undefined || retryHintMs > retryHintCapMs) {
+		return { _tag: "deny" };
+	}
+	return { _tag: "retry", delayMs: retryHintMs };
+}
+
+/**
+ * Allows one replay only for a classifier-proven in-band 429 with a credible
+ * short recovery hint. Wire 429s have no provenance and retain the transport
+ * budget's terminal result.
+ */
+export function resolveInBandRateLimitRetry(
+	message: AssistantMessage,
+	maxRetryDelayMs = 60_000,
+): ReplaySafeProviderErrorRetryDecision {
+	return resolveTaggedInBandRateLimitRetry(
+		message,
+		message.errorStatus,
+		message.errorMessage,
+		maxRetryDelayMs,
+	);
+}
+
+/** Applies the same in-band 429 policy before a provider finalizes its error. */
+export function resolveInBandRateLimitErrorRetry(
+	error: unknown,
+	maxRetryDelayMs = 60_000,
+): ReplaySafeProviderErrorRetryDecision {
+	return resolveTaggedInBandRateLimitRetry(
+		error,
+		AIError.status(error),
+		error instanceof Error ? error.message : undefined,
+		maxRetryDelayMs,
+	);
 }
 
 class FinalizedProviderStreamError extends Error {

@@ -118,24 +118,30 @@ const NON_RETRYABLE_CODE_PATTERN =
 /** Flags this module asserts for a body it has itself recognised as shed-and-retry. */
 const IN_BAND_FLAGS = create(Flag.Transient);
 
-/** Explicit provenance carried only by errors created from an HTTP 200 body. */
+/** Explicit provenance carried only by values created from an HTTP 200 body. */
 const kInBandProviderError = Symbol("inBandProviderError");
 
 type InBandProviderErrorTagged = {
 	[kInBandProviderError]?: true;
 };
 
-function tagInBandProviderError<TError extends Error>(error: TError): TError {
-	Object.defineProperty(error, kInBandProviderError, { value: true });
-	return error;
+function tagInBandProviderError<TValue extends object>(value: TValue): TValue {
+	Object.defineProperty(value, kInBandProviderError, { value: true });
+	return value;
 }
 
-/** Whether an error came from the in-band classifier rather than an HTTP status line. */
-export function isInBandProviderError(error: unknown): error is Error {
+/** Whether a value carries provenance from the in-band classifier rather than an HTTP status line. */
+export function hasInBandProviderErrorProvenance(value: unknown): boolean {
 	return (
-		error instanceof Error &&
-		(error as Error & InBandProviderErrorTagged)[kInBandProviderError] === true
+		typeof value === "object" &&
+		value !== null &&
+		(value as InBandProviderErrorTagged)[kInBandProviderError] === true
 	);
+}
+
+/** Carries classifier provenance through finalized assistant-message errors. */
+export function transferInBandProviderErrorProvenance(source: unknown, target: object): void {
+	if (hasInBandProviderErrorProvenance(source)) tagInBandProviderError(target);
 }
 
 function normalizeCodeToken(value: unknown): string | undefined {

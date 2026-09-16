@@ -12,14 +12,18 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { __anthropicApiErrorForTesting, Flag, is } from "@oh-my-pi/pi-ai/error";
+import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
 	AnthropicApiError,
 	AnthropicMessagesClient,
 	type AnthropicMessagesClientLike,
 } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
+import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { MAX_RATE_LIMIT_ATTEMPTS } from "@oh-my-pi/pi-utils";
@@ -52,6 +56,34 @@ const anthropicModel: Model<"anthropic-messages"> = buildModel({
 	baseUrl: "https://api.anthropic.test",
 });
 
+const responsesModel: Model<"openai-responses"> = buildModel({
+	...modelDefaults,
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.test/v1",
+});
+
+const azureResponsesModel: Model<"azure-openai-responses"> = buildModel({
+	...modelDefaults,
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: "https://example.openai.azure.test/openai/v1",
+});
+
+const bedrockModel: Model<"bedrock-converse-stream"> = buildModel({
+	...modelDefaults,
+	api: "bedrock-converse-stream",
+	provider: "amazon-bedrock",
+	baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+});
+
+const ollamaModel: Model<"ollama-chat"> = buildModel({
+	...modelDefaults,
+	api: "ollama-chat",
+	provider: "ollama",
+	baseUrl: "http://127.0.0.1:11434",
+});
+
 function rateLimited(headers: Record<string, string> = {}, body = '{"error":{"message":"Rate limit reached"}}') {
 	return new Response(body, { status: 429, headers: { "content-type": "application/json", ...headers } });
 }
@@ -78,6 +110,42 @@ function completionsInBandRateLimited(message: string): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
+}
+
+function responsesSse(events: unknown[]): Response {
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+function responsesSuccess(text: string): Response {
+	return responsesSse([
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", delta: text },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: "msg_ok",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: {
+					input_tokens: 5,
+					output_tokens: 2,
+					total_tokens: 7,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		},
+	]);
 }
 
 function anthropicSuccess(text: string): Response {
@@ -202,6 +270,86 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.requests).toBe(1);
 		expect(outcome.stopReason).toBe("error");
 		expect(outcome.errorStatus).toBe(429);
+	});
+
+	it("recovers OpenAI Responses after one short-hinted HTTP-200 in-band 429", async () => {
+		let requests = 0;
+		const result = await streamOpenAIResponses(responsesModel, context, {
+			apiKey: "test-key",
+			fetch: async () => {
+				requests++;
+				return requests === 1
+					? responsesSse([
+							{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" },
+						])
+					: responsesSuccess("recovered");
+			},
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(requests).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("recovered");
+	});
+
+	it("recovers Azure Responses after one short-hinted HTTP-200 in-band 429", async () => {
+		let requests = 0;
+		const result = await streamAzureOpenAIResponses(azureResponsesModel, context, {
+			apiKey: "test-key",
+			azureBaseUrl: azureResponsesModel.baseUrl,
+			azureApiVersion: "v1",
+			fetch: async () => {
+				requests++;
+				return requests === 1
+					? responsesSse([
+							{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" },
+						])
+					: responsesSuccess("recovered");
+			},
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(requests).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("recovered");
+	});
+
+	it("spends one Bedrock request on a short-hinted quota 429", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const result = await streamBedrock(bedrockModel, context, {
+			bearerToken: "test-token",
+			fetch: async () => {
+				requests++;
+				return rateLimited(
+					{ "retry-after-ms": "20" },
+					'{"type":"insufficient_quota","message":"You have hit your usage limit. Please retry in 20ms"}',
+				);
+			},
+		}).result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+	});
+
+	it("spends one Ollama request on a short-hinted quota 429", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const result = await streamOllama(ollamaModel, context, {
+			apiKey: "test-key",
+			fetch: async () => {
+				requests++;
+				return rateLimited(
+					{ "retry-after-ms": "20" },
+					'{"type":"insufficient_quota","message":"You have hit your usage limit. Please retry in 20ms"}',
+				);
+			},
+		}).result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
 	});
 
 	it("spends one request on a quota-exhaustion 429 so credential rotation runs immediately", async () => {

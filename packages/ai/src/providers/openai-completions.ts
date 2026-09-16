@@ -3,14 +3,7 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
-import {
-	$env,
-	CREDIBLE_RATE_LIMIT_HINT_MS,
-	extractRetryHint,
-	logger,
-	parseStreamingJson,
-	parseStreamingJsonThrottled,
-} from "@oh-my-pi/pi-utils";
+import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -37,7 +30,11 @@ import type {
 import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
-import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import {
+	hasVisibleAssistantContent,
+	resolveInBandRateLimitRetry,
+	withReplaySafeStreamRetry,
+} from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -637,12 +634,6 @@ const OPENAI_COMPLETIONS_ERROR_STATUS_BY_TYPE: Readonly<Record<string, number>> 
 	SERVICE_UNAVAILABLE: 503,
 	TOO_MANY_REQUESTS: 429,
 	REQUEST_TIMEOUT: 408,
-};
-
-const kOpenAICompletionsInBandRateLimit = Symbol("openAICompletionsInBandRateLimit");
-
-type OpenAICompletionsInBandRateLimitTagged = {
-	[kOpenAICompletionsInBandRateLimit]?: true;
 };
 
 function parseOpenAICompletionsErrorStatus(value: unknown): number | undefined {
@@ -1539,10 +1530,7 @@ const streamOpenAICompletionsOnce = (
 			// Only the shared HTTP-200 body classifier carries this provenance.
 			// A wire 429 has the same status, but already spent its transport budget
 			// and must not receive another replay at the provider layer.
-			if (result.status === 429 && AIError.isInBandProviderError(error)) {
-				(output as AssistantMessage & OpenAICompletionsInBandRateLimitTagged)[kOpenAICompletionsInBandRateLimit] =
-					true;
-			}
+			AIError.transferInBandProviderErrorProvenance(error, output);
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -1560,37 +1548,14 @@ const streamOpenAICompletionsOnce = (
  * Retries benign empty completions and transient provider failures only before
  * assistant output commits the attempt.
  */
-export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) => {
-	const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-	const rateLimitHintCapMs =
-		maxRetryDelayMs > 0 ? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS) : CREDIBLE_RATE_LIMIT_HINT_MS;
-	return withReplaySafeStreamRetry(model, context, options, streamOpenAICompletionsOnce, {
+export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) =>
+	withReplaySafeStreamRetry(model, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
-		resolveProviderErrorRetry: message => {
-			if (
-				(message as AssistantMessage & OpenAICompletionsInBandRateLimitTagged)[
-					kOpenAICompletionsInBandRateLimit
-				] !== true
-			) {
-				return { _tag: "default" };
-			}
-			if (message.errorStatus !== 429 || message.errorMessage === undefined) {
-				return { _tag: "deny" };
-			}
-			const retryHintMs = extractRetryHint(undefined, message.errorMessage);
-			if (
-				AIError.isUsageLimitOutcome(message.errorStatus, message.errorMessage) ||
-				retryHintMs === undefined ||
-				retryHintMs > rateLimitHintCapMs
-			) {
-				return { _tag: "deny" };
-			}
-			return { _tag: "retry", delayMs: retryHintMs };
-		},
+		resolveProviderErrorRetry: message =>
+			resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
 	});
-};
 
 function createRequestSetup(
 	model: Model<"openai-completions">,

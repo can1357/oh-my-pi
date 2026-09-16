@@ -55,7 +55,7 @@ import {
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
-import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
+import { hasVisibleAssistantContent, resolveInBandRateLimitErrorRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
@@ -849,6 +849,7 @@ class CodexStreamRuntime {
 	pendingSummaryDeltas = new Map<CodexOpenItem, string[]>();
 	websocketStreamRetries = 0;
 	providerRetryAttempt = 0;
+	inBandRateLimitRetries = 0;
 	sawTerminalEvent = false;
 	canSafelyReplayWebsocketOverSse = true;
 	whitespaceToolCallArgumentsDelta?: CodexWhitespaceToolCallArgumentsDeltaState;
@@ -2394,6 +2395,8 @@ class CodexStreamProcessor {
 		}
 
 		if (eventType === "error" || eventType === "response.failed") {
+			const inBandError = AIError.createInBandProviderError(rawEvent);
+			if (AIError.status(inBandError) === 429) throw inBandError;
 			throw createCodexProviderStreamError(rawEvent);
 		}
 
@@ -2878,8 +2881,11 @@ class CodexStreamProcessor {
 	}
 
 	async #tryRetryProviderError(error: unknown): Promise<boolean> {
+		const rateLimitDecision = resolveInBandRateLimitErrorRetry(error, this.options?.maxRetryDelayMs ?? 60_000);
 		const retryable =
-			error instanceof CodexProviderStreamError ? error.retryable : AIError.isProviderRetryableError(error);
+			rateLimitDecision._tag === "retry" ||
+			(rateLimitDecision._tag === "default" &&
+				(error instanceof CodexProviderStreamError ? error.retryable : AIError.isProviderRetryableError(error)));
 		// A leading `response.output_item.added` opens an empty block and emits only
 		// a `*_start` before any delta; that is replay-safe. But once any text or
 		// thinking delta has streamed — including a whitespace-only
@@ -2895,6 +2901,7 @@ class CodexStreamProcessor {
 		);
 		if (
 			!retryable ||
+			(rateLimitDecision._tag === "retry" && this.runtime.inBandRateLimitRetries >= 1) ||
 			hasVisibleAssistantContent(this.output) ||
 			streamedContent ||
 			!this.runtime.canSafelyReplayWebsocketOverSse ||
@@ -2909,6 +2916,7 @@ class CodexStreamProcessor {
 		// consumers never see an orphaned start from the abandoned attempt.
 		this.#closeOpenBlocksForReplay();
 		this.runtime.providerRetryAttempt += 1;
+		if (rateLimitDecision._tag === "retry") this.runtime.inBandRateLimitRetries += 1;
 		const websocketState = this.requestContext.websocketState;
 		if (websocketState) {
 			resetCodexWebSocketAppendState(websocketState);
@@ -2927,7 +2935,12 @@ class CodexStreamProcessor {
 		this.runtime.sawTerminalEvent = false;
 		resetOutputState(this.output);
 		this.firstTokenTime = undefined;
-		await scheduler.wait(CODEX_RETRY_DELAY_MS * this.runtime.providerRetryAttempt, {
+		const backoffDelayMs = CODEX_RETRY_DELAY_MS * this.runtime.providerRetryAttempt;
+		const delayMs =
+			rateLimitDecision._tag === "retry" && rateLimitDecision.delayMs !== undefined
+				? Math.max(rateLimitDecision.delayMs, backoffDelayMs)
+				: backoffDelayMs;
+		await scheduler.wait(delayMs, {
 			signal: this.requestSetup.requestSignal,
 		});
 

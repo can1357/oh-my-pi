@@ -23,7 +23,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
-import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { resolveInBandRateLimitRetry, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -935,6 +935,7 @@ const streamOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			AIError.transferInBandProviderErrorProvenance(error, output);
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}
@@ -952,13 +953,19 @@ const streamOpenAIResponsesOnce = (
 };
 
 /**
- * Public entry: retry benign empty completions before they reach the agent
- * loop. Transient stream failures are retried inside the attempt so stateful
- * Responses request metadata remains stable.
+ * Public entry: retry benign empty completions and classifier-proven in-band
+ * 429s before they reach the agent loop. Wire 429s remain terminal here because
+ * they already spent their transport budget.
  */
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
 	withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
 		retryEmptyCompletion: true,
+		retryProviderErrors: true,
+		maxProviderErrorRetries: 1,
+		resolveProviderErrorRetry: message => {
+			const decision = resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000);
+			return decision._tag === "default" ? { _tag: "deny" } : decision;
+		},
 	});
 
 function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {

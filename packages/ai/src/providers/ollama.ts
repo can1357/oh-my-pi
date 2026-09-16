@@ -341,7 +341,10 @@ function createChatBody(model: Model<"ollama-chat">, context: Context, options: 
 }
 
 function shouldRetryOllamaResponse(response: Response, bodyText: string): boolean {
-	return response.status < 500 || !AIError.LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(bodyText);
+	return (
+		!AIError.isUsageLimitOutcome(response.status, bodyText) &&
+		(response.status < 500 || !AIError.LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(bodyText))
+	);
 }
 
 async function captureHttpErrorResponse(response: Response): Promise<CapturedHttpErrorResponse> {
