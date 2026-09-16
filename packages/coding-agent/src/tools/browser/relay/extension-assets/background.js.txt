@@ -1,4 +1,4 @@
-// ../coding-agent/src/tools/browser/relay/attachment-guard.ts
+// packages/coding-agent/src/tools/browser/relay/attachment-guard.ts
 class AttachmentGuard {
   options;
   #attached = new Set;
@@ -82,7 +82,7 @@ class AttachmentGuard {
   }
 }
 
-// extension/attachment-state.ts
+// packages/browser-relay/extension/attachment-state.ts
 function noteAttachmentStateChange(epochs, tabId) {
   epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
@@ -247,7 +247,10 @@ function filterFreshAttachmentState(epochs, snapshot, tabIds) {
   return tabIds.filter((tabId) => isAttachmentStateCurrent(epochs, tabId, snapshot.get(tabId) ?? 0));
 }
 
-// extension/orphan-sweep.ts
+// packages/browser-relay/extension/orphan-sweep.ts
+function shouldClearOrphanSweepDeadlineAfterHello(state) {
+  return state.isCurrentSocket && state.isHelloDeliveredSocket && state.socketReadyState === state.openReadyState;
+}
 function orphanSweepSeesRelayDisconnected(state) {
   return state.forceDisconnected === true || state.socketReadyState !== state.openReadyState;
 }
@@ -307,7 +310,7 @@ function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurre
   });
 }
 
-// extension/pending-attaches.ts
+// packages/browser-relay/extension/pending-attaches.ts
 async function finalizePendingAttach(operation, persist, onCanceled, onPersistFailed) {
   if (operation.canceled) {
     await onCanceled();
@@ -353,7 +356,7 @@ class PendingAttaches {
   }
 }
 
-// extension/pending-ops.ts
+// packages/browser-relay/extension/pending-ops.ts
 async function afterPendingOperationsSettle(operations, callback) {
   await Promise.allSettled(operations);
   return callback();
@@ -370,7 +373,7 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
   }
 }
 
-// extension/hello-refresh.ts
+// packages/browser-relay/extension/hello-refresh.ts
 function applyHelloTabChanges(tabs, changes) {
   const current = new Map(tabs.map((tab) => [tab.tabId, tab]));
   for (const [tabId, tab] of changes) {
@@ -392,7 +395,7 @@ function shouldSuppressHelloSnapshot(structuralDirty, reconciliationDirty, allow
   return structuralDirty || reconciliationDirty && !allowStaleReconciliation;
 }
 
-// extension/background.ts
+// packages/browser-relay/extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
@@ -603,8 +606,16 @@ async function setOrphanSweepDeadline(deadlineMs) {
   await update;
 }
 function clearOrphanSweepDeadlineAfterHello(socket) {
+  const isCurrent = () => shouldClearOrphanSweepDeadlineAfterHello({
+    isCurrentSocket: ws === socket,
+    isHelloDeliveredSocket: helloDeliveredSocket === socket,
+    socketReadyState: socket.readyState,
+    openReadyState: WebSocket.OPEN
+  });
+  if (!isCurrent())
+    return;
   setOrphanSweepDeadline(null).catch(() => {
-    if (ws === socket && helloDeliveredSocket === socket && socket.readyState === WebSocket.OPEN) {
+    if (isCurrent()) {
       setTimeout(() => clearOrphanSweepDeadlineAfterHello(socket), 1000);
     }
   });
