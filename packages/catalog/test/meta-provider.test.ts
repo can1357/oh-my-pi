@@ -261,3 +261,52 @@ describe("Muse fingerprint compat", () => {
 		}
 	});
 });
+
+describe("Contributor max endpoint gating", () => {
+	test("advertises max only on the direct endpoint", () => {
+		const seed = metaMuseModels.find(model => model.id === "muse-spark-1.3-contributor")!;
+		// Custom alias on the direct wire inherits the tier with the fingerprint.
+		const direct = buildModel({ ...seed, provider: "custom-meta-route", baseUrl: "https://API.META.AI/v1" });
+		expect(direct.thinking?.efforts).toContain(Effort.Max);
+		expect(direct.compat.museFingerprint).toBe(true);
+		// Built-in provider redirected to a proxy loses the tier the wire cannot honor.
+		const proxied = buildModel({ ...seed, baseUrl: "https://proxy.example/v1" });
+		expect(proxied.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		// Alias behind a proxy: no tier, no fingerprint.
+		const aliasProxy = buildModel({
+			...seed,
+			provider: "custom-meta-route",
+			baseUrl: "https://proxy.example/v1",
+		});
+		expect(aliasProxy.thinking?.efforts).not.toContain(Effort.Max);
+		expect(aliasProxy.compat.museFingerprint).toBe(false);
+	});
+
+	test("resolves bare discovery rows through the endpoint gate", () => {
+		const seed = metaMuseModels.find(model => model.id === "muse-spark-1.3-contributor")!;
+		// Built-in discovery keeps the tier the provider-scoped rule used to grant.
+		const bareMeta = buildModel({ ...seed, thinking: undefined });
+		expect(bareMeta.thinking?.efforts).toContain(Effort.Max);
+		// Alias discovery on the direct wire inherits it by identity.
+		const bareAlias = buildModel({
+			...seed,
+			thinking: undefined,
+			provider: "custom-meta-route",
+			baseUrl: "https://API.META.AI/v1",
+		});
+		expect(bareAlias.thinking?.efforts).toContain(Effort.Max);
+		// Bare rows behind a proxy resolve the five-tier ladder.
+		const bareProxy = buildModel({ ...seed, thinking: undefined, baseUrl: "https://proxy.example/v1" });
+		expect(bareProxy.thinking?.efforts).not.toContain(Effort.Max);
+	});
+
+	test("leaves other ladders untouched", () => {
+		// Standard 1.3 keeps vendor-documented max on any endpoint.
+		const standard = metaMuseModels.find(model => model.id === "muse-spark-1.3")!;
+		const standardProxy = buildModel({ ...standard, baseUrl: "https://proxy.example/v1" });
+		expect(standardProxy.thinking?.efforts).toContain(Effort.Max);
+		// The gate only strips: older contributors never gain max.
+		const older = metaMuseModels.find(model => model.id === "muse-spark-1.2-contributor")!;
+		expect(buildModel({ ...older }).thinking?.efforts).not.toContain(Effort.Max);
+	});
+});
