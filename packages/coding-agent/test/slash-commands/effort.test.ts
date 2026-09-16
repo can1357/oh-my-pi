@@ -33,6 +33,7 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[] } =
 			configured = level;
 		},
 		getAvailableThinkingLevels: () => options.efforts ?? [Effort.Low, Effort.Medium, Effort.High],
+		getAvailableEffortSelectors: () => [ThinkingLevel.Off, AUTO_THINKING, ...(options.efforts ?? [Effort.Low, Effort.Medium, Effort.High])],
 	} as unknown as AgentSession;
 	const tuiRuntime = { ctx: { session } } as unknown as TuiSlashCommandRuntime;
 	return {
@@ -68,6 +69,7 @@ describe("/effort slash command", () => {
 		const effort = buildTuiBuiltinSlashCommands(h.tuiRuntime).find(item => item.name === "effort");
 		const completions = await Promise.resolve(effort?.getArgumentCompletions?.(""));
 		expect(completions?.map(item => item.label)).toEqual(["off", "auto", "low", "medium"]);
+		expect(completions?.map(item => item.label)).toEqual((h.tuiRuntime.ctx.session as any).getAvailableEffortSelectors());
 		expect(completions?.map(item => item.label)).not.toContain("xhigh");
 		expect(effort?.getInlineHint?.("x")).toBeNull();
 	});

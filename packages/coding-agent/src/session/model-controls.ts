@@ -563,18 +563,19 @@ export class ModelControls {
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
 	}
 
+	/** All selectable effort selectors for the active model, in cycle order. */
+	getAvailableEffortSelectors(): ConfiguredThinkingLevel[] {
+		if (!this.#model?.reasoning) return [];
+		return [ThinkingLevel.Off, AUTO_THINKING, ...this.getAvailableThinkingLevels()];
+	}
+
 	/**
 	 * Cycle to next thinking level: off → auto → minimal..max → off.
 	 * @returns New selector, or undefined if model doesn't support thinking
 	 */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		if (!this.#model?.reasoning) return undefined;
-
-		const levels: ConfiguredThinkingLevel[] = [
-			ThinkingLevel.Off,
-			AUTO_THINKING,
-			...this.getAvailableThinkingLevels(),
-		];
+		const levels = this.getAvailableEffortSelectors();
+		if (levels.length === 0) return undefined;
 		const configured = this.configuredThinkingLevel();
 		const currentLevel = configured === ThinkingLevel.Inherit ? ThinkingLevel.Off : configured;
 		const currentIndex = currentLevel ? levels.indexOf(currentLevel) : -1;

@@ -1,6 +1,5 @@
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AgentSession } from "../../session/agent-session";
-import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 
 /**
  * Effort selectors `/effort` accepts for the session's active model. `off` and
@@ -13,6 +12,5 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
  * the dropdown can never suggest a value the handler then rejects.
  */
 export function availableEffortSelectors(session: AgentSession): ConfiguredThinkingLevel[] {
-	if (!session.model?.reasoning) return [];
-	return [ThinkingLevel.Off, AUTO_THINKING, ...session.getAvailableThinkingLevels()];
+	return session.getAvailableEffortSelectors();
 }
