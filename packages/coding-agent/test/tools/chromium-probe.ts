@@ -10,24 +10,24 @@ import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browse
  * instead of failing.
  */
 async function chromiumCanLaunch(): Promise<boolean> {
- try {
-  const executable = await ensureChromiumExecutable();
-  if (!executable) return false;
-  // Only Linux runs the exec probe. Elsewhere the resolved candidate is a
-  // GUI application path, and running it is the hazard
-  // `isChromiumExecutable()` already refuses for the same reason (#8445): a
-  // GUI `chrome.exe --version` prints nothing to a detached stdout and does
-  // not exit, so this spawnSync never returns and every importing suite
-  // hangs during module evaluation. Check the file instead, so a stale
-  // PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
-  // back unvalidated — still skips the suites rather than failing them at
-  // launch.
-  if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
-  const probe = Bun.spawnSync([executable, "--version"], { stdout: "ignore", stderr: "ignore" });
-  return probe.exitCode === 0;
- } catch {
-  return false;
- }
+	try {
+		const executable = await ensureChromiumExecutable();
+		if (!executable) return false;
+		// Only Linux runs the exec probe. Elsewhere the resolved candidate is a
+		// GUI application path, and running it is the hazard
+		// `isChromiumExecutable()` already refuses for the same reason (#8445): a
+		// GUI `chrome.exe --version` prints nothing to a detached stdout and does
+		// not exit, so this spawnSync never returns and every importing suite
+		// hangs during module evaluation. Check the file instead, so a stale
+		// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
+		// back unvalidated — still skips the suites rather than failing them at
+		// launch.
+		if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
+		const probe = Bun.spawnSync([executable, "--version"], { stdout: "ignore", stderr: "ignore" });
+		return probe.exitCode === 0;
+	} catch {
+		return false;
+	}
 }
 
 let probe: Promise<boolean> | undefined;
@@ -47,8 +47,8 @@ let probe: Promise<boolean> | undefined;
  * sequence. The probe runs once per process.
  */
 export function chromiumAvailable(): Promise<boolean> {
- probe ??= chromiumCanLaunch();
- return probe;
+	probe ??= chromiumCanLaunch();
+	return probe;
 }
 
 let visibleProbe: Promise<boolean> | undefined;
@@ -67,12 +67,12 @@ let visibleProbe: Promise<boolean> | undefined;
  * temporal-dead-zone reason.
  */
 export function visibleBrowserAvailable(): Promise<boolean> {
- visibleProbe ??= (async () => {
-  if (!(await chromiumAvailable())) return false;
-  if (process.platform !== "linux") return true;
-  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
- })();
- return visibleProbe;
+	visibleProbe ??= (async () => {
+		if (!(await chromiumAvailable())) return false;
+		if (process.platform !== "linux") return true;
+		return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+	})();
+	return visibleProbe;
 }
 
 let cdpProbe: Promise<boolean> | undefined;
@@ -93,50 +93,50 @@ let cdpProbe: Promise<boolean> | undefined;
  * Same promise-not-awaited-const shape as `chromiumAvailable()`.
  */
 export function chromiumCdpAvailable(): Promise<boolean> {
- cdpProbe ??= (async () => {
-  if (!(await chromiumAvailable())) return false;
-  if (process.platform !== "linux") return true;
-  const executable = await ensureChromiumExecutable().catch(() => null);
-  if (!executable) return false;
-  const profile = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cdp-probe-"));
-  const child = Bun.spawn(
-   [
-    executable,
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    `--user-data-dir=${profile}`,
-    "--remote-debugging-port=0",
-    "about:blank",
-   ],
-   { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
-  );
-  try {
-   const stderrText = new Promise<string>(resolve => {
-    const decoder = new TextDecoder();
-    let text = "";
-    const pump = async () => {
-     const reader = child.stderr.getReader();
-     for (; ;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      text += decoder.decode(value, { stream: true });
-      if (text.includes("DevTools listening")) break;
-     }
-     resolve(text);
-    };
-    void pump();
-   });
-   const served = await Promise.race([
-    stderrText.then(text => text.includes("DevTools listening")),
-    Bun.sleep(8_000).then(() => false),
-   ]);
-   return served;
-  } finally {
-   child.kill();
-   await Promise.allSettled([child.exited, fs.rm(profile, { recursive: true, force: true })]);
-  }
- })();
- return cdpProbe;
+	cdpProbe ??= (async () => {
+		if (!(await chromiumAvailable())) return false;
+		if (process.platform !== "linux") return true;
+		const executable = await ensureChromiumExecutable().catch(() => null);
+		if (!executable) return false;
+		const profile = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cdp-probe-"));
+		const child = Bun.spawn(
+			[
+				executable,
+				"--headless=new",
+				"--no-sandbox",
+				"--disable-gpu",
+				"--disable-dev-shm-usage",
+				`--user-data-dir=${profile}`,
+				"--remote-debugging-port=0",
+				"about:blank",
+			],
+			{ stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+		);
+		try {
+			const stderrText = new Promise<string>(resolve => {
+				const decoder = new TextDecoder();
+				let text = "";
+				const pump = async () => {
+					const reader = child.stderr.getReader();
+					for (;;) {
+						const { value, done } = await reader.read();
+						if (done) break;
+						text += decoder.decode(value, { stream: true });
+						if (text.includes("DevTools listening")) break;
+					}
+					resolve(text);
+				};
+				void pump();
+			});
+			const served = await Promise.race([
+				stderrText.then(text => text.includes("DevTools listening")),
+				Bun.sleep(8_000).then(() => false),
+			]);
+			return served;
+		} finally {
+			child.kill();
+			await Promise.allSettled([child.exited, fs.rm(profile, { recursive: true, force: true })]);
+		}
+	})();
+	return cdpProbe;
 }
