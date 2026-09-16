@@ -316,6 +316,566 @@ describe("AuthStorage codex oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-near", "api-acct-far");
 	});
 
+	test("account priority overrides reset-aware ranking for new sessions", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{ provider: "openai-codex", account: { email: "preferred@example.com" }, priority: 100 },
+				{ provider: "openai-codex", account: { email: "urgent@example.com" }, priority: 10 },
+			],
+		});
+		await authStorage.reload();
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-preferred", "preferred@example.com") },
+			{ type: "oauth", ...createCredential("acct-urgent", "urgent@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-preferred",
+			createCodexUsageReport({
+				accountId: "acct-preferred",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: 6 * 24 * HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-urgent",
+			createCodexUsageReport({
+				accountId: "acct-urgent",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "configured-priority");
+
+		expectExclusivePreference(counts, "api-acct-preferred", "api-acct-urgent");
+	});
+
+	test("account reserve protects a preferred account while an eligible sibling remains", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { email: "protected@example.com" },
+					priority: 100,
+					reservePct: 50,
+				},
+				{
+					provider: "openai-codex",
+					account: { email: "drain@example.com" },
+					priority: 10,
+					reservePct: 10,
+				},
+			],
+		});
+		await authStorage.reload();
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-drain", "drain@example.com") },
+		]);
+		for (const accountId of ["acct-protected", "acct-drain"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.6, resetInMs: 6 * 24 * HOUR_MS },
+				}),
+			);
+		}
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "configured-reserve");
+		const health = await authStorage.getModelUsageHealth("openai-codex", {
+			reserveFraction: 0.1,
+		});
+
+		expectExclusivePreference(counts, "api-acct-drain", "api-acct-protected");
+		expect(health.accounts.map(account => account.state)).toEqual(["reserve", "healthy"]);
+		expect(health.state).toBe("healthy");
+	});
+
+	test("applies the global reserve fallback to unconfigured siblings", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			defaultReservePct: 10,
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-protected" },
+					priority: 100,
+					reservePct: 50,
+				},
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-default", "default@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-protected",
+			createCodexUsageReport({
+				accountId: "acct-protected",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.6, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-default",
+			createCodexUsageReport({
+				accountId: "acct-default",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.95, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "global-reserve-fallback");
+		expectExclusivePreference(counts, "api-acct-protected", "api-acct-default");
+	});
+
+	test("matches account selectors conjunctively and exposes the configured policy", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { email: "shared@example.com", accountId: "acct-team", orgId: "org-team" },
+					priority: 42,
+					reservePct: 25,
+				},
+				{
+					provider: "openai-codex",
+					account: { email: "shared@example.com", accountId: "acct-personal", orgId: "org-personal" },
+					priority: 7,
+				},
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{
+				type: "oauth",
+				...createCredential("acct-team", "shared@example.com"),
+				orgId: "org-team",
+			},
+			{
+				type: "oauth",
+				...createCredential("acct-personal", "shared@example.com"),
+				orgId: "org-personal",
+			},
+		]);
+
+		expect(
+			authStorage.getAccountPolicy("openai-codex", {
+				email: "shared@example.com",
+				accountId: "acct-team",
+				orgId: "org-team",
+			}),
+		).toEqual({
+			provider: "openai-codex",
+			account: { email: "shared@example.com", accountId: "acct-team", orgId: "org-team" },
+			priority: 42,
+			reservePct: 25,
+		});
+		expect(
+			authStorage.getAccountPolicy("openai-codex", {
+				email: "shared@example.com",
+				accountId: "acct-team",
+				orgId: "org-personal",
+			}),
+		).toBeUndefined();
+	});
+
+	test("rejects account selectors that match zero or multiple available OAuth accounts", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			accountPolicies: [{ provider: "openai-codex", account: { email: "missing@example.com" }, priority: 1 }],
+		});
+		await expect(
+			authStorage.set("openai-codex", [
+				{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+				{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			]),
+		).rejects.toThrow("matches no stored OAuth account");
+
+		authStorage = new AuthStorage(store, {
+			accountPolicies: [{ provider: "openai-codex", account: { email: "shared@example.com" }, priority: 1 }],
+		});
+		await expect(
+			authStorage.set("openai-codex", [
+				{
+					type: "oauth",
+					...createCredential("acct-team", "shared@example.com"),
+					orgId: "org-team",
+				},
+				{
+					type: "oauth",
+					...createCredential("acct-personal", "shared@example.com"),
+					orgId: "org-personal",
+				},
+			]),
+		).rejects.toThrow("matches 2 stored OAuth accounts");
+	});
+
+	test("validates the prospective OAuth pool before login upsert persistence", async () => {
+		if (!store) throw new Error("test setup failed");
+		const provider = "unit-account-policy-upsert";
+		const sourceId = "auth-storage-account-policy-test";
+		authStorage = new AuthStorage(store, {
+			accountPolicies: [{ provider, account: { email: "shared@example.com" }, priority: 1 }],
+		});
+		await authStorage.set(provider, [
+			{ type: "oauth", ...createCredential("acct-existing", "shared@example.com"), orgId: "org-existing" },
+		]);
+		oauthUtils.registerOAuthProvider({
+			id: provider,
+			name: "Account Policy Upsert Test",
+			sourceId,
+			login: async () => ({
+				...createCredential("acct-incoming", "shared@example.com"),
+				orgId: "org-incoming",
+			}),
+			refreshToken: async credential => credential,
+		});
+		try {
+			await expect(
+				authStorage.login(provider, {
+					onAuth: () => {},
+					onPrompt: async () => "",
+				}),
+			).rejects.toThrow("matches 2 stored OAuth accounts");
+			expect(store.listAuthCredentials(provider)).toHaveLength(1);
+			expect(authStorage.listOAuthAccounts(provider)).toHaveLength(1);
+		} finally {
+			oauthUtils.unregisterOAuthProviders(sourceId);
+		}
+	});
+
+	test("validates the returned OAuth pool before installing a remote upsert result", async () => {
+		if (!store) throw new Error("test setup failed");
+		const provider = "unit-account-policy-returned-upsert";
+		const sourceId = "auth-storage-returned-account-policy-test";
+		authStorage = new AuthStorage(store, {
+			accountPolicies: [{ provider, account: { email: "shared@example.com" }, priority: 1 }],
+		});
+		await authStorage.set(provider, [
+			{ type: "oauth", ...createCredential("acct-existing", "shared@example.com"), orgId: "org-existing" },
+		]);
+		const existing = store.listAuthCredentials(provider)[0];
+		if (!existing) throw new Error("expected existing credential");
+		store.upsertAuthCredentialRemote = async () => [
+			existing,
+			{
+				...existing,
+				id: existing.id + 1,
+				credential: {
+					type: "oauth",
+					...createCredential("acct-concurrent", "shared@example.com"),
+					orgId: "org-concurrent",
+				},
+			},
+		];
+		oauthUtils.registerOAuthProvider({
+			id: provider,
+			name: "Returned Account Policy Upsert Test",
+			sourceId,
+			login: async () => ({
+				...createCredential("acct-existing", "shared@example.com"),
+				orgId: "org-existing",
+			}),
+			refreshToken: async credential => credential,
+		});
+		try {
+			await expect(
+				authStorage.login(provider, {
+					onAuth: () => {},
+					onPrompt: async () => "",
+				}),
+			).rejects.toThrow("matches 2 stored OAuth accounts");
+			expect(authStorage.listOAuthAccounts(provider)).toHaveLength(1);
+		} finally {
+			oauthUtils.unregisterOAuthProviders(sourceId);
+		}
+	});
+
+	test("validates the prospective pool before removing a selector's sole match", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			accountPolicies: [{ provider: "openai-codex", account: { accountId: "acct-required" }, priority: 1 }],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-required", "required@example.com") },
+			{ type: "oauth", ...createCredential("acct-sibling", "sibling@example.com") },
+		]);
+		const accounts = authStorage.listOAuthAccounts("openai-codex");
+		const required = accounts.find(account => account.accountId === "acct-required");
+		const sibling = accounts.find(account => account.accountId === "acct-sibling");
+		if (!required || !sibling) throw new Error("expected both accounts");
+
+		await expect(authStorage.removeCredential("openai-codex", required.credentialId)).rejects.toThrow(
+			"matches no stored OAuth account",
+		);
+		expect(store.listAuthCredentials("openai-codex")).toHaveLength(2);
+		expect(await authStorage.removeCredential("openai-codex", sibling.credentialId)).toBe(true);
+		expect(store.listAuthCredentials("openai-codex")).toHaveLength(1);
+		expect(await authStorage.removeCredential("openai-codex", required.credentialId)).toBe(true);
+		expect(store.listAuthCredentials("openai-codex")).toHaveLength(0);
+	});
+
+	test("keeps a definitively failed credential disabled when its policy becomes unmatched", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [{ provider: "openai-codex", account: { accountId: "acct-required" }, priority: 100 }],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-required", "required@example.com") },
+			{ type: "oauth", ...createCredential("acct-sibling", "sibling@example.com") },
+		]);
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials["openai-codex"] as OAuthCredentials | undefined;
+			if (!credential?.accountId) return null;
+			if (credential.accountId === "acct-required") throw new Error("invalid_grant");
+			return {
+				apiKey: `api-${credential.accountId}`,
+				newCredentials: credential,
+			};
+		});
+
+		await expect(authStorage.getApiKey("openai-codex", "definitive-policy-disable")).rejects.toThrow(
+			"matches no stored OAuth account",
+		);
+		await expect(authStorage.getOAuthAccess("openai-codex", "definitive-policy-disable-retry")).rejects.toThrow(
+			"matches no stored OAuth account",
+		);
+		expect(
+			store
+				.listAuthCredentials("openai-codex")
+				.map(row => (row.credential.type === "oauth" ? row.credential.accountId : undefined)),
+		).toEqual(["acct-sibling"]);
+		expect((await authStorage.listDisabledCredentials("openai-codex")).map(row => row.accountId)).toContain(
+			"acct-required",
+		);
+	});
+
+	test("requires a base selector identity and usage capability for reserve", () => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: "openai-codex", account: { orgId: "org-only" }, priority: 1 }],
+				}),
+		).toThrow("must include at least one of email, accountId, or projectId");
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					usageProviderResolver: () => undefined,
+					accountPolicies: [
+						{
+							provider: "provider-without-usage",
+							account: { email: "account@example.com" },
+							reservePct: 20,
+						},
+					],
+				}),
+		).toThrow("reservePct requires a usage provider");
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
+				}),
+		).toThrow("without surrounding whitespace");
+	});
+
+	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{ provider: "openai-codex", account: { email: "hot@example.com" }, priority: 300 },
+				{ provider: "openai-codex", account: { email: "unknown@example.com" }, priority: 200 },
+				{ provider: "openai-codex", account: { email: "safe@example.com" }, priority: 10 },
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-hot", "hot@example.com") },
+			{ type: "oauth", ...createCredential("acct-unknown", "unknown@example.com") },
+			{ type: "oauth", ...createCredential("acct-safe", "safe@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-hot",
+			createCodexUsageReport({
+				accountId: "acct-hot",
+				primary: { usedFraction: 0.9, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-safe",
+			createCodexUsageReport({
+				accountId: "acct-safe",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-safety");
+		expectExclusivePreference(counts, "api-acct-safe", "api-acct-hot");
+		expectExclusivePreference(counts, "api-acct-safe", "api-acct-unknown");
+	});
+
+	test("applies deterministic priority without a usage ranking strategy", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			rankingStrategyResolver: () => undefined,
+			accountPolicies: [
+				{ provider: "openai-codex", account: { accountId: "acct-preferred" }, priority: 10 },
+				{ provider: "openai-codex", account: { accountId: "acct-other" }, priority: 1 },
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-other", "other@example.com") },
+			{ type: "oauth", ...createCredential("acct-preferred", "preferred@example.com") },
+		]);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-without-ranking");
+		expectExclusivePreference(counts, "api-acct-preferred", "api-acct-other");
+	});
+
+	test("reports reserve health for usage-capable OAuth without a ranking strategy", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			rankingStrategyResolver: () => undefined,
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-health", "health@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-health",
+			createCodexUsageReport({
+				accountId: "acct-health",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.95, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const health = await authStorage.getModelUsageHealth("openai-codex", {
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("reserve");
+		expect(health.accounts[0]?.state).toBe("reserve");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.05);
+	});
+
+	test("evicts an automatic warm pin using inherited global reserve for a priority-only policy", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-protected" },
+					priority: 100,
+				},
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-sibling", "sibling@example.com") },
+		]);
+		const base = Date.now();
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => base + clockOffset);
+		const setUsage = (protectedUsed: number, siblingUsed: number): void => {
+			usageByAccount.set(
+				"acct-protected",
+				createCodexUsageReport({
+					accountId: "acct-protected",
+					primary: { usedFraction: protectedUsed, resetInMs: HOUR_MS },
+					secondary: { usedFraction: protectedUsed, resetInMs: WEEK_MS },
+				}),
+			);
+			usageByAccount.set(
+				"acct-sibling",
+				createCodexUsageReport({
+					accountId: "acct-sibling",
+					primary: { usedFraction: siblingUsed, resetInMs: HOUR_MS },
+					secondary: { usedFraction: siblingUsed, resetInMs: WEEK_MS },
+				}),
+			);
+		};
+		setUsage(0.2, 0.2);
+		expect(await authStorage.getApiKey("openai-codex", "automatic-reserve-pin")).toBe("api-acct-protected");
+
+		clockOffset = 10 * 60_000;
+		setUsage(0.95, 0.2);
+		expect(await authStorage.getApiKey("openai-codex", "automatic-reserve-pin")).toBe("api-acct-sibling");
+	});
+
+	test("keeps an explicit user pin authoritative over reserve", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-protected" },
+					reservePct: 50,
+				},
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-sibling", "sibling@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-protected",
+			createCodexUsageReport({
+				accountId: "acct-protected",
+				primary: { usedFraction: 0.7, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.7, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-sibling",
+			createCodexUsageReport({
+				accountId: "acct-sibling",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+			}),
+		);
+		const protectedAccount = authStorage
+			.listOAuthAccounts("openai-codex")
+			.find(account => account.accountId === "acct-protected");
+		if (!protectedAccount) throw new Error("expected protected account");
+		expect(
+			authStorage.pinSessionOAuthAccount("openai-codex", "explicit-reserve-pin", protectedAccount.credentialId),
+		).toBe(true);
+
+		expect(await authStorage.getApiKey("openai-codex", "explicit-reserve-pin")).toBe("api-acct-protected");
+	});
+
+	test("keeps a lone reserve account usable when usage is unknown", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-only" },
+					reservePct: 90,
+				},
+			],
+		});
+		await authStorage.set("openai-codex", [{ type: "oauth", ...createCredential("acct-only", "only@example.com") }]);
+
+		expect(await authStorage.getApiKey("openai-codex", "single-unknown-reserve")).toBe("api-acct-only");
+	});
+
 	test("keeps a Codex session pinned after >1h idle", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		const storage = authStorage;
