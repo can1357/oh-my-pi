@@ -24,11 +24,11 @@ Import from subpaths (`@oh-my-pi/pi-catalog/<module>`) or the root barrel.
 Never edit `src/models.json` or `src/compat/rules.json` by hand. `models.json` is produced from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `scripts/generate-models.ts`; `rules.json` is compiled from the KDL tree in `src/compat/rules/`. Regenerate with:
 
 ```sh
-bun run gen:compat   # src/compat/rules/**/*.kdl -> src/compat/rules.json
+bun run gen:compat   # KDL -> src/compat/{rules.json,provider-ids.ts,auth-ids.ts}
 bun run gen:models   # upstream sources + rules -> src/models.json
 ```
 
-Model- or provider-conditional policy (identity, effort ladders, wire quirks, modality/limit/pricing corrections, API routing, roster exclusions) lives in the KDL tree — see `src/compat/rules/README.md` for the grammar and axis vocabulary. TypeScript changes are only for transport mechanics: provider entries in `provider-models/descriptors.ts`, discovery/request plumbing in `provider-models/openai-compat.ts`, and generator wiring in `scripts/generate-models.ts`. Commit `rules.json` (and a rebaked `models.json` when values change) alongside the `.kdl` edit.
+Model- or provider-conditional policy (identity, effort ladders, wire quirks, modality/limit/pricing corrections, API routing, roster exclusions) lives in the KDL tree — see `src/compat/rules/README.md` for the grammar and axis vocabulary. TypeScript changes are only for transport mechanics: runtime discovery factories in `provider-models/descriptors.ts`, discovery/request plumbing in `provider-models/openai-compat.ts`, and generator wiring in `scripts/generate-models.ts`. Commit the generated `src/compat/rules.json`, `src/compat/provider-ids.ts`, and `src/compat/auth-ids.ts` (and a rebaked `models.json` when values change) alongside the `.kdl` edit.
 
 ## Install
 

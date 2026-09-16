@@ -9,7 +9,7 @@ whenever it has catalog-managed runtime model discovery:
   entry is compiled into `src/compat/rules.json`, and `KnownProvider` is
   generated from these files into `src/compat/provider-ids.ts`.
 - **Auth half** (`packages/catalog/src/compat/rules/auth/<id>.kdl`): the root
-  `auth "<id>"` node carrying the env fallback and the login/refresh policy.
+  `auth "<id>"` node carrying the login/refresh policy and optional env overrides.
   Runtime accessors live in `src/compat/auth.ts`; the `AuthProviderId` and
   `LoginProviderId` unions are generated into `src/compat/auth-ids.ts`, and
   `auth/_order.kdl` pins the `/login` roster order.
@@ -42,8 +42,8 @@ common case for gateways and API-key providers, since stream dispatch keys on
 
 ## Shape
 
-For the common case, a provider is **one catalog rule, one auth rule, and one
-factory entry**:
+A catalog provider needs **one catalog rule and one auth rule**. Add a factory
+when using descriptor-based endpoint discovery:
 
 1. **Add `packages/catalog/src/compat/rules/providers/<id>.kdl`** with the root
    `provider "<id>"` node: `default-model`, the plain API-key env var(s) as
@@ -56,18 +56,27 @@ factory entry**:
    fetch the provider's endpoint; that path walks `PROVIDER_DESCRIPTORS`, so it
    needs a factory entry too (step 3).
 2. **Add `packages/catalog/src/compat/rules/auth/<id>.kdl`** with the root
-   `auth "<id>"` node: `name`, `env`, and the login flow (`login "api-key"`
-   with a `validate` probe for the common case). When the provider has a
-   `login` and does not set `show-in-login-list #false`, add its id to the
-   `login-order` node in `auth/_order.kdl`.
-3. **Add a factory to `MODEL_MANAGER_FACTORIES`** in
+   `auth "<id>"` node and required `name`. The `login` node is optional:
+   env-only providers can omit it. For interactive API-key login, use
+   `login "api-key"` with a required `prompt`; supply `auth-url` and
+   `instructions` together or omit both. Add `validate` when a safe probe can
+   distinguish valid credentials; a public endpoint is not a key-validation
+   probe (see `auth/commandcode.kdl`). Keep ordinary API-key env names in the
+   catalog rule from step 1; auth `env` is an optional override for auth-only
+   providers or intentional overrides, including computed resolvers. When the
+   provider has a `login` and does not set `show-in-login-list #false`, add its id
+   to the `login-order` node in `auth/_order.kdl`.
+3. **For descriptor-based endpoint discovery, add a factory to
+   `MODEL_MANAGER_FACTORIES`** in
    `packages/catalog/src/provider-models/descriptors.ts`, keyed by provider id.
+   Providers relying only on seeds or upstream catalog data can omit this step.
    For a plain OpenAI-compatible gateway, call the exported
    `createSimpleOpenAICompletionsOptions(providerId, defaultBaseUrl, config)` —
    from a thin named wrapper beside the others in
    `packages/catalog/src/provider-models/openai-compat.ts`, the way `groq`,
-   `together`, and `coreweave` do it — or write a bespoke manager in
-   `special.ts`. `PROVIDER_DESCRIPTORS` is that table joined with the compiled
+   `together`, and `coreweave` do it — or use a bespoke manager in the
+   appropriate module under `provider-models/`, following similar providers.
+   `PROVIDER_DESCRIPTORS` is that table joined with the compiled
    entries, and the descriptor-based paths read it: the runtime refreshes the
    ids in it, and `generate-models.ts` fetches the entries whose compiled entry
    also carries a `discovery` node, minus its local-only and credential-scoped
@@ -96,9 +105,10 @@ factory entry**:
    commit the rebaked `src/models.json` with it.
 
 For an **auth flow with vendor-specific code**, declare
-`login "custom" hook="name"` and implement the hook in
-`packages/ai/src/registry/hooks/custom.ts` (or the matching domain file under
-`registry/hooks/`). Hook names are validated against those tables by the
+`login "custom" hook="name"` and implement the hook in the matching domain file
+under `packages/ai/src/registry/hooks/` (`api-key.ts` for key-paste flows,
+`custom.ts` for its whole-flow hooks). Hook names are validated against the
+merged tables in `registry/hooks/index.ts` by the
 `@oh-my-pi/pi-ai` `auth-hooks-registry` test, so an unknown hook name fails the
 suite rather than the login.
 
@@ -112,7 +122,7 @@ suite rather than the login.
 | `default-model`                       | Required for a catalog entry. Member of `KnownProvider`; preferred model when no explicit selection is made.                                                                                                                                                                                                                                                                                                                                                                             |
 | `env`                                 | Env var name(s), in order, for the runtime API-key fallback (`getEnvApiKey`).                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `allow-unauthenticated`               | Runtime creates a model manager even without a key.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `dynamic-models-authoritative`        | Successful runtime discovery replaces bundled models instead of merging.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `dynamic-models-authoritative`        | Controls generator replacement of upstream/snapshot rows after qualifying endpoint discovery and disables unauthenticated shared-catalog fallback in descriptor-based runtime setup. Runtime pruning additionally requires the factory's returned `ModelManagerOptions.dynamicModelsAuthoritative` to be `true`; the descriptor flag is not copied into those options.                                                                                                                   |
 | `skip-cross-provider-reference-fills` | Generator backfills never copy reasoning/input/limits from same-id rows on other hosts.                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `discovery`                           | Configures the generation-time catalog fetch. The generator walks `PROVIDER_DESCRIPTORS`, so this node only configures a fetch for a provider that already has a factory entry, and it is still only eligible: the local-only and credential-scoped ids are dropped by that script. `label=` is required; `oauth-provider=` lets a stored credential stand in for a key; `allow-unauthenticated=` permits credential-less discovery; child `env "…"` overrides the generation-time keys. |
 | `seed`                                | Authors bundled rows — credential-scoped rosters, unauthenticated regens, or models ahead of upstream catalogs. A discoverable provider can seed too: `bundle="always"` keeps those rows in every regeneration, deduped behind upstream data at the default `precedence="upstream"`, while `precedence="seed"` prepends them after the snapshot merge so the authored row wins dedup. `bundle=` picks `always` (default), `fallback`, or `empty`.                                        |
@@ -126,7 +136,7 @@ in the same `provider` node, below the entry properties.
 | Field                    | Effect                                                                                                                                                                                                                                                                                                                            |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`                   | Required. Shows in the `/login` list when the policy declares a visible login flow.                                                                                                                                                                                                                                               |
-| `env`                    | Env fallback for `getEnvApiKey`: `env "A" "B"` for an ordered list, or `env hook="name"` for a computed resolver registered in `packages/ai/src/registry/hooks/env.ts`.                                                                                                                                                           |
+| `env`                    | Optional override of the catalog env fallback for `getEnvApiKey`: `env "A" "B"` for an ordered list, or `env hook="name"` for a computed resolver registered in `packages/ai/src/registry/hooks/env.ts`. Omit it for ordinary catalog API-key providers; use it for auth-only providers or intentional overrides.                 |
 | `login`                  | Interactive login: `api-key`, `oauth-code`, `device-code`, or `custom`. Present ⇒ member of `LoginProviderId` and dispatchable through `AuthStorage.login`.                                                                                                                                                                       |
 | `refresh`                | Token refresher (`refresh { … }`, `refresh "none"`, or `refresh hook="name"`). `oauth-code` and `device-code` logins must declare one — use `refresh "none"` for a grant that cannot be refreshed; omit it when there is no login, since the compiler rejects a `refresh` without one.                                            |
 | `store-as`               | Persist stored OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`); a login returning a plain API-key string is stored under the provider's own id.                                                                                                                                     |
@@ -176,7 +186,7 @@ policy.
 
 ```sh
 cd packages/catalog
-bun run gen:compat   # rules/ → src/compat/rules.json (committed)
+bun run gen:compat   # rules/ → rules.json, provider-ids.ts, auth-ids.ts in src/compat/
 bun test test/compat-compile.test.ts test/compat-conformance.test.ts \
          test/compat-taxonomy.test.ts test/compat-cascade.test.ts test/compat-parity.test.ts
 ```
