@@ -80,6 +80,8 @@ import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
+/** Default remaining quota protected for accounts without an explicit policy override. */
+export const DEFAULT_USAGE_RESERVE_PCT = 10;
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
  * Primary (short, e.g. 5h) window used-fraction at or above which a candidate
@@ -123,6 +125,34 @@ export type AuthCredential = ApiKeyCredential | OAuthCredential;
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
 export type AuthStorageData = Record<string, AuthCredentialEntry>;
+
+export interface AuthAccountSelector {
+	readonly email?: string;
+	readonly accountId?: string;
+	readonly projectId?: string;
+	/** Optional organization/workspace qualifier; not a base identity by itself. */
+	readonly orgId?: string;
+}
+
+export interface AuthAccountPolicy {
+	readonly provider: string;
+	readonly account: AuthAccountSelector;
+	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
+	readonly priority?: number;
+	/** Protected remaining quota percentage for this account. */
+	readonly reservePct?: number;
+}
+
+export type AuthAccountPolicies = readonly AuthAccountPolicy[];
+
+function matchesAuthAccountSelector(selector: AuthAccountSelector, identity: OAuthAccountIdentity): boolean {
+	return (
+		(selector.email === undefined || selector.email === identity.email) &&
+		(selector.accountId === undefined || selector.accountId === identity.accountId) &&
+		(selector.projectId === undefined || selector.projectId === identity.projectId) &&
+		(selector.orgId === undefined || selector.orgId === identity.orgId)
+	);
+}
 
 /**
  * Cascade leg that supplies a provider's active credential, highest precedence
@@ -587,6 +617,9 @@ export interface CredentialDisabledEvent {
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	accountPolicies?: AuthAccountPolicies;
+	/** Global reserve fallback for accounts without a matching reservePct policy. */
+	defaultReservePct?: number;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
@@ -1304,11 +1337,21 @@ type StoredOAuthSelection = {
 	credential: OAuthCredential;
 	index: number;
 };
+type SessionCredential = {
+	type: AuthCredential["type"];
+	index: number;
+	credentialId?: number;
+	lastUsedAtMs?: number;
+	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
+	explicit?: true;
+};
 
 type UsageCandidate<T extends AuthCredential> = {
 	selection: CredentialSelection<T>;
 	usage: UsageReport | null;
 	usageChecked: boolean;
+	/** Present after policy-aware ranking; used to decide whether a warm automatic pin may be evicted. */
+	inReserve?: boolean;
 };
 
 type OAuthCandidate = UsageCandidate<OAuthCredential>;
@@ -1328,6 +1371,8 @@ type CredentialBlockRouting = {
 type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
 	blockedUntil?: number;
+	inReserve: boolean;
+	accountPriority: number;
 	hasPriorityBoost: boolean;
 	usageMeasured: boolean;
 	planPriority: number;
@@ -1359,10 +1404,7 @@ export class AuthStorage {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
-	#sessionLastCredential: Map<
-		string,
-		Map<string, { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number }>
-	> = new Map();
+	#sessionLastCredential: Map<string, Map<string, SessionCredential>> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
@@ -1391,6 +1433,8 @@ export class AuthStorage {
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	#accountPolicies: AuthAccountPolicies;
+	#defaultReservePct: number;
 	#usageCache: UsageCache;
 	#usageCacheEpoch = 0;
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
@@ -1426,6 +1470,12 @@ export class AuthStorage {
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
+		this.#accountPolicies = options.accountPolicies ?? [];
+		this.#defaultReservePct =
+			typeof options.defaultReservePct === "number" && Number.isFinite(options.defaultReservePct)
+				? Math.max(0, Math.min(100, options.defaultReservePct))
+				: DEFAULT_USAGE_RESERVE_PCT;
+		this.#validateAccountPolicyConfiguration();
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
 		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
 		// cache rows (24h last-good retention). A cheap indexed DELETE;
@@ -1625,6 +1675,99 @@ export class AuthStorage {
 		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#usageProviderResolver?.(provider);
 	}
 
+	#validateAccountPolicyConfiguration(): void {
+		for (let index = 0; index < this.#accountPolicies.length; index += 1) {
+			const policy = this.#accountPolicies[index]!;
+			const path = `auth.accountPolicies[${index}]`;
+			if (
+				typeof policy.provider !== "string" ||
+				policy.provider.length === 0 ||
+				policy.provider.trim() !== policy.provider
+			) {
+				throw new AIError.ConfigurationError(
+					`${path}.provider must be a non-empty string without surrounding whitespace`,
+				);
+			}
+			if (!policy.account || typeof policy.account !== "object") {
+				throw new AIError.ConfigurationError(`${path}.account must be an object`);
+			}
+			const baseIdentities = [policy.account.email, policy.account.accountId, policy.account.projectId];
+			if (!baseIdentities.some(value => typeof value === "string" && value.length > 0)) {
+				throw new AIError.ConfigurationError(
+					`${path}.account must include at least one of email, accountId, or projectId`,
+				);
+			}
+			for (const field of ["email", "accountId", "projectId", "orgId"] as const) {
+				const value = policy.account[field];
+				if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
+					throw new AIError.ConfigurationError(`${path}.account.${field} must be a non-empty string`);
+				}
+			}
+			if (policy.priority !== undefined && !Number.isFinite(policy.priority)) {
+				throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
+			}
+			if (
+				policy.reservePct !== undefined &&
+				(!Number.isFinite(policy.reservePct) || policy.reservePct < 0 || policy.reservePct > 100)
+			) {
+				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
+			}
+		}
+	}
+
+	#validateAccountPolicyUsageCapability(provider: string): void {
+		const policyIndex = this.#accountPolicies.findIndex(
+			policy => policy.provider === provider && policy.reservePct !== undefined,
+		);
+		if (
+			policyIndex !== -1 &&
+			this.#resolveUsageProvider(provider as Provider) === undefined &&
+			this.#store.getUsageReport === undefined
+		) {
+			throw new AIError.ConfigurationError(
+				`auth.accountPolicies[${policyIndex}].reservePct requires a usage provider for ${provider}`,
+			);
+		}
+	}
+
+	#validateAccountPoliciesForProvider(provider: string, credentials: readonly AuthCredential[]): void {
+		const policies = this.#accountPolicies
+			.map((policy, index) => ({ policy, index }))
+			.filter(({ policy }) => policy.provider === provider);
+		if (policies.length === 0) return;
+		const oauthCredentials = credentials.filter(
+			(credential): credential is OAuthCredential => credential.type === "oauth",
+		);
+		if (oauthCredentials.length === 0) return;
+
+		const claimedCredentials = new Map<number, number>();
+		for (const { policy, index } of policies) {
+			const matches: number[] = [];
+			for (let credentialIndex = 0; credentialIndex < oauthCredentials.length; credentialIndex += 1) {
+				if (matchesAuthAccountSelector(policy.account, oauthCredentials[credentialIndex]!)) {
+					matches.push(credentialIndex);
+				}
+			}
+			const path = `auth.accountPolicies[${index}].account`;
+			if (matches.length === 0) {
+				throw new AIError.ConfigurationError(`${path} matches no stored OAuth account for ${provider}`);
+			}
+			if (matches.length > 1) {
+				throw new AIError.ConfigurationError(
+					`${path} matches ${matches.length} stored OAuth accounts for ${provider}; add another identity field`,
+				);
+			}
+			const credentialIndex = matches[0]!;
+			const previousPolicyIndex = claimedCredentials.get(credentialIndex);
+			if (previousPolicyIndex !== undefined) {
+				throw new AIError.ConfigurationError(
+					`auth.accountPolicies[${previousPolicyIndex}] and auth.accountPolicies[${index}] match the same stored OAuth account for ${provider}`,
+				);
+			}
+			claimedCredentials.set(credentialIndex, index);
+		}
+	}
+
 	/**
 	 * Register a per-provider API key sourced from user configuration
 	 * (e.g. `models.yml` `providers.<name>.apiKey`). Higher priority than
@@ -1686,6 +1829,10 @@ export class AuthStorage {
 		const dedupedGrouped = new Map<string, StoredCredential[]>();
 		for (const [provider, entries] of grouped.entries()) {
 			const deduped = this.#pruneDuplicateStoredCredentials(provider, entries);
+			this.#validateAccountPoliciesForProvider(
+				provider,
+				deduped.map(entry => entry.credential),
+			);
 			if (deduped.length > 0) {
 				dedupedGrouped.set(provider, deduped);
 			}
@@ -2111,7 +2258,8 @@ export class AuthStorage {
 	/**
 	 * Records which credential was used for a session (for rate-limit switching).
 	 * `lastUsedAtMs` backdates the sticky (session-file pin restores on resume);
-	 * it defaults to now for live selections.
+	 * it defaults to now for live selections. Automatic re-recording of the same
+	 * durable row preserves an explicit user pin.
 	 */
 	#recordSessionCredential(
 		provider: string,
@@ -2119,26 +2267,33 @@ export class AuthStorage {
 		type: AuthCredential["type"],
 		index: number,
 		lastUsedAtMs?: number,
+		explicit = false,
 	): void {
 		if (!sessionId) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
 		const credentialId = this.#getStoredCredentials(provider)[index]?.id;
 		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map();
-		sessionMap.set(sessionId, { type, index, credentialId, lastUsedAtMs: nowMs });
+		const previous = sessionMap.get(sessionId);
+		const sameCredential =
+			previous?.type === type &&
+			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
+		const isExplicit = explicit || (sameCredential && previous?.explicit === true);
+		const sessionCredential: SessionCredential = {
+			type,
+			index,
+			credentialId,
+			lastUsedAtMs: nowMs,
+			...(isExplicit ? { explicit: true as const } : {}),
+		};
+		sessionMap.set(sessionId, sessionCredential);
 		this.#sessionLastCredential.set(provider, sessionMap);
 
 		try {
 			if (credentialId !== undefined) {
 				const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
-				const cacheValue = JSON.stringify({
-					type,
-					index,
-					credentialId,
-					lastUsedAtMs: nowMs,
-				});
 				// Expires in 30 days
 				const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
-				this.#store.setCache(cacheKey, cacheValue, expiresAtSec);
+				this.#store.setCache(cacheKey, JSON.stringify(sessionCredential), expiresAtSec);
 			}
 		} catch (err) {
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
@@ -2146,10 +2301,7 @@ export class AuthStorage {
 	}
 
 	/** Retrieves the last credential used by a session. */
-	#getSessionCredential(
-		provider: string,
-		sessionId: string | undefined,
-	): { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number } | undefined {
+	#getSessionCredential(provider: string, sessionId: string | undefined): SessionCredential | undefined {
 		if (!sessionId) return undefined;
 		let sessionMap = this.#sessionLastCredential.get(provider);
 		const live = sessionMap?.get(sessionId);
@@ -2172,12 +2324,7 @@ export class AuthStorage {
 			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
 			const raw = this.#store.getCache(cacheKey);
 			if (raw) {
-				const val = JSON.parse(raw) as {
-					type: AuthCredential["type"];
-					index: number;
-					credentialId?: number;
-					lastUsedAtMs?: number;
-				};
+				const val = JSON.parse(raw) as SessionCredential;
 
 				if (val.credentialId !== undefined) {
 					const stored = this.#getStoredCredentials(provider);
@@ -2197,11 +2344,12 @@ export class AuthStorage {
 					sessionMap = new Map();
 					this.#sessionLastCredential.set(provider, sessionMap);
 				}
-				const sessionVal = {
+				const sessionVal: SessionCredential = {
 					type: val.type,
 					index: val.index,
 					credentialId: val.credentialId,
 					lastUsedAtMs: val.lastUsedAtMs,
+					...(val.explicit === true ? { explicit: true } : {}),
 				};
 				sessionMap.set(sessionId, sessionVal);
 				return sessionVal;
@@ -2363,6 +2511,8 @@ export class AuthStorage {
 				usageChecked,
 				blocked,
 				blockedUntil,
+				inReserve: false,
+				accountPriority: 0,
 				usageMeasured,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
@@ -2602,6 +2752,7 @@ export class AuthStorage {
 	async set(provider: string, credential: AuthCredentialEntry): Promise<void> {
 		const normalized = Array.isArray(credential) ? credential : [credential];
 		const deduped = this.#dedupeOAuthCredentials(provider, normalized);
+		this.#validateAccountPoliciesForProvider(provider, deduped);
 		const stored = this.#store.replaceAuthCredentialsRemote
 			? await this.#store.replaceAuthCredentialsRemote(provider, deduped)
 			: this.#store.replaceAuthCredentialsForProvider(provider, deduped);
@@ -2883,9 +3034,18 @@ export class AuthStorage {
 	}
 
 	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
+		const prospectiveCredentials = this.#dedupeOAuthCredentials(provider, [
+			...this.#store.listAuthCredentials(provider).map(entry => entry.credential),
+			credential,
+		]);
+		this.#validateAccountPoliciesForProvider(provider, prospectiveCredentials);
 		const stored = this.#store.upsertAuthCredentialRemote
 			? await this.#store.upsertAuthCredentialRemote(provider, credential)
 			: this.#store.upsertAuthCredentialForProvider(provider, credential);
+		this.#validateAccountPoliciesForProvider(
+			provider,
+			stored.map(entry => entry.credential),
+		);
 		this.#setStoredCredentials(
 			provider,
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
@@ -2913,6 +3073,11 @@ export class AuthStorage {
 		const entries = this.#getStoredCredentials(provider);
 		const index = entries.findIndex(entry => entry.id === credentialId);
 		if (index === -1) return false;
+		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
+		this.#validateAccountPoliciesForProvider(
+			provider,
+			remainingEntries.map(entry => entry.credential),
+		);
 
 		if (this.#store.deleteAuthCredentialRemote) {
 			const deleted = await this.#store.deleteAuthCredentialRemote(credentialId, "deleted by user");
@@ -2920,10 +3085,7 @@ export class AuthStorage {
 		} else {
 			this.#store.deleteAuthCredential(credentialId, "deleted by user");
 		}
-		this.#setStoredCredentials(
-			provider,
-			entries.filter((_entry, entryIndex) => entryIndex !== index),
-		);
+		this.#setStoredCredentials(provider, remainingEntries);
 		this.#resetProviderAssignments(provider);
 		return true;
 	}
@@ -3139,6 +3301,18 @@ export class AuthStorage {
 		}
 		if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
 		return identity;
+	}
+
+	/**
+	 * Return the configured account policy matching an OAuth identity.
+	 *
+	 * This is a read-only diagnostics surface: it performs the same conjunctive
+	 * selector match as routing and never refreshes, ranks, or mutates credentials.
+	 */
+	getAccountPolicy(provider: string, identity: OAuthAccountIdentity): AuthAccountPolicy | undefined {
+		return this.#accountPolicies.find(
+			policy => policy.provider === provider && matchesAuthAccountSelector(policy.account, identity),
+		);
 	}
 
 	/**
@@ -4220,7 +4394,13 @@ export class AuthStorage {
 		options.signal?.throwIfAborted();
 		const origin = this.getCredentialOrigin(provider);
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		if (!origin || !strategy || (origin.kind !== "oauth" && origin.kind !== "api_key")) {
+		const usageProvider = this.#resolveUsageProvider(provider);
+		const canFetchOAuthUsage = usageProvider !== undefined || this.#store.getUsageReport !== undefined;
+		if (
+			!origin ||
+			(origin.kind !== "oauth" && origin.kind !== "api_key") ||
+			(strategy === undefined && (origin.kind !== "oauth" || !canFetchOAuthUsage))
+		) {
 			return { state: "unknown", accounts: [] };
 		}
 
@@ -4246,11 +4426,19 @@ export class AuthStorage {
 		};
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options.modelId);
 		const planEligibilityByCredential = new Map<number, boolean | undefined>();
-		const blockScope = strategy.blockScope?.(rankingContext);
+		const blockScope = strategy?.blockScope?.(rankingContext);
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const reserveFraction = Number.isFinite(options.reserveFraction)
 			? Math.max(0, Math.min(1, options.reserveFraction))
-			: 0;
+			: this.#defaultReservePct / 100;
+
+		const resolveReserveFraction = (entry: StoredCredential): number => {
+			const policy = this.#getAccountPolicy(provider, entry.credential);
+			const configured = policy?.reservePct;
+			return configured === undefined || !Number.isFinite(configured)
+				? reserveFraction
+				: Math.max(0, Math.min(1, configured / 100));
+		};
 		const nowMs = Date.now();
 		let accounts = await Promise.all(
 			pool.map(async ({ entry, index }): Promise<ModelUsageAccountHealth> => {
@@ -4304,12 +4492,7 @@ export class AuthStorage {
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
 
-				// Reserve health is opt-in and non-destructive: prefer the strategy's
-				// reserve scoping, which may expose mapped model/tier rows that the
-				// hard-block scoper withholds until confirmed exhaustion.
-				const limits =
-					strategy.scopeLimitsForReserve?.(report, rankingContext) ??
-					this.#getScopedUsageLimits(strategy, report, rankingContext);
+				const limits = this.#getReserveUsageLimits(strategy, report, rankingContext);
 				if (limits.length === 0) return { credentialId: entry.id, credentialType, state: "unknown" };
 
 				const currentLimits = limits.filter(limit => {
@@ -4342,7 +4525,7 @@ export class AuthStorage {
 				return {
 					credentialId: entry.id,
 					credentialType,
-					state: remainingFraction <= reserveFraction ? "reserve" : "healthy",
+					state: remainingFraction <= resolveReserveFraction(entry) ? "reserve" : "healthy",
 					remainingFraction,
 				};
 			}),
@@ -4956,6 +5139,44 @@ export class AuthStorage {
 		return Math.min(Math.max(usedFraction, 0), 1);
 	}
 
+	#getAccountPolicy(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
+		return credential.type === "oauth" ? this.getAccountPolicy(provider, credential) : undefined;
+	}
+
+	#getReserveUsageLimits(
+		strategy: CredentialRankingStrategy | undefined,
+		report: UsageReport,
+		rankingContext: CredentialRankingContext,
+	): UsageLimit[] {
+		if (strategy) {
+			return (
+				strategy.scopeLimitsForReserve?.(report, rankingContext) ??
+				this.#getScopedUsageLimits(strategy, report, rankingContext)
+			);
+		}
+		return report.limits.filter(limit => {
+			const modelId = limit.scope.modelId;
+			return modelId === undefined || rankingContext.modelId === undefined || modelId === rankingContext.modelId;
+		});
+	}
+
+	#resolveRemainingFraction(
+		strategy: CredentialRankingStrategy | undefined,
+		report: UsageReport | null,
+		rankingContext: CredentialRankingContext,
+		nowMs: number,
+	): number | undefined {
+		if (!report) return undefined;
+		const usedFractions = this.#getReserveUsageLimits(strategy, report, rankingContext)
+			.filter(limit => {
+				const resetsAt = limit.window?.resetsAt;
+				return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
+			})
+			.map(resolveUsedFraction)
+			.filter((fraction): fraction is number => fraction !== undefined);
+		return usedFractions.length === 0 ? undefined : Math.max(0, 1 - Math.max(...usedFractions));
+	}
+
 	/**
 	 * Computes the required drain rate: `headroomFraction / remainingHours` —
 	 * how fast the window's remaining quota must be consumed to fully use it
@@ -4994,6 +5215,7 @@ export class AuthStorage {
 		if (planRequirement !== "none" && left.planPriority !== right.planPriority) {
 			return left.planPriority - right.planPriority;
 		}
+		if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
 		if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 		// Short-window guard: candidates whose primary (e.g. 5h) window is
 		// nearly exhausted rank behind cool ones regardless of drain urgency —
@@ -5008,6 +5230,7 @@ export class AuthStorage {
 		const leftMeasured = left.usageMeasured;
 		const rightMeasured = right.usageMeasured;
 		if (leftMeasured !== rightMeasured) return leftMeasured ? -1 : 1;
+		if (left.accountPriority !== right.accountPriority) return right.accountPriority - left.accountPriority;
 		// Required drain, descending: the account whose remaining quota must
 		// burn fastest to avoid expiring unused at its reset comes first, so
 		// staggered resets land at ~100% utilization instead of stranding
@@ -5041,6 +5264,7 @@ export class AuthStorage {
 			selection: candidate.selection,
 			usage: candidate.usage,
 			usageChecked: candidate.usageChecked,
+			inReserve: candidate.inReserve,
 		}));
 	}
 
@@ -5051,7 +5275,8 @@ export class AuthStorage {
 		planRequirement: OpenAICodexPlanRequirement;
 		credentials: OAuthSelection[];
 		options?: AuthApiKeyOptions;
-		strategy: CredentialRankingStrategy;
+		strategy?: CredentialRankingStrategy;
+		defaultReservePct?: number;
 		rankingContext: CredentialRankingContext;
 		blockScope?: string;
 		/** Scopes a block may live under for this request; reads honour all of them. */
@@ -5145,7 +5370,8 @@ export class AuthStorage {
 			const { selection, usage, usageChecked } = result;
 			let { blockedUntil } = result;
 			let blocked = blockedUntil !== undefined;
-			const scopedLimits = usage ? this.#getScopedUsageLimits(strategy, usage, args.rankingContext) : undefined;
+			const scopedLimits =
+				usage && strategy ? this.#getScopedUsageLimits(strategy, usage, args.rankingContext) : undefined;
 			if (!blocked && scopedLimits && this.#isUsageLimitReached(scopedLimits)) {
 				const resetAtMs = this.#getUsageResetAtMs(scopedLimits, nowMs);
 				blockedUntil = resetAtMs ?? Date.now() + AuthStorage.#defaultBackoffMs;
@@ -5159,28 +5385,41 @@ export class AuthStorage {
 				);
 				blocked = true;
 			}
-			const windows = usage ? strategy.findWindowLimits(usage, args.rankingContext) : undefined;
+			const windows = usage && strategy ? strategy.findWindowLimits(usage, args.rankingContext) : undefined;
 			const primary = windows?.primary;
 			const secondary = windows?.secondary;
-			const usageMeasured = primary !== undefined || secondary !== undefined;
+			const remainingFraction = this.#resolveRemainingFraction(strategy, usage, args.rankingContext, nowMs);
+			const usageMeasured =
+				strategy === undefined ? remainingFraction !== undefined : primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
+			const policy = this.#getAccountPolicy(args.provider, selection.credential);
+			const reservePct = policy?.reservePct ?? args.defaultReservePct;
+			const reserveFraction =
+				reservePct === undefined || !Number.isFinite(reservePct)
+					? undefined
+					: Math.max(0, Math.min(1, reservePct / 100));
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
+				inReserve:
+					reserveFraction !== undefined && remainingFraction !== undefined && remainingFraction <= reserveFraction,
+				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				usageMeasured,
-				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
+				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: getOpenAICodexPlanPriority(usage, args.planRequirement),
-				secondaryUsed: this.#normalizeUsageFraction(secondary),
-				secondaryRequiredDrain: this.#computeWindowRequiredDrain(
-					secondary,
-					nowMs,
-					strategy.windowDefaults.secondaryMs,
-				),
-				primaryUsed: this.#normalizeUsageFraction(primary),
-				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
+				secondaryUsed: strategy ? this.#normalizeUsageFraction(secondary) : 0,
+				secondaryRequiredDrain:
+					strategy === undefined
+						? 0
+						: this.#computeWindowRequiredDrain(secondary, nowMs, strategy.windowDefaults.secondaryMs),
+				primaryUsed: strategy ? this.#normalizeUsageFraction(primary) : 0,
+				primaryRequiredDrain:
+					strategy === undefined
+						? 0
+						: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
 			});
 		}
@@ -5214,8 +5453,13 @@ export class AuthStorage {
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+		this.#validateAccountPoliciesForProvider(
+			provider,
+			credentials.map(entry => entry.credential),
+		);
 
 		if (credentials.length === 0) return undefined;
+		this.#validateAccountPolicyUsageCapability(provider);
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
@@ -5228,7 +5472,19 @@ export class AuthStorage {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
-		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
+		const hasAccountPolicy = credentials.some(
+			({ credential }) => this.#getAccountPolicy(provider, credential) !== undefined,
+		);
+		const hasPriorityPolicy = credentials.some(
+			({ credential }) => this.#getAccountPolicy(provider, credential)?.priority !== undefined,
+		);
+		const canFetchPolicyUsage =
+			strategy !== undefined ||
+			this.#resolveUsageProvider(provider as Provider) !== undefined ||
+			this.#store.getUsageReport !== undefined;
+		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
+		const checkUsage =
+			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
@@ -5255,13 +5511,27 @@ export class AuthStorage {
 			sessionPreferredIndex !== undefined &&
 			sessionPreferredCanRefreshOrUse &&
 			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
-		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || !sessionPreferredIsWarm || hasPlanRequirement);
+		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
+		const shouldRank =
+			checkUsage &&
+			(!sessionPreferredIsAvailable ||
+				!sessionPreferredIsWarm ||
+				hasPlanRequirement ||
+				(policyReserveEnabled && !sessionPinIsExplicit));
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
 		// sibling — this respects the residual value of a same-account shared static prefix that other
 		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
 		const baseRankingOrder = credentials.map((_credential, index) => index);
-		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : order;
+		const policyOrder = hasPriorityPolicy
+			? [...baseRankingOrder].sort((leftIndex, rightIndex) => {
+					const leftPriority = this.#getAccountPolicy(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
+					const rightPriority =
+						this.#getAccountPolicy(provider, credentials[rightIndex]!.credential)?.priority ?? 0;
+					return rightPriority - leftPriority || leftIndex - rightIndex;
+				})
+			: order;
+		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : policyOrder;
 		const sessionPreferredRankingPos =
 			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement
 				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
@@ -5272,7 +5542,7 @@ export class AuthStorage {
 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
 			];
 		}
-		const candidates = shouldRank
+		const candidates: OAuthCandidate[] = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
 					provider,
@@ -5280,12 +5550,13 @@ export class AuthStorage {
 					order: rankingOrder,
 					credentials,
 					options,
-					strategy: strategy!,
+					strategy,
+					defaultReservePct: policyReserveEnabled ? this.#defaultReservePct : undefined,
 					rankingContext,
 					blockScope,
 					blockScopes,
 				})
-			: order
+			: policyOrder
 					.map(idx => credentials[idx])
 					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
 					.map(selection => ({
@@ -5295,19 +5566,27 @@ export class AuthStorage {
 					}));
 		const preflightFailures = new Set<OAuthCandidate>();
 
-		// On the warm skip path the candidate list follows the round-robin `order`, not the pin, so
-		// hoist the pinned credential to the front to actually reuse it. When ranking ran, the pin is
-		// already a mere tie-break via `rankingOrder`; do not override the ranked result here.
-		if (!shouldRank && sessionPreferredIndex !== undefined && !hasPlanRequirement) {
-			const sessionPreferredCandidate = candidates.findIndex(
-				candidate =>
-					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
-					candidate.selection.index === sessionPreferredIndex,
+		const sessionPreferredCandidate = candidates.findIndex(
+			candidate =>
+				!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
+				candidate.selection.index === sessionPreferredIndex,
+		);
+		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
+		const reserveWouldEvictAutomaticPin =
+			!sessionPinIsExplicit &&
+			preferredCandidate?.inReserve === true &&
+			candidates.some(
+				candidate => candidate.selection.index !== sessionPreferredIndex && candidate.inReserve === false,
 			);
-			if (sessionPreferredCandidate > 0) {
-				const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
-				candidates.unshift(preferred);
-			}
+		// A warm automatic pin normally wins. Reserve is the one policy allowed
+		// to evict it, and only while a sibling is confirmed outside reserve.
+		if (
+			!hasPlanRequirement &&
+			sessionPreferredCandidate > 0 &&
+			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !reserveWouldEvictAutomaticPin))
+		) {
+			const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
+			candidates.unshift(preferred);
 		}
 		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
 		// the session-preferred credential (or the first candidate when no
@@ -5437,19 +5716,12 @@ export class AuthStorage {
 		// unenforced and the pin is not known-ineligible) so an active session never
 		// silently migrates accounts mid-conversation; blocked, exhausted, or
 		// known-ineligible pins still fall through to the ranked sibling.
-		if (hasPlanRequirement && sessionPreferredIndex !== undefined) {
-			const sessionPreferredCandidate = candidates.findIndex(
-				candidate =>
-					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
-					candidate.selection.index === sessionPreferredIndex,
-			);
-			if (sessionPreferredCandidate > 0) {
-				const preferred = candidates[sessionPreferredCandidate]!;
-				const planEligibility = getOpenAICodexPlanEligibility(preferred.usage, planRequirement);
-				if (planEligibility === true || (!enforcePlanRequirement && planEligibility !== false)) {
-					candidates.splice(sessionPreferredCandidate, 1);
-					candidates.unshift(preferred);
-				}
+		if (hasPlanRequirement && sessionPreferredCandidate > 0 && !reserveWouldEvictAutomaticPin) {
+			const preferred = candidates[sessionPreferredCandidate]!;
+			const planEligibility = getOpenAICodexPlanEligibility(preferred.usage, planRequirement);
+			if (planEligibility === true || (!enforcePlanRequirement && planEligibility !== false)) {
+				candidates.splice(sessionPreferredCandidate, 1);
+				candidates.unshift(preferred);
 			}
 		}
 
@@ -5555,6 +5827,7 @@ export class AuthStorage {
 			await this.reload();
 			return "cas-lost";
 		}
+		this.#validateAccountPoliciesForProvider(provider, this.#getCredentialsForProvider(provider));
 		return "disabled";
 	}
 
@@ -6216,8 +6489,8 @@ export class AuthStorage {
 	 * Pin one stored OAuth account as this session's preferred credential.
 	 *
 	 * The durable credential id keeps the pin stable across credential refreshes,
-	 * storage reordering, and process restarts. Normal auth retry and usage-limit
-	 * handling may still route around an unavailable account.
+	 * storage reordering, and process restarts. Account reserve never evicts this
+	 * explicit user pin; hard unavailability and auth retry may still route around it.
 	 *
 	 * `options.lastUsedAtMs` backdates the sticky's last-use timestamp so a pin
 	 * restored from a persisted session keeps the provider's warm-window
@@ -6237,7 +6510,7 @@ export class AuthStorage {
 		const index = stored.findIndex(entry => entry.id === credentialId);
 		const target = stored[index];
 		if (target?.credential.type !== "oauth") return false;
-		this.#recordSessionCredential(provider, sessionId, "oauth", index, options?.lastUsedAtMs);
+		this.#recordSessionCredential(provider, sessionId, "oauth", index, options?.lastUsedAtMs, true);
 		return true;
 	}
 
@@ -6261,6 +6534,7 @@ export class AuthStorage {
 				credential.type,
 				credential.index,
 				credential.lastUsedAtMs,
+				credential.explicit === true,
 			);
 			inherited += 1;
 		}
