@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An Anthropic-compatible endpoint that rejects `cache_control` with a 400 no longer fails the turn. The request is replayed without prompt-cache breakpoints, the rejection is remembered for the rest of the session per endpoint and model, the prompt-cache betas are dropped alongside it, and the turn reports `prompt-cache` in `disabledFeatures`. An endpoint that takes the field but refuses `ttl`/`scope` sends the same 400, so a request that asked for either is first replayed with every breakpoint intact and those options removed; that succeeding keeps 5m caching on for the session and reports `prompt-cache-retention` instead ([#11812](https://github.com/can1357/oh-my-pi/pull/11812) by [@camjac251](https://github.com/camjac251)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added
@@ -52,7 +56,6 @@
 ### Fixed
 
 - 400-request debug dumps now redact provider-specific auth headers (`x-goog-api-key`, `x-amz-security-token`, and any header whose name carries a key/token/secret), not just a fixed allow-list, so a shared dump can no longer leak a live API key ([#12007](https://github.com/can1357/oh-my-pi/issues/12007)).
-- An Anthropic-compatible endpoint that rejects `cache_control` with a 400 no longer fails the turn. The request is replayed once without prompt-cache breakpoints, the rejection is remembered for the rest of the session per endpoint and model, the extended-cache-ttl beta is dropped alongside it, and the turn reports `prompt-cache` in `disabledFeatures` ([#11812](https://github.com/can1357/oh-my-pi/pull/11812) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.1.20] - 2026-09-13
 

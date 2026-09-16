@@ -4,11 +4,24 @@
  * terminal for the provider retry gate and the replay path re-sends a
  * byte-identical body, so such an endpoint used to break the turn outright.
  *
- * The provider must replay the request once without prompt-cache breakpoints,
+ * The provider must replay the request without prompt-cache breakpoints,
  * remember the rejection for the rest of the session — scoped to the model and
  * to the endpoint the request reached, or to the injected client itself when it
  * publishes no endpoint — and stop advertising the extended-cache-ttl beta on
  * requests that carry no breakpoint at all.
+ *
+ * An endpoint that takes the field but refuses `ttl`/`scope` on it sends the
+ * same 400, and no reading of the message separates the two. So the recovery is
+ * a ladder keyed on what the failing request asked for, not on its wording:
+ *
+ *   1. The request carried `ttl` or `scope` → replay with every breakpoint
+ *      intact, those options removed, and the betas that govern them withheld.
+ *      Succeeding latches the narrow flag, so the session keeps 5m caching.
+ *   2. Refused again, or the request carried no option at all → replay with no
+ *      breakpoint. Succeeding latches `cacheControlUnsupported` as before.
+ *
+ * Both latches are written from the turn's success path, so a 400 that meant
+ * something else costs one request rather than a session of lost caching.
  */
 import { describe, expect, it } from "bun:test";
 import { isCacheControlUnsupported } from "@oh-my-pi/pi-ai/error";
@@ -18,7 +31,7 @@ import {
 	streamAnthropic,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
-import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type { CacheControlEphemeral, MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
@@ -57,15 +70,24 @@ const CONTEXT: Context = {
 	],
 };
 
-/** Shape a caching-unaware proxy returns: a 400 naming the field it refuses. */
-function cacheControlRejectionResponse(): Response {
+/**
+ * Three wordings for the same HTTP outcome. The first names the field's own
+ * position, the second names a member under it, the third names that member in
+ * prose — and each successive version of the text classifier this ladder
+ * replaced drew its line somewhere between them. None of them is evidence about
+ * which of the two things the endpoint actually refused, so all three have to
+ * reach the ladder and be settled by replaying.
+ */
+const FIELD_SHAPED_REFUSAL = "messages.0.content.0.cache_control: Extra inputs are not permitted";
+const PATH_SHAPED_OPTION_REFUSAL = `messages.0.content.0.cache_control.ttl: unsupported value "1h"`;
+const PROSE_SHAPED_OPTION_REFUSAL = "unsupported ttl in cache_control";
+
+/** Shape a caching-unaware proxy returns: a 400 naming what it refuses. */
+function cacheControlRejectionResponse(message: string = FIELD_SHAPED_REFUSAL): Response {
 	return new Response(
 		JSON.stringify({
 			type: "error",
-			error: {
-				type: "invalid_request_error",
-				message: "messages.0.content.0.cache_control: Extra inputs are not permitted",
-			},
+			error: { type: "invalid_request_error", message },
 		}),
 		{ status: 400, headers: { "Content-Type": "application/json" } },
 	);
@@ -127,16 +149,40 @@ interface Capture {
 	betaHeaders: string[];
 }
 
+/** Records one request's body and beta header, and hands the body back. */
+function recordRequest(capture: Capture, input: Request | URL | string, init: RequestInit | undefined) {
+	const raw = init?.body;
+	const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
+	const body = JSON.parse(text) as MessageCreateParams;
+	capture.bodies.push(body);
+	const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+	capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
+	return body;
+}
+
 function createFetch(capture: Capture, modes: Array<"reject" | "ok">): FetchImpl {
 	return async (input, init) => {
-		const raw = init?.body;
-		const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
-		capture.bodies.push(JSON.parse(text) as MessageCreateParams);
-		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-		capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
+		recordRequest(capture, input, init);
 		const mode = modes[capture.bodies.length - 1];
 		if (mode === undefined) throw new Error(`unexpected request #${capture.bodies.length}`);
 		return mode === "reject" ? cacheControlRejectionResponse() : successResponse();
+	};
+}
+
+/**
+ * An endpoint that implements prompt caching but not the options on it: any
+ * breakpoint carrying `ttl` or `scope` is refused, the same breakpoint without
+ * them is accepted. It answers with the field-shaped 400 above, which is the
+ * whole point — the bytes are the ones a field refusal sends, so only replaying
+ * can tell the two apart.
+ */
+function createCacheOptionRejectingFetch(capture: Capture, message?: string): FetchImpl {
+	return async (input, init) => {
+		const body = recordRequest(capture, input, init);
+		const refused = collectCacheControls(body).some(
+			cacheControl => cacheControl.ttl !== undefined || cacheControl.scope !== undefined,
+		);
+		return refused ? cacheControlRejectionResponse(message) : successResponse();
 	};
 }
 
@@ -152,12 +198,7 @@ function createFetch(capture: Capture, modes: Array<"reject" | "ok">): FetchImpl
 function createBreakpointRejectingFetch(capture: Capture, failBreakpointFreeAttempts = 0): FetchImpl {
 	let failuresLeft = failBreakpointFreeAttempts;
 	return async (input, init) => {
-		const raw = init?.body;
-		const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
-		const body = JSON.parse(text) as MessageCreateParams;
-		capture.bodies.push(body);
-		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-		capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
+		const body = recordRequest(capture, input, init);
 		if (countBreakpoints(body) > 0) return cacheControlRejectionResponse();
 		if (failuresLeft > 0) {
 			failuresLeft--;
@@ -176,12 +217,7 @@ function createBreakpointRejectingFetch(capture: Capture, failBreakpointFreeAtte
  */
 function createFastModeRejectingFetch(capture: Capture, alsoRejectBreakpoints = false): FetchImpl {
 	return async (input, init) => {
-		const raw = init?.body;
-		const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
-		const body = JSON.parse(text) as MessageCreateParams;
-		capture.bodies.push(body);
-		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-		capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
+		const body = recordRequest(capture, input, init);
 		if (body.speed !== undefined) return fastModeRejectionResponse();
 		if (alsoRejectBreakpoints && countBreakpoints(body) > 0) return cacheControlRejectionResponse();
 		return successResponse();
@@ -200,11 +236,33 @@ function runPriorityTurn(
 	}).result();
 }
 
-function runTurn(fetchImpl: FetchImpl, states: Map<string, ProviderSessionState>): Promise<AssistantMessage> {
+/**
+ * The default request shape: `short` retention, so the breakpoints carry no
+ * `ttl` and no `scope`. A `cache_control` refusal on such a request cannot be
+ * about a nested option, so the ladder has exactly one rung and every row built
+ * on this runner is reading the field-level fallback.
+ */
+function runTurn(
+	fetchImpl: FetchImpl,
+	states: Map<string, ProviderSessionState>,
+	model: Model<"anthropic-messages"> = MODEL,
+): Promise<AssistantMessage> {
+	return streamAnthropic(model, CONTEXT, {
+		apiKey: "sk-ant-api-test",
+		cacheRetention: "short",
+		providerSessionState: states,
+		fetch: fetchImpl,
+	}).result();
+}
+
+/**
+ * The same turn asking for 1h retention, which is the only API-key path that
+ * puts `ttl` on a breakpoint and the extended-cache-ttl beta on the header. A
+ * refusal here gets the retention rung before the field rung.
+ */
+function runLongTurn(fetchImpl: FetchImpl, states: Map<string, ProviderSessionState>): Promise<AssistantMessage> {
 	return streamAnthropic(MODEL, CONTEXT, {
 		apiKey: "sk-ant-api-test",
-		// `long` retention is the only path that adds the extended-cache-ttl beta,
-		// so the header assertions below have something to observe.
 		cacheRetention: "long",
 		providerSessionState: states,
 		fetch: fetchImpl,
@@ -254,21 +312,37 @@ function runOverrideTurn(
 }
 
 /** Every `cache_control` breakpoint on the wire, across tools, system and messages. */
-function countBreakpoints(body: MessageCreateParams): number {
-	let count = 0;
+function collectCacheControls(body: MessageCreateParams): CacheControlEphemeral[] {
+	// `type` is carried only so this stays a structural match for the content
+	// blocks that declare no `cache_control` at all (`fallback`), which a
+	// single-optional-property shape rejects outright as a weak type.
+	const holders: Array<{ type?: string; cache_control?: CacheControlEphemeral | null }> = [];
 	for (const block of body.system ?? []) {
-		if (typeof block !== "string" && block.cache_control != null) count++;
+		if (typeof block !== "string") holders.push(block);
 	}
-	for (const tool of body.tools ?? []) {
-		if ("cache_control" in tool && tool.cache_control != null) count++;
-	}
+	for (const tool of body.tools ?? []) holders.push(tool);
 	for (const message of body.messages ?? []) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if ("cache_control" in block && block.cache_control != null) count++;
-		}
+		if (Array.isArray(message.content)) holders.push(...message.content);
 	}
-	return count;
+	const found: CacheControlEphemeral[] = [];
+	for (const holder of holders) {
+		if (holder.cache_control != null) found.push(holder.cache_control);
+	}
+	return found;
+}
+
+function countBreakpoints(body: MessageCreateParams): number {
+	return collectCacheControls(body).length;
+}
+
+/**
+ * The distinct `ttl` values on the wire, with an omitted `ttl` spelled
+ * `"default"` rather than left `undefined`: `toEqual` treats `[]` and
+ * `[undefined]` as equal, which would let a breakpoint-free body satisfy an
+ * assertion about a breakpoint that merely dropped its retention.
+ */
+function breakpointTtls(body: MessageCreateParams): string[] {
+	return [...new Set(collectCacheControls(body).map(cacheControl => cacheControl.ttl ?? "default"))];
 }
 
 function makeStatusError(status: number, message: string): Error {
@@ -288,10 +362,98 @@ describe("Anthropic cache_control rejection fallback", () => {
 
 		expect(message.stopReason).toBe("stop");
 		expect(message.errorMessage).toBeUndefined();
+		// The request asked for neither `ttl` nor `scope`, so a nested refusal was
+		// impossible and the ladder has no retention rung to spend: two requests,
+		// not three. A rung gated on the wording instead of on the request state
+		// would have burned one here on every such endpoint.
+		expect(breakpointTtls(capture.bodies[0])).toEqual(["default"]);
 		expect(capture.bodies).toHaveLength(2);
 		expect(countBreakpoints(capture.bodies[0])).toBeGreaterThan(0);
 		expect(countBreakpoints(capture.bodies[1])).toBe(0);
 		expect(message.disabledFeatures).toContain("prompt-cache");
+		expect(message.disabledFeatures).not.toContain("prompt-cache-retention");
+	});
+
+	// One row per wording: the shapes used to take opposite branches — the
+	// path-shaped one was vetoed as nested, the field-shaped one drove the
+	// breakpoint-free replay, and the prose one flipped sides between review
+	// rounds. The outcome is now the endpoint's answer rather than the message's,
+	// so all three converge here.
+	it.each([
+		["a field-shaped refusal", FIELD_SHAPED_REFUSAL],
+		["a path-shaped refusal naming the option", PATH_SHAPED_OPTION_REFUSAL],
+		["a prose refusal naming the option first", PROSE_SHAPED_OPTION_REFUSAL],
+	])("keeps 5m caching when an endpoint refusing only the options answers with %s", async (_shape, message) => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createCacheOptionRejectingFetch(capture, message);
+
+		const first = await runLongTurn(fetchImpl, states);
+		const second = await runLongTurn(fetchImpl, states);
+
+		expect(first.stopReason).toBe("stop");
+		expect(second.stopReason).toBe("stop");
+		// Three requests: 1h refused, the same breakpoints without `ttl` accepted,
+		// and a second turn that never had to pay the refusal again.
+		expect(capture.bodies).toHaveLength(3);
+		expect(breakpointTtls(capture.bodies[0])).toEqual(["1h"]);
+		// The rung that carried the turn kept every breakpoint. Reading this 400 as
+		// a field refusal would have shipped a breakpoint-free body instead and
+		// latched caching off for the session.
+		expect(countBreakpoints(capture.bodies[1])).toBe(countBreakpoints(capture.bodies[0]));
+		expect(breakpointTtls(capture.bodies[1])).toEqual(["default"]);
+		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
+		// The narrow latch, not the field one: the next turn's first attempt still
+		// caches, and still asks for no retention it has been refused.
+		expect(countBreakpoints(capture.bodies[2])).toBe(countBreakpoints(capture.bodies[0]));
+		expect(breakpointTtls(capture.bodies[2])).toEqual(["default"]);
+		// What a consumer is told. `prompt-cache` would be a lie here — the
+		// breakpoints went out and the endpoint is caching against them.
+		expect(first.disabledFeatures).toContain("prompt-cache-retention");
+		expect(first.disabledFeatures).not.toContain("prompt-cache");
+		expect(second.disabledFeatures).toContain("prompt-cache-retention");
+	});
+
+	it("strips every breakpoint when the retention rung is refused the same way", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createBreakpointRejectingFetch(capture);
+
+		const first = await runLongTurn(fetchImpl, states);
+		const second = await runLongTurn(fetchImpl, states);
+
+		expect(first.stopReason).toBe("stop");
+		expect(second.stopReason).toBe("stop");
+		// A 1h request against an endpoint with no prompt caching at all: the
+		// retention rung goes out first and is refused identically, so the ladder
+		// falls through to the breakpoint-free replay rather than failing the turn.
+		expect(breakpointTtls(capture.bodies[0])).toEqual(["1h"]);
+		expect(countBreakpoints(capture.bodies[1])).toBeGreaterThan(0);
+		expect(breakpointTtls(capture.bodies[1])).toEqual(["default"]);
+		expect(countBreakpoints(capture.bodies[2])).toBe(0);
+		// The field latch won, so the session stops offering breakpoints — the
+		// narrow one would have put them back on this attempt.
+		expect(capture.bodies).toHaveLength(4);
+		expect(countBreakpoints(capture.bodies[3])).toBe(0);
+		expect(first.disabledFeatures).toContain("prompt-cache");
+		expect(first.disabledFeatures).not.toContain("prompt-cache-retention");
+	});
+
+	it("asks for retention again after the session-close sweep", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createCacheOptionRejectingFetch(capture);
+
+		await runLongTurn(fetchImpl, states);
+		// What `/new` does. The narrow flag has to reset with the others, or a
+		// refusal learned before the sweep keeps 1h off for the process lifetime.
+		for (const state of states.values()) state.close();
+		const after = await runLongTurn(fetchImpl, states);
+
+		expect(after.stopReason).toBe("stop");
+		expect(capture.bodies).toHaveLength(4);
+		expect(breakpointTtls(capture.bodies[2])).toEqual(["1h"]);
+		expect(breakpointTtls(capture.bodies[3])).toEqual(["default"]);
 	});
 
 	it("omits breakpoints on the first attempt of a later turn in the same session", async () => {
@@ -334,19 +496,23 @@ describe("Anthropic cache_control rejection fallback", () => {
 		expect(next.disabledFeatures).toContain("prompt-cache");
 	});
 
-	it("stops advertising the extended-cache-ttl beta once breakpoints are dropped", async () => {
+	it("stops advertising the extended-cache-ttl beta from the first retry onward", async () => {
 		const capture: Capture = { bodies: [], betaHeaders: [] };
 		const states = new Map<string, ProviderSessionState>();
-		const fetchImpl = createFetch(capture, ["reject", "ok", "ok"]);
+		const fetchImpl = createBreakpointRejectingFetch(capture);
 
-		await runTurn(fetchImpl, states);
-		await runTurn(fetchImpl, states);
+		await runLongTurn(fetchImpl, states);
+		await runLongTurn(fetchImpl, states);
 
 		expect(capture.betaHeaders[0]).toContain(EXTENDED_CACHE_TTL_BETA);
 		// The immediate retry, not just the next turn: the client's default
-		// headers must be rebuilt alongside the body.
+		// headers must be rebuilt alongside the body. Both rungs qualify — the
+		// retention rung keeps its breakpoints but no longer asks for 1h, and a
+		// header still claiming the beta would contradict the body it rides on.
+		expect(capture.bodies).toHaveLength(4);
 		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
 		expect(capture.betaHeaders[2]).not.toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[3]).not.toContain(EXTENDED_CACHE_TTL_BETA);
 	});
 
 	it("drops caller-supplied cache betas from the breakpoint-free retry", async () => {
@@ -609,12 +775,7 @@ describe("Anthropic cache_control rejection fallback", () => {
 		const otherModel = buildModel({ ...MODEL, baseUrl: "https://gateway.example/v1" });
 
 		await runTurn(fetchImpl, states);
-		const other = await streamAnthropic(otherModel, CONTEXT, {
-			apiKey: "sk-ant-api-test",
-			cacheRetention: "long",
-			providerSessionState: states,
-			fetch: fetchImpl,
-		}).result();
+		const other = await runTurn(fetchImpl, states, otherModel);
 
 		expect(other.stopReason).toBe("stop");
 		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
@@ -636,13 +797,19 @@ describe("Anthropic cache_control rejection fallback", () => {
 
 		expect(message.stopReason).toBe("stop");
 		expect(message.errorMessage).toBeUndefined();
-		expect(capture.bodies).toHaveLength(2);
-		expect(countBreakpoints(capture.bodies[1])).toBe(0);
-		// The OAuth defaults advertise prompt-caching-scope unconditionally; a
-		// replay carrying no breakpoint must not keep claiming caching the
-		// endpoint just refused.
+		// Three rungs, because OAuth on an official endpoint defaults to 1h
+		// retention: the request carried `ttl`, so the retention rung goes first
+		// and the identity block survives it. Only the rung below it drops the
+		// breakpoint the block defaults to.
+		expect(capture.bodies).toHaveLength(3);
+		expect(breakpointTtls(capture.bodies[0])).toEqual(["1h"]);
+		expect(countBreakpoints(capture.bodies[1])).toBeGreaterThan(0);
+		expect(countBreakpoints(capture.bodies[2])).toBe(0);
+		// The OAuth defaults advertise prompt-caching-scope unconditionally; that
+		// beta governs `scope`, so neither rung may keep claiming it.
 		expect(capture.betaHeaders[0]).toContain(PROMPT_CACHING_SCOPE_BETA);
 		expect(capture.betaHeaders[1]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
+		expect(capture.betaHeaders[2]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
 	});
 
 	it("drops a cache beta supplied through model.headers from the replay", async () => {
@@ -756,7 +923,7 @@ describe("Anthropic cache_control rejection fallback", () => {
 			}),
 			apiKey: "ghu_test_token_12345",
 			stream: true,
-			dropCacheControl: true,
+			dropPromptCacheBetas: true,
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(CUSTOM_BETA);
@@ -837,24 +1004,6 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(true);
 	});
 
-	it("detects the field-level 400 even when Pydantic's diagnostic tail names a cache_control member", () => {
-		// Unabridged form of the row above: Pydantic appends the offending input,
-		// so `type` appears later in the same message. The veto fires only on the
-		// *next token* after the field, never on a message-wide member search —
-		// the words of "Extra inputs are not permitted" end the separator run,
-		// because letters are excluded from it. Turning this into a member search
-		// would suppress the exact 400 the fallback exists for.
-		expect(
-			isCacheControlUnsupported(
-				makeStatusError(
-					400,
-					"400 messages.0.content.0.cache_control: Extra inputs are not permitted " +
-						"[type=extra_forbidden, input_value={'type': 'ephemeral'}, input_type=dict]",
-				),
-			),
-		).toBe(true);
-	});
-
 	it("detects a strict JSON decoder refusing cache_control as an unknown field", () => {
 		// Go `DisallowUnknownFields` wording — a schema rejection with none of the
 		// extra-input/not-permitted vocabulary.
@@ -885,31 +1034,6 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(true);
 	});
 
-	// A member in *key* position is a sibling of the error object reporting the
-	// field, not a segment under it: the proxy refused `cache_control` itself and
-	// wrote its own `type`/`code` keys after the message. Reading those as
-	// nesting vetoes the exact 400 the fallback exists for, so an endpoint whose
-	// error shape is always message-first would never receive a breakpoint-free
-	// replay — the whole fallback would be dead against it. The joiner here is
-	// `","`, three characters, so every counted version of the rule vetoed these
-	// as well; only the key/segment distinction admits them.
-	it.each([
-		[
-			"a message-first body whose next key is type",
-			`{"message":"Unsupported parameter: cache_control","type":"invalid_request_error"}`,
-		],
-		[
-			"an OpenAI-compatible error object naming the field as param",
-			`{"error":{"param":"cache_control","type":"invalid_request_error","code":"unknown_parameter"}}`,
-		],
-		[
-			"a pretty-printed body that spaces the sibling key off its colon",
-			`{\n\t"message": "Unsupported parameter: cache_control",\n\t"type" : "invalid_request_error"\n}`,
-		],
-	])("detects a 400 refusing the cache_control field in %s", (_shape, message) => {
-		expect(isCacheControlUnsupported(makeStatusError(400, `400 ${message}`))).toBe(true);
-	});
-
 	it("keeps caching enabled when a 400 rejects the number of cache_control blocks", () => {
 		// Anthropic's breakpoint cap: the endpoint does support prompt caching, so
 		// disabling it for the rest of the session would be the wrong fallback.
@@ -923,43 +1047,17 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(false);
 	});
 
-	// A member named UNDER `cache_control` means the endpoint took the field and
-	// refused one nested option, so its ordinary 5m caching still works. The
-	// fallback would strip every breakpoint and latch `cacheControlUnsupported`
-	// for the session, disabling caching that the endpoint supports; a refused
-	// `ttl: "1h"` is the extended-cache-ttl beta's problem instead.
-	//
-	// Nesting is keyed on the member name, not on the punctuation joining it to
-	// the field, and the rule reaches that name across an unbounded run of
-	// non-alphanumeric characters. So the rows cover one message per distinct
-	// path syntax a validator emits, plus one where a pretty-printer breaks the
-	// joiner across lines; separator *width* is no longer a dimension, and the
-	// three `CacheControlEphemeral` members each appear at least once. Two rows
-	// carry a key-shaped `type` sibling further along the body: the member that
-	// decides nesting is the one adjacent to the field, and a later key must not
-	// be able to lift the veto.
+	// Inverse of the rows this file used to carry for the member distinction: a
+	// 400 naming a member under or before the field is no longer vetoed, because
+	// no reading of those bytes says whether the field or the option was refused.
+	// Admitting them is what lets the ladder ask the endpoint; re-narrowing the
+	// pattern would strand a real option refusal on a terminal 400 again.
 	it.each([
-		["a dotted path naming ttl", `messages.0.content.0.cache_control.ttl: unsupported value "1h"`],
-		[
-			"a fully quoted JSONPath naming ttl",
-			`$["messages"][0]["content"][0]["cache_control"]["ttl"]: unsupported value`,
-		],
-		["a spaced JSONPath naming scope across a line break", '$["cache_control"]\n\t[ "scope" ]: unsupported value'],
-		[
-			"a Pydantic location array naming ttl ahead of a type key",
-			`{"loc":["body","messages",0,"content",0,"cache_control","ttl"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}`,
-		],
-		[
-			"a dotted path naming ttl inside a message-first body",
-			`{"message":"Unsupported parameter","param":"messages.0.content.0.cache_control.ttl","type":"invalid_request_error"}`,
-		],
-		[
-			"a JSON Pointer naming scope",
-			`{"pointer":"/messages/0/content/0/cache_control/scope","detail":"unrecognized member"}`,
-		],
-		["a bracketed-symbol path naming type", "Unpermitted parameter: cache_control[:type]"],
-	])("keeps caching enabled when a 400 refuses %s under cache_control", (_shape, message) => {
-		expect(isCacheControlUnsupported(makeStatusError(400, `400 invalid_request_error: ${message}`))).toBe(false);
+		["names a member under the field", PATH_SHAPED_OPTION_REFUSAL],
+		["names a member before the field in prose", PROSE_SHAPED_OPTION_REFUSAL],
+		["names a member under the field in a JSON Pointer", `{"pointer":"/messages/0/cache_control/scope"}`],
+	])("classifies a 400 that %s", (_shape, message) => {
+		expect(isCacheControlUnsupported(makeStatusError(400, `400 unrecognized member: ${message}`))).toBe(true);
 	});
 
 	it("keeps caching enabled when a 400 refuses a cache_control value while naming the field itself", () => {

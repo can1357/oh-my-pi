@@ -285,58 +285,30 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 // `cache_control` field itself with a 400 naming it. Requires rejection wording
 // so a 400 that merely mentions the field for another reason stays terminal.
 //
-// The mention must also BE the rejected member rather than a path *under* it.
-// Validators name the field's own position, so segments before the name
-// (`messages.0.content.0.cache_control`) are still field-level; a member named
-// after it means the endpoint accepted the field and refused a nested option.
-// The fallback this predicate gates strips every breakpoint and latches
-// `cacheControlUnsupported` for the rest of the session, which would disable
-// the 5m caching such an endpoint still supports — a refused `ttl: "1h"`
-// belongs to the extended-cache-ttl beta path.
+// The trigger is deliberately a bare mention. Whether such a 400 refused the
+// field or one option *under* it — `ttl`, `scope` — is not decidable from the
+// message. The forward direction is: punctuation between the field and a
+// following member proves the member is the next token, for any joiner, without
+// enumerating them. The backward direction is not, and it is where four rounds
+// of this rule died. Prose subordinates a member to the field through an
+// English connective, grammar does not partition the way syntax does, and
+// `unsupported content type for cache_control` is unresolvable in principle:
+// `type` is both a member of `CacheControlEphemeral` and an ordinary noun, and
+// the construction that clause uses is the construction a real member refusal
+// uses. A rule that decides one direction and guesses the other still hands its
+// caller a partition the caller cannot trust.
 //
-// Nesting is decided by the member name that follows, never by the punctuation
-// that joins them: validators serialize the same path as `.ttl`, `["ttl"]`,
-// `"]["ttl"`, `/ttl`, `[:ttl]`, `-> ttl` or `","ttl"`, and that set of syntaxes
-// is unbounded while `CacheControlEphemeral`'s members are not (`type`, `ttl`,
-// `scope` — see `anthropic-wire.ts`). So the lookahead skips an unbounded run
-// of non-alphanumeric characters and asks only what the next token is. There is
-// deliberately no length budget: sizing one means enumerating joiner shapes,
-// which has now been reported wrong three times, and a count adds nothing the
-// separator class does not already guarantee.
-//
-// That class carries the rest of the invariant. Letters and digits are excluded
-// from it, so any run of punctuation and whitespace between the field name and
-// a member name means the member IS the next token — an intervening word ends
-// the run, and no later sentence can supply the name. `_` is in the class, but
-// `\bcache_control\b` cannot match when a word character follows it, so the run
-// can never begin with one; an `_` only appears after punctuation has already
-// terminated the field name.
-//
-// What the run cannot tell apart on its own is a member *under* the field from
-// a sibling key of the error object that reports it, because `,` joins both: a
-// message-first body such as
-// `{"message":"Unsupported parameter: cache_control","type":"invalid_request_error"}`
-// puts `type` three characters past the field, and so does the legitimate
-// location array `["cache_control","ttl"]`. What separates them is what follows
-// the member, not what precedes it. A sibling is a key, so its name is closed
-// by a quote and then a colon (`"type":`). A path segment is a value or a bare
-// token, so it is closed by `"]`, `",`, `"/`, `]`, or by the message's own `:`
-// with no quote before it — never by `":`. Hence the inner lookahead: the veto
-// fires for a segment and stands down for a key, which is what lets the
-// breakpoint-free replay reach a proxy whose 400 is always message-first. It
-// also settles the case this rule used to concede — a `loc` array that ends at
-// `cache_control` with `"type"` as the next key is field-level, and now reads
-// that way.
-//
-// Two shapes stay ambiguous under any rule of this kind. An unquoted key
-// (`\ntype: invalid_request_error`) is indistinguishable from a dotted path's
-// trailing segment, so it reads as nesting and costs at most one failed turn. A
-// body that echoes the field's own value object (`cache_control: {"ttl":"1h"}`)
-// puts a member in key position whichever member was refused, so it reads as
-// field-level — the direction that latches `cacheControlUnsupported` through a
-// *succeeding* replay and suppresses supported 5m caching for the session. The
-// same bytes carry both readings; no textual rule separates them.
-const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b(?![^A-Za-z0-9]*(?:type|ttl|scope)\b(?!["']\s*:))/i;
+// So this predicate answers only "this 400 is about `cache_control`", and the
+// retry ladder in `providers/anthropic.ts` asks the endpoint the rest. When the
+// failing request carried `ttl` or `scope`, the ladder replays with every
+// breakpoint intact and those options removed, and the rung that carries the
+// turn names what was refused: that rung succeeding means the field is
+// supported and an option was not, so short-lived caching stays on for the
+// session instead of being latched off by a reading of the prose. When the
+// request carried neither option a nested refusal is impossible — `type` is
+// mandatory and its only legal value is constant — so the ladder starts at the
+// breakpoint-free replay, which is the behavior this predicate has always had.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
 	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
 // Strict JSON decoders and OpenAI-compatible validators express the same schema
@@ -844,8 +816,10 @@ export function isFastModeUnsupported(error: unknown): boolean {
 }
 
 /**
- * An Anthropic-compatible endpoint rejected the `cache_control` field, so the
- * request must be replayed without prompt-cache breakpoints.
+ * An Anthropic-compatible endpoint returned a 400 rejecting something about
+ * `cache_control`. Whether it refused the field or one nested option is not
+ * decidable here (see {@link CACHE_CONTROL_FIELD_PATTERN}); the caller's retry
+ * ladder settles it by replaying.
  * Accessor for {@link Flag.CacheControlUnsupported}.
  *
  * Unlike the high-bit accessors this also requires a classified id. The flag
