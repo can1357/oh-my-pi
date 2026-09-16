@@ -156,7 +156,13 @@ export class WorkPool {
 			this.items.push(item);
 			queued.push(item);
 		}
-		this.#ensurePoolJob();
+		try {
+			this.#ensurePoolJob();
+		} catch (error) {
+			this.items.splice(this.items.length - queued.length, queued.length);
+			this.#nextSeq -= queued.length;
+			throw error;
+		}
 		for (const item of queued) this.#queueDispatch(item);
 		return queued.map(item => item.id);
 	}
@@ -166,7 +172,6 @@ export class WorkPool {
 		const manager = this.session.asyncJobManager;
 		if (!manager) throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		if (manager.getJob(this.name)) throw new ToolError(`workpool job id "${this.name}" already exists`);
-		this.#poolJobStarted = true;
 		const id = manager.register(
 			"task",
 			this.name,
@@ -202,6 +207,7 @@ export class WorkPool {
 			manager.cancel(id, { ownerId: this.ownerId });
 			throw new ToolError(`workpool job id "${this.name}" is unavailable`);
 		}
+		this.#poolJobStarted = true;
 	}
 
 	async #waitForDrain(): Promise<void> {
@@ -269,7 +275,7 @@ export class WorkPool {
 			item.agentId = idle.id;
 			idle.queue.push(item);
 			this.#card("dispatched", idle.id, `[${item.id}] ${item.text}`);
-			this.#drain(idle);
+			await this.#drain(idle);
 			return;
 		}
 		if (this.agents.length < this.limit()) {
@@ -294,7 +300,7 @@ export class WorkPool {
 		item.agentId = id;
 		this.agents.push(agent);
 		this.#card("spawned", id, `[${item.id}] ${item.text}`);
-		this.#drain(agent);
+		await this.#drain(agent);
 	}
 
 	#nextBusy(): WorkPoolAgent | undefined {
@@ -310,7 +316,7 @@ export class WorkPool {
 		return undefined;
 	}
 
-	#drain(agent: WorkPoolAgent): void {
+	async #drain(agent: WorkPoolAgent): Promise<void> {
 		if (agent.queue.length === 0) {
 			agent.state = "idle";
 			this.#notifyDrained();
@@ -336,7 +342,14 @@ export class WorkPool {
 		this.batches.push(batch);
 		const message = this.#batchMessage(batch);
 		if (agent.turns > 0) this.#card("batch", agent.id, message);
-		this.#startTurn(agent, batch, message);
+		try {
+			this.#startTurn(agent, batch, message);
+		} catch (error) {
+			// Registration can reject before a job exists. Settle the whole batch
+			// through the ordinary worker cleanup and queue handoff path.
+			const output = error instanceof Error ? error.message : String(error);
+			await this.#finishTurn(agent, batch, { exitCode: 1, output, error: output });
+		}
 	}
 
 	#batchMessage(batch: WorkPoolBatch): string {
@@ -483,7 +496,7 @@ export class WorkPool {
 			return;
 		}
 		if (yieldCleared && ref && (ref.status === "idle" || ref.status === "parked")) {
-			this.#drain(agent);
+			await this.#drain(agent);
 		} else {
 			agent.state = "dead";
 			const stranded = agent.queue.splice(0);
