@@ -183,6 +183,70 @@ describe("buildShareSnapshot", () => {
 		expect(JSON.stringify(header)).toContain(secret);
 	});
 
+	test("redacts the header git branch", () => {
+		const secret = "branchleak-ABCDE";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const header = {
+			type: "session",
+			version: 3,
+			id: "t",
+			timestamp: ts,
+			cwd: "/tmp/proj",
+			gitBranch: `feature/${secret}`,
+		};
+		const entries: SessionEntry[] = [messageEntry("e1", null, "work")];
+		const sm = {
+			getHeader: () => header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(secret);
+		// The branch itself still reaches the share, just obfuscated.
+		expect(flat).toContain("feature/");
+		// Source header keeps the real value; redaction is share-only.
+		expect(header.gitBranch).toBe(`feature/${secret}`);
+	});
+
+	test("includes the header git branch in the regex collision pre-scan", () => {
+		// The header is redacted first, so `title`'s placeholder for `plainSecret`
+		// is minted before `gitBranch` is reached: without `gitBranch` in the
+		// whole-snapshot pre-scan, the friendly prefix spells out the sanitized
+		// shape of the regex secret that only `gitBranch` carries.
+		const plainSecret = "OTHERSECRET";
+		const friendlyName = "TOKABC123";
+		const regexSecret = "tok_abc123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const header = {
+			type: "session",
+			version: 3,
+			id: "t",
+			timestamp: ts,
+			cwd: "/tmp",
+			title: `investigating ${plainSecret}`,
+			gitBranch: `feature/${regexSecret}`,
+		};
+		const entries: SessionEntry[] = [messageEntry("e1", null, "work")];
+		const sm = {
+			getHeader: () => header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		expect(flat).not.toContain(`${friendlyName}_`);
+	});
+
 	test("redacts assistant tool calls / error messages and bash meta, and drops provider replay payloads", () => {
 		const secret = "asst-secret-ABCDE";
 		const replaySentinel = "REPLAY_BLOB_SENTINEL_XYZ";

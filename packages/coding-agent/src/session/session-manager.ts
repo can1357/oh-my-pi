@@ -128,6 +128,10 @@ function fileSafeTimestamp(iso: string): string {
  */
 function resolveGitBranch(cwd: string): string | undefined {
 	try {
+		// `vcs.git` walks upward, so a pure-jj workspace nested inside a git
+		// checkout would otherwise be stamped with the *parent* repository's
+		// branch — a branch the session never runs on.
+		if (vcs.isPureJj(cwd)) return undefined;
 		const head = vcs.git(cwd)?.headSync();
 		return head?.kind === "ref" ? (head.branch ?? undefined) : undefined;
 	} catch {
