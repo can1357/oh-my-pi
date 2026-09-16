@@ -10,7 +10,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
   - Navigation: `url`, `title`, `goto`.
   - Inspection: `observe`, `ariaSnapshot`, `screenshot`, `extract`.
   - Interaction: `click`, `type`, `fill`, `press`, `scroll`, `drag`, `scrollIntoView`, `select`, `uploadFile`.
-  - Waiting: `waitFor`, `waitForSelector`, `waitForUrl`.
+  - Waiting: `waitFor` (selector, or a number of milliseconds to sleep), `waitForSelector`, `waitForUrl`.
   - Page execution: `evaluate`. `tab.evaluate(string)` evaluates the string as a page-global expression; top-level `return` is invalid. Pass a function or invoke an IIFE string to use `return`.
 - `tab.id(n)` / `tab.ref("e5")` return `BrowserElement` handles supporting `click`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, and `evaluate`. A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
 - JavaScript `await tab.run(fnOrCode, { args?, timeout? })` runs a function or code string. Functions receive `{ tab, page, browser, wait, assert }`; cell closures are not captured. Plain data, functions, and `RegExp` values are supported in `args`.

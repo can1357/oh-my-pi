@@ -249,7 +249,7 @@ interface TabApi {
 	press(key: KeyInput, opts?: { selector?: string }): Promise<void>;
 	scroll(deltaX: number, deltaY: number): Promise<void>;
 	drag(from: DragTarget, to: DragTarget): Promise<void>;
-	waitFor(selector: string, opts?: { timeout?: number }): Promise<ActionableHandle>;
+	waitFor(selector: string | number, opts?: { timeout?: number }): Promise<ActionableHandle | undefined>;
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	scrollIntoView(selector: string): Promise<void>;
 	select(selector: string, ...values: string[]): Promise<string[]>;
@@ -1736,6 +1736,18 @@ export class WorkerCore {
 				),
 			drag: (from, to) => op("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
 			waitFor: (selector, opts) => {
+				// Duration form: `tab.waitFor(ms)` is a plain bounded sleep. Agents had
+				// no documented sleep on the tab surface — the run-scope `wait` only
+				// polls conditions — so they (ab)used selector waits as timers (#12137).
+				// resolveWaitTimeout applies the same budget clamp as every other wait,
+				// and the op deadline adds the standard slack: the deadline is a stall
+				// watchdog, not the sleep duration itself.
+				if (typeof selector === "number") {
+					const ms = resolveWaitTimeout(timeoutMs, selector);
+					return op(`tab.waitFor(${ms}ms)`, ms + OP_DEADLINE_SLACK_MS, sig =>
+						untilAborted(sig, () => Bun.sleep(ms)).then(() => undefined),
+					);
+				}
 				const w = waitMs(opts?.timeout);
 				return op(
 					`tab.waitFor(${JSON.stringify(selector)})`,
