@@ -223,3 +223,20 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
 });
+describe("--system-prompt-template", () => {
+	it("parses a template path without leaking it into the prompt", () => {
+		const result = parseArgs(["--system-prompt-template", "/tmp/SYSTEM_TEMPLATE.md", "hello"]);
+
+		expect(result.systemPromptTemplate).toBe("/tmp/SYSTEM_TEMPLATE.md");
+		expect(result.systemPrompt).toBeUndefined();
+		expect(result.messages).toEqual(["hello"]);
+	});
+
+	it("supports equals syntax and consumes flag-looking values", () => {
+		const result = parseArgs(["--system-prompt-template=--profile", "hello"]);
+
+		expect(result.systemPromptTemplate).toBe("--profile");
+		expect(result.profile).toBeUndefined();
+		expect(result.messages).toEqual(["hello"]);
+	});
+});
