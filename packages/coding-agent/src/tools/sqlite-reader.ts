@@ -1,4 +1,8 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { rmSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { formatBytes, replaceTabs, truncateToWidth } from "./render-utils";
 import { ToolError } from "./tool-errors";
 
@@ -41,11 +45,74 @@ function configureSqliteReadConnection(db: Database): Database {
 }
 
 /**
- * Opens the query-only connection used by read tools, retrying read-write mode solely to initialize missing WAL sidecars.
+ * WAL sidecars written by engines other than SQLite. Turso's multiprocess
+ * WAL, for example, coordinates its writers through `<db>-tshm` — SQLite
+ * cannot see those locks, so opening the original in any mode that touches
+ * its sidecars can corrupt the live engine's view: a read-only open still
+ * creates a competing `-shm`, and a read-write close runs the close-time
+ * checkpoint that flushes and truncates the WAL out from under the writer.
+ * Databases carrying one of these sidecars are only read through a private
+ * copy.
+ */
+const FOREIGN_WAL_SIDECAR_SUFFIXES = ["-tshm"] as const;
+
+async function hasForeignWalSidecar(filePath: string): Promise<boolean> {
+	const checks = await Promise.all(
+		FOREIGN_WAL_SIDECAR_SUFFIXES.map(suffix => Bun.file(`${filePath}${suffix}`).exists()),
+	);
+	return checks.some(exists => exists);
+}
+
+function attachCopyCleanup(db: Database, tempDir: string): Database {
+	// The private copy owns its directory: shadow `close` so removing it
+	// follows the connection. Every caller disposes through `db?.close()` in
+	// a `finally` and never re-opens a closed database.
+	const close = db.close.bind(db);
+	db.close = () => {
+		close();
+		rmSync(tempDir, { recursive: true, force: true });
+	};
+	return db;
+}
+
+/**
+ * Reads a database whose WAL cannot be opened in place — a foreign WAL
+ * coordinator, missing SQLite sidecars, or a failed read-only open — through
+ * a disposable copy. SQLite recovers the WAL onto the copy; the original and
+ * everything next to it stays untouched. A frame torn by a concurrent append
+ * fails its checksum, so the copy reads up to the last intact commit.
+ */
+async function openPrivateCopy(filePath: string): Promise<Database> {
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-sqlite-read-"));
+	try {
+		const copyPath = path.join(tempDir, path.basename(filePath));
+		await fs.copyFile(filePath, copyPath);
+		if (await Bun.file(`${filePath}-wal`).exists()) {
+			await fs.copyFile(`${filePath}-wal`, `${copyPath}-wal`);
+		}
+		const db = configureSqliteReadConnection(
+			new Database(copyPath, { readwrite: true, create: false, strict: true }),
+		);
+		return attachCopyCleanup(db, tempDir);
+	} catch (error) {
+		await fs.rm(tempDir, { recursive: true, force: true });
+		throw error;
+	}
+}
+
+/**
+ * Opens the query-only connection used by read tools.
+ *
+ * The original is only ever opened read-only. Every case that would require
+ * writing next to it — a foreign WAL sidecar, a WAL-mode database whose
+ * SQLite sidecars are missing, or a read-only open failing with
+ * SQLITE_CANTOPEN — reads through a private copy instead: opening such a
+ * database read-write in place lets the close-time checkpoint flush and
+ * truncate a WAL that may belong to a live writer.
  */
 export async function openSqliteReadConnection(filePath: string): Promise<Database> {
-	if (await requiresWalSidecarInitialization(filePath)) {
-		return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
+	if ((await hasForeignWalSidecar(filePath)) || (await requiresWalSidecarInitialization(filePath))) {
+		return openPrivateCopy(filePath);
 	}
 	try {
 		return configureSqliteReadConnection(new Database(filePath, { readonly: true, strict: true }));
@@ -54,7 +121,7 @@ export async function openSqliteReadConnection(filePath: string): Promise<Databa
 			throw error;
 		}
 	}
-	return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
+	return openPrivateCopy(filePath);
 }
 const SQLITE_PATH_PATTERN = /\.(?:sqlite3?|db3?)(?=(?::|\?|$))/gi;
 const DEFAULT_QUERY_LIMIT = 20;
