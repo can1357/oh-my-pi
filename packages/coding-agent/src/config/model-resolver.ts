@@ -1357,9 +1357,9 @@ interface EffectiveAgentModelSelection {
 }
 
 /** Point an inherited selector at an explicitly requested thinking level. */
-function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingLevel): string {
-	return `${splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base}:${level}`;
-}
+	const suffix = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	if (suffix.level === ThinkingLevel.Max) return pattern + ":" + level;
+	return suffix.base + ":" + level;
 
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
@@ -1395,6 +1395,8 @@ function resolveEffectiveAgentModelSelection(
 		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
 		: undefined;
 	if (configuredAgentPatterns.length > 0) {
+		const taskAlias = matchSessionInheritedPattern(singleAgentPattern ?? "", { includeTaskAlias: true });
+		if (taskAlias?.level !== undefined && singleAgentPattern?.startsWith("@task")) return { source: agentModel, patterns: configuredAgentPatterns.map(pattern => applyRequestedThinkingLevel(pattern, taskAlias.level!)) };
 		if (
 			singleAgentPattern === formatModelRoleAlias("task") ||
 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
