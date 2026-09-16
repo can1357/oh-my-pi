@@ -1357,9 +1357,11 @@ interface EffectiveAgentModelSelection {
 }
 
 /** Point an inherited selector at an explicitly requested thinking level. */
+function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingLevel): string {
 	const suffix = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
-	if (suffix.level === ThinkingLevel.Max) return pattern + ":" + level;
-	return suffix.base + ":" + level;
+	if (suffix.level === ThinkingLevel.Max) return pattern + String.fromCharCode(58) + level;
+	return suffix.base + String.fromCharCode(58) + level;
+}
 
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
