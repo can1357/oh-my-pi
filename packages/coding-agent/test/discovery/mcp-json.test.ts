@@ -29,6 +29,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		PI_MCP_HEADER: process.env.PI_MCP_HEADER,
 		PI_MCP_URL: process.env.PI_MCP_URL,
 		PI_MCP_ENV: process.env.PI_MCP_ENV,
+		PI_MCP_LAZY: process.env.PI_MCP_LAZY,
 	};
 
 	beforeEach(async () => {
@@ -41,6 +42,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		process.env.PI_MCP_HEADER = "Bearer test-token";
 		process.env.PI_MCP_URL = "https://mcp.example.com";
 		process.env.PI_MCP_ENV = "env-value";
+		process.env.PI_MCP_LAZY = "true";
 	});
 
 	afterEach(async () => {
@@ -124,5 +126,23 @@ describe("standalone mcp.json oauth env expansion", () => {
 			callbackPath: "/oauth/callback",
 		});
 		expect(server?.auth).toBeUndefined();
+	});
+
+	test("expands a standalone env-var placeholder for lazy before boolean coercion", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					deferred: {
+						command: "deferred-server",
+						lazy: envPlaceholder("PI_MCP_LAZY"),
+					},
+				},
+			}),
+		);
+
+		const [server] = await loadStandaloneMcpConfig(tempDir);
+		expect(server).toBeDefined();
+		expect(server?.lazy).toBe(true);
 	});
 });

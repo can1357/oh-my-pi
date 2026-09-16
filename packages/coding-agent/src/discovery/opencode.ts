@@ -37,6 +37,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	resolveUserPath,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -196,6 +197,7 @@ interface OpenCodeMCPConfig {
 	url?: string;
 	headers?: Record<string, string>;
 	enabled?: boolean;
+	lazy?: boolean | string;
 	timeout?: number;
 	oauth?: {
 		clientId?: string;
@@ -333,6 +335,7 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
 		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
 		enabled: serverConfig.enabled,
+		lazy: parseMcpBooleanField(serverConfig.lazy),
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 		oauth: normalizeOAuth(serverConfig.oauth),
 		transport,

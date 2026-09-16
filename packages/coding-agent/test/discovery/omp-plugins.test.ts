@@ -508,6 +508,26 @@ test(".mcp.json with bare entries (no command/url) records a warning and is skip
 	expect((result.warnings ?? []).some(w => w.includes('"broken"'))).toBe(true);
 });
 
+test("regression: .mcp.json forwards lazy through plugin discovery", async () => {
+	writeFile(
+		path.join(ext, ".mcp.json"),
+		JSON.stringify({
+			mcpServers: {
+				deferred: { command: "lazy-server", lazy: true },
+				immediate: { command: "eager-server" },
+				stringForm: { command: "string-lazy-server", lazy: "true", enabled: "false" },
+			},
+		}),
+	);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const servers = await loadFromPlugin<{ name: string; lazy?: boolean; enabled?: boolean }>(mcpCapability.id, ctx());
+	expect(servers.find(s => s.name === "deferred")?.lazy).toBe(true);
+	expect(servers.find(s => s.name === "immediate")?.lazy).toBeUndefined();
+	expect(servers.find(s => s.name === "stringForm")?.lazy).toBe(true);
+	expect(servers.find(s => s.name === "stringForm")?.enabled).toBe(false);
+});
+
 test(".mcp.json expands environment placeholders recursively", async () => {
 	const variables = {
 		OMP_PLUGIN_COMMAND: "expanded-command",

@@ -159,12 +159,12 @@ export function createSourceMeta(
 	};
 }
 
-export function parseBoolean(value: unknown): boolean | undefined {
+export function parseBoolean(value: unknown, options?: { numeric?: boolean }): boolean | undefined {
 	if (typeof value === "boolean") return value;
 	if (typeof value === "string") {
 		const normalized = value.trim().toLowerCase();
-		if (normalized === "true") return true;
-		if (normalized === "false") return false;
+		if (normalized === "true" || (options?.numeric && normalized === "1")) return true;
+		if (normalized === "false" || (options?.numeric && normalized === "0")) return false;
 	}
 	return undefined;
 }
@@ -176,6 +176,17 @@ export function parseBoolean(value: unknown): boolean | undefined {
 export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undefined {
 	if (value === "string" || value === "number") return value;
 	return undefined;
+}
+
+/**
+ * Parse an MCP server boolean field (`enabled`, `lazy`). Accepts real
+ * booleans and the string forms "true"/"false"/"1"/"0" so hand-edited JSON
+ * (env expansion, shell-generated configs) round-trips the same across every
+ * discovery provider; anything else is dropped so a typo falls back to the
+ * default rather than silently taking on the wrong value.
+ */
+export function parseMcpBooleanField(value: unknown): boolean | undefined {
+	return parseBoolean(value, { numeric: true });
 }
 
 /**
