@@ -90,6 +90,41 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		});
 	});
 
+	test("strictly validates effective policy overrides without parsing superseded main-config values", async () => {
+		await Bun.write(path.join(agentDir, "config.yml"), ["auth:", "  accountPolicies: null", ""].join("\n"));
+		const invalidPolicies = [
+			{
+				provider: "openai-codex",
+				account: { email: "policy@example.com" },
+				reservePercent: 25,
+			},
+		];
+
+		await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
+			const storage = await discoverAuthStorage({
+				agentDir,
+				accountPolicies: [],
+				authStorageOptions: { defaultReservePct: 17 },
+			});
+			storage.close();
+
+			await expect(
+				discoverAuthStorage({
+					agentDir,
+					accountPolicies: invalidPolicies,
+					authStorageOptions: { defaultReservePct: 17 },
+				}),
+			).rejects.toThrow("auth.accountPolicies[0] has unknown fields: reservePercent");
+			await expect(
+				discoverAuthStorage({
+					agentDir,
+					accountPolicies: [],
+					authStorageOptions: { defaultReservePct: Number.NaN },
+				}),
+			).rejects.toThrow("retry.usageReservePct must be a finite number");
+		});
+	});
+
 	test("applies selector-list account priority from config.yml during credential selection", async () => {
 		const accountPolicies = [
 			{

@@ -660,7 +660,30 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 	});
 
-	test("requires a base selector identity and usage capability for reserve", () => {
+	test("accepts reserve policies whose usage provider registers after storage construction", async () => {
+		if (!store) throw new Error("test setup failed");
+		const provider = "openai-codex";
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			accountPolicies: [
+				{
+					provider,
+					account: { accountId: "acct-runtime" },
+					reservePct: 20,
+				},
+			],
+		});
+		await authStorage.set(provider, [{ type: "oauth", ...createCredential("acct-runtime", "runtime@example.com") }]);
+
+		await expect(authStorage.getApiKey(provider, "before-runtime-usage")).rejects.toThrow(
+			"reservePct requires a usage provider",
+		);
+
+		authStorage.setRuntimeUsageProvider(provider, { ...usageProvider, id: provider });
+		await expect(authStorage.getApiKey(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
+	});
+
+	test("requires a base selector identity", () => {
 		if (!store) throw new Error("test setup failed");
 		const activeStore = store;
 		expect(
@@ -669,19 +692,6 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: "openai-codex", account: { orgId: "org-only" }, priority: 1 }],
 				}),
 		).toThrow("must include at least one of email, accountId, or projectId");
-		expect(
-			() =>
-				new AuthStorage(activeStore, {
-					usageProviderResolver: () => undefined,
-					accountPolicies: [
-						{
-							provider: "provider-without-usage",
-							account: { email: "account@example.com" },
-							reservePct: 20,
-						},
-					],
-				}),
-		).toThrow("reservePct requires a usage provider");
 		expect(
 			() =>
 				new AuthStorage(activeStore, {
