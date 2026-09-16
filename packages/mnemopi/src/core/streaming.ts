@@ -345,13 +345,20 @@ export class DeltaSync {
 		table: DeltaTable = "working_memory",
 	): { inserted: number; updated: number; skipped: number; filtered_keys: number } {
 		assertDeltaTable(table);
+		const lastRowid = this.getCheckpoint(peerId, table)?.lastRowid ?? 0;
 		let inserted = 0,
 			updated = 0,
 			skipped = 0,
 			filteredKeys = 0,
-			maxRowid = this.getCheckpoint(peerId, table)?.lastRowid ?? 0;
+			maxRowid = lastRowid;
 		const qname = QUALIFIED_TABLE_NAMES[table];
 		for (const row of delta) {
+			const remoteRowid = row.rowid;
+			const hasRemoteRowid = typeof remoteRowid === "number" && Number.isSafeInteger(remoteRowid) && remoteRowid > 0;
+			if (hasRemoteRowid && remoteRowid <= lastRowid) {
+				skipped++;
+				continue;
+			}
 			const id = row.id;
 			if (typeof id !== "string" || id.length === 0) {
 				skipped++;
@@ -396,8 +403,7 @@ export class DeltaSync {
 				this.db.run(`INSERT INTO ${qname} (${columns.join(", ")}) VALUES (${placeholders})`, params);
 				inserted++;
 			}
-			const remoteRowid = row.rowid;
-			if (typeof remoteRowid === "number" && Number.isSafeInteger(remoteRowid) && remoteRowid > maxRowid) {
+			if (hasRemoteRowid && remoteRowid > maxRowid) {
 				maxRowid = remoteRowid;
 			}
 		}
