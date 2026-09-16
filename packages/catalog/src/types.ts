@@ -349,6 +349,8 @@ export interface OpenAICompat {
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
 	promptCacheSessionHeader?: "x-grok-conv-id";
+	/** Whether the transport sends the captured Muse User-Agent on the direct Meta Model API endpoint. Default: auto-detected (first-party api.meta.ai/v1 base URL). */
+	museFingerprint?: boolean;
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**
@@ -736,6 +738,8 @@ export interface ResolvedOpenAISharedCompat {
 	emptyLengthFinishIsContextError: boolean;
 	usesOpenAIToolCallIdLimit: boolean;
 	promptCacheSessionHeader?: OpenAICompat["promptCacheSessionHeader"];
+	/** Send the captured Muse User-Agent fingerprint on the direct Meta endpoint (enables Contributor `max`). */
+	museFingerprint: boolean;
 	/**
 	 * Whether this model accepts explicit OpenAI prompt-cache breakpoints.
 	 * Built catalog models always materialize this false-by-default value;
@@ -812,6 +816,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "emptyLengthFinishIsContextError"
 			| "usesOpenAIToolCallIdLimit"
 			| "promptCacheSessionHeader"
+			| "museFingerprint"
 			| "supportsPromptCacheBreakpoints"
 			| "promptCacheBreakpointTtl"
 			| "openRouterRouting"

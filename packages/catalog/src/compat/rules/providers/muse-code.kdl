@@ -15,6 +15,10 @@ provider "muse-code" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	// Same direct Model API wire as Meta API keys: the captured Muse
+	// User-Agent enables Contributor `max`, sent only on the first-party
+	// endpoint, never to proxies.
+	muse-fingerprint #true
 	// Subscription tier bills per request; the compact edit prompt cuts the
 	// recurring tool-schema bytes. Verified 2026-09-05 against api.meta.ai/v1:
 	// `custom` tools are rejected with 400 "`custom` tools are not supported

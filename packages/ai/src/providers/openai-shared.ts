@@ -1,6 +1,7 @@
 import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { isDirectMetaModelApiUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -21,7 +22,7 @@ import {
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
-import { isDirectMetaModelEndpoint, MUSE_USER_AGENT } from "./muse-fingerprint";
+import { MUSE_USER_AGENT } from "./muse-fingerprint";
 import {
 	$env,
 	classifyJsonPrefix,
@@ -155,7 +156,7 @@ export interface OpenAIStrictToolsState {
 export interface OpenAIRequestSetupModel extends OpenAIModelIdentity {
 	headers?: Record<string, string>;
 	premiumMultiplier?: number;
-	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader">;
+	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "museFingerprint">;
 }
 
 /** Cache identity controls shared by OpenAI-family transports. */
@@ -341,9 +342,11 @@ export function resolveOpenAIRequestSetup(
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
 	// The captured Muse User-Agent enables Contributor `max` in live tests on
-	// the direct Meta endpoint. Explicit User-Agent headers still win; proxies
-	// and gateways never receive it.
-	if ((model.provider === "meta" || model.provider === "muse-code") && isDirectMetaModelEndpoint(baseUrl)) {
+	// the direct Meta endpoint. The KDL-owned `museFingerprint` compat flag
+	// selects first-party Meta providers (and aliases on the same host);
+	// the endpoint check re-verifies the effective base URL at dispatch.
+	// Explicit User-Agent headers still win; proxies never receive it.
+	if (model.compat?.museFingerprint && isDirectMetaModelApiUrl(baseUrl)) {
 		setHeaderIfAbsent(headers, "User-Agent", MUSE_USER_AGENT);
 	}
 	const requestHeaders = { ...headers };

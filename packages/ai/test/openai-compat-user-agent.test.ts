@@ -141,6 +141,43 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 		expect(setup.headers["user-agent"]).toBe("custom-xai-client/1.0");
 		expect(setup.headers["User-Agent"]).toBeUndefined();
 	});
+
+	test("sends the Muse fingerprint only when compat flags it, even on uppercase hosts", () => {
+		const flagged = resolveOpenAIRequestSetup(
+			{
+				provider: "meta",
+				id: "muse-spark-1.3-contributor",
+				baseUrl: "https://API.META.AI/v1",
+				compat: { museFingerprint: true },
+			},
+			{ apiKey: "sk-test", messages: [] },
+		);
+		expect(flagged.headers["User-Agent"]).toBe(MUSE_USER_AGENT);
+		expect(flagged.requestHeaders["User-Agent"]).toBe(MUSE_USER_AGENT);
+	});
+
+	test("does not fingerprint direct Meta URLs without the compat flag", () => {
+		const setup = resolveOpenAIRequestSetup(
+			{ provider: "meta", id: "muse-spark-1.3-contributor", baseUrl: "https://api.meta.ai/v1" },
+			{ apiKey: "sk-test", messages: [] },
+		);
+		expect(setup.headers["User-Agent"]).toBeUndefined();
+		expect(setup.requestHeaders["User-Agent"]).toBeUndefined();
+	});
+
+	test("does not fingerprint proxies even when compat flags the provider", () => {
+		const setup = resolveOpenAIRequestSetup(
+			{
+				provider: "muse-code",
+				id: "muse-spark-1.3-contributor",
+				baseUrl: "https://proxy.example/v1",
+				compat: { museFingerprint: true },
+			},
+			{ apiKey: "sk-test", messages: [] },
+		);
+		expect(setup.headers["User-Agent"]).toBeUndefined();
+		expect(setup.requestHeaders["User-Agent"]).toBeUndefined();
+	});
 });
 
 describe("xAI stream User-Agent", () => {

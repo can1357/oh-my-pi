@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	hostMatchesUrl,
 	isDashscopeCompatibleModeUrl,
+	isDirectMetaModelApiUrl,
 	isVertexExpressOpenAIUrl,
 	isVertexRawPredictUrl,
 	modelMatchesHost,
@@ -80,5 +81,24 @@ describe("endpoint shape predicates", () => {
 		expect(isDashscopeCompatibleModeUrl("https://example.aliyuncs.com/compatible-mode/v1")).toBe(false);
 		expect(isDashscopeCompatibleModeUrl("https://dashscope.example.com/compatible-mode/v1")).toBe(false);
 		expect(isDashscopeCompatibleModeUrl("https://dashscope.aliyuncs.com/api/v1")).toBe(false);
+	});
+});
+
+describe("isDirectMetaModelApiUrl", () => {
+	test("matches the first-party endpoint regardless of hostname case", () => {
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v1")).toBe(true);
+		expect(isDirectMetaModelApiUrl("https://API.META.AI/v1")).toBe(true);
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v1/")).toBe(true);
+		expect(isDirectMetaModelApiUrl(undefined)).toBe(false);
+		expect(isDirectMetaModelApiUrl("")).toBe(false);
+	});
+
+	test("rejects proxies, lookalikes, and off-endpoint URLs", () => {
+		expect(isDirectMetaModelApiUrl("https://proxy.example/v1")).toBe(false);
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai.evil.com/v1")).toBe(false);
+		expect(isDirectMetaModelApiUrl("https://proxy.example/https://api.meta.ai/v1")).toBe(false);
+		expect(isDirectMetaModelApiUrl("http://api.meta.ai/v1")).toBe(false);
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v2")).toBe(false);
+		expect(isDirectMetaModelApiUrl("not a url")).toBe(false);
 	});
 });

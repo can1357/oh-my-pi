@@ -75,6 +75,10 @@ provider "meta" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	// The captured Muse User-Agent enables Contributor `max` in live tests on
+	// the direct Model API wire; the transport sends it only on the
+	// first-party endpoint, never to proxies.
+	muse-fingerprint #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		thinking-mode "effort"

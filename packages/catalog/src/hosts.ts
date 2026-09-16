@@ -176,3 +176,18 @@ export function isDashscopeCompatibleModeUrl(baseUrl: string): boolean {
 		normalized.includes("dashscope") && normalized.includes("aliyuncs.com") && normalized.includes("/compatible-mode")
 	);
 }
+
+const DIRECT_META_MODEL_API_URL = "https://api.meta.ai/v1";
+
+/**
+ * First-party Meta Model API base URL. Case-insensitive (hostnames are);
+ * trailing slashes and deeper `/v1/` subpaths accepted. Strict prefix: unlike
+ * the substring markers above, lookalikes (`api.meta.ai.evil.com`, a proxy
+ * path embedding the host) never match, so proxies never receive the Muse
+ * fingerprint gated on this.
+ */
+export function isDirectMetaModelApiUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	const lower = baseUrl.trim().toLowerCase();
+	return lower === DIRECT_META_MODEL_API_URL || lower.startsWith(`${DIRECT_META_MODEL_API_URL}/`);
+}

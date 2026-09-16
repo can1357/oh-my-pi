@@ -229,6 +229,7 @@ describe("openai-completions compatibility", () => {
 			reasoningDeltasMayBeCumulative: false,
 			emptyLengthFinishIsContextError: false,
 			usesOpenAIToolCallIdLimit: false,
+			museFingerprint: false,
 			dropThinkingWhenReasoningEffort: false,
 			nativeKimiK3Reasoning: false,
 			zaiReasoningEffortDialect: false,

@@ -61,6 +61,7 @@ const compat: ResolvedOpenAICompat = {
 	reasoningDeltasMayBeCumulative: false,
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,
+	museFingerprint: false,
 	dropThinkingWhenReasoningEffort: false,
 	nativeKimiK3Reasoning: false,
 	zaiReasoningEffortDialect: false,

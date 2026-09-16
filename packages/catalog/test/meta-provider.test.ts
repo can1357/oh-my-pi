@@ -229,3 +229,35 @@ describe("Muse Code subscription provider", () => {
 		}
 	});
 });
+
+describe("Muse fingerprint compat", () => {
+	test("flags direct Meta and subscription rows for the Muse User-Agent", () => {
+		for (const seeds of [metaMuseModels, museCodeModels]) {
+			const built = buildModel(seeds.find(model => model.id === "muse-spark-1.3-contributor")!);
+			expect(built.compat.museFingerprint).toBe(true);
+		}
+		// Aliases routed at the same first-party host inherit the flag.
+		const seed = metaMuseModels.find(model => model.id === "muse-spark-1.3-contributor")!;
+		const alias = buildModel({ ...seed, provider: "custom-meta-route", baseUrl: "https://API.META.AI/v1" });
+		expect(alias.compat.museFingerprint).toBe(true);
+		// Unrelated hosts stay unflagged.
+		const other = buildModel({ ...seed, provider: "openai", baseUrl: "https://api.openai.com/v1" });
+		expect(other.compat.museFingerprint).toBe(false);
+	});
+
+	test("bakes the fingerprint flag into bundled direct-wire rows", () => {
+		// The registry serves committed rows verbatim, so the flag must live
+		// in models.json itself — not only in live rules.
+		for (const provider of ["meta", "muse-code"] as const) {
+			for (const id of [
+				"muse-spark-1.1",
+				"muse-spark-1.2",
+				"muse-spark-1.2-contributor",
+				"muse-spark-1.3",
+				"muse-spark-1.3-contributor",
+			]) {
+				expect(getBundledModel<"openai-responses">(provider, id)?.compat?.museFingerprint).toBe(true);
+			}
+		}
+	});
+});
