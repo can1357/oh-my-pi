@@ -44,7 +44,7 @@ function createChatSse(): Response {
 	);
 }
 
-function xaiResponsesModel(provider: "xai" | "xai-oauth" = "xai"): Model<"openai-responses"> {
+function xaiResponsesModel(provider: "xai" | "xai-oauth" | "xai-api-oauth" = "xai"): Model<"openai-responses"> {
 	return buildModel({
 		id: "grok-4.6",
 		name: "Grok 4.6",
@@ -93,7 +93,7 @@ async function captureStreamHeaders(
 
 describe("resolveOpenAIRequestSetup User-Agent", () => {
 	test("sets omp User-Agent on xAI when none is provided", () => {
-		for (const provider of ["xai", "xai-oauth"] as const) {
+		for (const provider of ["xai", "xai-oauth", "xai-api-oauth"] as const) {
 			const setup = resolveOpenAIRequestSetup(
 				{ provider, id: "grok-4.6", baseUrl: "https://api.x.ai/v1" },
 				{ apiKey: "sk-test", messages: [] },

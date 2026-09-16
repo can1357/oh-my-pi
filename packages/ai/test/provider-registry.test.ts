@@ -17,6 +17,7 @@ const ENV_KEYS = [
 	"ZENMUX_API_KEY",
 	"EXA_API_KEY",
 	"XAI_OAUTH_TOKEN",
+	"XAI_API_OAUTH_TOKEN",
 	"UMANS_AI_CODING_PLAN_API_KEY",
 	"LLAMA_CPP_API_KEY",
 	"WANDB_API_KEY",
@@ -53,6 +54,9 @@ describe("provider registry auth surface", () => {
 	test("multi-var catalog env fallback picks names in order", () => {
 		Bun.env.XAI_OAUTH_TOKEN = "xai-oauth-env";
 		expect(getEnvApiKey("xai-oauth")).toBe("xai-oauth-env");
+
+		Bun.env.XAI_API_OAUTH_TOKEN = "xai-api-oauth-env";
+		expect(getEnvApiKey("xai-api-oauth")).toBe("xai-api-oauth-env");
 
 		Bun.env.WANDB_API_KEY = "wandb-env";
 		expect(getEnvApiKey("coreweave")).toBe("wandb-env");

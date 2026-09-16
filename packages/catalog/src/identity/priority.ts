@@ -13,6 +13,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"alibaba-token-plan",
 	"zai",
 	"xai-oauth",
+	"xai-api-oauth",
 	"xai",
 	"mistral",
 	"deepseek",

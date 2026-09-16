@@ -1351,7 +1351,7 @@ function hasTokenPrice(cost: ModelSpec["cost"]): boolean {
 }
 
 /**
- * Mirrors exact public-model prices onto matching SuperGrok catalog rows.
+ * Mirrors exact public-model prices onto matching zero-cost xAI OAuth rows.
  * The >200K long-context tier itself is rule-owned (`classes/xai.kdl`
  * `long-context-cost` multiplier axis) and derives at build time.
  */
@@ -1363,8 +1363,9 @@ export function applyXaiCatalogPricing(models: readonly ModelSpec[]): ModelSpec[
 	);
 
 	return models.map(model => {
-		if (model.provider !== "xai-oauth" || hasTokenPrice(model.cost)) return model;
-		const peer = pricingPeerFor("xai-oauth", model.id);
+		if ((model.provider !== "xai-oauth" && model.provider !== "xai-api-oauth") || hasTokenPrice(model.cost))
+			return model;
+		const peer = pricingPeerFor(model.provider, model.id);
 		const publicCost =
 			publicCosts.get(model.id) ?? (peer && peer.peerId !== model.id ? publicCosts.get(peer.peerId) : undefined);
 		return publicCost ? { ...model, cost: { ...publicCost } } : model;
@@ -1390,10 +1391,13 @@ export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelMan
 	};
 }
 
+type XaiOAuthProviderId = "xai-oauth" | "xai-api-oauth";
+
 export interface XaiOAuthModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	providerId?: XaiOAuthProviderId;
 }
 
 // xAI /v1/models returns chat, image, voice, and STT entries. Tool surfaces
@@ -1445,9 +1449,9 @@ export function applyXaiResponsesThinkingPolicy(model: ModelSpec<"openai-respons
 	return { ...model, compat };
 }
 
-// xai-oauth's /v1/models exposes no per-request output limit on the OAuth
-// (Grok Build / SuperGrok) surface, so the curated catalog owns `maxTokens`
-// like it owns `contextWindow`: each entry mirrors its context window. The
+// xAI's OAuth /v1/models response exposes no per-request output limit, so the
+// curated catalog owns `maxTokens` like it owns `contextWindow`: each entry
+// mirrors its context window. The
 // openai-responses wire clamps the actual request to
 // min(requested, model.maxTokens, OPENAI_MAX_OUTPUT_TOKENS=64000), so this is
 // just "no model-specific sub-cap below 64k", not an unbounded output budget.
@@ -1467,10 +1471,11 @@ export function applyXaiResponsesThinkingPolicy(model: ModelSpec<"openai-respons
 function mergeCuratedIntoModel(
 	base: ModelSpec<"openai-responses">,
 	curated: ModelSpec<"openai-responses">,
+	providerId: XaiOAuthProviderId,
 ): ModelSpec<"openai-responses"> {
 	const effortCapable =
 		curated.compat?.supportsReasoningEffort ??
-		resolveModelPolicy({ ...base, id: curated.id, provider: "xai-oauth" }).compat.supportsReasoningEffort;
+		resolveModelPolicy({ ...base, id: curated.id, provider: providerId }).compat.supportsReasoningEffort;
 	const compat = {
 		...base.compat,
 		includeEncryptedReasoning: base.compat?.includeEncryptedReasoning ?? true,
@@ -1496,8 +1501,8 @@ function mergeCuratedIntoModel(
 }
 
 /**
- * Overlay/inject curated xai-oauth metadata onto dynamic-fetch results so
- * a successful `online refresh` doesn't regress vision capability, context
+ * Overlay/inject curated xAI OAuth metadata onto dynamic-fetch results so a
+ * successful online refresh doesn't regress vision capability, context
  * window, reasoning flags, or the effort-dial allowlist.
  *
  * Three passes:
@@ -1517,15 +1522,18 @@ function mergeCuratedIntoModel(
  * Order: curated models first in declaration order; then dynamic remainder
  * in original order.
  */
-function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]): ModelSpec<"openai-responses">[] {
-	const filtered = dynamic.filter(e => !isExcludedModel("xai-oauth", e.id));
-	const curatedModels = seedModels<"openai-responses">("xai-oauth");
+function applyXAIOAuthCuration(
+	dynamic: readonly ModelSpec<"openai-responses">[],
+	providerId: XaiOAuthProviderId,
+): ModelSpec<"openai-responses">[] {
+	const filtered = dynamic.filter(e => !isExcludedModel(providerId, e.id));
+	const curatedModels = seedModels<"openai-responses">(providerId).filter(e => !isExcludedModel(providerId, e.id));
 
 	const byId = new Map<string, ModelSpec<"openai-responses">>(filtered.map(e => [e.id, e]));
 	for (const curated of curatedModels) {
 		const existing = byId.get(curated.id);
 		if (existing) {
-			byId.set(curated.id, mergeCuratedIntoModel(existing, curated));
+			byId.set(curated.id, mergeCuratedIntoModel(existing, curated, providerId));
 		}
 	}
 
@@ -1534,7 +1542,7 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
 		for (const curated of curatedModels) {
 			if (!byId.has(curated.id)) {
 				const base: ModelSpec<"openai-responses"> = { ...template, id: curated.id, name: curated.id };
-				byId.set(curated.id, mergeCuratedIntoModel(base, curated));
+				byId.set(curated.id, mergeCuratedIntoModel(base, curated, providerId));
 			}
 		}
 	}
@@ -1548,29 +1556,35 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
 }
 
 /**
- * Render the xai-oauth KDL seed as the static runtime fallback consumed by
+ * Render an xAI OAuth KDL seed as the static runtime fallback consumed by
  * {@link xaiOAuthModelManagerOptions}.
  */
-export function buildXaiOAuthStaticSeed(baseUrl?: string): ModelSpec<"openai-responses">[] {
+export function buildXaiOAuthStaticSeed(
+	baseUrl?: string,
+	providerId: XaiOAuthProviderId = "xai-oauth",
+): ModelSpec<"openai-responses">[] {
 	const resolvedBaseUrl = baseUrl ?? "https://api.x.ai/v1";
-	return seedModels<"openai-responses">("xai-oauth").map(seed => {
-		const base: ModelSpec<"openai-responses"> = {
-			...seed,
-			baseUrl: resolvedBaseUrl,
-			compat: { reasoningEffortMap: xaiResponsesReasoningEffortMap(seed.id) },
-		};
-		return mergeCuratedIntoModel(base, seed);
-	});
+	return seedModels<"openai-responses">(providerId)
+		.filter(seed => !isExcludedModel(providerId, seed.id))
+		.map(seed => {
+			const base: ModelSpec<"openai-responses"> = {
+				...seed,
+				baseUrl: resolvedBaseUrl,
+				compat: { reasoningEffortMap: xaiResponsesReasoningEffortMap(seed.id) },
+			};
+			return mergeCuratedIntoModel(base, seed, providerId);
+		});
 }
 
 export function xaiOAuthModelManagerOptions(
 	config?: XaiOAuthModelManagerConfig,
 ): ModelManagerOptions<"openai-responses"> {
+	const providerId = config?.providerId ?? "xai-oauth";
 	const defaultBaseUrl = "https://api.x.ai/v1";
 	const resolvedBaseUrl = config?.baseUrl ?? defaultBaseUrl;
 	const base = createOpenAICompatibleModelManagerOptions({
 		api: "openai-responses",
-		providerId: "xai-oauth",
+		providerId,
 		defaultBaseUrl,
 		config,
 		requireApiKey: true,
@@ -1579,24 +1593,22 @@ export function xaiOAuthModelManagerOptions(
 	// Static seed handed to the runtime model manager so the picker populates on
 	// a fresh login even before `fetchDynamicModels` fires (it is gated on
 	// `config.apiKey` at construction time, and OAuth tokens resolve later via
-	// AuthStorage). \`generate-models.ts\` calls the same builder so \`models.json\`
-	// carries these entries too — making the synchronous `#loadModels()` boot
-	// path honor `modelRoles.default = "xai-oauth/<id>"` without `await refresh()`.
-	const staticModels = buildXaiOAuthStaticSeed(resolvedBaseUrl);
+	// AuthStorage). `generate-models.ts` calls the same builder so `models.json`
+	// carries these entries too, making synchronous startup honor an OAuth model
+	// role without waiting for refresh.
+	const staticModels = buildXaiOAuthStaticSeed(resolvedBaseUrl, providerId);
 	if (!base.fetchDynamicModels) {
 		return { ...base, staticModels };
 	}
-	// Wrap fetchDynamicModels so an `online refresh` against xAI's /v1/models
-	// runs through applyXAIOAuthCuration — preserves curated context windows,
-	// vision modality, reasoning flags, and filters tool-only model ids
-	// (grok-imagine-*, grok-stt-*, grok-voice-*) from the chat picker.
+	// Wrap fetchDynamicModels so an online refresh against xAI's /v1/models
+	// preserves curated metadata and applies provider-specific roster exclusions.
 	const inner = base.fetchDynamicModels;
 	return {
 		...base,
 		staticModels,
 		fetchDynamicModels: async () => {
 			const dynamic = await inner();
-			return dynamic == null ? dynamic : applyXAIOAuthCuration(dynamic);
+			return dynamic == null ? dynamic : applyXAIOAuthCuration(dynamic, providerId);
 		},
 	};
 }

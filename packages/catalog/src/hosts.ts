@@ -47,7 +47,7 @@ export const KNOWN_HOSTS = {
 	},
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
-	xai: { providers: ["xai", "xai-oauth"], urlMarkers: ["api.x.ai"] },
+	xai: { providers: ["xai", "xai-oauth", "xai-api-oauth"], urlMarkers: ["api.x.ai"] },
 	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
@@ -106,7 +106,7 @@ export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): bo
 }
 
 /** Provider-or-URL host check — the canonical `provider === id || baseUrl.includes(marker)` idiom. */
-export function modelMatchesHost(model: { provider: string; baseUrl: string }, host: KnownHost): boolean {
+export function modelMatchesHost(model: { provider: string; baseUrl?: string }, host: KnownHost): boolean {
 	const spec: HostClassSpec = KNOWN_HOSTS[host];
 	if (spec.providers) {
 		for (const provider of spec.providers) {
