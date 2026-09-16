@@ -828,6 +828,7 @@ class SandboxManager:
         repo: str,
         clone_url: str,
         default_branch: str,
+        transport: GitTransport | None = None,
         refresh: bool = True,
     ) -> Path:
         """Create or refresh the shared clone for `repo`.
@@ -835,14 +836,15 @@ class SandboxManager:
         `clone_url` MUST be a plain `https://github.com/<owner>/<repo>.git`
         (no embedded credentials). Auth is supplied per-call by the transport.
         """
+        _transport = transport or self.transport
         target = self.pool_path(repo)
         if (target / ".git").exists() or (target / "HEAD").exists():
             self._reset_origin_url(target, clone_url)
             if refresh:
-                self.transport.fetch_pool(repo=repo, pool_dir=target)
+                _transport.fetch_pool(repo=repo, pool_dir=target)
             return target
         target.mkdir(parents=True, exist_ok=True)
-        self.transport.clone_pool(
+        _transport.clone_pool(
             repo=repo,
             clone_url=clone_url,
             default_branch=default_branch,
@@ -888,12 +890,14 @@ class SandboxManager:
         author_name: str,
         author_email: str,
         slot_uid: int | None = None,
+        transport: GitTransport | None = None,
     ) -> Workspace:
         """Create or resume a per-issue worktree."""
+        _transport = transport or self.transport
         with self._repo_lock(repo):
             if pr_head is not None and existing_branch is not None:
                 raise ValueError("ensure_workspace accepts either pr_head or existing_branch, not both")
-            pool = self.ensure_clone(repo=repo, clone_url=clone_url, default_branch=default_branch)
+            pool = self.ensure_clone(repo=repo, clone_url=clone_url, default_branch=default_branch, transport=transport)
             ws_root = self.workspace_root(repo, number)
             repo_dir = ws_root / "repo"
             session_dir = ws_root / ".omp-session"
@@ -928,7 +932,7 @@ class SandboxManager:
                 workspace_prepared = True
             if not repo_exists:
                 if pr_head is not None:
-                    self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+                    _transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
                     _worktree_add(
                         ["git", "worktree", "add", "--detach", str(repo_dir), "FETCH_HEAD"],
                         pool=pool,
@@ -939,7 +943,7 @@ class SandboxManager:
                     # For follow-ups on an existing PR, `existing_branch` is the remote
                     # head branch we need to amend; starting from default would silently
                     # lose the PR's current commits if the local pool branch is absent.
-                    self.transport.fetch_base_ref(repo=repo, pool_dir=pool, ref=existing_branch or default_branch)
+                    _transport.fetch_base_ref(repo=repo, pool_dir=pool, ref=existing_branch or default_branch)
                     probe = ["git", "rev-parse", "--verify", f"refs/heads/{branch}"]
                     check = _safe_run(probe, cwd=pool)
                     if check.returncode == 124:
