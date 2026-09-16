@@ -740,6 +740,44 @@ describe("OpenAI-family first-event timeouts", () => {
 		]);
 	});
 
+	it("clears first-attempt routed model attribution before a transparent stream retry", async () => {
+		let attempts = 0;
+		const providerRetryWait = vi.fn(async () => {});
+		const fetchMock: FetchImpl = () => {
+			attempts++;
+			return Promise.resolve(
+				createSseResponse(
+					attempts === 1
+						? [
+								{
+									type: "response.created",
+									response: { id: "resp_first", model: "gpt-5.4" },
+								},
+							]
+						: [
+								{
+									type: "response.completed",
+									response: {
+										id: "resp_second",
+										status: "completed",
+										usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+									},
+								},
+							],
+				),
+			);
+		};
+
+		const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerRetryWait,
+		}).result();
+
+		expect(providerRetryWait).toHaveBeenCalled();
+		expect(result.upstreamModel).toBeUndefined();
+	});
+
 	it("accepts response.done with a completed response as an OpenAI responses terminal event", async () => {
 		const completedResponse = createSseResponse([
 			{ type: "response.created", response: { id: "resp_done" } },
