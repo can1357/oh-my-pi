@@ -978,130 +978,22 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		await restart;
 	});
 
-	// The counterpart hazard to the case above. Holding #promptInFlightCount
-	// across a locally-handled slash command makes an UNRELATED restart wait for
-	// the handler — correct. But when the handler is itself the requester, the
-	// wait becomes circular: #doRequestRestart waits for the counter to reach
-	// zero, the matching #endInFlight() cannot run until the handler returns, and
-	// the handler is awaiting that very restart. The session latches out new
-	// turns permanently and the recycle never happens.
+	// The finding, and the whole reason `prompt()` holds `#promptInFlightCount`
+	// across a locally-handled slash command: a handler that fires
+	// `requestRestart()` FIRE-AND-FORGET and keeps doing async work is still
+	// using the live runtime. The held counter must keep the recycle waiting
+	// until the handler exits, so the session is never disposed while the handler
+	// still runs. `requestRestart()` is fire-and-forget only — a handler that
+	// awaited its own restart would deadlock on the counter its own frame holds,
+	// so the handled `.catch` shape below is the contract, never `await`.
 	//
-	// The restart TOOL avoids this by firing from an untracked continuation; an
-	// SDK extension or custom-TS command that `await`s requestRestart() cannot,
-	// so requestRestart() drops the requester's OWN window from the wait it owns.
-	//
-	// RED (pre-fix): the awaited restart never settled and this test timed out.
-	it("does not deadlock a restart awaited by the local slash-command handler that requested it", async () => {
-		let restartResult: RequestRestartResult | undefined;
-		const handlerEntered = Promise.withResolvers<void>();
-		// A registered extension command that AWAITS its own restart — the exact
-		// self-referential shape an SDK host writes.
-		const extensionRunner = {
-			hasHandlers: () => false,
-			emit: async () => undefined,
-			emitBeforeAgentStart: async () => undefined,
-			getCommand: (name: string) =>
-				name === "recycle"
-					? {
-							name: "recycle",
-							description: "requests its own restart",
-							handler: async () => {
-								handlerEntered.resolve();
-								restartResult = await session.requestRestart();
-							},
-						}
-					: undefined,
-			createCommandContext: () => ({}),
-			runScoped: <T>(run: () => T): T => run(),
-			emitError: () => {},
-		} as unknown as ExtensionRunner;
-		await buildLiveSession(undefined, extensionRunner);
-
-		const prompt = session.prompt("/recycle");
-		await handlerEntered.promise;
-
-		// The restart must complete rather than latch on its own caller. Event-
-		// gated on the prompt itself: the handler cannot return until the restart
-		// it awaits resolves, so this await IS the deadlock assertion.
-		expect(await prompt).toBe(false);
-		expect(restartResult).toEqual({ ok: true });
-		expect(session.isDisposed).toBe(true);
-	});
-
-	// Releasing the requester's own window must not release anyone else's: an
-	// unrelated prompt in setup still has to block the recycle. Without this the
-	// self-deadlock fix would be indistinguishable from deleting the barrier.
-	it("still blocks the recycle on another in-flight prompt while releasing the requester's own window", async () => {
-		const otherEntered = Promise.withResolvers<void>();
-		const releaseOther = Promise.withResolvers<void>();
-		let restartSettled = false;
-		const extensionRunner = {
-			hasHandlers: () => false,
-			emit: async () => undefined,
-			emitBeforeAgentStart: async () => undefined,
-			getCommand: (name: string) => {
-				if (name === "other") {
-					return {
-						name: "other",
-						description: "parks on I/O",
-						handler: async () => {
-							otherEntered.resolve();
-							await releaseOther.promise;
-						},
-					};
-				}
-				return name === "recycle"
-					? {
-							name: "recycle",
-							description: "requests its own restart",
-							handler: async () => {
-								await session.requestRestart();
-							},
-						}
-					: undefined;
-			},
-			createCommandContext: () => ({}),
-			runScoped: <T>(run: () => T): T => run(),
-			emitError: () => {},
-		} as unknown as ExtensionRunner;
-		await buildLiveSession(undefined, extensionRunner);
-
-		// An UNRELATED local handler parks first, holding its own window.
-		const other = session.prompt("/other");
-		await otherEntered.promise;
-
-		// Now the self-restarting handler runs. Its own window is released, but
-		// the other one is not, so the barrier must still hold.
-		const recycle = session.prompt("/recycle").then(result => {
-			restartSettled = true;
-			return result;
-		});
-		await drainEventLoop();
-		expect(restartSettled).toBe(false);
-		expect(session.isDisposed).toBe(false);
-
-		// Release the unrelated handler and the recycle proceeds.
-		releaseOther.resolve();
-		expect(await other).toBe(false);
-		expect(await recycle).toBe(false);
-		expect(session.isDisposed).toBe(true);
-	});
-
-	// The finding this whole window mechanism exists for: a handler that fires
-	// requestRestart() FIRE-AND-FORGET and then keeps doing async work is still
-	// using the live runtime. Releasing its window at the moment requestRestart()
-	// is INVOKED — rather than when the caller subscribes to the returned promise
-	// — lets the recycle observe zero in-flight prompts and dispose the session
-	// out from under the still-running handler. Invocation is not completion: only
-	// a subscription proves the caller is awaiting the outcome, so an unsubscribed
-	// restart must keep the window held until the handler exits.
-	//
-	// RED (pre-fix): requestRestart() released the window synchronously, so
-	// dispose ran while the handler was still parked on its post-restart work.
-	it("keeps the window held for a fire-and-forget restart while its handler keeps working", async () => {
+	// RED (with the window release restored): the recycle observed zero in-flight
+	// prompts and disposed the session out from under the still-running handler.
+	it("keeps the session live for a fire-and-forget restart while its handler keeps working", async () => {
 		const handlerEntered = Promise.withResolvers<void>();
 		const releaseHandler = Promise.withResolvers<void>();
 		let sessionAliveDuringWork: boolean | undefined;
+		let restartError: unknown;
 		let restart: Promise<RequestRestartResult> | undefined;
 		const extensionRunner = {
 			hasHandlers: () => false,
@@ -1113,15 +1005,18 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 							name: "recycle",
 							description: "fires a restart, then keeps working without awaiting it",
 							handler: async () => {
-								// Fire-and-forget: the handler never awaits the promise, so
-								// its window is not released on subscription. Captured only so
-								// the test can await the recycle's completion deterministically
-								// AFTER the handler exits — capturing is not subscribing.
+								// The handled fire-and-forget shape: the handler never awaits
+								// the outcome, so the recycle must wait on the held counter.
+								// Captured only so the test can settle deterministically after
+								// the handler exits — capturing is not awaiting.
 								restart = session.requestRestart();
+								void restart.catch(err => {
+									restartError = err;
+								});
 								handlerEntered.resolve();
 								await releaseHandler.promise;
-								// The handler is still using the live session here; if the
-								// recycle disposed under it this reads the disposed state.
+								// Still using the live session; if the recycle disposed under
+								// the handler this reads the disposed state.
 								sessionAliveDuringWork = !session.isDisposed;
 							},
 						}
@@ -1141,207 +1036,14 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		expect(session.isDisposed).toBe(false);
 
 		// The handler finishes on a still-live session, and only THEN does the
-		// window retire and the recycle proceed.
+		// held window retire and the recycle proceed.
 		releaseHandler.resolve();
 		expect(await prompt).toBe(false);
 		expect(sessionAliveDuringWork).toBe(true);
-		// Await the recycle itself (not a fixed drain budget) so the terminal
-		// disposal check is load-independent: the handler has exited, so the window
-		// is retired and the restart can now settle.
+		expect(restartError).toBeUndefined();
+		// The handler has exited, so the counter drains and the recycle settles.
 		if (!restart) throw new Error("Expected the handler to have captured its restart promise");
 		expect(await restart).toEqual({ ok: true });
-		expect(session.isDisposed).toBe(true);
-	});
-
-	// The residual hazard in the release above: the window is published on an
-	// AsyncLocalStorage store, and that store outlives the handler. A detached
-	// descendant the handler started — a timer, or a floating promise it never
-	// awaited — still resolves the same store after the handler has returned and
-	// its `#endInFlight()` has already balanced the counter.
-	//
-	// So a `requestRestart()` from that descendant found a window whose
-	// `released` flag was still false and decremented `#promptInFlightCount` a
-	// SECOND time for a window that was already accounted for. One decrement too
-	// many is not a bookkeeping curiosity: it drops the counter below the number
-	// of genuinely live prompts, so the recycle's quiescence wait resolves and
-	// dispose runs underneath an UNRELATED prompt — exactly the hazard the
-	// counter exists to prevent, now reachable from a handler that has already
-	// finished.
-	//
-	// Normal cleanup therefore marks the window released before decrementing, so
-	// the window is spent exactly once whichever path spends it.
-	//
-	// RED (pre-fix): dispose began while the unrelated handler was still parked.
-	it("does not let a detached descendant of a finished local command release a window twice", async () => {
-		const otherEntered = Promise.withResolvers<void>();
-		const releaseOther = Promise.withResolvers<void>();
-		// Opened inside the finished handler's async context, so the detached
-		// continuation below still resolves that handler's command window.
-		const detachedGate = Promise.withResolvers<void>();
-		let detached: Promise<RequestRestartResult> | undefined;
-		const extensionRunner = {
-			hasHandlers: () => false,
-			emit: async () => undefined,
-			emitBeforeAgentStart: async () => undefined,
-			getCommand: (name: string) => {
-				if (name === "other") {
-					return {
-						name: "other",
-						description: "parks on I/O",
-						handler: async () => {
-							otherEntered.resolve();
-							await releaseOther.promise;
-						},
-					};
-				}
-				return name === "detach"
-					? {
-							name: "detach",
-							description: "leaves a floating promise behind",
-							handler: async () => {
-								// Started, never awaited: the handler returns while this
-								// continuation is still parked, so it resumes with the
-								// command window's store and no window of its own.
-								detached = (async () => {
-									await detachedGate.promise;
-									return session.requestRestart();
-								})();
-							},
-						}
-					: undefined;
-			},
-			createCommandContext: () => ({}),
-			runScoped: <T>(run: () => T): T => run(),
-			emitError: () => {},
-		} as unknown as ExtensionRunner;
-		await buildLiveSession(undefined, extensionRunner);
-
-		let disposeStarted = false;
-		const realDispose = session.dispose.bind(session);
-		vi.spyOn(session, "dispose").mockImplementation(options => {
-			disposeStarted = true;
-			return realDispose(options);
-		});
-
-		// An UNRELATED local handler parks first and holds its own window for the
-		// whole test: nothing may dispose while it is in there.
-		const other = session.prompt("/other");
-		await otherEntered.promise;
-
-		// The second command runs to completion, so its window is spent by the
-		// ordinary cleanup path.
-		expect(await session.prompt("/detach")).toBe(false);
-		if (!detached) throw new Error("Expected the handler to leave a detached continuation");
-
-		// Only NOW does the orphaned descendant request the restart, holding the
-		// finished handler's store.
-		detachedGate.resolve();
-		const restart = detached;
-		let restartSettled = false;
-		void restart.then(() => {
-			restartSettled = true;
-		});
-
-		// Give the barrier every opportunity to (wrongly) flush and dispose on the
-		// strength of a counter the second release drove too low.
-		await drainEventLoop();
-		expect(disposeStarted).toBe(false);
-		expect(restartSettled).toBe(false);
-		expect(session.isDisposed).toBe(false);
-
-		// The unrelated handler completes against a session that is still ALIVE,
-		// and only then does the recycle proceed.
-		releaseOther.resolve();
-		expect(await other).toBe(false);
-		expect(await restart).toEqual({ ok: true });
-		expect(session.isDisposed).toBe(true);
-	});
-
-	// The same circular wait as the self-restart case above, reached through the
-	// COALESCE branch instead of the committing one.
-	//
-	// The ordering is forced by `prompt()`'s own latch check: once `#restarting`
-	// is set, `prompt()` refuses and no command window is ever opened. So the
-	// only way a local handler meets a populated `#restartCall` is for the
-	// handler to be parked ALREADY when an external requester latches — an SDK
-	// host recycling while a slash command awaits I/O, which is the ordinary
-	// shape, not a contrivance.
-	//
-	// From there the handler awaits `requestRestart()` and is handed the existing
-	// promise. But that restart is parked on `#promptInFlightCount`, and this
-	// handler's window is what the count is holding — held until the promise it
-	// is awaiting resolves. Releasing the window only in the committing path
-	// leaves the two waiting on each other permanently.
-	//
-	// Asserted as a DEADLOCK, not as a call: the handler cannot return until the
-	// promise it awaits settles, so awaiting the prompt IS the assertion — on the
-	// unfixed code nothing resolves it and the case fails on the runner's own
-	// timeout. A test that only verified the release was invoked would pass on
-	// code that still hangs here. Deliberately NOT a drain-budget check: whether
-	// the wrong path lands inside a fixed number of turns depends on how much
-	// unrelated I/O shares the loop, so co-running files would flip the result.
-	// The one negative check below is budget-free in the other direction — the
-	// external restart cannot settle while the handler holds its window, however
-	// many turns pass.
-	//
-	// RED (pre-fix): the awaited prompt never settles and the case times out.
-	it("does not deadlock a local slash-command handler that awaits an already-in-flight restart", async () => {
-		const handlerEntered = Promise.withResolvers<void>();
-		const releaseHandler = Promise.withResolvers<void>();
-		let coalescedResult: RequestRestartResult | undefined;
-		const extensionRunner = {
-			hasHandlers: () => false,
-			emit: async () => undefined,
-			emitBeforeAgentStart: async () => undefined,
-			getCommand: (name: string) =>
-				name === "recycle"
-					? {
-							name: "recycle",
-							description: "awaits a restart another caller already started",
-							handler: async () => {
-								handlerEntered.resolve();
-								// Parked while the external requester latches, so the call
-								// below takes the coalesce branch rather than committing.
-								await releaseHandler.promise;
-								coalescedResult = await session.requestRestart();
-							},
-						}
-					: undefined,
-			createCommandContext: () => ({}),
-			runScoped: <T>(run: () => T): T => run(),
-			emitError: () => {},
-		} as unknown as ExtensionRunner;
-		await buildLiveSession(undefined, extensionRunner);
-
-		let promptSettled = false;
-		const prompt = session.prompt("/recycle").then(result => {
-			promptSettled = true;
-			return result;
-		});
-		await handlerEntered.promise;
-
-		// The EXTERNAL restart latches while the handler is parked. It is not
-		// running inside the command window's async context, so it releases
-		// nothing of the handler's and parks on the counter the handler holds.
-		let externalSettled = false;
-		const external = session.requestRestart().then(result => {
-			externalSettled = true;
-			return result;
-		});
-		await drainEventLoop();
-		expect(externalSettled).toBe(false);
-
-		// The handler resumes and requests the restart that is already in flight.
-		releaseHandler.resolve();
-		// THE assertion: on the unfixed code the handler is still awaiting the
-		// coalesced promise while that promise waits for the handler's window, so
-		// neither of these ever resolves.
-		expect(await prompt).toBe(false);
-		expect(promptSettled).toBe(true);
-		expect(await external).toEqual({ ok: true });
-		// Both requesters observe the same single handoff.
-		expect(coalescedResult).toEqual(await external);
-		expect(coalescedResult).toEqual({ ok: true });
 		expect(session.isDisposed).toBe(true);
 	});
 
