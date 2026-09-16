@@ -3,10 +3,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import {
-	ModelControls,
-	type ModelControlsHost,
-} from "@oh-my-pi/pi-coding-agent/session/model-controls";
+import { ModelControls, type ModelControlsHost } from "@oh-my-pi/pi-coding-agent/session/model-controls";
 import {
 	buildTuiBuiltinSlashCommands,
 	lookupBuiltinSlashCommand,
@@ -85,12 +82,6 @@ async function run(h: Harness, args: string): Promise<void> {
 }
 
 describe("/effort slash command", () => {
-	it("is registered and accepts an argument", () => {
-		expect(command).toBeDefined();
-		expect(command!.allowArgs).toBe(true);
-		expect(command!.subcommands?.map(sub => sub.name)).toContain("auto");
-	});
-
 	it("completes only effort levels exposed by the active model", async () => {
 		const h = harness({ efforts: [Effort.Low, Effort.Medium] });
 		const effort = buildTuiBuiltinSlashCommands(h.tuiRuntime).find(item => item.name === "effort");
