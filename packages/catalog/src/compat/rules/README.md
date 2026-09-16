@@ -292,13 +292,14 @@ behavior {
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
     retry-reset-timezone provider="zai" offset="+08:00"
+    credential-retirement provider="github-copilot" retire-oauth-on-hard401=#true
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
 }
 ```
 
-`exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+`exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. `credential-retirement` resolves by provider without a model lookup; `retire-oauth-on-hard401=#true` opts into retiring a still-matching OAuth bearer only after refresh and retry fail, excluding policy and quota/concurrency denials. False or absent rules retain the existing suspect-and-block behavior. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
 
 ## Auth grammar
 

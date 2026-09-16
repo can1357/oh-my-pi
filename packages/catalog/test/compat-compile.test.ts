@@ -6,6 +6,7 @@ import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
+import { credentialRetirementFor } from "../src/compat/behavior";
 import committed from "../src/compat/rules.json";
 
 const AUTH_IDS_PATH = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
@@ -18,6 +19,14 @@ function taxonomySources(text: string) {
 		{ file: "taxonomy/test.kdl", text },
 	];
 }
+
+describe("provider credential retirement policy", () => {
+	test("Copilot opts into hard-401 OAuth retirement without a model lookup; other providers do not", () => {
+		expect(credentialRetirementFor("github-copilot")?.retireOAuthOnHard401).toBe(true);
+		expect(credentialRetirementFor("openai-codex")).toBeUndefined();
+		expect(credentialRetirementFor("unknown-provider")).toBeUndefined();
+	});
+});
 
 describe("compat compiler grammar", () => {
 	test("unknown axis directive is rejected with file:line", () => {

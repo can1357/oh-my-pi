@@ -13,6 +13,10 @@
 - Fixed recovery of corrupted model caches so private backups are preserved and concurrent recovery cannot overwrite a cache that has already been restored.
 - Fixed pricing for Devin (SWE-2, SWE-1.7, and GLM-5.2 High) and Kimi Code models when upstream discovery omits cost information. SWE-2 now reflects its promotional pricing through December 31, 2026, then switches to list pricing on January 1, 2027.
 - Fixed pricing and chat routing for Devin Fusion models so composite models use their own headline rates and supported Fusion lanes connect directly instead of failing through an incompatible routing path.
+### Fixed
+
+- Copilot OAuth retirement after a hard 401 now resolves from runtime KDL without a model lookup, keeping provider deployment policy out of the auth runtime ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Model discovery now logs at most ten dropped model names when an authoritative catalog shrinks, with labels truncated to 200 characters and total/omitted counts instead of an unbounded warning payload. ([#11913](https://github.com/can1357/oh-my-pi/pull/11913) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.2.1] - 2026-09-15
 

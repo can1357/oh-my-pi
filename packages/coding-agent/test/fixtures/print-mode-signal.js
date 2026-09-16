@@ -13,6 +13,9 @@ const session = {
 		onPersistenceError: () => () => {},
 	},
 	setTextOutputCommitted() {},
+	async getDisabledCredentialNotices() {
+		return [];
+	},
 	async prompt() {
 		process.kill(process.pid, "SIGTERM");
 		await Promise.withResolvers().promise;
