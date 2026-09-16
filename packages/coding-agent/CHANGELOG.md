@@ -371,6 +371,7 @@
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+- Secret obfuscation now registers passwords embedded in connection-URL environment variables (PostgreSQL, MongoDB, MySQL, Redis, AMQP, and any other `scheme://user:password@host` value) regardless of the variable name.
 
 ## [18.2.0] - 2026-09-15
 

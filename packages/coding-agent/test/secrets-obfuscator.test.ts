@@ -23,6 +23,7 @@ import { isJsonSchemaValueValid } from "@oh-my-pi/pi-ai/utils/schema/json-schema
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	builtinCredentialSecretEntries,
+	collectEnvSecrets,
 	getExistingSecretPlaceholderKey,
 	getSecretPlaceholderKey,
 	getSecretPlaceholderKeySync,
@@ -88,6 +89,65 @@ describe("builtinCredentialSecretEntries", () => {
 			// The model echoes the placeholder into edit-tool old_string verbatim.
 			const args = deobfuscateToolArguments(obfuscator, { old_string: providerView });
 			expect(args.old_string).toBe(fileLine);
+		}
+	});
+});
+
+describe("collectEnvSecrets connection URLs", () => {
+	it("registers the password from a DSN env var that does not match secret-name patterns", () => {
+		const name = "OMP_TEST_CONNURL_DSN";
+		const scheme = "postgres";
+		const user = "app";
+		const pw = `pw${"0123456789ab".slice(0, 12)}`;
+		const host = "db.internal:5432";
+		const db = "shop";
+		const url = `${scheme}://${user}:${pw}@${host}/${db}`;
+		process.env[name] = url;
+		try {
+			const entries = collectEnvSecrets();
+			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
+			expect(entries.some(e => e.content === url)).toBe(false);
+		} finally {
+			delete process.env[name];
+		}
+	});
+
+	it("registers both raw and decoded forms of a percent-encoded password", () => {
+		const name = "OMP_TEST_CONNURL_ENCODED";
+		const pwRaw = `p%40ss${"12345678"}%3Ax`;
+		const pwDecoded = decodeURIComponent(pwRaw);
+		const url = `postgres://app:${pwRaw}@db.internal:5432/shop`;
+		process.env[name] = url;
+		try {
+			const entries = collectEnvSecrets();
+			expect(entries.some(e => e.content === pwRaw)).toBe(true);
+			expect(entries.some(e => e.content === pwDecoded)).toBe(true);
+		} finally {
+			delete process.env[name];
+		}
+	});
+
+	it("skips connection-URL passwords shorter than the minimum length", () => {
+		const name = "OMP_TEST_CONNURL_SHORT";
+		const url = "postgres://app:pw@db.internal:5432/shop";
+		process.env[name] = url;
+		try {
+			const entries = collectEnvSecrets();
+			expect(entries.some(e => e.content === "pw")).toBe(false);
+		} finally {
+			delete process.env[name];
+		}
+	});
+
+	it("ignores non-URL values on non-secret variable names", () => {
+		const name = "OMP_TEST_CONNURL_PLAIN";
+		const value = "hello-world-value-123";
+		process.env[name] = value;
+		try {
+			const entries = collectEnvSecrets();
+			expect(entries.some(e => e.content === value)).toBe(false);
+		} finally {
+			delete process.env[name];
 		}
 	});
 });

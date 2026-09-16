@@ -184,6 +184,9 @@ const MIN_ENV_VALUE_LENGTH = 8;
 /** Env var name patterns that indicate secret values. */
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
 
+/** Extracts the password group from a `scheme://user:password@host` value. */
+const CONNECTION_URL_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/:@\s]+:([^@\s]+)@/i;
+
 /** Collect environment variable values that look like secrets. */
 export function collectEnvSecrets(): SecretEntry[] {
 	const entries: SecretEntry[] = [];
@@ -194,6 +197,26 @@ export function collectEnvSecrets(): SecretEntry[] {
 		if (seen.has(value)) continue;
 		seen.add(value);
 		entries.push({ type: "plain", content: value, mode: "obfuscate" });
+	}
+	// Second pass: extract passwords embedded in connection-URL values
+	// (e.g. scheme://user:password@host) regardless of the variable name.
+	for (const [, value] of Object.entries(process.env)) {
+		const match = CONNECTION_URL_PASSWORD_RE.exec(value ?? "");
+		if (!match) continue;
+		const password = match[1];
+		if (password.length >= MIN_ENV_VALUE_LENGTH && !seen.has(password)) {
+			seen.add(password);
+			entries.push({ type: "plain", content: password, mode: "obfuscate" });
+		}
+		try {
+			const decoded = decodeURIComponent(password);
+			if (decoded !== password && decoded.length >= MIN_ENV_VALUE_LENGTH && !seen.has(decoded)) {
+				seen.add(decoded);
+				entries.push({ type: "plain", content: decoded, mode: "obfuscate" });
+			}
+		} catch {
+			// Malformed percent-encoding — the raw password is already registered.
+		}
 	}
 	return entries;
 }
