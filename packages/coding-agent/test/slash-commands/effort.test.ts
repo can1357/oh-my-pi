@@ -4,9 +4,11 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
+	buildTuiBuiltinSlashCommands,
 	lookupBuiltinSlashCommand,
 	type SlashCommandRuntime,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 
 const command = lookupBuiltinSlashCommand("effort");
@@ -14,6 +16,7 @@ const command = lookupBuiltinSlashCommand("effort");
 interface Harness {
 	outputs: string[];
 	runtime: SlashCommandRuntime;
+	tuiRuntime: TuiSlashCommandRuntime;
 	level: () => ConfiguredThinkingLevel | undefined;
 	configChanges: () => number;
 }
@@ -31,10 +34,9 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[] } =
 		},
 		getAvailableThinkingLevels: () => options.efforts ?? [Effort.Low, Effort.Medium, Effort.High],
 	} as unknown as AgentSession;
+	const tuiRuntime = { ctx: { session } } as unknown as TuiSlashCommandRuntime;
 	return {
 		outputs,
-		level: () => configured,
-		configChanges: () => configChanges,
 		runtime: {
 			session,
 			output: (text: string) => {
@@ -44,6 +46,9 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[] } =
 				configChanges++;
 			},
 		} as unknown as SlashCommandRuntime,
+		tuiRuntime,
+		level: () => configured,
+		configChanges: () => configChanges,
 	};
 }
 
@@ -56,6 +61,15 @@ describe("/effort slash command", () => {
 		expect(command).toBeDefined();
 		expect(command!.allowArgs).toBe(true);
 		expect(command!.subcommands?.map(sub => sub.name)).toContain("auto");
+	});
+
+	it("completes only effort levels exposed by the active model", async () => {
+		const h = harness({ efforts: [Effort.Low, Effort.Medium] });
+		const effort = buildTuiBuiltinSlashCommands(h.tuiRuntime).find(item => item.name === "effort");
+		const completions = await Promise.resolve(effort?.getArgumentCompletions?.(""));
+		expect(completions?.map(item => item.label)).toEqual(["off", "auto", "low", "medium"]);
+		expect(completions?.map(item => item.label)).not.toContain("xhigh");
+		expect(effort?.getInlineHint?.("x")).toBeNull();
 	});
 
 	it("reports the configured level and the model's selectable levels", async () => {

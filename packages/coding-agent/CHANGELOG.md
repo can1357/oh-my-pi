@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Added the `/effort` slash command to inspect and set the active model's reasoning effort.
 
 ## [18.2.1] - 2026-09-15
 

@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -12,12 +11,12 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import {
-	AUTO_THINKING,
 	CLI_THINKING_LEVELS,
 	type ConfiguredThinkingLevel,
 	getConfiguredThinkingLevelMetadata,
 	parseCliThinkingLevel,
 } from "../thinking";
+import { availableEffortSelectors } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
@@ -693,14 +692,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				);
 				return commandConsumed();
 			}
-			// `off` and `auto` are always selectable; the concrete tiers are the
-			// ones this model actually exposes, so the command never sets a level
-			// the clamp would silently rewrite.
-			const choices: ConfiguredThinkingLevel[] = [
-				ThinkingLevel.Off,
-				AUTO_THINKING,
-				...session.getAvailableThinkingLevels(),
-			];
+			const choices = availableEffortSelectors(session);
 			const selector = command.args.trim().toLowerCase();
 			if (!selector) {
 				await runtime.output(
