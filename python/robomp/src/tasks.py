@@ -21,6 +21,7 @@ from robomp.github_client import (
     parse_issue_payload,
 )
 from robomp.github_events import normalize_review_to_comment
+from robomp.pragmas import parse_pragmas
 from robomp.sandbox import GitTransport, SandboxManager
 from robomp.worker import DirectiveInfo, ReleaseTaskContext, TaskInputs, ThreadMessage, run_task
 
@@ -74,6 +75,21 @@ def _comment_from_payload(payload: Mapping[str, Any]) -> CommentInfo:
         body=str(c.get("body") or ""),
         created_at=str(c.get("created_at") or ""),
     )
+
+
+async def _refetch_comment(github: GitHubBackend, repo: str, comment_id: int) -> CommentInfo | None:
+    """Fetch canonical comment text by id; None on any failure (logged).
+
+    Webhook payloads snapshot the comment at create/edit time, so a reviewer
+    bot that publishes a placeholder and fills in its real findings seconds
+    later leaves the payload stale. The REST comment endpoint always returns
+    the authoritative final text.
+    """
+    try:
+        return await github.get_issue_comment(repo, comment_id)
+    except Exception:
+        log.exception("comment refetch failed", extra={"repo": repo, "comment_id": comment_id})
+        return None
 
 
 def _directive_from_payload(payload: Mapping[str, Any]) -> DirectiveInfo | None:
@@ -855,33 +871,74 @@ async def handle_review(
     comment = normalize_review_to_comment(payload)
     user = comment.get("user") or {}
     body = str(comment.get("body") or "").strip()
+    author = str(user.get("login") or "")
     # The webhook body is a snapshot of the CREATE/EDIT event; review bots
     # publish placeholder bodies ("Reviewing this PR…") and fill the real
-    # finding in later. The canonical /pulls/comments/{id} endpoint always
-    # returns the authoritative final text, so resolve from it whenever we
-    # have a comment id.
+    # finding in later. Resolve the canonical text by id instead. The id
+    # space differs per submission kind, so try in order:
+    #   1. issue-comment endpoint  — plain PR conversation comments
+    #   2. review walk             — inline review comments (also path/line)
+    #   3. review summary endpoint — approve/request-changes verdict bodies
+    # The first fetch with a non-empty body wins; failures never block.
     comment_id = comment.get("id")
-    if comment_id is not None and hasattr(github, "get_review_comment"):
-        try:
-            fetched = await github.get_review_comment(repo_full, int(comment_id), pr_number=pr_number)
-            if fetched.body.strip():
-                body = fetched.body.strip()
-            if fetched.path:
-                comment["path"] = fetched.path
-            if fetched.line is not None:
-                comment["line"] = fetched.line
-            log.info(
-                "review_comment_refetch",
-                extra={"repo": repo_full, "pr": pr_number, "comment_id": comment_id},
-            )
-        except Exception:
-            log.exception(
-                "review comment refetch failed",
-                extra={"repo": repo_full, "pr": pr_number},
-            )
-            # fall back to the webhook comment body below
+    if comment_id is not None:
+        cid = int(comment_id)
+        resolved = False
+        if hasattr(github, "get_issue_comment"):
+            try:
+                fetched = await github.get_issue_comment(repo_full, cid)
+                if fetched.body.strip():
+                    body = fetched.body.strip()
+                    author = fetched.author or author
+                    log.info(
+                        "issue_comment_refetch",
+                        extra={"repo": repo_full, "pr": pr_number, "comment_id": cid},
+                    )
+                    resolved = True
+            except GitHubError:
+                pass  # not a conversation comment — try the review endpoints
+            except Exception:
+                log.exception(
+                    "issue comment refetch failed",
+                    extra={"repo": repo_full, "pr": pr_number},
+                )
+        if not resolved and hasattr(github, "get_review_comment"):
+            try:
+                fetched = await github.get_review_comment(repo_full, cid, pr_number=pr_number)
+                if fetched.body.strip():
+                    body = fetched.body.strip()
+                    author = fetched.author or author
+                    resolved = True
+                if fetched.path:
+                    comment["path"] = fetched.path
+                if fetched.line is not None:
+                    comment["line"] = fetched.line
+                log.info(
+                    "review_comment_refetch",
+                    extra={"repo": repo_full, "pr": pr_number, "comment_id": cid},
+                )
+            except Exception:
+                log.exception(
+                    "review comment refetch failed",
+                    extra={"repo": repo_full, "pr": pr_number},
+                )
+        if not resolved and hasattr(github, "get_pr_review"):
+            try:
+                fetched = await github.get_pr_review(repo_full, cid, pr_number=pr_number)
+                if fetched.body.strip():
+                    body = fetched.body.strip()
+                    author = fetched.author or author
+                    log.info(
+                        "pr_review_refetch",
+                        extra={"repo": repo_full, "pr": pr_number, "review_id": cid},
+                    )
+            except Exception:
+                log.exception(
+                    "pr review refetch failed",
+                    extra={"repo": repo_full, "pr": pr_number},
+                )
     review_payload = {
-        "author": str(user.get("login") or ""),
+        "author": author,
         "body": body,
         "path": str(comment.get("path") or ""),
         "line": comment.get("line"),
@@ -1047,6 +1104,19 @@ async def handle_pr_conversation(
             session_dir=str(workspace.session_dir),
         )
     comment = _comment_from_payload(payload)
+    if comment.id:
+        fetched = await _refetch_comment(github, repo_full, comment.id)
+        if fetched is not None and fetched.body.strip():
+            comment = fetched
+            if directive is not None:
+                cleaned, pragmas = parse_pragmas(fetched.body)
+                directive = DirectiveInfo(
+                    body=cleaned,
+                    author=directive.author,
+                    thread=directive.thread,
+                    pragmas=pragmas,
+                    authorizes_impl=directive.authorizes_impl,
+                )
     inputs = TaskInputs(
         settings=settings,
         db=db,

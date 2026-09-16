@@ -532,6 +532,7 @@ def _build_prompt(
             line_range = ""
         body = str(review_payload.get("body") or "")
         author = str(review_payload.get("author") or "")
+        comment_ref = f"{path}{line_range}" if path else "review summary"
         return persona.followup_review(
             repo=inputs.repo,
             workspace=inputs.workspace,
@@ -540,6 +541,7 @@ def _build_prompt(
             comment_body=body,
             comment_path=path,
             comment_line_range=line_range,
+            comment_ref=comment_ref,
             thread=thread,
         )
     raise ValueError(f"unknown task kind: {task_kind!r}")

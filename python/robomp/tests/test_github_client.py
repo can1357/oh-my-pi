@@ -663,6 +663,76 @@ def test_search_issues_github_uses_search_issues_with_items() -> None:
     assert results[0].number == 9
 
 
+def test_get_issue_comment_fetches_canonical_text() -> None:
+    """The webhook's `created` snapshot can be stale (reviewer bots edit the body
+    seconds later), so the refetch reads the canonical issue-comment endpoint."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "id": 14253,
+                "body": "## Walkthrough\n\nreal findings",
+                "user": {"login": "miracodeai-bot"},
+                "created_at": "2026-09-15T16:33:10Z",
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    comment = _run_async(client.get_issue_comment("octo/widget", 14253))
+
+    assert captured["path"] == "/repos/octo/widget/issues/comments/14253"
+    assert comment.id == 14253
+    assert comment.author == "miracodeai-bot"
+    assert comment.body == "## Walkthrough\n\nreal findings"
+    assert comment.created_at == "2026-09-15T16:33:10Z"
+
+
+def test_get_issue_comment_404_raises_github_error() -> None:
+    """A deleted/unreachable comment surfaces as `GitHubError` so callers can
+    fall back to the webhook body instead of crashing the dispatcher."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    with pytest.raises(GitHubError) as exc:
+        _run_async(client.get_issue_comment("octo/widget", 999999))
+
+    assert exc.value.status == 404
+
+
+def test_get_pr_review_fetches_summary_by_id() -> None:
+    """Review *summary* bodies (approve / request-changes verdicts) resolve only
+    on `pulls/{pr}/reviews/{id}`: the review id 404s on the issue-comment and
+    flat review-comment endpoints (Forgejo)."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "id": 555,
+                "user": {"login": "djdembeck"},
+                "body": "## Verdict: changes requested",
+                "state": "REQUEST_CHANGES",
+                "submitted_at": "2026-09-06T00:00:00Z",
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    review = _run_async(client.get_pr_review("octo/widget", 555, pr_number=1686))
+
+    assert captured["path"] == "/repos/octo/widget/pulls/1686/reviews/555"
+    assert review.id == 555
+    assert review.author == "djdembeck"
+    assert review.body == "## Verdict: changes requested"
+    assert review.state == "REQUEST_CHANGES"
+
+
 def test_get_review_comment_fetches_canonical_endpoint() -> None:
     """`get_review_comment` (the Forgejo #7935 workaround) reads the actual text
     from the canonical `/repos/{repo}/pulls/comments/{id}` endpoint (GitHub;
