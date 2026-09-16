@@ -130,6 +130,10 @@ export const usageHelp = {
 	description: "Show provider usage limits for every authenticated account",
 } satisfies CommandMetadata;
 
+export const workloadHelp = {
+	description: "Run a YAML DAG of subagent steps that omp executes without a model driving the control flow",
+} satisfies CommandMetadata;
+
 export const worktreeHelp = {
 	description: "Add, list, or clear git worktrees (clone-first when enabled)",
 } satisfies CommandMetadata;

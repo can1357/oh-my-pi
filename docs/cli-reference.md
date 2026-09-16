@@ -244,6 +244,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `tiny-models` | Download tiny local models (session titles + memory). | [local models](./local-models.md) |
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `ttsr` | Inspect and test Time-Traveling Stream Rules (TTSR). (Covers the CLI command; the [TTSR feature](./ttsr-injection-lifecycle.md) is documented separately.) | |
+| `workload` | Run a YAML DAG of subagent steps that omp executes without a model driving the control flow. | [workloads](./workloads.md) |
 | `worktree`, `wt` | List or clear agent-managed git worktrees (`~/.omp/wt`). | |
 | `search`, `q` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
 
