@@ -4117,7 +4117,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async disposeOptions => {
+			let disposeCall: Promise<void> | undefined;
+			const disposeOnce: AgentSession["dispose"] = async disposeOptions => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -4155,6 +4156,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterMcpPostmortem = undefined;
 				}
 			};
+			session.dispose = disposeOptions => (disposeCall ??= disposeOnce(disposeOptions));
 		}
 
 		if (model?.api === "openai-codex-responses") {

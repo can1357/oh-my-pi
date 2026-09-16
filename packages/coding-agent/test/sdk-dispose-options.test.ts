@@ -15,6 +15,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -84,14 +85,33 @@ describe("SDK session disposal options", () => {
 		}
 	});
 
-	it("persists the caller's shutdown reason once across repeated disposal", async () => {
+	it("preserves the first shutdown reason across concurrent and repeated disposal", async () => {
 		const current = await createSession();
 		current.sessionManager.appendMessage(createAssistantMessage("finished response"));
 		await current.sessionManager.ensureOnDisk();
 		const sessionFile = current.sessionFile;
 		if (!sessionFile) throw new Error("Expected a persisted session file");
 
-		await current.dispose({ reason: postmortem.Reason.SIGTERM });
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const registry = VibeSessionRegistry.global();
+		const suspendScope = registry.suspendScope.bind(registry);
+		vi.spyOn(registry, "suspendScope").mockImplementationOnce(async (scope, manager) => {
+			reached.resolve();
+			await release.promise;
+			return suspendScope(scope, manager);
+		});
+
+		const first = current.dispose({ reason: postmortem.Reason.SIGTERM });
+		await reached.promise;
+		const second = current.dispose({ reason: postmortem.Reason.MANUAL });
+		let concurrentResult: string;
+		try {
+			concurrentResult = await Promise.race([second.then(() => "disposed"), Bun.sleep(250).then(() => "pending")]);
+		} finally {
+			release.resolve();
+			await Promise.all([first, second]);
+		}
 		await current.dispose({ reason: postmortem.Reason.MANUAL });
 
 		const entries: unknown[] = (await Bun.file(sessionFile).text())
@@ -107,6 +127,7 @@ describe("SDK session disposal options", () => {
 				data: expect.objectContaining({ reason: postmortem.Reason.SIGTERM, kind: "signal" }),
 			}),
 		]);
+		expect(concurrentResult).toBe("pending");
 	});
 
 	it("returns at the caller's memory budget while consolidation is still running", async () => {
