@@ -11,24 +11,8 @@ import chalk from "chalk";
 import { discoverWorkloads, loadWorkload, resolveWorkloadArgs, type WorkloadSpec, WorkloadSpecError } from "./spec";
 import { runWorkload, type WorkloadRunEvent, type WorkloadRunResult } from "./runner";
 
-export {
-	discoverWorkloads,
-	loadWorkload,
-	parseWorkloadSpec,
-	resolveWorkloadArgs,
-	WorkloadSpecError,
-	type WorkloadArgSpec,
-	type WorkloadCandidate,
-	type WorkloadSpec,
-	type WorkloadStep,
-} from "./spec";
-export {
-	runWorkload,
-	type WorkloadRunEvent,
-	type WorkloadRunOptions,
-	type WorkloadRunResult,
-	type WorkloadStepReport,
-} from "./runner";
+export * from "./runner";
+export * from "./spec";
 
 export interface RunWorkloadCommandOptions {
 	/** Workload name or path; omitted lists what is discoverable. */

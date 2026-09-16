@@ -1,7 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import * as modelResolver from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as structured from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { parseWorkloadSpec, resolveWorkloadArgs } from "@oh-my-pi/pi-coding-agent/workload/spec";
 import { runWorkload } from "@oh-my-pi/pi-coding-agent/workload/runner";
 
@@ -31,6 +41,53 @@ async function run(yaml: string, options: { set?: string[]; cwd?: string; concur
 		cwd,
 		...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
 	});
+}
+
+const authStorages: AuthStorage[] = [];
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const storage of authStorages.splice(0)) storage.close();
+});
+
+/**
+ * Stub the session bootstrap a `prompt` step needs so the spawn path can be
+ * driven without credentials: every spawn goes through the mocked
+ * `runStructuredSubagent`, so nothing here is used for inference.
+ */
+async function stubSpawnEnvironment(execution: () => StructuredSubagentResult): Promise<{ spawns: () => number }> {
+	const model = buildModel({
+		id: "workload-test-model",
+		name: "Workload Test Model",
+		provider: "managed-primary",
+		baseUrl: "http://127.0.0.1:8080/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	} as ModelSpec<Api>) as Model<Api>;
+	const sessionManager = {
+		setSessionName: async () => {},
+		appendCustomEntry: () => {},
+		ensureOnDisk: async () => {},
+		getSessionFile: () => path.join(os.tmpdir(), "omp-workload-test-session.jsonl"),
+		getSessionId: () => "workload-test",
+		// No artifacts directory: the ledger write is skipped, so the test
+		// touches no real session storage.
+		getArtifactsDir: () => null,
+		getArtifactManager: () => null,
+	} as unknown as SessionManager;
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorages.push(authStorage);
+	vi.spyOn(Settings, "init").mockResolvedValue(Settings.isolated({}));
+	vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+	vi.spyOn(ModelRegistry.prototype, "refresh").mockResolvedValue(undefined);
+	vi.spyOn(ModelRegistry.prototype, "getAvailable").mockReturnValue([model]);
+	vi.spyOn(modelResolver, "resolveModelFromSettings").mockReturnValue(model);
+	vi.spyOn(SessionManager, "create").mockReturnValue(sessionManager);
+	const spy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async () => execution());
+	return { spawns: () => spy.mock.calls.length };
 }
 
 describe("runWorkload", () => {
@@ -173,5 +230,74 @@ steps:
 `);
 		expect(result.status).toBe("failed");
 		expect(result.steps[0]?.error).toMatch(/args\.nope/);
+	});
+
+	it("records a shell step whose spawn never starts as a failed attempt, honoring retries", async () => {
+		// A missing executable makes `Bun.spawn` throw rather than hand back a
+		// child, which must not bypass the retry / on_failure path.
+		const result = await run(`
+name: ghost
+steps:
+  - id: missing
+    run: ["./omp-workload-no-such-binary"]
+    retries: 1
+  - id: after
+    needs: [missing]
+    run: ["echo", "unreachable"]
+`);
+		expect(result.status).toBe("failed");
+		const missing = result.steps.find(step => step.id === "missing");
+		expect(missing?.status).toBe("failed");
+		expect(missing?.attempts).toBe(2);
+		expect(missing?.error).toMatch(/spawn failed:.*omp-workload-no-such-binary/);
+		expect(result.steps.find(step => step.id === "after")?.status).toBe("skipped");
+	});
+
+	it("fails a prompt step whose subagent reports an error with exit code 0", async () => {
+		// `runStructuredSubagent` attaches capture/merge failures to
+		// `result.error` while the subagent itself exited 0; that is a failed
+		// step, not a silent success.
+		const { spawns } = await stubSpawnEnvironment(
+			() =>
+				({
+					result: {
+						index: 0,
+						id: "ask",
+						agent: "task",
+						agentSource: "bundled",
+						task: "do work",
+						exitCode: 0,
+						output: "partial work",
+						stderr: "",
+						truncated: false,
+						durationMs: 1,
+						error: "isolated changes could not be captured",
+					},
+					policy: {},
+					mergeSummary: "",
+					changesApplied: null,
+					artifactsDir: os.tmpdir(),
+					temporaryArtifacts: true,
+				}) as unknown as StructuredSubagentResult,
+		);
+		const result = await run(`
+name: capture
+steps:
+  - id: ask
+    prompt: "do work"
+    retries: 1
+  - id: gate
+    needs: [ask]
+    run: ["echo", "unreachable"]
+`);
+		expect(result.status).toBe("failed");
+		const ask = result.steps.find(step => step.id === "ask");
+		expect(ask?.status).toBe("failed");
+		expect(ask?.error).toBe("isolated changes could not be captured");
+		// Retried once, so the error went through the same policy path a
+		// non-zero exit does.
+		expect(ask?.attempts).toBe(2);
+		expect(spawns()).toBe(2);
+		expect(result.steps.find(step => step.id === "gate")?.status).toBe("skipped");
 	});
 });
