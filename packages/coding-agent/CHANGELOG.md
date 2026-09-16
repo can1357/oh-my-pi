@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- MCP tool calls that legitimately run for minutes are no longer aborted at the request timeout when the server reports progress: every request now carries a progress token, and each `notifications/progress` re-arms that request's deadline, bounded by the new `OMP_MCP_MAX_TIMEOUT_MS` ceiling (default one hour).
+- MCP tool calls that legitimately run for minutes are no longer aborted at the request timeout when the server reports progress: every request now carries a progress token, and each `notifications/progress` re-arms that request's deadline, bounded by the new `OMP_MCP_MAX_TIMEOUT_MS` ceiling (default one hour) ([#12259](https://github.com/can1357/oh-my-pi/pull/12259), thanks @ComicBit).
 
 ## [18.2.2] - 2026-09-16
 
