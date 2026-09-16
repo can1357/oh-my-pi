@@ -333,6 +333,10 @@
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked ([#12236](https://github.com/can1357/oh-my-pi/pull/12236) by [@shivamklr](https://github.com/shivamklr)).
 
+### Fixed
+
+- Starting omp no longer dies on a single ambiguous discovered model identity in `models.yml` (OmniRoute `openai-compatible-chat-<uuid>/cohere/north-mini-code:free` tying `cohere` and `openai`).
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
@@ -916,7 +920,6 @@
 - Custom `Other` answers are now applied before the Ask dialog becomes interactive again, so the next Enter is no longer discarded ([#11558](https://github.com/can1357/oh-my-pi/pull/11558) by [@schickling-assistant](https://github.com/schickling-assistant)).
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
 - Fixed wrong-typed `compat.stripImageInput` in `models.yml` being silently accepted, so the documented vision opt-out is now validated like its neighbours ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
-- Starting omp no longer dies on a single ambiguous discovered model identity in `models.yml` (OmniRoute `openai-compatible-chat-<uuid>/cohere/north-mini-code:free` tying `cohere` and `openai`).
 
 ## [18.1.16] - 2026-09-09
 
@@ -942,7 +945,6 @@
 - Live task dispatch now reloads added, changed, removed, and deleted project task and retry settings before resolving subagents ([#11191](https://github.com/can1357/oh-my-pi/issues/11191)).
 - Reset `/loop` iterations combined with `--while` / `--until` no longer keep submitting without resetting when vibe mode is enabled while the condition command is still running; the loop now disables itself instead ([#10858](https://github.com/can1357/oh-my-pi/pull/10858)).
 - Returning from a focused agent (Agent Hub) now re-renders the main session's queued steering/follow-up block instead of leaving it blank until the next repaint ([#11379](https://github.com/can1357/oh-my-pi/issues/11379)).
-- Starting omp no longer dies on a single ambiguous discovered model identity in `models.yml` (OmniRoute `openai-compatible-chat-<uuid>/cohere/north-mini-code:free` tying `cohere` and `openai`).
 
 ## [18.1.15] - 2026-09-08
 

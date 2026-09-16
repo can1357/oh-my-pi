@@ -94,6 +94,8 @@
 - Fixed recovery of corrupted model caches so private backups are preserved and concurrent recovery cannot overwrite a cache that has already been restored.
 - Fixed pricing for Devin (SWE-2, SWE-1.7, and GLM-5.2 High) and Kimi Code models when upstream discovery omits cost information. SWE-2 now reflects its promotional pricing through December 31, 2026, then switches to list pricing on January 1, 2027.
 - Fixed pricing and chat routing for Devin Fusion models so composite models use their own headline rates and supported Fusion lanes connect directly instead of failing through an incompatible routing path.
+- Model-cache corruption recovery now preserves private database and sidecar backups and avoids replacing a cache already recovered by another process.
+- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient for runtime specs; curated generation explicitly uses strict identity validation, and policy rebaking remains strict by default.
 
 ## [18.2.1] - 2026-09-15
 
@@ -194,7 +196,6 @@
 
 - Fixed Command Code models outside the verified effort registry offering unsupported reasoning effort controls, and bundled the live Command Code catalog so fresh installs resolve the default model without waiting for discovery ([#11595](https://github.com/can1357/oh-my-pi/pull/11595) by [@H4vC](https://github.com/H4vC)).
 - Fixed the bundled `deepseek-flash` row shipping without context limits: it now carries its documented 1M context / 384K output so offline context accounting enforces the real window.
-- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient for runtime specs; curated generation explicitly uses strict identity validation, and policy rebaking remains strict by default.
 
 ## [18.1.16] - 2026-09-09
 
