@@ -3761,58 +3761,74 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([primary, first, second, primary]);
 	});
 
-	it("resumes an existing availability fallback after a request-scoped refusal fallback", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const availableModel = getBundledModel("openai", "gpt-4o-mini")!;
-		const refusalModel = getBundledModel("openai", "gpt-4o")!;
-		const primary = `${primaryModel.provider}/${primaryModel.id}`;
-		const available = `${availableModel.provider}/${availableModel.id}`;
-		const refusal = `${refusalModel.provider}/${refusalModel.id}`;
-		const requestedModels: string[] = [];
-		const mock = createMockModel({
-			responses: [
-				{ throw: "overloaded_error: provider returned error 503 retry-after-ms=60000" },
-				{ content: ["Availability fallback"] },
-				{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
-				{ content: ["Request-scoped fallback"] },
-				{ content: ["Availability fallback resumed"] },
-				{ content: ["Primary available again"] },
-			],
-		});
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
-				requestedModels.push(`${model.provider}/${model.id}`);
-				return mock.stream(model, context, options);
-			},
-		});
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.fallbackChains": { [primary]: [available, refusal] },
-			"retry.refusalFallbackRevertPolicy": "after-success",
-		});
-		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
-		let now = Date.now();
-		vi.spyOn(Date, "now").mockImplementation(() => now);
+	it.each([false, true])(
+		"resumes an existing availability fallback after a request-scoped refusal fallback (loops back: %s)",
+		async loopsBack => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const availableModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const refusalModel = getBundledModel("openai", "gpt-4o")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const available = `${availableModel.provider}/${availableModel.id}`;
+			const refusal = `${refusalModel.provider}/${refusalModel.id}`;
+			const requestedModels: string[] = [];
+			const mock = createMockModel({
+				responses: [
+					{ throw: "overloaded_error: provider returned error 503 retry-after-ms=60000" },
+					{ content: ["Availability fallback"] },
+					{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+					...(loopsBack
+						? [
+								{
+									stopReason: "error" as const,
+									stopDetails: { type: "refusal" },
+									errorMessage: "Replacement also declined",
+								},
+								{ content: ["Looped back to the availability fallback"] },
+							]
+						: [{ content: ["Request-scoped fallback"] }]),
+					{ content: ["Availability fallback resumed"] },
+					{ content: ["Primary available again"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": 2,
+				"retry.fallbackChains": { [primary]: [available, refusal], [refusal]: [available] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
 
-		await session.prompt("Primary is unavailable");
-		await session.waitForIdle();
-		await session.prompt("Availability fallback declines this request");
-		await session.waitForIdle();
-		expect(session.model?.id).toBe(availableModel.id);
-		expect(modelRegistry.isSelectorSuppressed(primary)).toBe(true);
-		await session.prompt("Keep using the available model");
-		await session.waitForIdle();
-		expect(requestedModels).toEqual([primary, available, available, refusal, available]);
-		expect(session.servingModel).toMatchObject({ modelIdentity: available, isFallback: true });
+			await session.prompt("Primary is unavailable");
+			await session.waitForIdle();
+			await session.prompt("Availability fallback declines this request");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(availableModel.id);
+			expect(modelRegistry.isSelectorSuppressed(primary)).toBe(true);
+			await session.prompt("Keep using the available model");
+			await session.waitForIdle();
+			const expectedModels = loopsBack
+				? [primary, available, available, refusal, available, available]
+				: [primary, available, available, refusal, available];
+			expect(requestedModels).toEqual(expectedModels);
+			expect(session.servingModel).toMatchObject({ modelIdentity: available, isFallback: true });
 
-		now += 60_001;
-		await session.prompt("Primary is available again");
-		await session.waitForIdle();
-		expect(requestedModels).toEqual([primary, available, available, refusal, available, primary]);
-		expect(session.servingModel).toMatchObject({ modelIdentity: primary, isFallback: false });
-	});
+			now += 60_001;
+			await session.prompt("Primary is available again");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([...expectedModels, primary]);
+			expect(session.servingModel).toMatchObject({ modelIdentity: primary, isFallback: false });
+		},
+	);
 
 	it("drops classifier refusal messages before later prompts", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
