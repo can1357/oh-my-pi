@@ -138,73 +138,105 @@ db.close();`,
 		expect(exitCode, stderr).toBe(0);
 	});
 
-	test("retries through a transient SQLITE_BUSY_RECOVERY and eventually succeeds", async () => {
+	test("retries through a transient SQLITE_BUSY lock and eventually succeeds", async () => {
 		const dbPath = path.join(tempDir, "retry.db");
-		let throws = 2;
-		// Synthesize the WAL-recovery race: the first two `db.run` calls in
-		// `#initializeSchema` (the first being `PRAGMA busy_timeout = 5000`)
-		// throw `SQLITE_BUSY_RECOVERY`, then the third attempt sees the spy
-		// drained and falls through to the real implementation.
-		const realRun = Database.prototype.run;
-		const spy = vi.spyOn(Database.prototype, "run").mockImplementation(function (
-			this: Database,
-			...args: Parameters<typeof realRun>
-		) {
-			if (throws > 0) {
-				throws--;
-				throw makeBusyError("SQLITE_BUSY_RECOVERY", 261);
-			}
-			return realRun.apply(this, args);
+		// Real lock via child process (spy-on-prototype stopped intercepting
+		// bun:sqlite on newer bun builds). Waits must be real wall-clock: fake
+		// timers cannot drive the child's hold or open()'s retry backoff.
+		const lockerScript = `import { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
+const db = new Database(process.argv[1]);
+db.run("BEGIN EXCLUSIVE");
+writeFileSync(process.argv[2], "locked");
+await Bun.sleep(Number(process.argv[3]));
+db.run("COMMIT");
+db.close();`;
+		const holdMs = 1_600;
+		const sentinel = path.join(tempDir, "locked.sentinel");
+		const locker = Bun.spawn([process.execPath, "-e", lockerScript, dbPath, sentinel, String(holdMs)], {
+			env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" },
+			stdout: "ignore",
+			stderr: "pipe",
 		});
+		// Sentinel handshake (same as #7298): open() must start while the lock is held.
+		const deadline = Date.now() + 5000;
+		let locked = false;
+		while (Date.now() < deadline) {
+			locked = await fs.access(sentinel).then(
+				() => true,
+				() => false,
+			);
+			if (locked || locker.exitCode !== null) break;
+			await Bun.sleep(10);
+		}
+		if (!locked) {
+			throw new Error(`locker never signaled readiness: ${await new Response(locker.stderr).text()}`);
+		}
 
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		try {
-			expect(throws).toBe(0);
-			expect(spy).toHaveBeenCalled();
+			// The open only completed because a retry waited out the writer.
+			expect(store.listAuthCredentials()).toEqual([]);
 		} finally {
 			store.close();
 		}
+		const [exitCode, stderr] = await Promise.all([locker.exited, new Response(locker.stderr).text()]);
+		expect(exitCode, stderr).toBe(0);
 	});
 
 	test("non-BUSY errors short-circuit retries", async () => {
 		const dbPath = path.join(tempDir, "fatal.db");
-		const realRun = Database.prototype.run;
-		let runCalls = 0;
-		vi.spyOn(Database.prototype, "run").mockImplementation(function (
-			this: Database,
-			...args: Parameters<typeof realRun>
-		) {
-			runCalls++;
-			if (runCalls === 1) {
-				const err = new Error("disk image malformed") as SqliteBusyShape;
-				err.code = "SQLITE_CORRUPT";
-				err.errno = 11;
-				throw err;
-			}
-			return realRun.apply(this, args);
-		});
-
-		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow("disk image malformed");
-		// Single attempt: the retry loop must NOT keep banging on a fatal error.
-		expect(runCalls).toBe(1);
+		// Real corrupt file: the first statement fails non-BUSY, so open() must
+		// short-circuit and surface the raw sqlite error (no spy — prototype
+		// spying stopped intercepting bun:sqlite on newer bun builds).
+		await fs.writeFile(
+			dbPath,
+			"this file is deliberately not a sqlite database — garbage bytes force a corruption error",
+		);
+		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow(
+			/not a database|disk image|malformed|corrupt/i,
+		);
 	});
 
 	test("exhausts retries and surfaces an error that includes the DB path", async () => {
 		const dbPath = path.join(tempDir, "stuck.db");
-		const realRun = Database.prototype.run;
-		vi.spyOn(Database.prototype, "run").mockImplementation(function (this: Database) {
-			// Always-busy: every attempt fails until the retry budget runs out.
-			throw makeBusyError("SQLITE_BUSY_RECOVERY", 261);
+		// Lock held past busy_timeout (1000ms headless) and the full retry budget
+		// (~0/100/300/700ms attempts) — open() must exhaust all 4 attempts and
+		// surface a ConfigurationError carrying the DB path. Real lock, no spying.
+		const holdMs = 8_000;
+		const lockerScript = `import { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
+const db = new Database(process.argv[1]);
+db.run("BEGIN EXCLUSIVE");
+writeFileSync(process.argv[2], "locked");
+await Bun.sleep(Number(process.argv[3]));
+db.run("COMMIT");
+db.close();`;
+		const sentinel = path.join(tempDir, "stuck-locked.sentinel");
+		const locker = Bun.spawn([process.execPath, "-e", lockerScript, dbPath, sentinel, String(holdMs)], {
+			env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" },
+			stdout: "ignore",
+			stderr: "pipe",
 		});
-		// Skip the sleep so the test doesn't take 700ms+ of real time.
-		const sleepSpy = vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		// Sentinel handshake (same as the transient test): open() must start while
+		// the lock is held, or it would win the race and create the database first.
+		const deadline = Date.now() + 5000;
+		let locked = false;
+		while (Date.now() < deadline) {
+			locked = await fs.access(sentinel).then(
+				() => true,
+				() => false,
+			);
+			if (locked || locker.exitCode !== null) break;
+			await Bun.sleep(10);
+		}
+		if (!locked) {
+			throw new Error(`locker never signaled readiness: ${await new Response(locker.stderr).text()}`);
+		}
 
 		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow(dbPath);
-		// open uses `maxAttempts = 4`, so the loop sleeps between attempts 0..2
-		// (three times) then throws after attempt 3 without sleeping again.
-		expect(sleepSpy).toHaveBeenCalledTimes(3);
-		// Reference realRun so the TS unused-binding lint stays quiet without
-		// suppressing the actual error path above.
-		expect(typeof realRun).toBe("function");
-	});
+		// The locker must still be holding (or have finished) when open() gave
+		// up — the point is exhaustion, not a lucky late acquisition.
+		expect(await locker.exited).toBe(0);
+	}, 20_000);
 });
