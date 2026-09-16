@@ -24,6 +24,7 @@ import {
 	formatSearchProviderFailures,
 	getSearchProvider,
 	getSearchProviderLabel,
+	isSearchProviderExcluded,
 	resolveProviderCandidates,
 	type SearchProvider,
 	type SearchProviderCandidate,
@@ -41,14 +42,15 @@ import {
 
 /**
  * Per-request provider override. Explicit selection is terminal — it bypasses
- * the configured chain, the exclusion list, and the credential gate that keeps
- * keyless fallbacks out of the auto chain — so the agent can reach a specific
- * corpus or engine instead of whatever the chain ranks first.
+ * the configured chain and the credential gate that keeps keyless fallbacks out
+ * of the auto chain, so the agent can reach a specific corpus or engine instead
+ * of whatever the chain ranks first. `providers.webSearchExclude` still wins:
+ * an excluded provider is refused, never queried.
  */
 const searchProviderSchema = type
 	.enumerated(...SEARCH_PROVIDER_PREFERENCES)
 	.describe(
-		"search provider for this request; overrides the providers.webSearch setting (default: auto = configured fallback chain)",
+		"search provider for this request; overrides the providers.webSearch setting (default: auto = configured fallback chain). providers.webSearchExclude still applies",
 	);
 
 /** Web search tool parameters schema */
@@ -159,6 +161,17 @@ async function executeSearch(
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
+		// `providers.webSearchExclude` is documented as providers web_search must
+		// never use, even as fallbacks — so a per-request override cannot reach
+		// one either. Refuse before the query leaves the process instead of
+		// silently answering from a different engine.
+		if (isSearchProviderExcluded(explicitProvider)) {
+			const message = `${getSearchProviderLabel(explicitProvider)} web search is excluded by providers.webSearchExclude. Remove it from that setting or omit the provider argument to use the configured chain.`;
+			return {
+				content: [{ type: "text" as const, text: `Error: ${message}` }],
+				details: { response: { provider: explicitProvider, sources: [] }, error: message },
+			};
+		}
 		candidates = [{ id: explicitProvider, explicit: true }];
 	} else {
 		// `--provider auto` and the default both walk the configured chain;

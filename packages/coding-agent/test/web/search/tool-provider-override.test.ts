@@ -1,8 +1,9 @@
 /**
  * `web_search` exposes the per-request `provider` override that `executeSearch`
  * already implemented for the CLI path: an explicit provider is terminal, so it
- * bypasses the configured chain and its exclusions, and fails instead of
- * quietly falling back to another engine.
+ * bypasses the configured chain ordering and fails instead of quietly falling
+ * back to another engine. `providers.webSearchExclude` outranks the override —
+ * an excluded engine is refused, never queried.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -50,6 +51,7 @@ function mockProviders(providers: provider.SearchProvider[]) {
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	provider.setExcludedSearchProviders([]);
 	resetSettingsForTest();
 });
 
@@ -78,7 +80,7 @@ describe("web_search provider parameter", () => {
 		expect(chain).not.toHaveBeenCalled();
 	});
 
-	it("reaches a provider the configured chain excludes", async () => {
+	it("reaches an engine the configured chain would not rank first", async () => {
 		vi.spyOn(provider, "resolveProviderCandidates").mockReturnValue([{ id: "brave", explicit: false }]);
 		mockProviders([hit("brave"), hit("mojeek")]);
 
@@ -88,6 +90,40 @@ describe("web_search provider parameter", () => {
 		});
 
 		expect(result.details?.response.provider).toBe("mojeek");
+	});
+
+	it("refuses an excluded provider instead of querying it", async () => {
+		const excludedSearch = vi.fn();
+		const chain = vi.spyOn(provider, "resolveProviderCandidates");
+		mockProviders([fakeProvider("mojeek", excludedSearch), hit("brave")]);
+		provider.setExcludedSearchProviders(["mojeek"]);
+
+		const result = await new WebSearchTool(FAKE_SESSION).execute("test-id", {
+			query: "anything",
+			provider: "mojeek",
+		});
+
+		expect(result.details?.error).toContain("providers.webSearchExclude");
+		const rendered = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(rendered).toContain("Error:");
+		expect(rendered).toContain("providers.webSearchExclude");
+		// Neither queried nor silently answered from a different engine.
+		expect(excludedSearch).not.toHaveBeenCalled();
+		expect(chain).not.toHaveBeenCalled();
+	});
+
+	it("still walks the chain for auto while an excluded engine stays unreachable", async () => {
+		provider.setExcludedSearchProviders(["mojeek"]);
+		const chain = vi.spyOn(provider, "resolveProviderCandidates").mockReturnValue([{ id: "brave", explicit: false }]);
+		mockProviders([hit("brave")]);
+
+		const result = await new WebSearchTool(FAKE_SESSION).execute("test-id", {
+			query: "anything",
+			provider: "auto",
+		});
+
+		expect(result.details?.response.provider).toBe("brave");
+		expect(chain).toHaveBeenCalledTimes(1);
 	});
 
 	it("fails instead of falling back when the requested provider is unavailable", async () => {
