@@ -78,13 +78,13 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			),
 		);
 
-		await expect(loadAuthAccountPolicyConfig(agentDir)).resolves.toEqual({
+		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 			accountPolicies,
 			defaultReservePct: 17,
 		});
 
 		await Bun.write(path.join(agentDir, "config.yml"), "auth: {}\n");
-		await expect(loadAuthAccountPolicyConfig(agentDir)).resolves.toEqual({
+		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 			accountPolicies: [],
 			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
 		});
@@ -251,7 +251,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
 			for (const { yaml, error } of invalidConfigs) {
 				await Bun.write(path.join(agentDir, "config.yml"), yaml);
-				await expect(loadAuthAccountPolicyConfig(agentDir)).rejects.toThrow(error);
+				await expect(loadAuthAccountPolicyConfig({ agentDir })).rejects.toThrow(error);
 			}
 		});
 	});

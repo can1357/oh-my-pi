@@ -833,6 +833,74 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(await authStorage.getApiKey("openai-codex", "automatic-reserve-pin")).toBe("api-acct-sibling");
 	});
 
+	test("keeps an automatic warm pin when the measured healthy sibling fails refresh preflight", async () => {
+		if (!store) throw new Error("test setup failed");
+		const base = Date.now();
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => base + clockOffset);
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-protected" },
+					priority: 100,
+				},
+			],
+		});
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{
+				type: "oauth",
+				...createCredential("acct-measured", "measured@example.com"),
+				expires: base + 5 * 60_000,
+			},
+			{ type: "oauth", ...createCredential("acct-unknown", "unknown@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-protected",
+			createCodexUsageReport({
+				accountId: "acct-protected",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-measured",
+			createCodexUsageReport({
+				accountId: "acct-measured",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+			}),
+		);
+		expect(await authStorage.getApiKey("openai-codex", "preflight-reserve-pin")).toBe("api-acct-protected");
+
+		clockOffset = 10 * 60_000;
+		usageByAccount.set(
+			"acct-protected",
+			createCodexUsageReport({
+				accountId: "acct-protected",
+				primary: { usedFraction: 0.95, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.95, resetInMs: WEEK_MS },
+			}),
+		);
+		await authStorage.invalidateUsageCache("openai-codex");
+		const refreshOAuthToken = vi
+			.spyOn(oauthUtils, "refreshOAuthToken")
+			.mockRejectedValue(new Error("temporary refresh failure"));
+
+		expect(await authStorage.getApiKey("openai-codex", "preflight-reserve-pin")).toBe("api-acct-protected");
+
+		clockOffset = 20 * 60_000;
+		refreshOAuthToken.mockImplementation(async (_provider, credential) => ({
+			...credential,
+			access: `refreshed-${credential.accountId}`,
+			expires: Date.now() + HOUR_MS,
+		}));
+		await authStorage.invalidateUsageCache("openai-codex");
+		expect(await authStorage.getApiKey("openai-codex", "preflight-reserve-pin")).toBe("api-acct-measured");
+	});
+
 	test("keeps an explicit user pin authoritative over reserve", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {

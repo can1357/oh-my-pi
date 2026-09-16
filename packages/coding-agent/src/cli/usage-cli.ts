@@ -1127,7 +1127,13 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: 
 }
 
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
-	const authStorage = await discoverAuthStorage();
+	const settings = await Settings.loadReadOnly();
+	const authStorage = await discoverAuthStorage(undefined, {
+		accountPolicies: settings.get("auth.accountPolicies"),
+		authStorageOptions: {
+			defaultReservePct: settings.get("retry.usageReservePct"),
+		},
+	});
 	try {
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
@@ -1200,7 +1206,6 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.stdout.write(`${formatUsageHistory(entries, sinceMs, nowMs, redaction)}\n`);
 			return;
 		}
-		const settings = await Settings.loadReadOnly();
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: settings.get("retry.usageReservePct"),
 			getAccountPolicy: (provider, identity) => authStorage.getAccountPolicy(provider, identity),

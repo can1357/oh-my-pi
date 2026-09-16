@@ -227,12 +227,26 @@ export interface AuthAccountPolicyConfig {
 	defaultReservePct: number;
 }
 
-/** Load and strictly validate account-selection policy configuration from the active main config file. */
-export async function loadAuthAccountPolicyConfig(agentDir: string = getAgentDir()): Promise<AuthAccountPolicyConfig> {
-	const snapshot = await readConfigYaml(agentDir);
+export interface LoadAuthAccountPolicyConfigOptions {
+	agentDir?: string;
+	accountPolicies?: unknown;
+	usageReservePct?: unknown;
+}
+
+/** Load and strictly validate account-selection policy configuration, with main-config fallback. */
+export async function loadAuthAccountPolicyConfig(
+	options: LoadAuthAccountPolicyConfigOptions = {},
+): Promise<AuthAccountPolicyConfig> {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const needsMainConfigFallback = options.accountPolicies === undefined || options.usageReservePct === undefined;
+	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
 	return {
-		accountPolicies: parseAuthAccountPolicies(snapshot.accountPolicies),
-		defaultReservePct: parseUsageReservePct(snapshot.usageReservePct),
+		accountPolicies: parseAuthAccountPolicies(
+			options.accountPolicies === undefined ? snapshot?.accountPolicies : options.accountPolicies,
+		),
+		defaultReservePct: parseUsageReservePct(
+			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
+		),
 	};
 }
 
@@ -356,15 +370,11 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
-	const suppliedDefaultReservePct = options.authStorageOptions?.defaultReservePct;
-	const needsMainConfigFallback = options.accountPolicies === undefined || suppliedDefaultReservePct === undefined;
-	const accountPolicySnapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
-	const accountPolicies = parseAuthAccountPolicies(
-		options.accountPolicies === undefined ? accountPolicySnapshot?.accountPolicies : options.accountPolicies,
-	);
-	const defaultReservePct = parseUsageReservePct(
-		suppliedDefaultReservePct === undefined ? accountPolicySnapshot?.usageReservePct : suppliedDefaultReservePct,
-	);
+	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
+		agentDir,
+		accountPolicies: options.accountPolicies,
+		usageReservePct: options.authStorageOptions?.defaultReservePct,
+	});
 
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());

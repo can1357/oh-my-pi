@@ -5577,21 +5577,23 @@ export class AuthStorage {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		const reserveWouldEvictAutomaticPin =
+		const reserveWouldEvictAutomaticPin = (excludePreflightFailures: boolean): boolean =>
 			!sessionPinIsExplicit &&
 			preferredCandidate?.inReserve === true &&
 			candidates.some(
 				candidate =>
-					candidate.selection.index !== sessionPreferredIndex &&
+					candidate !== preferredCandidate &&
+					(!excludePreflightFailures || !preflightFailures.has(candidate)) &&
 					candidate.reserveMeasured === true &&
 					candidate.inReserve === false,
 			);
+		const reserveWouldEvictBeforePreflight = reserveWouldEvictAutomaticPin(false);
 		// A warm automatic pin normally wins. Reserve is the one policy allowed
 		// to evict it, and only while a sibling is confirmed outside reserve.
 		if (
 			!hasPlanRequirement &&
 			sessionPreferredCandidate > 0 &&
-			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !reserveWouldEvictAutomaticPin))
+			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !reserveWouldEvictBeforePreflight))
 		) {
 			const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
 			candidates.unshift(preferred);
@@ -5710,6 +5712,22 @@ export class AuthStorage {
 			}),
 		);
 
+		const reserveWouldEvictAfterPreflight = reserveWouldEvictAutomaticPin(true);
+		if (
+			!hasPlanRequirement &&
+			preferredCandidate !== undefined &&
+			!preflightFailures.has(preferredCandidate) &&
+			sessionPreferredIsWarm &&
+			!sessionPinIsExplicit &&
+			!reserveWouldEvictAfterPreflight
+		) {
+			const preferredIndex = candidates.indexOf(preferredCandidate);
+			if (preferredIndex > 0) {
+				candidates.splice(preferredIndex, 1);
+				candidates.unshift(preferredCandidate);
+			}
+		}
+
 		// Enforce a tier only when at least one account is confirmed eligible. If
 		// every report is unknown or ineligible, preserve trial/grandfathered access
 		// by allowing the normal candidate fallback to attempt the request.
@@ -5724,7 +5742,7 @@ export class AuthStorage {
 		// unenforced and the pin is not known-ineligible) so an active session never
 		// silently migrates accounts mid-conversation; blocked, exhausted, or
 		// known-ineligible pins still fall through to the ranked sibling.
-		if (hasPlanRequirement && sessionPreferredCandidate > 0 && !reserveWouldEvictAutomaticPin) {
+		if (hasPlanRequirement && sessionPreferredCandidate > 0 && !reserveWouldEvictAfterPreflight) {
 			const preferred = candidates[sessionPreferredCandidate]!;
 			const planEligibility = getOpenAICodexPlanEligibility(preferred.usage, planRequirement);
 			if (planEligibility === true || (!enforcePlanRequirement && planEligibility !== false)) {

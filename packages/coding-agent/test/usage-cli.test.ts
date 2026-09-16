@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
@@ -827,5 +829,60 @@ describe("formatUsageHistory", () => {
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).toContain("du*");
+	});
+});
+
+describe("usage command configuration", () => {
+	it("uses PI_CONFIG_FILES account policies during auth discovery", async () => {
+		using tempDir = TempDir.createSync("@omp-usage-overlay-");
+		const overlayPath = tempDir.join("overlay.yml");
+		await Promise.all([
+			Bun.write(
+				tempDir.join("config.yml"),
+				[
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: stale@example.test",
+					"      unsupported: true",
+					"",
+				].join("\n"),
+			),
+			Bun.write(
+				overlayPath,
+				[
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: overlay@example.test",
+					"      priority: 20",
+					"retry:",
+					"  usageReservePct: 17",
+					"",
+				].join("\n"),
+			),
+		]);
+		const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
+		const proc = Bun.spawn([process.execPath, cliEntry, "usage", "invalidate"], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				NO_COLOR: "1",
+				PI_CODING_AGENT_DIR: tempDir.path(),
+				PI_CONFIG_FILES: overlayPath,
+			},
+		});
+		const [exitCode, output, error] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+
+		expect(error).toBe("");
+		expect(exitCode).toBe(0);
+		expect(output).toBe("Invalidated cached usage reports for all providers.\n");
 	});
 });
