@@ -33,6 +33,17 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandFailureRetryAt.delete(command);
 }
 
+/**
+ * Drop every cached `!command` result and failure backoff so the next
+ * {@link resolveConfigValue} re-runs the command. Used by an explicit catalog
+ * refresh (`omp models refresh`, TUI F5) — not by ordinary online discovery —
+ * so users can recover a stuck command-backed credential without restarting.
+ */
+export function invalidateAllCommandConfigs(): void {
+	commandValueCache.clear();
+	commandFailureRetryAt.clear();
+}
+
 function resolveCommandConfig(command: string, options?: ResolveConfigValueOptions): string | undefined {
 	if (options?.forceCommandRefresh === true) {
 		commandValueCache.delete(command);

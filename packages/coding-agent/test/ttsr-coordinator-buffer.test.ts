@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it, type Mock, vi } from "bun:test";
 import type { Agent, AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -29,10 +29,10 @@ function makeRule(scope: string): Rule {
 
 interface CoordinatorHostBundle {
 	host: TtsrCoordinatorHost;
-	emitSessionEvent: ReturnType<typeof vi.fn>;
-	followUp: ReturnType<typeof vi.fn>;
-	hasQueuedMessages: ReturnType<typeof vi.fn>;
-	scheduleAgentContinue: ReturnType<typeof vi.fn>;
+	emitSessionEvent: Mock<(event: AgentSessionEvent) => Promise<void>>;
+	followUp: Mock<(message: AgentMessage) => void>;
+	hasQueuedMessages: Mock<() => boolean>;
+	scheduleAgentContinue: Mock<(options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => void>;
 }
 
 function makeHost(): CoordinatorHostBundle {

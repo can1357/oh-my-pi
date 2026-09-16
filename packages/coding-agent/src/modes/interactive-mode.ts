@@ -847,6 +847,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
+	/**
+	 * Set once a graceful {@link shutdown} teardown threw. The teardown is
+	 * promise-memoized (and the session manager latches its disk error), so
+	 * re-running it repeats the identical failure — without this flag the user is
+	 * trapped in a process that can never close (#12238: a corrupted session file
+	 * makes the close-time rewrite refuse to clobber it). The next shutdown is the
+	 * escape hatch: exit without writing the session log.
+	 */
+	#teardownFailed = false;
+	/** True once a graceful `shutdown()` teardown failed at the memoized
+	 *  dispose stage. Surfaced to the input controller so the next single
+	 *  Ctrl+C skips the double-tap gate and runs `shutdown()` — which
+	 *  force-quits — instead of merely clearing the editor (#12238). */
+	get teardownFailed(): boolean {
+		return this.#teardownFailed;
+	}
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
 	 *  abort the remaining work instead of stacking another no-op call. */
@@ -5431,12 +5447,27 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
+		// The previous graceful teardown failed AT the memoized session.dispose()
+		// (the session is already disposing), so it re-rejects identically forever
+		// and the process can never close (#12238: a corrupted session file makes
+		// the close-time rewrite refuse to clobber it). This second attempt is the
+		// escape hatch: quit without writing the session log. 130 = 128 + SIGINT,
+		// matching the Ctrl+C hard-abort exit code in input-controller.
+		if (this.#teardownFailed) {
+			try {
+				await postmortem.quit(130);
+			} catch {
+				// Extension/hook loading temporarily guards process.exit. Cleanup
+				// has already run; bypass that guard for this host-owned escape.
+				postmortem.exitProcess(130);
+			}
+			return;
+		}
 		this.#isShuttingDown = true;
 		try {
 			await this.#teardown();
 		} catch (error) {
-			this.#isShuttingDown = false;
-			this.showError(`Could not close session: ${error instanceof Error ? error.message : String(error)}`);
+			this.#handleTeardownError("close", error);
 			return;
 		}
 
@@ -5449,6 +5480,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		await postmortem.quit(0);
+	}
+
+	#handleTeardownError(action: "close" | "restart", error: unknown): void {
+		this.#isShuttingDown = false;
+		const detail = error instanceof Error ? error.message : String(error);
+		// Arm the escape hatch only once dispose() has begun: its promise is
+		// memoized, so a retry can only re-fail. A failure BEFORE dispose (a
+		// transient BTW/live-command flush) leaves the session undisposed and
+		// the teardown genuinely retryable, so it must not force-quit.
+		this.#teardownFailed = this.session.isDisposed;
+		this.showError(
+			this.#teardownFailed
+				? `Could not ${action} session: ${detail}\nPress Ctrl+C again to exit without saving the session log.`
+				: `Could not ${action} session: ${detail}`,
+		);
 	}
 
 	/**
@@ -5468,8 +5514,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			await this.#teardown();
 		} catch (error) {
-			this.#isShuttingDown = false;
-			this.showError(`Could not restart session: ${error instanceof Error ? error.message : String(error)}`);
+			this.#handleTeardownError("restart", error);
 			return;
 		}
 

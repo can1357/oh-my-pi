@@ -1323,6 +1323,15 @@ export class InputController {
 			postmortem.exitProcess(130); // 128 + SIGINT
 		}
 
+		// A graceful close already failed at the memoized dispose stage (#12238),
+		// so re-running it can only re-fail. The user was told one more Ctrl+C
+		// exits; honour that with a single press — skip the double-tap gate below
+		// and let shutdown() take its force-quit escape hatch.
+		if (this.ctx.teardownFailed) {
+			void this.ctx.shutdown();
+			return;
+		}
+
 		const now = Date.now();
 		if (now - this.ctx.lastSigintTime < 500) {
 			void this.ctx.shutdown();

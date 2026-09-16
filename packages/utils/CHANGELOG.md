@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.2.2] - 2026-09-16
+
 ### Added
 
-- Added `openSqliteDatabase` and `openSqliteDatabaseSync` with path-attributed errors and opt-in corruption recovery that preserves private database and sidecar backups; async opens also retry busy errors.
+- Added asynchronous and synchronous SQLite database opening APIs with path-attributed errors, optional corruption recovery that preserves private database and sidecar backups, and automatic retries for transient busy errors during asynchronous opens.
 
 ## [18.2.1] - 2026-09-15
 

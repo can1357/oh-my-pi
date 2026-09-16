@@ -325,6 +325,30 @@ export function resolveCascadeRules(cascade: CompiledCascade, target: ResolveTar
 	return cloneAxes(resolveOverIndex(buildRuleIndex(cascade), target));
 }
 
+/**
+ * Whether the effort ladder this target resolves to comes from a rule scoped
+ * to the model's identity (a recognized class, family, revision, or an explicit
+ * model selector), rather than a provider/api-wide or fallback unknown-class
+ * rule that any unrecognized id at that provider inherits.
+ *
+ * Discovery reads this to tell reviewed tiers apart from a blanket default, so
+ * catalog-published tiers can correct the latter and never the former.
+ */
+export function hasModelScopedEffortsRule(target: ResolveTarget): boolean {
+	const winners: WinnerTable = {};
+	for (const { rule, rank } of rankRelevantRules(getRuleIndex(), prepareTarget(target))) {
+		contest(winners, rule.compiled.thinking, rank, rule, target);
+	}
+	const winner = winners.efforts?.rule.compiled;
+	if (winner === undefined) return false;
+	return (
+		(winner.class !== undefined && winner.class !== "unknown") ||
+		winner.family !== undefined ||
+		winner.revision !== undefined ||
+		winner.models !== undefined
+	);
+}
+
 function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes {
 	const ranked = rankRelevantRules(index, prepareTarget(target));
 	let reasoning = target.reasoning === true;

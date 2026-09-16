@@ -61,6 +61,7 @@ import {
 import {
 	type CommandApiKeyResolution,
 	createLiveConfigHeaders,
+	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
 	resolveConfigHeaders,
@@ -211,6 +212,17 @@ function isExtendedContextEnabledFromSettings(settingsInstance?: Settings): bool
 	}
 }
 
+/**
+ * Extra knobs for {@link ModelRegistry.refresh} / {@link ModelRegistry.refreshProvider}.
+ * Online discovery (`strategy: "online"`) is independent of credential minting:
+ * opening `/models` and hovering a provider fetch catalogs without re-running
+ * `!command` helpers. Pass `refreshCommandCredentials` only for explicit user
+ * refresh (`omp models refresh`, TUI F5).
+ */
+export interface ModelRegistryRefreshOptions {
+	refreshCommandCredentials?: boolean;
+}
+
 /** Authentication material returned to legacy extensions for one model request. */
 export type ResolvedRequestAuth =
 	| {
@@ -272,6 +284,10 @@ export class ModelRegistry {
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
 	#runtimeProviderApiKeys: Map<string, string> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
+	// Command-backed values from registerProvider (apiKey + provider/model
+	// headers). Separate from #commandConfigsByProvider because static reload
+	// rebuilds that map from models.yml only; runtime entries must survive.
+	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
 	// Credential-aware model projections registered via
 	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
 	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
@@ -341,8 +357,45 @@ export class ModelRegistry {
 	#invalidateProviderCommandConfigs(provider: string): void {
 		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
 		const configs = this.#commandConfigsByProvider.get(provider);
-		if (!configs) return;
-		for (const config of configs) invalidateCommandConfig(config);
+		if (configs) {
+			for (const config of configs) invalidateCommandConfig(config);
+		}
+		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
+		if (!runtimeConfigs) return;
+		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+	}
+
+	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
+		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
+		this.#collectCommandConfigValues(target, config.apiKey, config.headers);
+		for (const modelDef of config.models ?? []) {
+			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+		}
+		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
+		else this.#runtimeCommandConfigsByProvider.delete(providerName);
+	}
+
+	/** Fold `!command` headers from a live `fetchDynamicModels` payload into the runtime tracker. */
+	#recordRuntimeModelHeaderCommands(
+		providerName: string,
+		models: readonly { headers?: Record<string, string> }[],
+	): void {
+		if (models.length === 0) return;
+		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
+		for (const modelDef of models) {
+			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+		}
+		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
+	}
+
+	#reloadStaticModelsForRefresh(options?: ModelRegistryRefreshOptions, providerId?: string): void {
+		if (options?.refreshCommandCredentials) {
+			if (providerId) this.#invalidateProviderCommandConfigs(providerId);
+			else invalidateAllCommandConfigs();
+			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+			return;
+		}
+		this.#reloadStaticModels();
 	}
 
 	#installProviderApiKey(provider: string, keyConfig: string): void {
@@ -405,8 +458,14 @@ export class ModelRegistry {
 	/**
 	 * Reload models from disk (built-in + custom config).
 	 */
-	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
-		this.#reloadStaticModels();
+	async refresh(
+		strategy: ModelRefreshStrategy = "online-if-uncached",
+		options?: ModelRegistryRefreshOptions,
+	): Promise<void> {
+		// Credential minting is opt-in. `strategy: "online"` only means "hit the
+		// network for catalogs" — the unscoped model hub opens with that strategy
+		// as a background reconcile, and must not spawn `!command` helpers.
+		this.#reloadStaticModelsForRefresh(options);
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
@@ -537,8 +596,15 @@ export class ModelRegistry {
 		for (const settle of this.#initialRefreshWaiters) settle();
 	}
 
-	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		this.#reloadStaticModels();
+	async refreshProvider(
+		providerId: string,
+		strategy: ModelRefreshStrategy = "online",
+		options?: ModelRegistryRefreshOptions,
+	): Promise<void> {
+		// Hover / auto-refresh uses `"online"` for a live catalog. Only F5 (and
+		// other explicit callers) pass refreshCommandCredentials to re-mint
+		// `!command` keys and headers for this provider.
+		this.#reloadStaticModelsForRefresh(options, providerId);
 		for (const selector of this.#suppressedSelectors.keys()) {
 			if (selector.startsWith(`${providerId}/`)) {
 				this.#suppressedSelectors.delete(selector);
@@ -1075,7 +1141,14 @@ export class ModelRegistry {
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			if (!cache) {
-				if (sharedCatalogProvider) {
+				const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+				const discoveryExpected =
+					sharedCatalogProvider ||
+					(descriptor !== undefined &&
+						(this.authStorage.hasAuth(providerId) ||
+							descriptor.allowUnauthenticated === true ||
+							this.#keylessProviders.has(providerId)));
+				if (discoveryExpected) {
 					this.#providerDiscoveryStates.set(providerId, {
 						provider: providerId,
 						status: "idle",
@@ -2096,27 +2169,25 @@ export class ModelRegistry {
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
-			if (options.modelsDev) {
-				const status =
-					result.source === "cache"
-						? "cached"
-						: result.source === "bundled" && result.stale
-							? "unavailable"
-							: result.source === "bundled"
-								? "idle"
-								: result.models.length > 0
-									? "ok"
-									: "empty";
-				this.#providerDiscoveryStates.set(options.providerId, {
-					provider: options.providerId,
-					status,
-					optional: false,
-					stale: result.stale,
-					fetchedAt: result.updatedAt,
-					source: result.source,
-					models: models.map(model => model.id),
-				});
-			}
+			const status =
+				result.source === "cache"
+					? "cached"
+					: result.source === "bundled" && result.stale
+						? "unavailable"
+						: result.source === "bundled"
+							? "idle"
+							: result.models.length > 0
+								? "ok"
+								: "empty";
+			this.#providerDiscoveryStates.set(options.providerId, {
+				provider: options.providerId,
+				status,
+				optional: false,
+				stale: result.stale,
+				fetchedAt: result.updatedAt,
+				source: result.source,
+				models: models.map(model => model.id),
+			});
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && !result.stale) {
 				authoritativeProviders.add(options.providerId);
@@ -2127,9 +2198,21 @@ export class ModelRegistry {
 			}
 			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const previous = this.#providerDiscoveryStates.get(options.providerId);
+			this.#providerDiscoveryStates.set(options.providerId, {
+				provider: options.providerId,
+				status: "unavailable",
+				optional: previous?.optional ?? false,
+				stale: true,
+				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
+				...(previous?.source !== undefined ? { source: previous.source } : {}),
+				models: previous?.models ?? [],
+				error: message,
+			});
 			logger.warn("model discovery failed for provider", {
 				provider: options.providerId,
-				error: error instanceof Error ? error.message : String(error),
+				error: message,
 			});
 			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
 		}
@@ -2700,6 +2783,7 @@ export class ModelRegistry {
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
+		this.#runtimeCommandConfigsByProvider.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
@@ -2852,6 +2936,7 @@ export class ModelRegistry {
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}
+		this.#recordRuntimeCommandConfigs(providerName, config);
 
 		if (config.models && config.models.length > 0) {
 			// Build model overlays that persist across refresh() cycles
@@ -2943,6 +3028,9 @@ export class ModelRegistry {
 					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 						fetcher(resolvedKey),
 					);
+					// Dynamic rows can carry `!command` headers that are not on the
+					// registerProvider() config; track them so F5 / 401 can evict the cache.
+					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
 					const results: Model<Api>[] = [];
 					for (const modelDef of modelDefs) {
 						const overlay = buildCustomModelOverlay(

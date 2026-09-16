@@ -16,10 +16,10 @@ const TRANSCRIPT_PREFIX = "Settled transcript row ";
 
 /** Below-transcript chrome that inflates on demand, mimicking a confirmation dialog or a tall multi-line editor swapped in above the input. */
 class InlineWidget implements Component {
-	expanded = false;
+	rows = 0;
 
 	render(): readonly string[] {
-		return this.expanded ? Array.from({ length: 24 }, (_, i) => `Live widget row ${i}`) : [];
+		return Array.from({ length: this.rows }, (_, i) => `Live widget row ${i}`);
 	}
 }
 
@@ -55,10 +55,10 @@ function makeHarness(): Harness {
 /** Settle, grow the inline chrome, settle, shrink it back, settle. */
 async function cycleWidget(h: Harness): Promise<void> {
 	await h.scheduler.settle(h.terminal);
-	h.widget.expanded = true;
+	h.widget.rows = 24;
 	h.composer.ui.requestRender();
 	await h.scheduler.settle(h.terminal);
-	h.widget.expanded = false;
+	h.widget.rows = 0;
 	h.composer.ui.requestRender();
 	await h.scheduler.settle(h.terminal);
 }
@@ -111,7 +111,7 @@ describe("composer inline shrink (#11007)", () => {
 		// rendering before shrinking. The retirement baseline must not adopt the
 		// expanded peak at the resize, or the frames before the shrink retire
 		// rows the shrink cannot reclaim and the editor is stranded again.
-		h.widget.expanded = true;
+		h.widget.rows = 24;
 		h.composer.ui.requestRender();
 		await h.scheduler.settle(h.terminal);
 		h.terminal.resize(COLUMNS, shorter);
@@ -120,7 +120,7 @@ describe("composer inline shrink (#11007)", () => {
 			h.composer.ui.requestRender();
 			await h.scheduler.settle(h.terminal);
 		}
-		h.widget.expanded = false;
+		h.widget.rows = 0;
 		h.composer.ui.requestRender();
 		await h.scheduler.settle(h.terminal);
 
@@ -128,6 +128,32 @@ describe("composer inline shrink (#11007)", () => {
 		expect(after.findIndex(row => row.includes("EDITOR"))).toBe(shorter - 1);
 		const lastContent = after.reduce((last, row, i) => (row.length > 0 ? i : last), -1);
 		expect(lastContent).toBe(shorter - 1);
+
+		h.composer.stop();
+	});
+
+	it("clips the live tail from the top instead of compacting it when the chrome grows a few rows", async () => {
+		const h = makeHarness();
+		await h.scheduler.settle(h.terminal);
+
+		// A persistent few-row growth (multi-line prompt, todo HUD, subagent badge)
+		// lifts the chrome above the retirement baseline. The tail must scroll
+		// off the top like native history would — not collapse into the
+		// one-row-per-block emergency layout that drops every inter-block blank
+		// and strands the freed rows below the editor.
+		h.widget.rows = 3;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+
+		const view = h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+		const editorRow = view.findIndex(row => row.includes("EDITOR"));
+		expect(editorRow).toBe(ROWS - 1);
+		const transcriptRows = view.slice(0, editorRow - 3);
+		const separators = transcriptRows.filter(
+			(row, i) => row === "" && transcriptRows[i - 1]?.startsWith(TRANSCRIPT_PREFIX),
+		);
+		expect(separators.length).toBeGreaterThan(0);
+		expect(transcriptRows.at(-1)).toBe(`${TRANSCRIPT_PREFIX}${TRANSCRIPT_ROWS - 1}`);
 
 		h.composer.stop();
 	});
