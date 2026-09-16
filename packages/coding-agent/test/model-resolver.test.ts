@@ -1196,6 +1196,46 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-5:high"]);
 	});
 
+	test("suffixed task aliases select the configured task model and requested effort", () => {
+		const settings = Settings.isolated({
+			modelRoles: { task: "anthropic/claude-sonnet-4-5:low" },
+		});
+
+		for (const agentModel of ["@task:high", "pi/task:high"]) {
+			const selection = resolveAgentModelSelection({
+				agentModel,
+				settings,
+				activeModelPattern: "openai/gpt-4o",
+			});
+
+			expect(selection.role).toBe("task");
+			const result = parseModelPattern(selection.patterns[0]!, mockModels);
+			expect(result.model).toBe(mockModels[0]);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+		}
+	});
+
+	test("suffixed unset task aliases inherit the active model at the requested effort without a role", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o" },
+		});
+
+		for (const agentModel of ["@task:high", "pi/task:high"]) {
+			const selection = resolveAgentModelSelection({
+				agentModel,
+				settings,
+				activeModelPattern: "anthropic/claude-sonnet-4-5:low",
+			});
+
+			expect(selection.role).toBeUndefined();
+			const result = parseModelPattern(selection.patterns[0]!, mockModels);
+			expect(result.model).toBe(mockModels[0]);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+		}
+	});
+
 	test("accepts YAML list values for configured task role patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {

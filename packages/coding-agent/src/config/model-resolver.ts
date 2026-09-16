@@ -1397,15 +1397,9 @@ function resolveEffectiveAgentModelSelection(
 		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
 		: undefined;
 	if (configuredAgentPatterns.length > 0) {
-		const taskAlias = matchSessionInheritedPattern(singleAgentPattern ?? "", { includeTaskAlias: true });
-		if (taskAlias?.level !== undefined && singleAgentPattern?.startsWith("@task")) return { source: agentModel, patterns: configuredAgentPatterns.map(pattern => applyRequestedThinkingLevel(pattern, taskAlias.level!)) };
-		if (
-			singleAgentPattern === formatModelRoleAlias("task") ||
-			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
-		) {
+		if (!agentInheritance || resolveExplicitModelRole(singleAgentPattern, settings) === "task") {
 			return { source: agentModel, patterns: configuredAgentPatterns };
 		}
-		if (!agentInheritance) return { source: agentModel, patterns: configuredAgentPatterns };
 	}
 
 	return inheritSessionModel(agentInheritance);
