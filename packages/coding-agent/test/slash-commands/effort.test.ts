@@ -4,6 +4,10 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
+	ModelControls,
+	type ModelControlsHost,
+} from "@oh-my-pi/pi-coding-agent/session/model-controls";
+import {
 	buildTuiBuiltinSlashCommands,
 	lookupBuiltinSlashCommand,
 	type SlashCommandRuntime,
@@ -19,21 +23,43 @@ interface Harness {
 	tuiRuntime: TuiSlashCommandRuntime;
 	level: () => ConfiguredThinkingLevel | undefined;
 	configChanges: () => number;
+	controls: ModelControls;
 }
 
-function harness(options: { reasoning?: boolean; efforts?: readonly Effort[]; selectorEfforts?: readonly Effort[] } = {}): Harness {
+function harness(options: { reasoning?: boolean; efforts?: readonly Effort[] } = {}): Harness {
 	const outputs: string[] = [];
 	let configured: ConfiguredThinkingLevel | undefined;
 	let configChanges = 0;
-	const model = { provider: "test", id: "test-model", reasoning: options.reasoning ?? true } as Model;
+	const model = {
+		provider: "test",
+		id: "test-model",
+		reasoning: options.reasoning ?? true,
+		thinking: { efforts: options.efforts ?? [Effort.Low, Effort.Medium, Effort.High] },
+	} as unknown as Model;
+	// Real ModelControls, so the selector list under test is the production one
+	// rather than a double: the exercised paths read the active model's supported
+	// efforts and push the resolved level at the agent.
+	const controls = new ModelControls(
+		{
+			agent: { setThinkingLevel: () => {}, setDisableReasoning: () => {} },
+			model: () => model,
+			promptGeneration: () => 0,
+			sessionManager: { appendThinkingLevelChange: () => Promise.resolve() },
+			clearInheritedProviderPromptCacheKey: () => {},
+			clearActiveRetryFallback: () => {},
+			emit: () => {},
+			emitNotice: () => {},
+		} as unknown as ModelControlsHost,
+		{},
+	);
 	const session = {
 		model,
 		configuredThinkingLevel: () => configured,
 		setThinkingLevel: (level: ConfiguredThinkingLevel | undefined) => {
 			configured = level;
 		},
-		getAvailableThinkingLevels: () => options.efforts ?? [Effort.Low, Effort.Medium, Effort.High],
-		getAvailableEffortSelectors: () => [ThinkingLevel.Off, AUTO_THINKING, ...(options.selectorEfforts ?? options.efforts ?? [Effort.Low, Effort.Medium, Effort.High])],
+		getAvailableThinkingLevels: () => controls.getAvailableThinkingLevels(),
+		getAvailableEffortSelectors: () => controls.getAvailableEffortSelectors(),
 	} as unknown as AgentSession;
 	const tuiRuntime = { ctx: { session } } as unknown as TuiSlashCommandRuntime;
 	return {
@@ -50,6 +76,7 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[]; se
 		tuiRuntime,
 		level: () => configured,
 		configChanges: () => configChanges,
+		controls,
 	};
 }
 
@@ -74,11 +101,20 @@ describe("/effort slash command", () => {
 		expect(effort?.getInlineHint?.("x")).toBeNull();
 	});
 
-	it("uses the model-controls selector list for completions", async () => {
-		const h = harness({ efforts: [Effort.Low, Effort.Medium], selectorEfforts: [Effort.Medium] });
+	it("offers exactly the selectors the cycle walks", async () => {
+		const h = harness({ efforts: [Effort.Low, Effort.Medium] });
 		const effort = buildTuiBuiltinSlashCommands(h.tuiRuntime).find(item => item.name === "effort");
 		const completions = await Promise.resolve(effort?.getArgumentCompletions?.(""));
-		expect(completions?.map(item => item.label)).toEqual(["off", "auto", "medium"]);
+		const controls = h.controls;
+		const cycled: ConfiguredThinkingLevel[] = [];
+		for (let step = 0; step < 4; step++) {
+			const next = controls.cycleThinkingLevel();
+			if (next === undefined) break;
+			cycled.push(next);
+		}
+		// One source of truth: the dropdown and keyboard cycling must enumerate
+		// the same selectors, so a second hardcoded list in either surface fails.
+		expect(completions?.map(item => item.label)).toEqual(cycled.slice(0, 4));
 	});
 
 	it("reports the configured level and the model's selectable levels", async () => {
