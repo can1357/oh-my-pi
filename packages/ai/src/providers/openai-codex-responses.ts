@@ -2068,7 +2068,7 @@ function isCodexStalePreviousResponseError(error: unknown): boolean {
 }
 
 function shouldPreserveCodexWebSocketAppendState(context: CodexStreamFailureContext, error: unknown): boolean {
-	if (!(error instanceof CodexProviderStreamError) || !error.code) return false;
+	if (!(error instanceof Error) || !("code" in error) || typeof error.code !== "string") return false;
 	const state = context.requestContext.websocketState;
 	return (
 		Object.hasOwn(CODEX_APPEND_PRESERVING_REJECTION_CODES, error.code.toLowerCase()) &&
@@ -2918,7 +2918,7 @@ class CodexStreamProcessor {
 		this.runtime.providerRetryAttempt += 1;
 		if (rateLimitDecision._tag === "retry") this.runtime.inBandRateLimitRetries += 1;
 		const websocketState = this.requestContext.websocketState;
-		if (websocketState) {
+		if (websocketState && !shouldPreserveCodexWebSocketAppendState(this, error)) {
 			resetCodexWebSocketAppendState(websocketState);
 			websocketState.modelsEtag = undefined;
 		}
