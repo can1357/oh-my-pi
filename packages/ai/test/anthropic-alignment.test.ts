@@ -198,6 +198,59 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["x-client-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 	});
 
+	it("sends the current Claude Code identity for Fable 5.1 OAuth requests", async () => {
+		const model = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-fable-5-1",
+			name: "Claude Fable 5.1",
+			thinking: { mode: "anthropic-adaptive", efforts: [Effort.High] },
+		});
+		let capturedUrl: string | undefined;
+		let capturedHeaders: Headers | undefined;
+		let capturedBody = "";
+		const controller = new AbortController();
+		const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			capturedUrl = input instanceof Request ? input.url : String(input);
+			capturedHeaders = new Headers(init?.headers);
+			capturedBody = typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as Uint8Array);
+			controller.abort();
+			return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		await streamAnthropic(
+			model,
+			{ messages: [{ role: "user", content: "Hi", timestamp: 0 }] },
+			{
+				apiKey: "sk-ant-oat-test",
+				isOAuth: true,
+				thinkingEnabled: true,
+				thinkingDisplay: "omitted",
+				reasoning: Effort.High,
+				fetch: fakeFetch,
+				signal: controller.signal,
+			},
+		).result();
+
+		const payload = JSON.parse(capturedBody) as {
+			model: string;
+			thinking: { type: string; display: string };
+			system: Array<{ text: string }>;
+		};
+		expect(capturedUrl).toBe("https://api.anthropic.com/v1/messages?beta=true");
+		expect(payload.model).toBe("claude-fable-5-1");
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "omitted" });
+		// Pin the verified upstream release independently of the implementation constants:
+		// comparing two values derived from the same stale pin missed the version rejection.
+		expect(capturedHeaders?.get("User-Agent")).toBe("claude-cli/2.1.273 (external, local-agent, agent-sdk/0.3.273)");
+		expect(payload.system[0].text).toMatch(
+			/^x-anthropic-billing-header: cc_version=2\.1\.273\.[0-9a-f]{3}; cc_entrypoint=local-agent; cch=[0-9a-f]{5};$/,
+		);
+		expect(payload.system[0].text).not.toContain("cch=00000");
+	});
+
 	it("sends redact-thinking beta only when thinking display is omitted", () => {
 		const baseArgs = {
 			model: ANTHROPIC_MODEL,

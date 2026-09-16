@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Updated Anthropic OAuth request identity to Claude Code 2.1.273 and Claude Agent SDK 0.3.273, with a wire-level regression test for Fable 5.1 requests.
+
 ## [16.4.18] - 2026-09-09
 
 ### Fixed
