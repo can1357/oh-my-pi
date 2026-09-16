@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `openSqliteDatabase` and `openSqliteDatabaseSync` with path-attributed errors and opt-in corruption recovery that preserves private database and sidecar backups; async opens also retry busy errors.
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

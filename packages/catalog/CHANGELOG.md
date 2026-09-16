@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Model-cache corruption recovery now preserves private database and sidecar backups and avoids replacing a cache already recovered by another process.
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

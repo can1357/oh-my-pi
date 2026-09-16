@@ -1277,21 +1277,22 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Terminal Title Run State",
 			description:
-				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' on Windows), '>' when it's your turn, '!' when the agent is waiting on you",
+				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' under WSL), '>' when it's your turn, '!' when the agent is waiting on you",
 		},
 	},
 	"tui.titleSpinner": {
 		type: "enum",
-		values: ["braille", "dots", "line"] as const,
+		values: ["braille", "pulse", "dots", "line"] as const,
 		default: "braille",
 		ui: {
 			tab: "appearance",
 			group: "Display",
 			label: "Terminal Title Spinner",
 			description:
-				"Glyph set for the working-state spinner in the terminal title — braille sweep, single-dot cycle, or ASCII-safe line",
+				"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
 			options: [
 				{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+				{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
 				{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
 				{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
 			],
