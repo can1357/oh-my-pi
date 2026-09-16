@@ -460,6 +460,7 @@ import {
 	cfgProvidersCacheRetention,
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
+	cfgRetryRefusalFallbackRevertPolicy,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
 	cfgSkillful,
@@ -1871,6 +1872,14 @@ export class AgentSession implements SettingsScope {
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
+			if (cfgRetryRefusalFallbackRevertPolicy.get(this) === "after-success") {
+				// message_end persistence and fallback attribution are asynchronous.
+				// Settle this response before restoring its model; maintenance below
+				// then checks the restored model's window before any continuation.
+				await Promise.allSettled(this.#inFlightEventHandlers);
+				if (signal?.aborted) return;
+				await this.#recovery.maybeRestoreRetryFallbackPrimary({ afterSuccessOnly: true });
+			}
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
