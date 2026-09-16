@@ -133,9 +133,7 @@ function tagInBandProviderError<TValue extends object>(value: TValue): TValue {
 /** Whether a value carries provenance from the in-band classifier rather than an HTTP status line. */
 export function hasInBandProviderErrorProvenance(value: unknown): boolean {
 	return (
-		typeof value === "object" &&
-		value !== null &&
-		(value as InBandProviderErrorTagged)[kInBandProviderError] === true
+		typeof value === "object" && value !== null && (value as InBandProviderErrorTagged)[kInBandProviderError] === true
 	);
 }
 
@@ -338,7 +336,5 @@ export function createInBandProviderErrorFromText(text: string): Error | undefin
 	}
 	// A proxy status line with no machine code to preserve: report the upstream
 	// text verbatim rather than padding it with wording of ours.
-	return tagInBandProviderError(
-		attach(new ProviderResponseError(detail, { kind: "runtime" }), IN_BAND_FLAGS),
-	);
+	return tagInBandProviderError(attach(new ProviderResponseError(detail, { kind: "runtime" }), IN_BAND_FLAGS));
 }

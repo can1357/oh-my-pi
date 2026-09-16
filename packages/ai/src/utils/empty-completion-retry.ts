@@ -108,12 +108,7 @@ export function resolveInBandRateLimitRetry(
 	message: AssistantMessage,
 	maxRetryDelayMs = 60_000,
 ): ReplaySafeProviderErrorRetryDecision {
-	return resolveTaggedInBandRateLimitRetry(
-		message,
-		message.errorStatus,
-		message.errorMessage,
-		maxRetryDelayMs,
-	);
+	return resolveTaggedInBandRateLimitRetry(message, message.errorStatus, message.errorMessage, maxRetryDelayMs);
 }
 
 /** Applies the same in-band 429 policy before a provider finalizes its error. */

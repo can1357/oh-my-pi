@@ -275,8 +275,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	return withReplaySafeStreamRetry(model, context, options, streamAzureOpenAIResponsesOnce, {
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
-		resolveProviderErrorRetry: message =>
-			resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
+		resolveProviderErrorRetry: message => resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
 	});
 };
 

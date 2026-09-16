@@ -1553,8 +1553,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
-		resolveProviderErrorRetry: message =>
-			resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
+		resolveProviderErrorRetry: message => resolveInBandRateLimitRetry(message, options?.maxRetryDelayMs ?? 60_000),
 	});
 
 function createRequestSetup(

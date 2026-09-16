@@ -294,9 +294,7 @@ describe("transport rate-limit budget", () => {
 			fetch: async () => {
 				requests++;
 				return requests === 1
-					? responsesSse([
-							{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" },
-						])
+					? responsesSse([{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" }])
 					: responsesSuccess("recovered");
 			},
 			providerRetryWait: async () => {},
@@ -316,9 +314,7 @@ describe("transport rate-limit budget", () => {
 			fetch: async () => {
 				requests++;
 				return requests === 1
-					? responsesSse([
-							{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" },
-						])
+					? responsesSse([{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" }])
 					: responsesSuccess("recovered");
 			},
 			providerRetryWait: async () => {},

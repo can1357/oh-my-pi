@@ -556,8 +556,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					signal: watchdog.signal,
 					fetch: options.fetch,
 					rateLimitBudget: true,
-					shouldRetryResponse: (response, bodyText) =>
-						!AIError.isUsageLimitOutcome(response.status, bodyText),
+					shouldRetryResponse: (response, bodyText) => !AIError.isUsageLimitOutcome(response.status, bodyText),
 					timeout: false,
 				});
 			} finally {
