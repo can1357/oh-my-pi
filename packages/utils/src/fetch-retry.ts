@@ -69,7 +69,7 @@ export interface RetryHintOptions {
  * reset timestamp that has already elapsed).
  */
 export function extractRetryHint(
-	source: Response | Headers | null | undefined,
+	source: Response | Headers | Readonly<Record<string, string | undefined>> | null | undefined,
 	body?: string,
 	options?: RetryHintOptions,
 ): number | undefined {
@@ -88,7 +88,17 @@ export function extractRetryHint(
 		else retryNow = true;
 	};
 
-	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
+	let headers: Headers | undefined;
+	if (source instanceof Headers) {
+		headers = source;
+	} else if (source instanceof Response) {
+		headers = source.headers;
+	} else if (source) {
+		headers = new Headers();
+		for (const [name, value] of Object.entries(source)) {
+			if (typeof value === "string") headers.set(name, value);
+		}
+	}
 	if (headers) {
 		const retryAfterMs = headers.get("retry-after-ms");
 		if (retryAfterMs) {
