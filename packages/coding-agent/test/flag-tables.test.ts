@@ -222,4 +222,16 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	it("omits --resume for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
+
+	it("replaces --new with the resumed session so the relaunch does not hit the flag conflict", () => {
+		expect(restartArgv(["--new", "--model", "opus"], "sid")).toEqual(["--model", "opus", "--resume", "sid"]);
+	});
+
+	it("keeps a fresh launch fresh when there is no session to resume", () => {
+		expect(restartArgv(["--new-session", "--model", "opus", "hello"], undefined)).toEqual([
+			"--model",
+			"opus",
+			"--new",
+		]);
+	});
 });
