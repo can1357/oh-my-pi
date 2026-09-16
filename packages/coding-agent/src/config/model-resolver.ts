@@ -1132,15 +1132,34 @@ export function resolveExplicitModelRole(
 	return undefined;
 }
 
-function isSessionInheritedAgentPattern(value: string): boolean {
+/** The `default` role written as a pattern: names the session's model, not a configured list. */
+function isDefaultRolePattern(value: string): boolean {
 	return (
 		value === DEFAULT_MODEL_ROLE ||
 		value === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
 		value === DEFAULT_MODEL_ROLE_ALIAS ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}` ||
+		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}`
+	);
+}
+
+function isSessionInheritedAgentPattern(value: string): boolean {
+	return (
+		isDefaultRolePattern(value) ||
 		value === formatModelRoleAlias("task") ||
 		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 	);
+}
+
+/**
+ * Whether a model selection means "run whatever the parent session is running"
+ * rather than a configured pattern list. `@default` is the explicit spelling of
+ * that intent, so it must resolve through the session's active model instead of
+ * expanding `modelRoles.default` — a parent that switched models mid-session
+ * would otherwise hand its child a different model than its own.
+ */
+export function modelSelectionInheritsSessionModel(value: string | string[] | undefined): boolean {
+	const patterns = normalizeModelPatternList(value);
+	return patterns.length === 1 && isDefaultRolePattern(patterns[0]!);
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
@@ -1310,7 +1329,16 @@ function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
 	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
+	const inheritSessionModel = (): EffectiveAgentModelSelection => {
+		const fallback =
+			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+		return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	};
 
+	// `@default` asks for the parent's live model, so it short-circuits to the
+	// session tail rather than expanding the `default` role — and it stays the
+	// winning source, never demoting to the agent definition below.
+	if (modelSelectionInheritsSessionModel(requestModel)) return inheritSessionModel();
 	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
 	if (requestPatterns.length > 0) {
 		return { source: requestModel, patterns: requestPatterns };
@@ -1335,9 +1363,7 @@ function resolveEffectiveAgentModelSelection(
 		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
 	}
 
-	const fallback =
-		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	return inheritSessionModel();
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */

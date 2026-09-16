@@ -1105,6 +1105,39 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
+	test("a requested @default inherits the parent's active model over the configured default role", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" },
+		});
+
+		for (const requestModel of ["@default", "*", "default"]) {
+			expect(
+				resolveAgentModelSelection({
+					requestModel,
+					settingsOverride: "@definition",
+					agentModel: "@definition",
+					settings,
+					activeModelPattern: "zai/glm-5.2:high",
+				}),
+			).toEqual({ patterns: ["zai/glm-5.2:high"], role: undefined });
+		}
+
+		// Without an active model the configured default is still the tail.
+		expect(resolveAgentModelPatterns({ requestModel: "@default", settings })).toEqual(["openai/gpt-4o"]);
+
+		// An explicit selector and a non-default role alias are unaffected.
+		expect(
+			resolveAgentModelPatterns({
+				requestModel: "anthropic/claude-opus-4-5",
+				settings,
+				activeModelPattern: "zai/glm-5.2:high",
+			}),
+		).toEqual(["anthropic/claude-opus-4-5"]);
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@definition", settings, activeModelPattern: "zai/glm-5.2:high" }),
+		).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
 	test("uses the configured task role before falling back to the session model", () => {
 		const settings = Settings.isolated({
 			modelRoles: {

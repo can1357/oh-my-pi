@@ -411,6 +411,21 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
+	it("inherits the parent's active model for `@default`, not the configured default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({ modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" } }),
+			getActiveModelString: () => "zai/glm-5.2:high",
+			getModelString: () => "openai/gpt-4o",
+		} as ToolSession;
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default" }));
+
+		expect(policy.modelOverride).toEqual(["zai/glm-5.2:high"]);
+		// The request still outranks the agent definition; it just resolves to inheritance.
+		expect(policy.modelRole).toBeUndefined();
+	});
+
 	it("falls through an empty configured override to the agent definition role", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);

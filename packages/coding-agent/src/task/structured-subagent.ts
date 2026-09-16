@@ -9,6 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import {
+	modelSelectionInheritsSessionModel,
 	normalizeModelPatternList,
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
@@ -362,23 +363,29 @@ export async function resolveEffectiveSubagentPolicy(
 			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
 			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
 		}
-		// Role-expand the request's own patterns: `modelOverride` may come from
-		// a lower-precedence source, and blaming `model` for its failure misleads.
-		const resolvedRequest = resolveConfiguredModelPatterns(request.model, request.session.settings);
-		const modelRegistry = request.session.modelRegistry;
-		// A cold registry (discovery races startup) must never reject a valid
-		// selector, but an empty expansion is a config/shape failure no amount
-		// of discovery can fix.
-		const unmatched =
-			resolvedRequest.length === 0 ||
-			(modelRegistry !== undefined &&
-				modelRegistry.getAvailable().length > 0 &&
-				!resolveModelOverride(resolvedRequest, modelRegistry, request.session.settings).model);
-		if (unmatched) {
-			throw new StructuredSubagentError(
-				"preflight",
-				`No available model matches \`model\`: ${JSON.stringify(request.model)}. Run \`omp models find <query> --json\` and use a listed \`selector\`, or omit \`model\` to use the agent's own.`,
-			);
+		// `@default` asks for the parent's live model, not a pattern to look up:
+		// the resolver already answered with the inherited selection, and the
+		// parent is running it, so there is nothing left to expand or match.
+		if (!modelSelectionInheritsSessionModel(request.model)) {
+			// Role-expand the request's own patterns: `modelOverride` may come
+			// from a lower-precedence source, and blaming `model` for its
+			// failure misleads.
+			const resolvedRequest = resolveConfiguredModelPatterns(request.model, request.session.settings);
+			const modelRegistry = request.session.modelRegistry;
+			// A cold registry (discovery races startup) must never reject a valid
+			// selector, but an empty expansion is a config/shape failure no amount
+			// of discovery can fix.
+			const unmatched =
+				resolvedRequest.length === 0 ||
+				(modelRegistry !== undefined &&
+					modelRegistry.getAvailable().length > 0 &&
+					!resolveModelOverride(resolvedRequest, modelRegistry, request.session.settings).model);
+			if (unmatched) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`No available model matches \`model\`: ${JSON.stringify(request.model)}. Run \`omp models find <query> --json\` and use a listed \`selector\`, or omit \`model\` to use the agent's own.`,
+				);
+			}
 		}
 	}
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");

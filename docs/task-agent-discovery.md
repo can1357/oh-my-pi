@@ -207,10 +207,13 @@ For task dispatch, model precedence is:
 3. the agent frontmatter's prioritized `model` list
 4. the parent's active model, then its configured/default model fallback
 
-Role aliases in any of the first three sources are expanded through `modelRoles`. A per-call `model`
-is validated before dispatch: the ambiguous literals `default`/`inherit` are rejected in favor of an
-explicit `@default`, and a selector that expands to nothing or matches no available model fails the
-spawn naming the selector rather than silently falling through to a lower-precedence source.
+Role aliases in any of the first three sources are expanded through `modelRoles`, except `@default`
+(equivalently `*`), which names step 4 itself: it resolves to the parent's active model rather than
+to `modelRoles.default`, so a child asked for `@default` runs whatever its parent switched to. A
+per-call `model` is validated before dispatch: the ambiguous literals `default`/`inherit` are
+rejected in favor of an explicit `@default`, and a selector that expands to nothing or matches no
+available model fails the spawn naming the selector rather than silently falling through to a
+lower-precedence source.
 
 Service-tier precedence is independent of model selection: an exact, case-sensitive
 `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
