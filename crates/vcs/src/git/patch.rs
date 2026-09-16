@@ -6,10 +6,16 @@
 //! markers or unmerged entries in the checkout. Stash pop is likewise
 //! preflighted so a rejected restore leaves no trace (issue #4175).
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	fs,
 	path::{Component, Path, PathBuf},
+	sync::{
+		Arc, LazyLock,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use gix::{
@@ -19,6 +25,7 @@ use gix::{
 	objs::tree::EntryKind,
 	refs::transaction::PreviousValue,
 };
+use parking_lot::Mutex;
 
 use super::{GitRepo, mutate::update_reference};
 use crate::{
@@ -87,25 +94,48 @@ enum BinaryKind {
 enum ApplyFailure {
 	Context(String),
 	Invalid(String),
+	/// A path naming the git store, carried as a field so callers can classify
+	/// and redact the refusal rather than parsing a rendered message.
+	GitStore {
+		path: String,
+	},
 }
 
 impl ApplyFailure {
 	fn into_error(self) -> Error {
-		let message = match self {
-			Self::Context(message) | Self::Invalid(message) => message,
-		};
-		Error::PatchFailed { message }
+		match self {
+			Self::Context(message) | Self::Invalid(message) => Error::PatchFailed { message },
+			Self::GitStore { path } => Error::PathInGitStore { path },
+		}
 	}
 }
 
 impl GitRepo {
 	/// Apply a git-format patch to the worktree or index.
 	pub fn apply_patch(&self, patch_text: &str, options: &ApplyOptions) -> Result<()> {
+		begin_operation();
 		if patch_text.trim().is_empty() {
 			return Ok(());
 		}
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
+		// Containment is checked for EVERY side before anything is read or
+		// written. Two distinct reasons to do it first:
+		//
+		//   - Reading. `augment_patch_sources` opens each source to fill the state map.
+		//     A source beneath an escaping symlink would be read from outside the
+		//     worktree before any later check could refuse it, and a device or FIFO
+		//     target — `link/dev/zero`, a named pipe — turns that read into unbounded
+		//     memory growth or a hang.
+		//   - Writing. Validating per path as each is reached leaves a patch whose
+		//     early files are legitimate and whose later target escapes half-applied,
+		//     and a rename would already have deleted its source.
+		//
+		// Rejecting up front keeps application all-or-nothing with respect to
+		// path validity.
+		if !options.cached {
+			assert_patch_paths_contained(self, &patches, options.reverse)?;
+		}
 		let mut state = if options.cached {
 			index_map_at(&repo, options.index_path.as_deref())?
 		} else {
@@ -125,6 +155,7 @@ impl GitRepo {
 
 	/// Check whether a patch applies without changing the index or worktree.
 	pub fn can_apply_patch(&self, patch_text: &str, options: &ApplyOptions) -> Result<bool> {
+		begin_operation();
 		if patch_text.trim().is_empty() {
 			return Ok(true);
 		}
@@ -132,6 +163,15 @@ impl GitRepo {
 			return Ok(false);
 		};
 		let repo = self.gix()?.with_object_memory();
+		// Refused before any source is opened, for the same two reasons as
+		// `apply_patch`: a probe must not be usable to read outside the
+		// worktree, and a patch that cannot apply without escaping does not
+		// apply. Without this the predicate answers `true` for a patch
+		// `apply_patch` then refuses, and a caller that gates on it would treat
+		// an attack as a viable change.
+		if !options.cached && assert_patch_paths_contained(self, &patches, options.reverse).is_err() {
+			return Ok(false);
+		}
 		let mut state = if options.cached {
 			index_map_at(&repo, options.index_path.as_deref())?
 		} else {
@@ -213,6 +253,7 @@ impl GitRepo {
 
 	/// Cherry-pick one commit with a fail-clean three-way tree merge.
 	pub fn cherry_pick(&self, rev: &str) -> Result<()> {
+		begin_operation();
 		let repo = self.gix()?;
 		let picked_id = repo
 			.rev_parse_single(rev)
@@ -275,11 +316,15 @@ impl GitRepo {
 			.message_raw()
 			.map_err(|err| Error::backend("git cherry-pick message", err))?
 			.to_str_lossy();
+		let merged = tree_map(&repo, merged_tree)?;
+		let previous = index_map(&repo)?;
+		// Refuse before HEAD moves. Discovering an escaping path after the
+		// commit would leave HEAD ahead of a worktree and index that never
+		// received it — a fail-clean pick must fail before it commits.
+		assert_worktree_map_contained(self, &repo, &previous, &merged)?;
 		repo
 			.commit_as(committer, author, "HEAD", message.as_ref(), merged_tree, [head_id])
 			.map_err(|err| Error::backend("git cherry-pick commit", err))?;
-		let merged = tree_map(&repo, merged_tree)?;
-		let previous = index_map(&repo)?;
 		write_worktree_map(self, &previous, &merged)?;
 		write_index_map(&repo, &merged)
 	}
@@ -296,6 +341,7 @@ impl GitRepo {
 
 	/// Stash index, tracked worktree changes, and untracked files.
 	pub fn stash_push(&self, message: Option<&str>) -> Result<bool> {
+		begin_operation();
 		let repo = self.gix()?;
 		let head = repo
 			.head_commit()
@@ -307,6 +353,14 @@ impl GitRepo {
 			.detach();
 		let head_map = tree_map(&repo, head_tree)?;
 		let index = index_map(&repo)?;
+		// Before READING. `tracked_worktree_map` opens every indexed path to
+		// build the map, so an indexed `dir/file` shadowed by an outbound `dir`
+		// symlink is slurped from outside the worktree and written into a loose
+		// blob before any later check can refuse it — and a large enough file
+		// exhausts memory or disk on the way. Only prefixes are judged: the
+		// leaf is the file being read, and whether it is itself a link is the
+		// write-side question.
+		assert_indexed_prefixes_contained(self, &repo, &index)?;
 		let tracked_worktree = tracked_worktree_map(self, &repo, &index)?;
 		let untracked = untracked_worktree_map(self, &repo, &index)?;
 		if index == head_map && tracked_worktree == index && untracked.is_empty() {
@@ -329,6 +383,17 @@ impl GitRepo {
 				untracked_commit.id().detach(),
 			])
 			.map_err(|err| Error::backend("git stash commit", err))?;
+		// Refuse before `refs/stash` moves. Discovering an escaping path during
+		// the writes below would install a stash and its reflog while leaving
+		// the dirty worktree and index in place — the caller sees an error and
+		// a stash it did not ask for. Same ordering `cherry_pick` uses.
+		let gix_repo = repo.clone();
+		assert_worktree_map_contained(self, &gix_repo, &tracked_worktree, &head_map)?;
+		for path in untracked.keys() {
+			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			assert_prefix_within_root(self.root(), path)?;
+			assert_prefix_outside_git_store(self, &gix_repo, path)?;
+		}
 		update_stash_ref(
 			&repo,
 			stash_commit.id().detach(),
@@ -346,6 +411,7 @@ impl GitRepo {
 
 	/// Try to pop the top stash without leaving partial conflict state.
 	pub fn stash_try_pop(&self, reinstate_index: bool) -> Result<bool> {
+		begin_operation();
 		let repo = self.gix()?;
 		let Some(stash_ref) = repo
 			.try_find_reference("refs/stash")
@@ -354,6 +420,12 @@ impl GitRepo {
 			return Ok(false);
 		};
 		let stash_id = stash_ref.id().detach();
+		// Same ordering hazard as `stash_push`: the maps below read indexed
+		// paths off disk before anything validates them.
+		{
+			let index = index_map(&repo)?;
+			assert_indexed_prefixes_contained(self, &repo, &index)?;
+		}
 		let stash_log = fs::read(self.info().common_dir.join("logs/refs/stash")).ok();
 		let stash = repo
 			.find_commit(stash_id)
@@ -412,6 +484,53 @@ impl GitRepo {
 		for path in untracked.keys() {
 			if self.root().join(path).symlink_metadata().is_ok() {
 				return Ok(false);
+			}
+		}
+		// The collision probe above answers "is something already there", which
+		// an outbound symlink in the PREFIX makes falsely negative: the external
+		// target is absent, so the leaf looks free. Containment is a separate
+		// question and must be settled for every destination — tracked and
+		// untracked alike — before the first write, or a refusal lands after the
+		// tracked half has been restored and the stash is still present.
+		if let Some(index) = &merged_index {
+			// Index-only entries can be absent from the restored worktree. Reject
+			// them before any files change, not later in `write_index_map`.
+			for path in index.keys() {
+				validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			}
+		}
+		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
+		// The untracked half is written AFTER the tracked map, so its topology
+		// is the tracked map's RESULT, not the filesystem of today. Two things
+		// follow. A tracked outbound `dir` the pop deletes is gone before an
+		// untracked `dir/u` is restored, so resolving `dir/u` through the
+		// current link would reject a valid pop. And a tracked outbound link
+		// the pop CREATES exists by the time an untracked descendant is
+		// written, so an untracked `é/u` (spelled NFD, say) beneath a restored
+		// NFC `é` link is a write through that link — and the current
+		// filesystem, where the link is still absent, cannot show it. Both
+		// sets are keyed by `normalize_repo_path` for exactly that reason.
+		let removed_by_tracked: BTreeSet<&str> = current_worktree
+			.keys()
+			.filter(|path| !merged_worktree.contains_key(*path))
+			.map(String::as_str)
+			.collect();
+		let restored_links: BTreeSet<String> = merged_worktree
+			.iter()
+			.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
+			.map(|(path, _)| normalize_repo_path(path))
+			.collect();
+		for (path, entry) in &untracked {
+			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			assert_no_symlink_ancestor(path, &restored_links)?;
+			if has_removed_ancestor(self.root(), path, &removed_by_tracked)
+				|| entry.mode == Mode::SYMLINK
+			{
+				assert_prefix_within_root(self.root(), path)?;
+				assert_prefix_outside_git_store(self, &repo, path)?;
+			} else {
+				assert_within_root(self.root(), path)?;
+				assert_outside_git_store(self, &repo, path)?;
 			}
 		}
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
@@ -1488,6 +1607,11 @@ fn write_worktree_map(
 	next: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
 	let gix_repo = repo.gix()?;
+	// Every removal and every write is validated before the first one happens,
+	// so a refusal cannot leave the worktree half-written. Callers that mutate
+	// repository state first must call `assert_worktree_map_contained` BEFORE
+	// they commit, not rely on this one.
+	assert_worktree_map_contained(repo, &gix_repo, previous, next)?;
 	for path in previous.keys() {
 		if !next.contains_key(path) {
 			remove_worktree_path(repo, path)?;
@@ -1508,6 +1632,14 @@ fn write_worktree_entry(
 	gix_repo: &gix::Repository,
 ) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+	// A symlink is unlinked and recreated, never opened through, so its leaf is
+	// not resolved; resolving it would reject repositories that legitimately
+	// track a link pointing outside the worktree.
+	if entry.mode == Mode::SYMLINK {
+		assert_prefix_within_root(repo.root(), path)?;
+	} else {
+		assert_within_root(repo.root(), path)?;
+	}
 	let absolute = repo.root().join(path);
 	if let Some(parent) = absolute.parent() {
 		fs::create_dir_all(parent)?;
@@ -1540,6 +1672,11 @@ fn write_worktree_entry(
 
 fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+	// Only the PREFIX is resolved: `remove_file` unlinks a directory entry
+	// without following it, so a tracked symlink pointing outside the worktree
+	// is safe to delete and must stay deletable.
+	assert_prefix_within_root(repo.root(), path)?;
+	assert_prefix_outside_git_store(repo, &repo.gix()?, path)?;
 	let absolute = repo.root().join(path);
 	match fs::remove_file(&absolute) {
 		Ok(()) => {},
@@ -1568,8 +1705,712 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	{
 		return Err(ApplyFailure::Invalid(format!("unsafe patch path: {path}")));
 	}
+	// A patch must never touch `.git/` — doing so could overwrite hooks, the
+	// index, or the objects store, giving the patch author arbitrary code
+	// execution on the host. Checked per-component so `sub/.git/…` (a nested
+	// repository) is rejected just like a leading `.git`.
+	if candidate
+		.components()
+		.any(|component| is_git_store_alias(component.as_os_str()))
+	{
+		return Err(ApplyFailure::GitStore { path: path.to_owned() });
+	}
 	Ok(())
 }
+
+/// Whether HFS+ folds this codepoint away when comparing filenames.
+///
+/// Git's exact `core.protectHFS` set (`is_hfs_dotgit` in `utf8.c`), not the
+/// `Cf` general category: `Cf` is far wider, and rejecting a path git accepts
+/// breaks every later operation that rewrites an index containing it.
+const fn is_hfs_ignorable(c: char) -> bool {
+	matches!(
+		c,
+		'\u{200c}' | '\u{200d}' | '\u{200e}' | '\u{200f}'
+			| '\u{202a}'..='\u{202e}'
+			| '\u{206a}'..='\u{206f}'
+			| '\u{feff}'
+	)
+}
+
+/// Collapse `.` components and duplicate separators so two spellings of the
+/// same repository path compare equal.
+///
+/// `validate_repo_path` has already refused `..`, absolute paths and prefixes,
+/// so this only has to fold the harmless-looking forms — `./link/file` names
+/// exactly the hierarchy `link/file` does.
+///
+/// The result is a COMPARISON KEY, never a filesystem path. It folds what the
+/// filesystems a portable patch may land on fold: case (macOS and Windows
+/// defaults) and canonical equivalence (macOS normalizes names, so a minted
+/// `é` and a later `e◌́/file` are one entry). Over-folding can only refuse
+/// MORE descendants of a minted link, never fewer.
+///
+/// NFC first, then case: composing before folding is what makes the two
+/// spellings of `é` land on one key. `str::to_lowercase` is the full Unicode
+/// mapping; `xutf` deliberately offers ASCII-only folding, which would let
+/// `É/file` slip past a minted `é`.
+fn normalize_repo_path(rel: &str) -> String {
+	let mut normalized = String::with_capacity(rel.len());
+	for segment in rel
+		.split(['/', '\\'])
+		.filter(|segment| !segment.is_empty() && *segment != ".")
+	{
+		if !normalized.is_empty() {
+			normalized.push('/');
+		}
+		normalized.push_str(segment);
+	}
+	xutf::IntoUnicodeNormalized::into_nfc(normalized).to_lowercase()
+}
+
+/// Refuse proper descendants of links in the resulting topology, not the links
+/// themselves. Normalized names are comparison keys, never filesystem paths.
+fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()> {
+	if has_normalized_ancestor_in(path, links) {
+		return Err(Error::PathEscapesRoot { path: path.to_owned() });
+	}
+	Ok(())
+}
+
+/// Whether a proper ancestor of `path` names the same filesystem entry as
+/// something in `removed` — judged by the FILESYSTEM, not by string rules.
+///
+/// Neither string strategy is right on its own. Folding case and Unicode form
+/// says `Link` covers `link` and NFC `é` covers NFD `é`, which is true on the
+/// default macOS filesystem and false on a case-sensitive Linux one: there,
+/// removing `Link` leaves an untracked outbound `link` in place, and skipping
+/// containment lets the child resolve through it after HEAD has moved. Exact
+/// comparison says the opposite and refuses a safe macOS pick. The only
+/// authority on whether two spellings are one entry is the filesystem itself,
+/// so each candidate ancestor is compared against the removed entries by
+/// identity — same device and inode — rather than by name.
+fn has_removed_ancestor(root: &Path, path: &str, removed: &BTreeSet<&str>) -> bool {
+	if removed.is_empty() {
+		return false;
+	}
+	let identity = |rel: &str| -> Option<(u64, u64)> {
+		let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
+		Some((meta.dev(), meta.ino()))
+	};
+	let removed_ids: Vec<(u64, u64)> = removed.iter().filter_map(|rel| identity(rel)).collect();
+	let mut prefix = path;
+	while let Some(cut) = prefix.rfind('/') {
+		prefix = &prefix[..cut];
+		// A textual match is sufficient: the entry is named for removal as-is.
+		if removed.contains(prefix) {
+			return true;
+		}
+		// Otherwise the spelling differs; only the filesystem can say whether
+		// it is still the same entry.
+		if let Some(id) = identity(prefix)
+			&& removed_ids.contains(&id)
+		{
+			return true;
+		}
+	}
+	false
+}
+
+/// Whether any PROPER ancestor of `path` is in `set`, comparing by the same
+/// filesystem-normalized key [`normalize_repo_path`] produces.
+///
+/// Every set consulted for topology — links a write will create, entries a
+/// write will remove first — must be built with that key too, or an NFD
+/// spelling in one map and an NFC spelling in the other name the same
+/// directory and never match.
+fn has_normalized_ancestor_in(path: &str, set: &BTreeSet<String>) -> bool {
+	if set.is_empty() {
+		return false;
+	}
+	let normalized = normalize_repo_path(path);
+	let mut prefix = normalized.as_str();
+	while let Some(cut) = prefix.rfind('/') {
+		prefix = &prefix[..cut];
+		if set.contains(prefix) {
+			return true;
+		}
+	}
+	false
+}
+
+/// Mode of `rel` as it exists in the worktree today, if it exists at all.
+///
+/// Used to infer a mode the patch does not state — a 100% rename omits the
+/// mode headers entirely, and application resolves it from the source entry.
+fn worktree_entry_mode(repo: &GitRepo, rel: &str) -> Option<Mode> {
+	let metadata = std::fs::symlink_metadata(repo.root().join(rel)).ok()?;
+	metadata.file_type().is_symlink().then_some(Mode::SYMLINK)
+}
+
+/// Validate every path a patch would touch, before any of them is touched.
+///
+/// Mirrors exactly what [`write_patch_worktree`] will do per side: a source
+/// that is only unlinked is checked with the prefix guard, a target that is
+/// opened for writing with the full guard. Keeping the two in step is what
+/// makes the preflight meaningful — a rule enforced here but not there would
+/// reject a valid patch, and one enforced there but not here would reopen the
+/// partial-write window this exists to close.
+fn assert_patch_paths_contained(
+	repo: &GitRepo,
+	patches: &[FilePatch],
+	reverse: bool,
+) -> Result<()> {
+	let gix_repo = repo.gix()?;
+	// Paths this patch will itself turn into symlinks. The per-path guards
+	// below interrogate the CURRENT filesystem, where none of them exist yet,
+	// so a patch that creates `link` as 120000 and then writes `link/file`
+	// passes both checks and is only refused once `write_patch_worktree` has
+	// already created the link — a partial application. The topology the patch
+	// produces has to be judged before the first entry is written.
+	//
+	// Judged IN PATCH ORDER, not against the final set. `write_patch_worktree`
+	// applies entries sequentially, so a path is only under a minted link if
+	// that link was minted by an EARLIER entry. A patch that deletes
+	// `link/file` and then creates symlink `link` is valid — the child and
+	// its empty directory are gone before the link exists — and git accepts
+	// the same reordering. Checking the deletion against the final set would
+	// reject it.
+	let mut minted_links: BTreeSet<String> = BTreeSet::new();
+	for patch in patches {
+		let (source, target, _, target_mode) = patch_sides(patch, reverse);
+		// Both sides of THIS entry are judged against links minted so far.
+		for path in [source, target].into_iter().flatten() {
+			assert_no_symlink_ancestor(path, &minted_links)?;
+		}
+		let Some(target) = target else { continue };
+		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
+		// symlink arrives with `target_mode == None` and application inherits
+		// the mode from the source entry. Infer it the same way here, or the
+		// scan misses a link this patch is about to mint and the descendant is
+		// refused only after the link exists.
+		let mode = match target_mode {
+			Some(mode) => Some(mode),
+			None => source
+				.and_then(|source| worktree_entry_mode(repo, source))
+				.or_else(|| worktree_entry_mode(repo, target)),
+		};
+		if mode == Some(Mode::SYMLINK) {
+			minted_links.insert(normalize_repo_path(target));
+		}
+	}
+	for patch in patches {
+		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
+		// Same inference the minted-link scan uses: a mode-less patch updating a
+		// tracked symlink arrives with `None`, and application inherits SYMLINK
+		// from the source entry. Reading the declared field alone would resolve
+		// the existing leaf and reject a safe unlink-and-recreate.
+		let target_mode = match declared_mode {
+			Some(mode) => Some(mode),
+			None => source
+				.and_then(|source| worktree_entry_mode(repo, source))
+				.or_else(|| target.and_then(|target| worktree_entry_mode(repo, target))),
+		};
+		if let Some(source) = source
+			&& target != Some(source)
+		{
+			validate_repo_path(source).map_err(ApplyFailure::into_error)?;
+			assert_prefix_within_root(repo.root(), source)?;
+			assert_prefix_outside_git_store(repo, &gix_repo, source)?;
+		}
+		if let Some(target) = target {
+			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
+			// The patch declares the mode it will write. A `120000` target is
+			// unlinked and recreated by `write_worktree_entry`, never opened
+			// through, so resolving its current destination would reject a
+			// valid patch that merely repoints an outbound symlink. Mirror the
+			// write site exactly: full guard for content, prefix for links.
+			if target_mode == Some(Mode::SYMLINK) {
+				assert_prefix_within_root(repo.root(), target)?;
+				assert_prefix_outside_git_store(repo, &gix_repo, target)?;
+			} else {
+				assert_within_root(repo.root(), target)?;
+				assert_outside_git_store(repo, &gix_repo, target)?;
+			}
+		}
+	}
+	Ok(())
+}
+
+/// Refuse a path that lands inside the repository's ACTUAL Git store.
+///
+/// [`validate_repo_path`] rejects components *named* `.git` under any spelling
+/// a filesystem accepts, which covers the ordinary layout and nested
+/// repositories. It cannot cover a store that does not carry that name: after
+/// `git init --separate-git-dir=meta .` the worktree holds a `.git` FILE
+/// pointing at `meta/`, and `meta/hooks/pre-commit` is both a real hook and an
+/// unremarkable-looking path inside the root. Worktrees created by
+/// `git worktree add` have the same shape, with `common_dir` naming the shared
+/// store the linked one borrows objects and hooks from.
+///
+/// So the store is refused by LOCATION as well as by name — canonicalized, so
+/// a symlinked or relative spelling cannot dodge the comparison.
+fn assert_outside_git_store(repo: &GitRepo, gix_repo: &gix::Repository, rel: &str) -> Result<()> {
+	assert_store_containment(repo, gix_repo, rel, LeafPolicy::Resolve)
+}
+
+/// Whether the leaf itself is opened, or only unlinked and recreated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeafPolicy {
+	/// The leaf is opened through: resolve it.
+	Resolve,
+	/// The leaf is unlinked or recreated, never followed: judge its prefix.
+	Prefix,
+}
+
+/// Refuse a path whose PREFIX lands in the git store, leaving the leaf alone.
+///
+/// Deleting an entry, or replacing a symlink, cannot reach through the leaf —
+/// `remove_file` unlinks the directory entry and `symlink` creates a new one.
+/// Resolving it would refuse a tracked symlink that happens to point into the
+/// store, which is a link the repository is entitled to delete.
+fn assert_prefix_outside_git_store(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	rel: &str,
+) -> Result<()> {
+	assert_store_containment(repo, gix_repo, rel, LeafPolicy::Prefix)
+}
+
+fn assert_store_containment(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	rel: &str,
+	leaf: LeafPolicy,
+) -> Result<()> {
+	let joined = repo.root().join(rel);
+	let candidate = if leaf == LeafPolicy::Prefix {
+		match joined.parent() {
+			Some(parent) => parent.to_path_buf(),
+			// No parent means the join produced the root, which is not a store.
+			None => return Ok(()),
+		}
+	} else {
+		joined
+	};
+	// The candidate usually does not exist yet, so resolve the deepest existing
+	// ancestor: a store lives in directories that do exist.
+	let mut probe = candidate.as_path();
+	let resolved = loop {
+		if let Ok(canonical) = std::fs::canonicalize(probe) {
+			// Re-attach the unresolved tail so `meta/hooks/pre-commit` is still
+			// compared as a path under `meta`, not just as `meta`.
+			let tail = candidate.strip_prefix(probe).unwrap_or(Path::new(""));
+			break canonical.join(tail);
+		}
+		match probe.parent() {
+			Some(parent) if parent != probe => probe = parent,
+			_ => return Ok(()),
+		}
+	};
+	for store in [gix_repo.git_dir(), gix_repo.common_dir()] {
+		let store = std::fs::canonicalize(&store).unwrap_or(store.to_path_buf());
+		if resolved.starts_with(&store) {
+			return Err(Error::PathInGitStore { path: rel.to_owned() });
+		}
+	}
+	// A NESTED repository may keep its store anywhere — `git init
+	// --separate-git-dir=nested-meta sub` leaves a live store with no `.git`
+	// component, and it is a SIBLING of `sub` rather than a descendant, so
+	// walking the candidate's ancestors never finds it. Every `.git` FILE under
+	// the root names one; each is followed and the candidate compared against
+	// its target.
+	//
+	// Bounded to the immediate children of the root plus their own children:
+	// deeper nesting is rare enough that a full-tree walk on every path check
+	// would cost more than it protects.
+	if nested_stores(repo)
+		.iter()
+		.any(|store| resolved.starts_with(store))
+	{
+		return Err(Error::PathInGitStore { path: rel.to_owned() });
+	}
+	Ok(())
+}
+
+/// Every nested repository store under `repo`'s root.
+///
+/// Discovery is a directory walk and the containment guards run per affected
+/// path, so a thousand-file change would otherwise repeat the same traversal a
+/// thousand times. It is therefore cached — but only for the CURRENT
+/// operation: a process-global cache in a long-lived agent would never see a
+/// nested repository created after its first scan, and an untrusted patch
+/// could then reach that store's hooks. [`begin_operation`] invalidates it.
+///
+/// Keyed by root, one slot per repository. Mutations on different
+/// repositories are allowed to interleave — the envd lock serializes by
+/// `common_dir`, not globally — and a single shared slot would be evicted by
+/// the other root on every path check, recreating the per-path rescan the
+/// cache exists to remove. Entries from earlier operations are dropped on the
+/// next insert, so the map never outgrows the set of live roots.
+fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
+	/// Per-root discovery result, stamped with the operation it was scanned in.
+	type StoreScan = (u64, Arc<Vec<PathBuf>>);
+	static CACHE: LazyLock<Mutex<BTreeMap<PathBuf, StoreScan>>> =
+		LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+	let root = repo.root();
+	let generation = OPERATION.load(Ordering::Acquire);
+	{
+		let cache = CACHE.lock();
+		if let Some((stamp, found)) = cache.get(root)
+			&& *stamp == generation
+		{
+			return Arc::clone(found);
+		}
+	}
+	let mut found = Vec::new();
+	collect_nested_stores(root, &mut found);
+	let found = Arc::new(found);
+	let mut cache = CACHE.lock();
+	cache.retain(|_, (stamp, _)| *stamp == generation);
+	cache.insert(root.to_path_buf(), (generation, Arc::clone(&found)));
+	found
+}
+
+/// Monotonic operation stamp; bumping it invalidates [`nested_stores`].
+static OPERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Open a new operation, so store discovery is redone rather than reused.
+///
+/// Called by every entry point that applies or restores changes. Discovery
+/// within one operation is still a single walk; across operations it is never
+/// stale, which is what a long-lived agent needs.
+fn begin_operation() {
+	OPERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Walk `dir` for nested stores, recording every directory git treats as one.
+///
+/// Unbounded by depth: a cap is a hole, since `a/b/c/sub/.git` pointing at
+/// `deep-meta` is as live a store as one at the root. The cost is paid once per
+/// operation — see [`nested_stores`] — not once per path.
+fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) {
+	let Ok(entries) = std::fs::read_dir(dir) else {
+		return;
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		let Ok(kind) = entry.file_type() else {
+			continue;
+		};
+
+		// A `.git` FILE points at a store. For a LINKED worktree it points at
+		// `…/worktrees/<name>`, which is only half the story: git reads
+		// `commondir` from there and uses the parent as its common store, so
+		// `meta/hooks/pre-commit` is live even though the pointer never names
+		// `meta`. Record both.
+		if kind.is_file() && path.file_name().is_some_and(|name| name == ".git") {
+			if let Some(bytes) = read_store_metadata(&path)
+				&& let Ok(target) = gix::discover::parse::gitdir(&bytes)
+			{
+				let store = canonical_or_self(&dir.join(target));
+				if let Some(common) = read_store_metadata(&store.join("commondir")) {
+					let common = common.trim_end();
+					if !common.is_empty()
+						&& let Ok(common) = gix::path::try_from_bstr(common.as_bstr())
+					{
+						found.push(canonical_or_self(&store.join(common)));
+					}
+				}
+				found.push(store);
+			}
+			continue;
+		}
+		if !kind.is_dir() {
+			continue;
+		}
+		// A BARE repository has no `.git` file at all — `git init --bare bare`
+		// leaves the store itself on disk, hooks included, under an arbitrary
+		// name. Require a parseable HEAD, not merely familiar directory names.
+		if is_bare_store(&path) {
+			found.push(canonical_or_self(&path));
+			continue;
+		}
+		// Do not descend through links: a nested store does not live behind one,
+		// and following it would leave the worktree.
+		collect_nested_stores(&path, found);
+	}
+}
+
+fn canonical_or_self(path: &Path) -> PathBuf {
+	std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Recognize a store by Git's directory layout and a valid loose HEAD, without
+/// opening a repository (which would read arbitrary configuration/includes).
+fn is_bare_store(dir: &Path) -> bool {
+	if !dir.join("objects").is_dir() || !dir.join("refs").is_dir() {
+		return false;
+	}
+	let Some(head) = read_store_metadata(&dir.join("HEAD")) else {
+		return false;
+	};
+	let Ok(name) = gix::refs::FullName::try_from("HEAD") else {
+		return false;
+	};
+	let hex_len = head
+		.iter()
+		.take_while(|byte| byte.is_ascii_hexdigit())
+		.count();
+	let Some(hash) = gix::hash::Kind::from_hex_len(hex_len) else {
+		return false;
+	};
+	gix::refs::file::loose::Reference::try_from_path(name, &head, hash).is_ok()
+}
+
+/// Metadata discovered in a worktree is untrusted: never follow a metadata
+/// symlink, open a special file, or read an unlimited directive/reference.
+fn read_store_metadata(path: &Path) -> Option<Vec<u8>> {
+	use std::io::Read as _;
+
+	const LIMIT: u64 = 64 * 1024;
+	let metadata = fs::symlink_metadata(path).ok()?;
+	if !metadata.is_file() || metadata.len() > LIMIT {
+		return None;
+	}
+	let mut options = fs::OpenOptions::new();
+	options.read(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt as _;
+		// Also prevent a swapped symlink/FIFO from following or blocking at open.
+		options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+	}
+	let file = options.open(path).ok()?;
+	let metadata = file.metadata().ok()?;
+	if !metadata.is_file() || metadata.len() > LIMIT {
+		return None;
+	}
+	let mut bytes = Vec::new();
+	file.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+	(bytes.len() as u64 <= LIMIT).then_some(bytes)
+}
+
+/// Refuse any indexed path whose PREFIX leaves the worktree, before a caller
+/// reads those paths off disk.
+///
+/// The leaf is deliberately not resolved: it is the file about to be read, and
+/// whether it is itself an outbound link is the write-side question. What this
+/// stops is reading THROUGH an escaping directory prefix.
+fn assert_indexed_prefixes_contained(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	index: &BTreeMap<String, FileEntry>,
+) -> Result<()> {
+	for path in index.keys() {
+		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+		assert_prefix_within_root(repo.root(), path)?;
+		assert_prefix_outside_git_store(repo, gix_repo, path)?;
+	}
+	Ok(())
+}
+
+/// Validate every path a worktree-map write would remove or create.
+///
+/// Split out of [`write_worktree_map`] because some callers advance repository
+/// state BEFORE writing: `cherry_pick` runs `commit_as`, moving HEAD, and only
+/// then writes the worktree. A refusal discovered during the write would leave
+/// HEAD ahead of an index and worktree that never received the change —
+/// exactly the fail-clean contract those operations document. Such callers run
+/// this first, while the refusal is still free.
+fn assert_worktree_map_contained(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	previous: &BTreeMap<String, FileEntry>,
+	next: &BTreeMap<String, FileEntry>,
+) -> Result<()> {
+	// Current filesystem checks cannot see links this map will create. Judge
+	// the resulting tree before removals, writes, or the caller's HEAD update.
+	let links: BTreeSet<String> = next
+		.iter()
+		.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
+		.map(|(path, _)| normalize_repo_path(path))
+		.collect();
+	for path in next.keys() {
+		assert_no_symlink_ancestor(path, &links)?;
+	}
+	for path in previous.keys() {
+		if !next.contains_key(path) {
+			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			assert_prefix_within_root(repo.root(), path)?;
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+		}
+	}
+	// Entries the removal pass takes out before anything is written. A tracked
+	// outbound symlink `dir` that `next` replaces with `dir/file` is gone by
+	// the time the child is created, so judging the child against the CURRENT
+	// filesystem would reject a safe operation — the escaping ancestor is
+	// itself scheduled for removal. Keyed like `links` above: `previous` may
+	// spell the link NFC and `next` its child NFD, and on a normalizing
+	// filesystem those are one hierarchy.
+	// EXACT names here, deliberately not folded. Folding serves the minted-link
+	// scan, where the question is "does this spelling denote the same
+	// hierarchy" — but this question is "will the actual filesystem entry be
+	// gone", and on a case-sensitive worktree `Link` and `link` are two
+	// entries. Treating a removed `Link` as the ancestor of `link/file` would
+	// skip containment for a path that resolves through a symlink the write
+	// pass never touches, and the refusal would then land after HEAD moved.
+	let removed: BTreeSet<&str> = previous
+		.keys()
+		.filter(|path| !next.contains_key(*path))
+		.map(String::as_str)
+		.collect();
+	for (path, entry) in next {
+		// Exactly the predicate the write loop uses. Validating entries it will
+		// never touch would fail a cherry-pick of one file because some
+		// unrelated, unchanged path had locally been replaced by a symlink —
+		// a path this call is not going to write to at all.
+		// Shape is validated for EVERY entry, changed or not. `write_index_map`
+		// calls `validate_repo_path` unconditionally further downstream, and by
+		// then `cherry_pick` has already advanced HEAD — so an untouched path
+		// that an older index accepted but this policy refuses would fail the
+		// operation after the commit. Containment is the part that may be
+		// skipped below: that one asks what the path resolves through, which
+		// only matters for a path being written.
+		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+		if previous.get(path) == Some(entry) && repo.root().join(path).exists() {
+			continue;
+		}
+		// Skip containment when a proper ancestor is being removed first: the
+		// path the guard would resolve does not survive into the write pass.
+		let ancestor_removed = has_removed_ancestor(repo.root(), path, &removed);
+		if ancestor_removed {
+			// Root containment already models the post-removal topology; the
+			// store check must too, or `dir -> .git` replaced by `dir/file`
+			// resolves through the link that is about to be unlinked and the
+			// safe operation is rejected as touching the store. Judge the
+			// prefix, which is what survives into the write.
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+			continue;
+		}
+		// A symlink entry is written by unlinking whatever is there and calling
+		// `symlink` — neither follows the old leaf, and the new one is created,
+		// not opened. Resolving it would reject every operation on a repository
+		// that legitimately tracks a link pointing outside the worktree:
+		// `stash_push`, `stash_try_pop` and `cherry_pick` would all fail even
+		// when the link is untouched, and a patch updating the link itself
+		// would be refused. Only the prefix has to stay inside the root.
+		if entry.mode == Mode::SYMLINK {
+			assert_prefix_within_root(repo.root(), path)?;
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+		} else {
+			assert_within_root(repo.root(), path)?;
+			assert_outside_git_store(repo, gix_repo, path)?;
+		}
+	}
+	Ok(())
+}
+
+/// Whether a single path component names the Git store under any spelling a
+/// filesystem may accept for it.
+///
+/// Git itself refuses these same aliases when checking out a tree (see
+/// `is_ntfs_dotgit` and the `core.protectNTFS`/`core.protectHFS` defaults);
+/// this mirrors that rule for patch application.
+fn is_git_store_alias(component: &std::ffi::OsStr) -> bool {
+	let Some(name) = component.to_str() else {
+		// A non-UTF-8 component cannot spell `.git` in any of the forms
+		// below, and `validate_repo_path` has already rejected traversal.
+		return false;
+	};
+	// HFS+ treats a specific set of codepoints as invisible when comparing
+	// names, so `.\u{200c}git` opens the real `.git`; git refuses those
+	// spellings under `core.protectHFS`.
+	//
+	// It must be git's EXACT set, not the whole `Cf` general category. Folding
+	// more is not the safe direction it looks like: `.g\u{2060}it/file` is a
+	// path git accepts, and refusing it fails every later operation that
+	// rewrites an index containing it — an unrelated cherry-pick included.
+	// Verified against `git update-index`: U+200C and U+206F are rejected by
+	// git, U+2060 is accepted.
+	let folded: String = name.chars().filter(|c| !is_hfs_ignorable(*c)).collect();
+	let name = folded.as_str();
+	// NTFS reaches a directory through its alternate-stream syntax, so
+	// `.git::$INDEX_ALLOCATION` and `.git:x` open the same store. Cut at the
+	// first colon before anything else: the stream suffix survives the
+	// dot/space trim below and would otherwise carry the name past every
+	// comparison.
+	let name = name.split(':').next().unwrap_or(name);
+	// NTFS and HFS+ then ignore trailing dots and spaces, so `.git.`, `.git `
+	// and `git~1.` all reach the store too. Compare the trimmed spelling
+	// against BOTH protected names: checking only `.git` lets
+	// `sub/git~1./hooks/pre-commit` through, and a nested store is invisible to
+	// `assert_outside_git_store`, which only knows the outer one.
+	let trimmed = name.trim_end_matches(['.', ' ']);
+	trimmed.eq_ignore_ascii_case(".git") || trimmed.eq_ignore_ascii_case("git~1")
+}
+
+/// Refuse a path that would leave the worktree once symlinks are resolved.
+///
+/// The leaf is resolved too, so this is the guard for anything that OPENS the
+/// path — writing a file, creating a directory. To delete an entry, use
+/// [`assert_prefix_within_root`]: unlinking does not follow the leaf, and
+/// resolving it would reject legitimately tracked symlinks.
+///
+/// THREAT MODEL. The check is not atomic with the write that follows it: a
+/// symlink planted into the prefix between the two would still be followed.
+/// Closing that window needs `openat`/`O_NOFOLLOW` descriptor-relative writes,
+/// which the surrounding code does not use. It is accepted here because a
+/// worktree is operated by a single agent at a time — an attacker able to
+/// plant directories mid-apply already has write access to the workspace and
+/// does not need a patch to exercise it. What this guard does stop is the
+/// untrusted PATCH TEXT, which is the actual attacker-controlled input.
+fn assert_within_root(root: &Path, rel: &str) -> Result<()> {
+	assert_contained(root, rel, root.join(rel).as_path())
+}
+
+/// Refuse a path whose PREFIX would leave the worktree, ignoring the leaf.
+///
+/// For deletion: `remove_file` unlinks a directory entry without following it,
+/// so a tracked symlink whose target is outside the worktree (or dangling) is
+/// both safe to remove and must stay removable.
+fn assert_prefix_within_root(root: &Path, rel: &str) -> Result<()> {
+	let absolute = root.join(rel);
+	// No parent means the join produced the root itself, which is contained by
+	// definition; `validate_repo_path` has already refused empty and absolute
+	// paths, so this cannot be an escape.
+	let Some(parent) = absolute.parent() else {
+		return Ok(());
+	};
+	assert_contained(root, rel, parent)
+}
+
+/// Walk `probe` up to the deepest existing ancestor and require it to resolve
+/// inside `root`. `rel` names the original path for the error message.
+fn assert_contained(root: &Path, rel: &str, probe: &Path) -> Result<()> {
+	// Resolve the deepest existing ancestor against a canonicalized root so a
+	// symlinked directory (macOS /var -> /private/var, or a hostile symlink
+	// planted inside the root) is resolved consistently — a nonexistent leaf
+	// must not be compared unresolved against a resolved root, which would
+	// false-positive on symlinked prefixes.
+	let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+	let escaped = || Error::PathEscapesRoot { path: rel.to_owned() };
+	let mut probe = probe;
+	loop {
+		if probe == root {
+			return Ok(());
+		}
+		match std::fs::canonicalize(probe) {
+			Ok(canonical) if canonical.starts_with(&root_canonical) => return Ok(()),
+			Ok(_) => return Err(escaped()),
+			// `canonicalize` fails both for a path that does not exist and for a
+			// DANGLING symlink. Only the first may walk up: a dangling link is a
+			// real directory entry, and the write below would follow it and land
+			// at its target, outside the root.
+			Err(_) => {
+				if std::fs::symlink_metadata(probe).is_ok() {
+					return Err(escaped());
+				}
+				match probe.parent() {
+					Some(parent) if parent != probe => probe = parent,
+					_ => return Ok(()),
+				}
+			},
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::process::Command;
@@ -2050,5 +2891,1548 @@ mod tests {
 		assert!(repository.stash_try_pop(false).expect("pop second"));
 		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]), first);
 		assert_eq!(fs::read(temp.path().join("file.txt")).expect("second restored"), b"second\n");
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_git_store_and_escapes() {
+		for path in [
+			".git",
+			".git/config",
+			".git/hooks/pre-commit",
+			"sub/.git/objects",
+			"../outside",
+			"/abs/path",
+			"",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// Ordinary relative paths still apply.
+		assert!(validate_repo_path("src/main.rs").is_ok());
+		assert!(validate_repo_path("a/b/c.txt").is_ok());
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_case_insensitive_git_aliases() {
+		// macOS and Windows default to case-insensitive filesystems, where each
+		// of these opens the real `.git`. The byte-exact check they replaced
+		// admitted every one of them.
+		for path in [
+			".GIT/hooks/pre-commit",
+			".Git/config",
+			".gIt/objects/pack",
+			"sub/.GIT/config",
+			"GIT~1/hooks/pre-commit",
+			"git~1/config",
+			".git./config",
+			".git /config",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// Names that merely start with or contain `git` are ordinary files.
+		assert!(validate_repo_path("gitignore").is_ok());
+		assert!(validate_repo_path(".gitignore").is_ok());
+		assert!(validate_repo_path("src/git/patch.rs").is_ok());
+		assert!(validate_repo_path("digits/x.txt").is_ok());
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_hfs_ignorable_git_spellings() {
+		// HFS+ folds these codepoints away when comparing names, so each of
+		// these opens the real `.git`. Git refuses the same set under
+		// `core.protectHFS`; a nested repository under `sub/` is reachable the
+		// same way, and `assert_outside_git_store` cannot help there — it only
+		// knows the OUTER repository's store.
+		for path in [
+			".\u{200c}git/config",
+			".g\u{200d}it/hooks/pre-commit",
+			".gi\u{feff}t/objects",
+			".git\u{202a}/config",
+			"sub/.\u{200c}git/hooks/pre-commit",
+			"sub/.g\u{206f}it/config",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// Ordinary names containing no ignorable characters still apply.
+		assert!(validate_repo_path("sub/gitignore").is_ok());
+		assert!(validate_repo_path("digit/x.txt").is_ok());
+	}
+
+	#[test]
+	fn apply_patch_refuses_to_write_through_symlink_outside_root() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		// A symlinked directory inside the worktree aliases an untracked path
+		// that would otherwise be written into the repo root. The patch must
+		// not follow the link out of the worktree.
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+			symlink(outside.path(), temp.path().join("link")).expect("create symlink");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = &outside;
+		}
+		let repository = repo(temp.path());
+		// Craft a minimal "new file" patch targeting the symlinked prefix.
+		let patch = concat!(
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"index 0000000..3b18e51\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		let result = repository.apply_patch(patch, &ApplyOptions::default());
+		#[cfg(unix)]
+		{
+			assert!(result.is_err(), "patch must refuse symlink traversal");
+			assert!(
+				!outside.path().join("sneaky.txt").exists(),
+				"file written through symlink escape"
+			);
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = result;
+		}
+	}
+
+	#[test]
+	fn apply_patch_refuses_to_write_through_dangling_symlink_outside_root() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		// The link's target does not exist yet. `canonicalize` fails for a
+		// dangling link exactly as it does for an absent path, so a guard that
+		// walks up on any error admits it — and `create_dir_all` then
+		// materialises the target while following the link.
+		let ghost = outside.path().join("ghost");
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+			symlink(&ghost, temp.path().join("link")).expect("create dangling symlink");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = &outside;
+		}
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"index 0000000..3b18e51\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		let result = repository.apply_patch(patch, &ApplyOptions::default());
+		#[cfg(unix)]
+		{
+			assert!(result.is_err(), "patch must refuse dangling symlink traversal");
+			assert!(!ghost.exists(), "patch materialised the link target outside the root");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = result;
+			let _ = &ghost;
+		}
+	}
+
+	#[test]
+	fn apply_patch_leaves_worktree_untouched_when_a_later_path_escapes() {
+		let temp = init(&[("keep.txt", b"base\n"), ("doomed.txt", b"victim\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+			symlink(outside.path(), temp.path().join("link")).expect("create symlink");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = &outside;
+		}
+		let repository = repo(temp.path());
+		// Three sides in order: a legitimate edit, a legitimate deletion, then
+		// a target beneath the escaping symlink. Validating per-side as each is
+		// reached would commit the first two before refusing the third.
+		let patch = concat!(
+			"diff --git a/keep.txt b/keep.txt\n",
+			"--- a/keep.txt\n",
+			"+++ b/keep.txt\n",
+			"@@ -1 +1 @@\n",
+			"-base\n",
+			"+edited\n",
+			"diff --git a/doomed.txt b/doomed.txt\n",
+			"deleted file mode 100644\n",
+			"--- a/doomed.txt\n",
+			"+++ /dev/null\n",
+			"@@ -1 +0,0 @@\n",
+			"-victim\n",
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		let result = repository.apply_patch(patch, &ApplyOptions::default());
+		#[cfg(unix)]
+		{
+			assert!(result.is_err(), "patch must refuse the escaping target");
+			assert_eq!(
+				fs::read(temp.path().join("keep.txt")).expect("keep.txt"),
+				b"base\n",
+				"earlier edit was committed before the escape was caught"
+			);
+			assert!(
+				temp.path().join("doomed.txt").exists(),
+				"earlier deletion was committed before the escape was caught"
+			);
+			assert!(!outside.path().join("sneaky.txt").exists(), "escape was written");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = result;
+		}
+	}
+
+	#[test]
+	fn can_apply_patch_reports_false_for_an_escaping_patch() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+			symlink(outside.path(), temp.path().join("link")).expect("create symlink");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = &outside;
+		}
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		#[cfg(unix)]
+		{
+			// The predicate must agree with `apply_patch`: a caller gating on it
+			// would otherwise treat an attack as a viable change.
+			assert!(
+				!repository
+					.can_apply_patch(patch, &ApplyOptions::default())
+					.expect("probe"),
+				"can_apply_patch claimed an escaping patch applies"
+			);
+			assert!(
+				repository
+					.apply_patch(patch, &ApplyOptions::default())
+					.is_err()
+			);
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = (&repository, patch);
+		}
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_deletes_a_tracked_symlink_pointing_outside_the_root() {
+		use std::os::unix::fs::symlink;
+
+		// A repository may legitimately track a symlink whose target lies
+		// outside the worktree. Unlinking it does not follow it, so deletion
+		// must keep working — resolving the leaf would break ordinary patch
+		// deletion, cherry-pick, and stash cleanup.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let link = temp.path().join("outbound");
+		symlink(outside.path().join("target"), &link).expect("create dangling symlink");
+		git(temp.path(), &["add", "outbound"]);
+		git(temp.path(), &["commit", "-m", "track symlink"]);
+
+		let repository = repo(temp.path());
+		let target_id = git(temp.path(), &["rev-parse", "HEAD:outbound"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/outbound b/outbound\n",
+				"deleted file mode 120000\n",
+				"index {}..0000000\n",
+				"--- a/outbound\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&target_id[..7],
+			outside.path().join("target").display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("delete tracked symlink");
+		assert!(
+			link.symlink_metadata().is_err(),
+			"tracked symlink pointing outside the root was not deleted"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_to_read_a_source_through_an_escaping_symlink() {
+		use std::os::unix::fs::symlink;
+
+		// The source side is READ to build the state map. Before the preflight
+		// moved ahead of that read, a patch could name a source beneath an
+		// escaping symlink and have it slurped from outside the worktree — and
+		// pointing it at a device or FIFO turned that read into unbounded
+		// memory growth or a hang.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let secret = outside.path().join("secret.txt");
+		fs::write(&secret, b"classified\n").expect("write secret");
+		symlink(outside.path(), temp.path().join("link")).expect("create symlink");
+
+		let repository = repo(temp.path());
+		let objects_before = loose_object_count(temp.path());
+		let patch = concat!(
+			"diff --git a/link/secret.txt b/link/secret.txt\n",
+			"deleted file mode 100644\n",
+			"--- a/link/secret.txt\n",
+			"+++ /dev/null\n",
+			"@@ -1 +0,0 @@\n",
+			"-classified\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch must refuse a source outside the worktree"
+		);
+		assert!(
+			!repository
+				.can_apply_patch(patch, &ApplyOptions::default())
+				.expect("probe"),
+			"probe must refuse it too — it reads the same sources"
+		);
+		assert!(secret.exists(), "external file was consumed by the patch");
+		// Refusal alone proves nothing: the patch is refused either way, just
+		// later. What separates the two orderings is whether the source was
+		// READ — `augment_patch_sources` writes every source it reads into the
+		// object store as a blob, so the store growing is the observable
+		// evidence that external content was slurped before the refusal.
+		assert_eq!(
+			loose_object_count(temp.path()),
+			objects_before,
+			"external file was read into the object store before the refusal"
+		);
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_separate_git_dir_store() {
+		// `git init --separate-git-dir=meta .` leaves a `.git` FILE pointing at
+		// `meta/`, so the real store carries a name the component check cannot
+		// recognise. `meta/hooks/pre-commit` is a genuine hook and an
+		// unremarkable-looking path inside the root.
+		let temp = TempDir::new().expect("tempdir");
+		git(temp.path(), &["init", "--separate-git-dir=meta", "."]);
+		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		git(temp.path(), &["config", "user.name", "Test"]);
+		fs::write(temp.path().join("keep.txt"), b"base\n").expect("seed");
+		git(temp.path(), &["add", "keep.txt"]);
+		git(temp.path(), &["commit", "-m", "seed"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/meta/hooks/pre-commit b/meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into the separate git dir"
+		);
+		assert!(
+			!temp.path().join("meta/hooks/pre-commit").exists(),
+			"hook was written into the real git store"
+		);
+		// A path that merely shares the prefix is not the store.
+		assert!(validate_repo_path("metadata/notes.txt").is_ok());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_roundtrip_preserves_a_tracked_outbound_symlink() {
+		use std::os::unix::fs::symlink;
+
+		// A repository may track a symlink whose target lies outside the
+		// worktree. Writing such an entry unlinks and recreates the link
+		// without following it, so stash and pop must keep working — resolving
+		// the leaf would fail every operation that merely carries the entry
+		// along, even when the link itself is untouched.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let link = temp.path().join("outbound");
+		symlink(outside.path().join("target"), &link).expect("create symlink");
+		git(temp.path(), &["add", "outbound"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+
+		let repository = repo(temp.path());
+		fs::write(temp.path().join("keep.txt"), b"dirty\n").expect("dirty the tree");
+		assert!(
+			repository.stash_push(Some("wip")).expect("stash"),
+			"stash must not choke on the link"
+		);
+		assert!(link.symlink_metadata().is_ok(), "stash removed the tracked symlink");
+		assert!(repository.stash_try_pop(false).expect("pop"), "pop must restore the change");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("keep.txt"), b"dirty\n");
+		assert!(link.symlink_metadata().is_ok(), "pop lost the tracked symlink");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_before_advancing_head_when_a_path_escapes() {
+		use std::os::unix::fs::symlink;
+
+		// `cherry_pick` merges trees, commits with `commit_as` — moving HEAD —
+		// and only THEN writes the worktree. A path refused during that write
+		// leaves HEAD ahead of a worktree that never received the change.
+		//
+		// The escape has to be invisible to the tree merge, so it is planted in
+		// the worktree only: `nested/` is a real tracked directory in both
+		// trees, replaced on disk by a symlink pointing outside the root.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		fs::create_dir_all(temp.path().join("nested")).expect("mkdir");
+		fs::write(temp.path().join("nested/tracked.txt"), b"one\n").expect("write");
+		git(temp.path(), &["add", "nested/tracked.txt"]);
+		git(temp.path(), &["commit", "-m", "track nested"]);
+
+		git(temp.path(), &["checkout", "-q", "-b", "side"]);
+		fs::write(temp.path().join("nested/tracked.txt"), b"two\n").expect("write");
+		git(temp.path(), &["commit", "-aqm", "edit nested"]);
+		let side = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+		git(temp.path(), &["checkout", "-q", "-"]);
+
+		// Swap the real directory for a link out of the worktree. The trees
+		// still merge cleanly — only the write is an escape.
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		fs::remove_dir_all(temp.path().join("nested")).expect("drop real dir");
+		symlink(outside.path(), temp.path().join("nested")).expect("create symlink");
+
+		let repository = repo(temp.path());
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+		assert!(repository.cherry_pick(&side).is_err(), "cherry-pick must refuse the escaping path");
+		assert_eq!(
+			git(temp.path(), &["rev-parse", "HEAD"]),
+			head_before,
+			"HEAD advanced even though the worktree write was refused"
+		);
+		assert!(!outside.path().join("tracked.txt").exists(), "file written outside the worktree");
+	}
+
+	/// Number of loose objects in a repository's store.
+	fn loose_object_count(cwd: &Path) -> usize {
+		let output = git(cwd, &["count-objects", "-v"]);
+		output
+			.lines()
+			.find_map(|line| line.strip_prefix("count: "))
+			.and_then(|count| count.trim().parse().ok())
+			.expect("count-objects reports a count")
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_repoints_a_tracked_symlink_that_targets_outside_the_root() {
+		use std::os::unix::fs::symlink;
+
+		// A patch whose target mode is 120000 is unlinked and recreated, never
+		// opened through. Resolving its CURRENT destination would reject a
+		// valid patch that merely repoints an outbound link.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let first = outside.path().join("one");
+		let second = outside.path().join("two");
+		fs::write(&first, b"one\n").expect("first target");
+		fs::write(&second, b"two\n").expect("second target");
+		symlink(&first, temp.path().join("outbound")).expect("create symlink");
+		git(temp.path(), &["add", "outbound"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+
+		let repository = repo(temp.path());
+		let blob = git(temp.path(), &["rev-parse", "HEAD:outbound"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/outbound b/outbound\n",
+				"index {}..1111111 120000\n",
+				"--- a/outbound\n",
+				"+++ b/outbound\n",
+				"@@ -1 +1 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&blob.trim()[..7],
+			first.display(),
+			second.display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("repointing an outbound symlink is a valid patch");
+		assert_eq!(
+			fs::read_link(temp.path().join("outbound")).expect("still a symlink"),
+			second,
+			"symlink was not repointed"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_ignores_an_unchanged_path_the_write_loop_would_not_touch() {
+		use std::os::unix::fs::symlink;
+
+		// The map preflight must validate exactly what the write loop writes.
+		// An unrelated, unchanged tracked path that has locally become an
+		// outbound symlink is never written, so it must not fail the pick.
+		let temp = init(&[("keep.txt", b"base\n"), ("untouched.txt", b"stable\n")]);
+		git(temp.path(), &["checkout", "-q", "-b", "side"]);
+		fs::write(temp.path().join("keep.txt"), b"edited\n").expect("edit");
+		git(temp.path(), &["commit", "-aqm", "edit keep"]);
+		let side = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+		git(temp.path(), &["checkout", "-q", "-"]);
+
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let target = outside.path().join("elsewhere");
+		fs::write(&target, b"stable\n").expect("outside target");
+		fs::remove_file(temp.path().join("untouched.txt")).expect("drop real file");
+		symlink(&target, temp.path().join("untouched.txt")).expect("shadow with symlink");
+
+		let repository = repo(temp.path());
+		repository
+			.cherry_pick(&side)
+			.expect("unrelated unchanged path must not block the pick");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("keep.txt"), b"edited\n");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_push_refuses_before_installing_a_stash() {
+		use std::os::unix::fs::symlink;
+
+		// `update_stash_ref` runs before the worktree is rewritten, so a
+		// refusal discovered during the write would leave a stash the caller
+		// never asked for alongside the still-dirty tree.
+		let temp = init(&[("keep.txt", b"base\n"), ("nested/tracked.txt", b"one\n")]);
+		fs::write(temp.path().join("nested/tracked.txt"), b"two\n").expect("dirty the tree");
+
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		fs::remove_file(temp.path().join("nested/tracked.txt")).expect("drop file");
+		fs::remove_dir(temp.path().join("nested")).expect("drop dir");
+		symlink(outside.path(), temp.path().join("nested")).expect("shadow the prefix");
+
+		let repository = repo(temp.path());
+		// `git()` panics on a non-zero status, and `--verify --quiet` exits 1
+		// when no stash exists — which is exactly the state under test.
+		let stash_ref = |cwd: &Path| -> Option<String> {
+			let output = Command::new("git")
+				.current_dir(cwd)
+				.args(["rev-parse", "--verify", "--quiet", "refs/stash"])
+				.output()
+				.expect("run git");
+			output
+				.status
+				.success()
+				.then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+		};
+		let before = stash_ref(temp.path());
+		assert!(repository.stash_push(Some("wip")).is_err(), "stash must refuse the escaping path");
+		assert_eq!(stash_ref(temp.path()), before, "a stash was installed despite the refusal");
+	}
+
+	#[test]
+	fn containment_refusals_carry_the_path_as_a_typed_field() {
+		// The refusal must be classifiable and the path redactable without
+		// parsing a rendered message.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/.git/hooks/pre-commit b/.git/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/.git/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		match repository.apply_patch(patch, &ApplyOptions::default()) {
+			Err(Error::PathInGitStore { path }) => {
+				assert_eq!(path, ".git/hooks/pre-commit");
+				assert_eq!(Error::PathInGitStore { path }.kind(), "PathInGitStore");
+			},
+			other => panic!("expected a typed git-store refusal, got {other:?}"),
+		}
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_a_path_under_a_symlink_the_same_patch_creates() {
+		// The per-path guards interrogate the CURRENT filesystem, where the
+		// link does not exist yet, so both paths pass and the refusal would
+		// land only after `write_patch_worktree` created the link.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/link b/link\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/link\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/link/sneaky.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+pwned\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&patch, &ApplyOptions::default())
+				.is_err(),
+			"patch must refuse a path under a symlink it mints itself"
+		);
+		assert!(!temp.path().join("link").symlink_metadata().is_ok(), "the link was created anyway");
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_the_trimmed_dos_alias() {
+		// Windows ignores trailing dots and spaces before lookup, so trimming
+		// and then comparing only against `.git` lets the DOS alias through.
+		for path in [
+			"git~1./hooks/pre-commit",
+			"git~1 /config",
+			"sub/git~1./hooks/pre-commit",
+			"GIT~1.//config",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// Names that merely resemble it stay valid.
+		assert!(validate_repo_path("git~10/notes.txt").is_ok());
+		assert!(validate_repo_path("sub/gitlab/config").is_ok());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_deletes_a_tracked_symlink_pointing_into_the_git_store() {
+		use std::os::unix::fs::symlink;
+
+		// Unlinking cannot modify the link's target, so a repository that
+		// tracks a link into its own store is entitled to delete it. Resolving
+		// the leaf would refuse an operation that touches nothing.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let link = temp.path().join("storelink");
+		symlink(temp.path().join(".git/config"), &link).expect("create symlink");
+		git(temp.path(), &["add", "-f", "storelink"]);
+		git(temp.path(), &["commit", "-m", "track store symlink"]);
+
+		let repository = repo(temp.path());
+		let blob = git(temp.path(), &["rev-parse", "HEAD:storelink"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/storelink b/storelink\n",
+				"deleted file mode 120000\n",
+				"index {}..0000000\n",
+				"--- a/storelink\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&blob.trim()[..7],
+			temp.path().join(".git/config").display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("deleting the link is safe");
+		assert!(link.symlink_metadata().is_err(), "tracked store symlink was not deleted");
+		assert!(temp.path().join(".git/config").exists(), "the link target was disturbed");
+	}
+
+	#[test]
+	fn error_kind_is_derived_from_the_variant_name() {
+		// Derived, so a new variant cannot drift from its reported kind.
+		assert_eq!(Error::PathEscapesRoot { path: "a".to_owned() }.kind(), "PathEscapesRoot");
+		assert_eq!(Error::PathInGitStore { path: "a".to_owned() }.kind(), "PathInGitStore");
+		assert_eq!(Error::Canceled.kind(), "Canceled");
+		assert_eq!(Error::PatchFailed { message: "x".to_owned() }.kind(), "PatchFailed");
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_ntfs_alternate_stream_aliases() {
+		// NTFS opens a directory through its stream syntax, and the suffix
+		// survives the dot/space trim, so it would otherwise carry the name
+		// past every comparison.
+		for path in [
+			".git::$INDEX_ALLOCATION/hooks/pre-commit",
+			"git~1::$INDEX_ALLOCATION/config",
+			"sub/.git::$INDEX_ALLOCATION/hooks/pre-commit",
+			".git:x/config",
+			".GIT::$INDEX_ALLOCATION/config",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// A colon elsewhere in a name is not a store alias.
+		assert!(validate_repo_path("notes:draft.txt").is_ok());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_a_path_under_a_renamed_symlink_with_no_mode_header() {
+		use std::os::unix::fs::symlink;
+
+		// A 100% rename carries no mode headers, so `target_mode` is None and
+		// application inherits SYMLINK from the source entry. The topology scan
+		// has to infer it the same way, or it misses the minted link.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("old")).expect("create symlink");
+		git(temp.path(), &["add", "old"]);
+		git(temp.path(), &["commit", "-m", "track symlink"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/old b/link\n",
+			"similarity index 100%\n",
+			"rename from old\n",
+			"rename to link\n",
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch must refuse a path under a symlink it renames into place"
+		);
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the renamed link");
+		assert!(temp.path().join("old").symlink_metadata().is_ok(), "the rename was applied anyway");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_replaces_a_tracked_outbound_symlink_with_a_directory() {
+		use std::os::unix::fs::symlink;
+
+		// The removal pass takes `dir` out before the creation pass writes
+		// `dir/file`, so judging the child against the pre-removal filesystem
+		// would reject a safe operation: the escaping ancestor does not survive
+		// into the write.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("dir")).expect("create symlink");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+
+		git(temp.path(), &["checkout", "-q", "-b", "side"]);
+		git(temp.path(), &["rm", "-q", "dir"]);
+		fs::create_dir_all(temp.path().join("dir")).expect("mkdir");
+		fs::write(temp.path().join("dir/file.txt"), b"real file\n").expect("write");
+		git(temp.path(), &["add", "dir/file.txt"]);
+		git(temp.path(), &["commit", "-m", "replace link with a directory"]);
+		let side = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+		git(temp.path(), &["checkout", "-q", "-"]);
+
+		let repository = repo(temp.path());
+		repository
+			.cherry_pick(&side)
+			.expect("replacing a removed symlink ancestor is safe");
+		assert_eq!(fs::read(temp.path().join("dir/file.txt")).expect("dir/file.txt"), b"real file\n");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the old link");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_normalizes_spellings_before_matching_a_minted_symlink() {
+		// `./link/file` and `link/file` name the same hierarchy, so a raw
+		// prefix comparison misses the link this patch mints.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/link b/link\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/link\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/./link/sneaky.txt b/./link/sneaky.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/./link/sneaky.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+pwned\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&patch, &ApplyOptions::default())
+				.is_err(),
+			"a dot-prefixed spelling must not slip past the minted link"
+		);
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_nested_repositorys_separate_git_dir() {
+		// `git init --separate-git-dir=… sub` leaves a live store with no
+		// `.git` component, outside the outer repository's own directories.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--separate-git-dir=nested-meta", "sub"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/nested-meta/hooks/pre-commit b/nested-meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/nested-meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into a nested repository's store"
+		);
+		assert!(
+			!temp.path().join("nested-meta/hooks/pre-commit").exists(),
+			"hook was written into the nested store"
+		);
+	}
+
+	#[test]
+	fn error_kind_stays_usable_in_a_const_context() {
+		// Downstream code classifies in const/static initializers; narrowing
+		// the API would break it silently.
+		const CANCELED: &str = Error::Canceled.kind();
+		assert_eq!(CANCELED, "Canceled");
+		assert_eq!(Error::PathInGitStore { path: "a".to_owned() }.kind(), "PathInGitStore");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_folds_case_and_separators_when_matching_a_minted_symlink() {
+		// `Link` and `link` are the same directory on the case-insensitive
+		// filesystems macOS and Windows default to, and `link\\file` is a path
+		// on Windows. An exact comparison misses both, so the descendant is
+		// refused only after the link has been created.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+
+		for descendant in ["link/sneaky.txt", "Link/sneaky.txt", "link\\sneaky.txt"] {
+			let patch = format!(
+				concat!(
+					"diff --git a/Link b/Link\n",
+					"new file mode 120000\n",
+					"--- /dev/null\n",
+					"+++ b/Link\n",
+					"@@ -0,0 +1 @@\n",
+					"+{}\n",
+					"\\ No newline at end of file\n",
+					"diff --git a/{} b/{}\n",
+					"new file mode 100644\n",
+					"--- /dev/null\n",
+					"+++ b/{}\n",
+					"@@ -0,0 +1 @@\n",
+					"+pwned\n",
+				),
+				outside.path().display(),
+				descendant,
+				descendant,
+				descendant,
+			);
+			assert!(
+				repository
+					.apply_patch(&patch, &ApplyOptions::default())
+					.is_err(),
+				"spelling {descendant:?} slipped past the minted link"
+			);
+			assert!(
+				!temp.path().join("Link").symlink_metadata().is_ok(),
+				"the link was created before {descendant:?} was refused"
+			);
+			assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+		}
+	}
+
+	#[test]
+	fn normalize_repo_path_folds_case_dots_and_both_separators() {
+		assert_eq!(normalize_repo_path("./Link/File.txt"), "link/file.txt");
+		assert_eq!(normalize_repo_path("link\\file.txt"), "link/file.txt");
+		assert_eq!(normalize_repo_path("LINK//./file.txt"), "link/file.txt");
+		// Distinct hierarchies stay distinct.
+		assert_ne!(normalize_repo_path("linkx/file.txt"), normalize_repo_path("link/file.txt"));
+	}
+
+	#[test]
+	fn validate_repo_path_keeps_format_characters_git_does_not_fold() {
+		// Folding the whole `Cf` category rejects paths git accepts, and then
+		// every later operation that rewrites an index containing one fails —
+		// an unrelated cherry-pick included. Verified against `git
+		// update-index`: U+2060 is accepted by git even under protectHFS.
+		assert!(validate_repo_path(".g\u{2060}it/file").is_ok());
+		assert!(validate_repo_path("a\u{00ad}b/notes.txt").is_ok());
+		// The set git DOES fold stays refused.
+		assert!(validate_repo_path(".g\u{200c}it/file").is_err());
+		assert!(validate_repo_path(".g\u{206f}it/file").is_err());
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_linked_worktrees_common_store() {
+		// A linked worktree's `.git` points at `meta/worktrees/<name>`, and git
+		// reads `commondir` from there to find `meta` — where the hooks live.
+		// The worktree is created OUTSIDE the outer root and only its checkout
+		// moved in, so the only pointer the scanner can see is the linked one.
+		//
+		// What this pins is the OUTCOME, not one guard: `meta` is also
+		// bare-shaped, so `is_bare_store` catches it first and the commondir
+		// resolution is defence in depth behind it. Removing either alone
+		// leaves the patch refused; removing both lets it through, which is
+		// what this test fails on.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let host = tempfile::tempdir().expect("host tempdir");
+		git(host.path(), &["init", "-q", "--separate-git-dir=meta", "inner"]);
+		let inner = host.path().join("inner");
+		git(&inner, &["config", "user.email", "test@example.com"]);
+		git(&inner, &["config", "user.name", "Test"]);
+		fs::write(inner.join("f.txt"), b"x\n").expect("seed inner");
+		git(&inner, &["add", "f.txt"]);
+		git(&inner, &["commit", "-m", "seed"]);
+		git(&inner, &["worktree", "add", "-q", "../wt"]);
+
+		// Move only the linked checkout into the worktree under test, and put
+		// the common store where the patch will aim.
+		std::fs::rename(host.path().join("wt"), temp.path().join("wt")).expect("move worktree");
+		std::fs::rename(host.path().join("meta"), temp.path().join("meta")).expect("move store");
+		let pointer = temp.path().join("wt/.git");
+		fs::write(&pointer, format!("gitdir: {}\n", temp.path().join("meta/worktrees/wt").display()))
+			.expect("repoint");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/meta/hooks/pre-commit b/meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into a linked worktree's common store"
+		);
+		assert!(!temp.path().join("meta/hooks/pre-commit").exists(), "hook was written");
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_nested_bare_repository() {
+		// `git init --bare bare` leaves the store itself on disk under an
+		// arbitrary name, with no `.git` file to discover it by. Its hooks run
+		// when the repository receives a push.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--bare", "inner.git"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/inner.git/hooks/pre-receive b/inner.git/hooks/pre-receive\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/inner.git/hooks/pre-receive\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into a nested bare repository"
+		);
+		assert!(!temp.path().join("inner.git/hooks/pre-receive").exists(), "hook was written");
+	}
+
+	#[test]
+	fn nested_store_discovery_sees_repositories_created_after_an_earlier_operation() {
+		// A process-global cache in a long-lived agent would never see a store
+		// created after its first scan, and an untrusted patch could then reach
+		// that store's hooks.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let benign = concat!(
+			"diff --git a/keep.txt b/keep.txt\n",
+			"--- a/keep.txt\n",
+			"+++ b/keep.txt\n",
+			"@@ -1 +1 @@\n",
+			"-base\n",
+			"+edited\n",
+		);
+		repository
+			.apply_patch(benign, &ApplyOptions::default())
+			.expect("first operation");
+
+		// Only now does the nested store exist.
+		git(temp.path(), &["init", "-q", "--bare", "later.git"]);
+		let attack = concat!(
+			"diff --git a/later.git/hooks/pre-receive b/later.git/hooks/pre-receive\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/later.git/hooks/pre-receive\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(attack, &ApplyOptions::default())
+				.is_err(),
+			"a store created after the first scan was not discovered"
+		);
+		assert!(!temp.path().join("later.git/hooks/pre-receive").exists(), "hook was written");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_push_refuses_before_reading_through_an_escaping_prefix() {
+		use std::os::unix::fs::symlink;
+
+		// `tracked_worktree_map` opens every indexed path, so an indexed
+		// `dir/file` shadowed by an outbound `dir` is slurped from outside the
+		// worktree and hashed into a loose blob before any later check refuses
+		// it. A large enough file exhausts memory or disk on the way.
+		let temp = init(&[("keep.txt", b"base\n"), ("dir/file.txt", b"tracked\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		fs::write(outside.path().join("file.txt"), b"classified\n").expect("external file");
+		fs::remove_file(temp.path().join("dir/file.txt")).expect("drop file");
+		fs::remove_dir(temp.path().join("dir")).expect("drop dir");
+		symlink(outside.path(), temp.path().join("dir")).expect("shadow the prefix");
+
+		let repository = repo(temp.path());
+		let objects_before = loose_object_count(temp.path());
+		assert!(repository.stash_push(Some("wip")).is_err(), "stash must refuse the escaping prefix");
+		assert_eq!(
+			loose_object_count(temp.path()),
+			objects_before,
+			"external content was read into the object store before the refusal"
+		);
+	}
+
+	#[test]
+	fn stash_index_refusal_preserves_worktree_index_and_stash() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let gix_repo = repository.gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let blob = gix_repo
+			.write_blob(b"staged\n")
+			.expect("staged blob")
+			.detach();
+		let child = gix_repo
+			.write_object(&gix::objs::Tree {
+				entries: vec![gix::objs::tree::Entry {
+					mode:     EntryKind::Blob.into(),
+					filename: "file".into(),
+					oid:      blob,
+				}],
+			})
+			.expect("child tree")
+			.detach();
+		let mut index_tree = gix_repo
+			.find_tree(head_tree)
+			.expect("base tree")
+			.decode()
+			.expect("decode tree")
+			.to_owned();
+		index_tree.entries.push(gix::objs::tree::Entry {
+			mode:     EntryKind::Tree.into(),
+			// A spelling gix's tree validation ACCEPTS (it applies HFS folding
+			// and NTFS trailing-dot trimming separately) but our per-component
+			// policy refuses (it composes them): `.git` + U+200C + `.` reaches
+			// the store on a mount that both ignores the joiner and trims the
+			// dot. It has to be one gix will write into a tree, or the merge
+			// rejects it first and this test proves nothing about the guard.
+			filename: ".git\u{200c}.".into(),
+			oid:      child,
+		});
+		index_tree.entries.sort();
+		let index_tree = gix_repo
+			.write_object(&index_tree)
+			.expect("legacy index tree")
+			.detach();
+		let index_commit = gix_repo
+			.new_commit("legacy index", index_tree, [head_id])
+			.expect("index commit")
+			.id()
+			.detach();
+		let mut restored = tree_map(&gix_repo, head_tree).expect("base map");
+		restored.get_mut("keep.txt").expect("tracked file").id = blob;
+		let restored_tree = write_tree_map(&gix_repo, &restored).expect("restored tree");
+		let stash = gix_repo
+			.new_commit("legacy stash", restored_tree, [head_id, index_commit])
+			.expect("stash commit")
+			.id()
+			.detach();
+		update_stash_ref(&gix_repo, stash, PreviousValue::Any, "legacy stash".to_owned(), true)
+			.expect("stash ref");
+		let index_before = fs::read(gix_repo.git_dir().join("index")).expect("index before");
+		let log_before = fs::read(gix_repo.common_dir().join("logs/refs/stash")).expect("stash log");
+
+		assert!(repository.stash_try_pop(true).is_err(), "unsafe index must be refused");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("tracked file"), b"base\n");
+		assert_eq!(fs::read(gix_repo.git_dir().join("index")).expect("index"), index_before);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), head_id.to_string());
+		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]).trim(), stash.to_string());
+		assert_eq!(
+			fs::read(gix_repo.common_dir().join("logs/refs/stash")).expect("stash log"),
+			log_before
+		);
+		assert!(
+			repository
+				.stash_try_pop(false)
+				.expect("pop without reinstating index")
+		);
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("restored file"), b"staged\n");
+	}
+
+	/// Commit a tree that pairs an outbound symlink with a regular file whose
+	/// path is a case-alias descendant of it — the shape a Linux-authored tree
+	/// takes when checked out on the case-insensitive macOS default.
+	#[cfg(unix)]
+	fn commit_case_aliased_symlink_tree(temp: &TempDir, outside: &Path) -> String {
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let mut map = tree_map(&gix_repo, head_tree).expect("base map");
+		let link = gix_repo
+			.write_blob(outside.as_os_str().as_encoded_bytes())
+			.expect("link blob")
+			.detach();
+		let file = gix_repo.write_blob(b"pwned\n").expect("file blob").detach();
+		map.insert("Link".to_owned(), FileEntry::new(link, Mode::SYMLINK));
+		map.insert("link/file.txt".to_owned(), FileEntry::new(file, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("aliased tree");
+		gix_repo
+			.new_commit("aliased", tree, [head.id().detach()])
+			.expect("aliased commit")
+			.id()
+			.to_string()
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_a_case_aliased_symlink_descendant_before_moving_head() {
+		// `Link` and `link/file.txt` are distinct on the filesystem that
+		// authored them and one hierarchy on the one applying them. Judging
+		// each against the CURRENT filesystem misses the relationship: the
+		// write pass creates the link first and refuses the child afterwards,
+		// by which point HEAD has already advanced.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let picked = commit_case_aliased_symlink_tree(&temp, outside.path());
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+		let repository = repo(temp.path());
+
+		assert!(repository.cherry_pick(&picked).is_err(), "aliased descendant must be refused");
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+		assert!(temp.path().join("Link").symlink_metadata().is_err(), "the link was minted");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_folds_canonical_equivalence_when_matching_a_minted_symlink() {
+		// macOS normalizes names, so a minted `é` (U+00E9) and a later target
+		// under `e` + U+0301 are one directory entry. Scalar lowercasing leaves
+		// them byte-distinct and the descendant slips past the preflight.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/\u{e9} b/\u{e9}\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/\u{e9}\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/e\u{301}/sneaky.txt b/e\u{301}/sneaky.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/e\u{301}/sneaky.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+pwned\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&patch, &ApplyOptions::default())
+				.is_err(),
+			"a decomposed spelling must not slip past the composed minted link"
+		);
+		assert!(
+			temp.path().join("\u{e9}").symlink_metadata().is_err(),
+			"the link was created before the descendant was refused"
+		);
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	fn normalize_repo_path_folds_canonical_equivalence_and_case_together() {
+		assert_eq!(normalize_repo_path("e\u{301}/File"), normalize_repo_path("\u{e9}/file"));
+		assert_eq!(normalize_repo_path("\u{c9}/x"), normalize_repo_path("\u{e9}/x"));
+		assert_ne!(normalize_repo_path("e/x"), normalize_repo_path("\u{e9}/x"));
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn nested_store_discovery_does_not_open_a_fifo_named_dot_git() {
+		// A FIFO named `.git` is not a gitfile, but `is_dir()` is false for it
+		// too, and a plain `read_to_string` blocks every apply, cherry-pick and
+		// stash preflight until something writes to the pipe.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let dir = temp.path().join("sub");
+		fs::create_dir(&dir).expect("nested dir");
+		let fifo = std::ffi::CString::new(dir.join(".git").as_os_str().as_encoded_bytes())
+			.expect("fifo path");
+		// SAFETY: `fifo` is a valid NUL-terminated path for the duration of the
+		// call and `mkfifo` does not retain it.
+		assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/keep.txt b/keep.txt\n",
+			"--- a/keep.txt\n",
+			"+++ b/keep.txt\n",
+			"@@ -1 +1 @@\n",
+			"-base\n",
+			"+edited\n",
+		);
+		// Would hang forever before the fix; a bounded, non-following read
+		// simply skips the entry and the unrelated patch applies.
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("discovery must not block on a FIFO");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("edited"), b"edited\n");
+	}
+
+	#[test]
+	fn store_metadata_reads_are_bounded_and_never_follow_links() {
+		// Metadata found in a worktree is untrusted. A `.git` FILE holds one
+		// short `gitdir:` line; anything larger is not a gitfile and must not
+		// be slurped into memory, and a symlink named `.git` must not be
+		// followed to wherever it points.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let mut huge = b"gitdir: ../elsewhere".to_vec();
+		huge.resize(1024 * 1024, b'x');
+		fs::write(temp.path().join("huge"), huge).expect("oversized metadata");
+		assert!(read_store_metadata(&temp.path().join("huge")).is_none(), "oversized file was read");
+
+		let small = temp.path().join("small");
+		fs::write(&small, b"gitdir: meta\n").expect("small metadata");
+		assert_eq!(read_store_metadata(&small).as_deref(), Some(&b"gitdir: meta\n"[..]));
+
+		#[cfg(unix)]
+		{
+			let link = temp.path().join("link");
+			std::os::unix::fs::symlink(&small, &link).expect("metadata symlink");
+			assert!(read_store_metadata(&link).is_none(), "symlinked metadata was followed");
+		}
+	}
+
+	#[test]
+	fn ordinary_directory_with_head_objects_and_refs_is_not_a_store() {
+		// `HEAD`, `objects/` and `refs/` are not exotic names. A project that
+		// happens to use all three is not a bare repository, and refusing
+		// every write beneath it would break that project for no reason.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let dir = temp.path().join("lookalike");
+		fs::create_dir_all(dir.join("objects")).expect("objects dir");
+		fs::create_dir_all(dir.join("refs")).expect("refs dir");
+		fs::write(dir.join("HEAD"), b"this is a header file, not a git ref\n").expect("HEAD");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/lookalike/objects/note.txt b/lookalike/objects/note.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/lookalike/objects/note.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+not a git object\n",
+		);
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("a look-alike directory must stay writable");
+		assert!(temp.path().join("lookalike/objects/note.txt").is_file(), "patch was refused");
+	}
+
+	#[test]
+	fn bare_store_recognition_requires_a_valid_head() {
+		// Positive: what `git init --bare` produces. Negative: the same layout
+		// with a HEAD that is neither a symbolic ref nor an object id.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--bare", "real.git"]);
+		assert!(is_bare_store(&temp.path().join("real.git")), "real bare store not recognized");
+
+		let fake = temp.path().join("fake");
+		fs::create_dir_all(fake.join("objects")).expect("objects dir");
+		fs::create_dir_all(fake.join("refs")).expect("refs dir");
+		fs::write(fake.join("HEAD"), b"nonsense\n").expect("HEAD");
+		assert!(!is_bare_store(&fake), "garbage HEAD was accepted as a store");
+	}
+
+	/// A stash whose tracked half restores an outbound symlink named
+	/// `link_name`, and whose untracked half restores `untracked_path`. Built
+	/// directly, not via `stash_push`, because the interesting stashes are the
+	/// ones authored on a filesystem with different rules than the one popping.
+	#[cfg(unix)]
+	fn stash_with_symlink_and_untracked(
+		temp: &TempDir,
+		outside: &Path,
+		link_name: &str,
+		untracked_path: &str,
+	) -> gix::ObjectId {
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let link = gix_repo
+			.write_blob(outside.as_os_str().as_encoded_bytes())
+			.expect("link blob")
+			.detach();
+		let mut tracked = tree_map(&gix_repo, head_tree).expect("base map");
+		tracked.insert(link_name.to_owned(), FileEntry::new(link, Mode::SYMLINK));
+		let tracked_tree = write_tree_map(&gix_repo, &tracked).expect("tracked tree");
+		let index_commit = gix_repo
+			.new_commit("index", head_tree, [head_id])
+			.expect("index commit")
+			.id()
+			.detach();
+		let file = gix_repo
+			.write_blob(b"pwned\n")
+			.expect("untracked blob")
+			.detach();
+		let mut untracked = BTreeMap::new();
+		untracked.insert(untracked_path.to_owned(), FileEntry::new(file, Mode::FILE));
+		let untracked_tree = write_tree_map(&gix_repo, &untracked).expect("untracked tree");
+		let untracked_commit = gix_repo
+			.new_commit("untracked", untracked_tree, std::iter::empty::<gix::ObjectId>())
+			.expect("untracked commit")
+			.id()
+			.detach();
+		let stash = gix_repo
+			.new_commit("stash", tracked_tree, [head_id, index_commit, untracked_commit])
+			.expect("stash commit")
+			.id()
+			.detach();
+		update_stash_ref(&gix_repo, stash, PreviousValue::Any, "stash".to_owned(), true)
+			.expect("stash ref");
+		stash
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_pop_refuses_an_untracked_descendant_of_a_restored_link_before_writing() {
+		// The tracked half restores an outbound `é` (NFC) link; the untracked
+		// half restores `e◌́/u` (NFD). On a normalizing filesystem that is a
+		// write THROUGH the link — but the link does not exist yet when the
+		// untracked loop consults the filesystem, so both halves used to pass
+		// and the refusal landed after the tracked half was written.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let stash =
+			stash_with_symlink_and_untracked(&temp, outside.path(), "\u{e9}", "e\u{301}/u.txt");
+		let repository = repo(temp.path());
+
+		assert!(
+			repository.stash_try_pop(false).is_err(),
+			"descendant of restored link must be refused"
+		);
+		assert!(temp.path().join("\u{e9}").symlink_metadata().is_err(), "tracked link was restored");
+		assert!(!outside.path().join("u.txt").exists(), "wrote through the restored link");
+		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]).trim(), stash.to_string());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_accepts_a_child_replacing_a_removed_link_under_another_spelling() {
+		use std::os::unix::fs::symlink;
+
+		// HEAD tracks an outbound `é` (NFC) link; the pick replaces it with a
+		// regular `e◌́/file.txt` (NFD). The write pass removes the link before
+		// creating the child, so the operation is safe — but a removal set
+		// keyed on raw strings never matches the NFD child's ancestor, and the
+		// preflight resolves through the still-present link and refuses.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("\u{e9}")).expect("track a link");
+		git(temp.path(), &["add", "-A"]);
+		git(temp.path(), &["commit", "-qm", "link"]);
+
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let mut map = tree_map(&gix_repo, head.tree_id().expect("tree").detach()).expect("map");
+		map.remove("\u{e9}").expect("link tracked");
+		let file = gix_repo.write_blob(b"child\n").expect("blob").detach();
+		map.insert("e\u{301}/file.txt".to_owned(), FileEntry::new(file, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("tree");
+		let picked = gix_repo
+			.new_commit("replace", tree, [head.id().detach()])
+			.expect("commit")
+			.id()
+			.to_string();
+
+		repo(temp.path())
+			.cherry_pick(&picked)
+			.expect("replacing a removed link under another spelling is safe");
+		assert!(temp.path().join("e\u{301}/file.txt").is_file(), "child was not written");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the old link");
+	}
+
+	#[test]
+	fn nested_store_cache_keeps_one_slot_per_root_within_an_operation() {
+		// Two repositories interleaving path checks inside one operation must
+		// not evict each other: a single shared slot would rescan the whole
+		// worktree on every alternation. Same operation, alternating roots,
+		// and the SAME `Arc` must come back for each — a rescan allocates a
+		// fresh one.
+		let a = init(&[("a.txt", b"a\n")]);
+		let b = init(&[("b.txt", b"b\n")]);
+		let (repo_a, repo_b) = (repo(a.path()), repo(b.path()));
+		begin_operation();
+		let first_a = nested_stores(&repo_a);
+		let first_b = nested_stores(&repo_b);
+		let second_a = nested_stores(&repo_a);
+		let second_b = nested_stores(&repo_b);
+		assert!(Arc::ptr_eq(&first_a, &second_a), "root A was rescanned after root B was checked");
+		assert!(Arc::ptr_eq(&first_b, &second_b), "root B was rescanned after root A was checked");
+		// And a new operation still invalidates both.
+		begin_operation();
+		assert!(
+			!Arc::ptr_eq(&first_a, &nested_stores(&repo_a)),
+			"stale scan survived a new operation"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_accepts_deleting_a_child_before_minting_its_parent_as_a_link() {
+		// Valid ordering: `link/file` is deleted and its empty directory removed
+		// BEFORE symlink `link` is created, so the deletion never traverses the
+		// link. Judging the source against the final set of minted links would
+		// reject a patch git itself accepts.
+		let temp = init(&[("keep.txt", b"base\n"), ("link/file.txt", b"child\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let blob = git(temp.path(), &["rev-parse", "HEAD:link/file.txt"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/link/file.txt b/link/file.txt\n",
+				"deleted file mode 100644\n",
+				"index {}..0000000\n",
+				"--- a/link/file.txt\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-child\n",
+				"diff --git a/link b/link\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/link\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&blob.trim()[..7],
+			outside.path().display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("delete-then-mint is a valid ordering");
+		assert!(
+			temp
+				.path()
+				.join("link")
+				.symlink_metadata()
+				.is_ok_and(|m| m.file_type().is_symlink())
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn map_preflight_does_not_treat_a_differently_named_entry_as_the_removed_ancestor() {
+		// On a case-sensitive filesystem `Link` and `link` are two entries.
+		// Removing tracked `Link` must not be taken as removing untracked
+		// outbound `link`, or `link/file` skips containment and resolves
+		// through a symlink the write pass never touches. Where the filesystem
+		// folds case, the two ARE one entry and the skip is correct — so the
+		// check asks the filesystem rather than a string rule.
+		use std::os::unix::fs::symlink;
+		let temp = init(&[("keep.txt", b"base\n"), ("Link", b"tracked\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let folds = {
+			fs::write(temp.path().join("PROBE"), b"").expect("probe");
+			let same = temp.path().join("probe").exists();
+			fs::remove_file(temp.path().join("PROBE")).expect("cleanup");
+			same
+		};
+		if folds {
+			// Cannot construct two distinct entries here; the NFC/NFD test
+			// covers the folding side of this behaviour.
+			return;
+		}
+		symlink(outside.path(), temp.path().join("link")).expect("untracked outbound link");
+
+		let mut previous = BTreeMap::new();
+		let gix_repo = repo(temp.path()).gix().expect("open");
+		let id = gix_repo.write_blob(b"tracked\n").expect("blob").detach();
+		previous.insert("Link".to_owned(), FileEntry { id, mode: Mode::FILE, intent_to_add: false });
+		let mut next = BTreeMap::new();
+		next.insert("link/file.txt".to_owned(), FileEntry {
+			id,
+			mode: Mode::FILE,
+			intent_to_add: false,
+		});
+
+		let repository = repo(temp.path());
+		assert!(
+			assert_worktree_map_contained(&repository, &gix_repo, &previous, &next).is_err(),
+			"removing `Link` was taken as removing `link`, skipping containment"
+		);
 	}
 }

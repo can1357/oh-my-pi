@@ -8900,10 +8900,13 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "parking_lot",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "xutf",
 ]
 
 [[package]]
