@@ -1,7 +1,8 @@
 //! Process management
 
 use futures::FutureExt;
-use std::io::Write;
+mod completion;
+use completion::{CompletionMarker, completion_exit_code, wait_with_output};
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -10,11 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{error, openfiles::OpenFile, sys};
 
-struct CompletionMarker {
-	output:            OpenFile,
-	end_marker_prefix: String,
-	end_marker_suffix: String,
-}
 
 /// A waitable future that will yield the results of a child process's
 /// execution.
@@ -50,7 +46,7 @@ impl ChildProcess {
 		let kill_handle = child.raw_handle().and_then(duplicate_handle);
 
 		Self {
-			exec_future: Box::pin(child.wait_with_output()),
+			exec_future: Box::pin(wait_with_output(child)),
 			pid,
 			pgid,
 			reaped: false,
@@ -168,13 +164,8 @@ impl ChildProcess {
 	}
 
 	fn write_completion_marker(&mut self, exit_code: i32) {
-		if let Some(mut marker) = self.completion_marker.take() {
-			let _ = write!(
-				marker.output,
-				"{}{}{}",
-				marker.end_marker_prefix, exit_code, marker.end_marker_suffix
-			);
-			let _ = marker.output.flush();
+		if let Some(marker) = self.completion_marker.take() {
+			marker.write(exit_code);
 		}
 	}
 
@@ -285,21 +276,6 @@ fn terminate_process_id(pid: sys::process::ProcessId) -> bool {
 	terminated
 }
 
-fn completion_exit_code(status: &std::process::ExitStatus) -> i32 {
-	if let Some(code) = status.code() {
-		return code;
-	}
-
-	#[cfg(unix)]
-	{
-		use std::os::unix::process::ExitStatusExt as _;
-		if let Some(signal) = status.signal() {
-			return 128 + signal;
-		}
-	}
-
-	127
-}
 
 /// Represents the result of waiting for an executing process.
 pub enum ProcessWaitResult {
