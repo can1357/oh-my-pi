@@ -635,8 +635,23 @@ export abstract class OAuthCallbackFlow {
 						callbackPromise,
 						requestManualInput(signal).then((input): CallbackResult | null => {
 							const parsed = parseCallbackInput(input);
-							if (!parsed.code) return null;
-							if (expectedState && parsed.state && parsed.state !== expectedState) return null;
+							if (!parsed.code) {
+								// A silent `null` re-prompts with the same empty input, which
+								// reads as "the paste was ignored". The common cause is pasting
+								// the authorize URL (it carries `client_id`/`state` but no
+								// `code`) after the browser failed to hand a custom-scheme
+								// redirect back to us, so name the actual problem.
+								this.ctrl.onProgress?.(
+									"No `code` in that input — paste the full redirect URL this login attempt produced",
+								);
+								return null;
+							}
+							if (expectedState && parsed.state && parsed.state !== expectedState) {
+								this.ctrl.onProgress?.(
+									"`state` is from another login attempt — use the redirect URL from the tab this attempt opened",
+								);
+								return null;
+							}
 							return { code: parsed.code, state: parsed.state ?? "" };
 						}),
 					]);
@@ -663,9 +678,15 @@ export function parseCallbackInput(input: string): { code?: string; state?: stri
 
 	try {
 		const url = new URL(value);
+		// Providers differ on which side of the URL carries the response: Z.AI's
+		// coding-plan callback is a query (`?code=…&state=…`, matching ZCode's own
+		// `parseCallbackParams`), others use the fragment. Accept both so a pasted
+		// URL cannot fail on a shape the native callback path would have taken
+		// (`parseNativeCallback` also accepts the `authCode` alias).
+		const params = url.searchParams.size > 0 ? url.searchParams : new URLSearchParams(url.hash.replace(/^#/, ""));
 		return {
-			code: url.searchParams.get("code") ?? undefined,
-			state: url.searchParams.get("state") ?? undefined,
+			code: params.get("code") ?? params.get("authCode") ?? undefined,
+			state: params.get("state") ?? undefined,
 		};
 	} catch {
 		// Not a URL - check for query string format
@@ -674,7 +695,7 @@ export function parseCallbackInput(input: string): { code?: string; state?: stri
 	if (value.includes("code=")) {
 		const params = new URLSearchParams(value.replace(/^[?#]/, ""));
 		return {
-			code: params.get("code") ?? undefined,
+			code: params.get("code") ?? params.get("authCode") ?? undefined,
 			state: params.get("state") ?? undefined,
 		};
 	}
