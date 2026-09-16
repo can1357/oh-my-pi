@@ -199,4 +199,47 @@ describe("applyEditsThenRename", () => {
 		expect(await Bun.file(source).text()).toBe("export const x = 1;\n");
 		expect(await Bun.file(path.join(dest, "keep.txt")).text()).toBe("keep");
 	});
+
+	it.each(["symlink", "hard link"])("preserves distinct reference edits through a %s alias", async aliasKind => {
+		const alias = path.join(dir, "alias.ts");
+		if (aliasKind === "symlink") await fs.symlink(ref, alias);
+		else await fs.link(ref, alias);
+		const dest = path.join(dir, "renamed.ts");
+		await applyEditsThenRename(
+			[
+				{ filePath: alias, edits: importEdit },
+				{
+					filePath: ref,
+					edits: [{ range: { start: { line: 0, character: 9 }, end: { line: 0, character: 10 } }, newText: "y" }],
+				},
+			],
+			source,
+			dest,
+		);
+
+		expect(await Bun.file(ref).text()).toBe('import { y } from "./renamed";\n');
+		expect(await Bun.file(alias).text()).toBe('import { y } from "./renamed";\n');
+		expect(await Bun.file(dest).text()).toBe("export const x = 1;\n");
+		expect(await Bun.file(source).exists()).toBe(false);
+	});
+
+	it("rejects conflicting edits through a symlink alias before changing files", async () => {
+		const alias = path.join(dir, "alias.ts");
+		await fs.symlink(ref, alias);
+		const dest = path.join(dir, "renamed.ts");
+		await expect(
+			applyEditsThenRename(
+				[
+					{ filePath: ref, edits: importEdit },
+					{ filePath: alias, edits: [{ ...importEdit[0], newText: "./conflict" }] },
+				],
+				source,
+				dest,
+			),
+		).rejects.toThrow("overlapping LSP edits");
+
+		expect(await Bun.file(ref).text()).toBe(refBefore);
+		expect(await Bun.file(source).text()).toBe("export const x = 1;\n");
+		expect(await Bun.file(dest).exists()).toBe(false);
+	});
 });

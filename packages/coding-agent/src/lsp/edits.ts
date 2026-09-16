@@ -178,7 +178,7 @@ export interface RenameReferenceEdit {
  * All reference edits are prepared against their pre-move snapshots before any
  * writes. If a write or move fails, every attempted reference write is rolled
  * back, including a write that may have partially completed before throwing.
- * Duplicate reference paths share one snapshot and one combined edit batch.
+ * Reference paths sharing a filesystem identity use one snapshot and edit batch.
  *
  * @throws the original error, or an AggregateError retaining it and any rollback failures.
  */
@@ -187,15 +187,17 @@ export async function applyEditsThenRename(
 	source: string,
 	dest: string,
 ): Promise<void> {
-	const editsByPath = new Map<string, TextEdit[]>();
+	const editsByFile = new Map<string, RenameReferenceEdit>();
 	for (const { filePath, edits } of references) {
 		const resolved = path.resolve(filePath);
-		const pending = editsByPath.get(resolved);
-		if (pending) pending.push(...edits);
-		else editsByPath.set(resolved, [...edits]);
+		const stat = await fs.stat(resolved, { bigint: true });
+		const identity = `${stat.dev}:${stat.ino}`;
+		const pending = editsByFile.get(identity);
+		if (pending) pending.edits.push(...edits);
+		else editsByFile.set(identity, { filePath: resolved, edits: [...edits] });
 	}
 	const prepared: Array<{ filePath: string; original: string; updated: string }> = [];
-	for (const [filePath, edits] of editsByPath) {
+	for (const { filePath, edits } of editsByFile.values()) {
 		const original = await Bun.file(filePath).text();
 		prepared.push({ filePath, original, updated: applyTextEditsToString(original, edits) });
 	}
