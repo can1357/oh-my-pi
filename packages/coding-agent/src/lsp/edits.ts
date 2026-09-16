@@ -175,30 +175,55 @@ export interface RenameReferenceEdit {
 /**
  * Apply a rename's reference edits and then move `source` → `dest` as one unit.
  *
- * The reference edits (import/usage rewrites in other files) must be written
- * before the move so their positions match the pre-move file contents, but a
- * failed move must not leave those files half-rewritten: each edited file is
- * snapshotted first, and if `mkdir`/`rename` throws, every snapshot is restored
- * before the error propagates. A failed move therefore leaves the source,
- * destination, and every reference file exactly as they were.
+ * All reference edits are prepared against their pre-move snapshots before any
+ * writes. If a write or move fails, every attempted reference write is rolled
+ * back, including a write that may have partially completed before throwing.
+ * Reference paths sharing a filesystem identity use one snapshot and edit batch.
  *
- * @throws the original `mkdir`/`rename` error, after rolling back the edits.
+ * @throws the original error, or an AggregateError retaining it and any rollback failures.
  */
 export async function applyEditsThenRename(
 	references: RenameReferenceEdit[],
 	source: string,
 	dest: string,
 ): Promise<void> {
-	const backups: Array<{ filePath: string; original: string }> = [];
+	const editsByFile = new Map<string, RenameReferenceEdit>();
 	for (const { filePath, edits } of references) {
-		backups.push({ filePath, original: await Bun.file(filePath).text() });
-		await applyTextEdits(filePath, edits);
+		const resolved = path.resolve(filePath);
+		const stat = await fs.stat(resolved, { bigint: true });
+		const identity = `${stat.dev}:${stat.ino}`;
+		const pending = editsByFile.get(identity);
+		if (pending) pending.edits.push(...edits);
+		else editsByFile.set(identity, { filePath: resolved, edits: [...edits] });
 	}
+	const prepared: Array<{ filePath: string; original: string; updated: string }> = [];
+	for (const { filePath, edits } of editsByFile.values()) {
+		const original = await Bun.file(filePath).text();
+		prepared.push({ filePath, original, updated: applyTextEditsToString(original, edits) });
+	}
+	let attempted = 0;
 	try {
+		for (const { filePath, updated } of prepared) {
+			attempted++;
+			await Bun.write(filePath, updated);
+		}
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
 	} catch (err) {
-		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
+		const rollbackErrors: Error[] = [];
+		for (let i = attempted - 1; i >= 0; i--) {
+			const { filePath, original } = prepared[i];
+			try {
+				await Bun.write(filePath, original);
+			} catch (rollbackError) {
+				rollbackErrors.push(new Error(`Failed to restore reference file ${filePath}`, { cause: rollbackError }));
+			}
+		}
+		if (rollbackErrors.length > 0) {
+			throw new AggregateError([err, ...rollbackErrors], "LSP rename failed and reference rollback failed", {
+				cause: err,
+			});
+		}
 		throw err;
 	}
 }
