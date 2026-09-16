@@ -581,13 +581,13 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Restores the configured primary after fallback cooldown expiry.
+	 * Restores the previous model after fallback cooldown expiry or request-scoped success.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
-	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary();
+	maybeRestoreRetryFallbackPrimary(options?: { afterSuccessOnly?: boolean }): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(options);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -1841,7 +1841,7 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
+		options?: { pinFallback?: boolean; restoreAfterSuccess?: boolean; apiKey?: string; signal?: AbortSignal },
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -1880,9 +1880,12 @@ export class TurnRecovery {
 		// candidate as fallback-routed. Attribution itself is safe regardless — it
 		// names the last model that served, which this swap has not changed.
 		const routedBeforeSwap = this.#fallbackRoutedFor;
+		const previousFallback = this.#activeRetryFallback;
+		const startRequestScopedFallback =
+			options?.restoreAfterSuccess === true && !previousFallback?.restoreAfterSuccess;
 		const servedBeforeSwap = this.#activeRetryFallback?.served;
 		this.#markFallbackRouted();
-		if (this.#activeRetryFallback) this.#activeRetryFallback.served = false;
+		if (this.#activeRetryFallback && !startRequestScopedFallback) this.#activeRetryFallback.served = false;
 		await this.#host.setModelWithProviderSessionReset(candidate);
 		if (options?.signal?.aborted) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
@@ -1900,13 +1903,17 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
-		if (!this.#activeRetryFallback) {
+		if (!this.#activeRetryFallback || startRequestScopedFallback) {
 			this.#activeRetryFallback = {
 				role,
 				originalSelector: currentSelector,
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				restoreAfterSuccess: options?.restoreAfterSuccess,
+				previousFallback: startRequestScopedFallback ? previousFallback : undefined,
+				originalWasFallback:
+					startRequestScopedFallback && routedBeforeSwap === this.#host.sessionManager.getSessionId(),
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
@@ -1928,6 +1935,7 @@ export class TurnRecovery {
 		options?: {
 			excludeProvider?: string;
 			pinFallback?: boolean;
+			restoreAfterSuccess?: boolean;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
 		},
@@ -2089,16 +2097,21 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		if (!this.#activeRetryFallback) return false;
-		if (this.#activeRetryFallback.pinned) return false;
-		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+	async #maybeRestoreRetryFallbackPrimary(options?: { afterSuccessOnly?: boolean }): Promise<boolean> {
+		const fallback = this.#activeRetryFallback;
+		if (!fallback) return false;
+		if (fallback.restoreAfterSuccess) {
+			if (!fallback.served) return false;
+		} else {
+			if (options?.afterSuccessOnly || fallback.pinned) return false;
+			if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+		}
 
 		const {
 			originalSelector: originalSelectorRaw,
 			originalThinkingLevel,
 			lastAppliedFallbackThinkingLevel,
-		} = this.#activeRetryFallback;
+		} = fallback;
 		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw, this.#host.modelRegistry);
 		if (!originalSelector) {
 			// Defensive: the stored selector is always produced by
@@ -2129,8 +2142,18 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
+		const generation = this.#host.promptGeneration();
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
-		if (!apiKey) return false;
+		if (
+			!apiKey ||
+			this.#activeRetryFallback !== fallback ||
+			this.#host.model() !== currentModel ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress()
+		) {
+			return false;
+		}
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const thinkingToApply =
@@ -2142,6 +2165,8 @@ export class TurnRecovery {
 		// attribution in that window would see the restored primary still tagged
 		// as fallback-served.
 		this.clearActiveRetryFallback();
+		this.#activeRetryFallback = fallback.previousFallback;
+		if (fallback.originalWasFallback) this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
@@ -2364,6 +2389,9 @@ export class TurnRecovery {
 			effectiveUsageLimitWaitMs > retrySettings.maxDelayMs &&
 			/\bGoUsageLimitError\b/.test(errorMessage) &&
 			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
+		const restoreAfterSuccess =
+			(classifierRefusal || AIError.is(id, AIError.Flag.ContentBlocked)) &&
+			this.#host.settings.get("retry.refusalFallbackRevertPolicy") === "after-success";
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
@@ -2373,14 +2401,15 @@ export class TurnRecovery {
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!waitForSiblingCredential &&
-				!(retryBudgetExhausted && classifierRefusal)
+				!(retryBudgetExhausted && (classifierRefusal || restoreAfterSuccess))
 			) {
-				if (!classifierRefusal) {
+				if (!classifierRefusal && !restoreAfterSuccess) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
+					pinFallback: classifierRefusal && !restoreAfterSuccess,
+					restoreAfterSuccess,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
 				});

@@ -2169,6 +2169,7 @@ describe("AgentSession retry delay cap", () => {
 			"compaction.enabled": false,
 			"retry.maxRetries": 0,
 			"retry.modelFallback": true,
+			"retry.refusalFallbackRevertPolicy": "after-success",
 			"retry.fallbackChains": {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
