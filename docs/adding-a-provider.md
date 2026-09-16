@@ -45,8 +45,9 @@ factory entry**:
    `env`, and the cascade rules the provider needs. Declaring `default-model`
    is what makes the file a catalog provider — a file without it is wire-compat
    only (custom provider ids such as `llama.cpp`) and may carry no other entry
-   node. Add a `discovery` node only when the provider should be model-listed at
-   generation time.
+   node. Add a `discovery` node when the provider's endpoint should be queried
+   at generation time; the generator fetches only providers that have both this
+   node and a factory entry.
 2. **Add `packages/catalog/src/compat/rules/auth/<id>.kdl`** with the root
    `auth "<id>"` node: `name`, `env`, and the login flow (`login "api-key"`
    with a `validate` probe for the common case). When the provider has a
@@ -59,13 +60,17 @@ factory entry**:
    `createSimpleOpenAICompletionsOptions(providerId, defaultBaseUrl, config)`
    (as `groq`, `together`, and `coreweave` do) or as a named factory in
    `packages/catalog/src/provider-models/openai-compat.ts` / `special.ts`.
-   Only ids in this table enter `PROVIDER_DESCRIPTORS`, so a provider that
-   declares a `discovery` node but has no factory is generated into the bundled
-   catalog and never refreshed at runtime. Omit the factory only when there is
-   no runtime discovery to run — the header of that file names those ids
-   (`amazon-bedrock`, `azure`, `gitlab-duo`, the MiniMax ids, and the
-   OAuth-driven managers `google-antigravity` / `google-gemini-cli` /
-   `openai-codex`, whose managers are built by the coding-agent runtime).
+   `PROVIDER_DESCRIPTORS` is built from this table joined with the compiled
+   entries, and both discovery paths read it: the runtime refreshes models for
+   the ids in it, and `generate-models.ts` fetches the subset whose compiled
+   entry also carries a `discovery` node. A provider with a `discovery` node but
+   no factory is therefore fetched by neither — its rows come only from the
+   upstream merge or a seed — so omit the factory only when the provider has no
+   runtime discovery to run and no generic catalog fetch to make. The header of
+   that file names those ids (`amazon-bedrock`, `azure`, `gitlab-duo`, the
+   MiniMax ids, and the OAuth-driven managers `google-antigravity` /
+   `google-gemini-cli` / `openai-codex`, whose managers are built by the
+   coding-agent runtime).
 4. **Add a `TRANSPORTS` entry** in `packages/ai/src/registry/registry.ts` only
    when the provider shapes models or requests in TypeScript alongside its KDL
    auth policy.
@@ -87,15 +92,15 @@ suite rather than the login.
 **Catalog entry** (`provider "<id>"` in `providers/<id>.kdl`, compiled to
 `CompiledProvider`; see the grammar README for the full node list):
 
-| Field                                 | Effect                                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `default-model`                       | Required for a catalog entry. Member of `KnownProvider`; preferred model when no explicit selection is made.                                                                                                                                                                                                                                   |
-| `env`                                 | Env var name(s), in order, for the runtime API-key fallback (`getEnvApiKey`).                                                                                                                                                                                                                                                                  |
-| `allow-unauthenticated`               | Runtime creates a model manager even without a key.                                                                                                                                                                                                                                                                                            |
-| `dynamic-models-authoritative`        | Successful runtime discovery replaces bundled models instead of merging.                                                                                                                                                                                                                                                                       |
-| `skip-cross-provider-reference-fills` | Generator backfills never copy reasoning/input/limits from same-id rows on other hosts.                                                                                                                                                                                                                                                        |
-| `discovery`                           | Enrolls the provider in generation-time discovery (`generate-models.ts`). Runtime discovery is a `MODEL_MANAGER_FACTORIES` entry instead. `label=` is required; `oauth-provider=` lets a stored credential stand in for a key; `allow-unauthenticated=` permits credential-less discovery; child `env "…"` overrides the generation-time keys. |
-| `seed`                                | Authors bundled rows for providers that cannot be discovered at generation time; `bundle=` picks `always` (default), `fallback`, or `empty`.                                                                                                                                                                                                   |
+| Field                                 | Effect                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default-model`                       | Required for a catalog entry. Member of `KnownProvider`; preferred model when no explicit selection is made.                                                                                                                                                                                                                                                                       |
+| `env`                                 | Env var name(s), in order, for the runtime API-key fallback (`getEnvApiKey`).                                                                                                                                                                                                                                                                                                      |
+| `allow-unauthenticated`               | Runtime creates a model manager even without a key.                                                                                                                                                                                                                                                                                                                                |
+| `dynamic-models-authoritative`        | Successful runtime discovery replaces bundled models instead of merging.                                                                                                                                                                                                                                                                                                           |
+| `skip-cross-provider-reference-fills` | Generator backfills never copy reasoning/input/limits from same-id rows on other hosts.                                                                                                                                                                                                                                                                                            |
+| `discovery`                           | Configures the generation-time catalog fetch for a provider that already has a factory entry; `label=` is required. Generation iterates `PROVIDER_DESCRIPTORS`, so this node alone enrolls nothing. `oauth-provider=` lets a stored credential stand in for a key; `allow-unauthenticated=` permits credential-less discovery; child `env "…"` overrides the generation-time keys. |
+| `seed`                                | Authors bundled rows for providers that cannot be discovered at generation time; `bundle=` picks `always` (default), `fallback`, or `empty`.                                                                                                                                                                                                                                       |
 
 Cascade rules (wire quirks, thinking ladders, limit/pricing corrections) live
 in the same `provider` node, below the entry properties.
@@ -124,8 +129,15 @@ in the same `provider` node, below the entry properties.
 pairs each provider id with a
 `(config: ModelManagerConfig) => ModelManagerOptions<Api>` factory;
 `PROVIDER_DESCRIPTORS` joins those factories with the compiled entries, and a
-provider appears there only when it has both — the factory entry, not the KDL
-`discovery` node, is what enables runtime discovery. **Code half**
+provider appears there only when it has both. It is the enrollment surface for
+catalog-managed discovery: the runtime refreshes the ids in it, and
+`generate-models.ts` filters the same array down to the entries carrying a
+`discovery` node — so that node configures a fetch the factory entry has already
+enabled. Two runtime paths sit beside it by design, which is why their providers
+need no factory here: the coding-agent's special managers
+(`SPECIAL_MODEL_MANAGER_PROVIDER_IDS` in
+`packages/coding-agent/src/config/model-provider-discovery.ts`) and the
+models.dev catalog ids. **Code half**
 (`packages/ai/src/registry/registry.ts`): `TRANSPORTS` pairs a provider id with
 a `ProviderTransport` (`prepareModel`, `prepareRequest`, `mapSimpleOptions`,
 `prepareModelDiscovery`) for the few providers that need code beside their auth
