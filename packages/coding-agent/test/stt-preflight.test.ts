@@ -92,7 +92,7 @@ describe("STTController preflight", () => {
 	beforeEach(async () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
-		settings.set("stt.modelName", "fast");
+		settings.set("stt.localModel", "fast");
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(""),
@@ -163,7 +163,7 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenLastCalledWith("fast");
 
 		// Switch the model, then stop and re-start the gesture.
-		settings.set("stt.modelName", "turbo");
+		settings.set("stt.localModel", "turbo");
 		await controller.toggle(editor, makeOptions()); // recording -> idle
 		expect(controller.state).toBe("idle");
 		await controller.toggle(editor, makeOptions()); // idle -> recording

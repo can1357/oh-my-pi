@@ -166,7 +166,7 @@ describe("omp setup speech", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.set("stt.backend", "cloud");
-		settings.set("stt.modelName", "fast");
+		settings.set("stt.localModel", "fast");
 	});
 
 	afterEach(() => {
@@ -185,20 +185,23 @@ describe("omp setup speech", () => {
 		expect(download).toHaveBeenCalledWith("fast", expect.any(Function));
 	});
 
-	it("reports the local model actually probed when stt.modelName holds a cloud id", async () => {
-		// `--check`/`--json` never run the picker, so a cloud id lingers in
-		// `stt.modelName` after the credential goes away. The local path resolves
-		// it onto the default spec; the status must name that model, not the
-		// remote id it neither probed nor could download.
-		settings.set("stt.modelName", "gpt-4o-mini-transcribe");
-		const cached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
-		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+	it("picks cloud models into stt.cloudModel without disturbing the local fallback", async () => {
+		// The two families are disjoint: choosing a transcription id must not
+		// overwrite the local model the cloud backend falls back to.
+		const picker = vi.spyOn(setupModelPicker, "selectSetupModel").mockResolvedValue("gpt-4o-mini-transcribe");
+		const stt = buildSpeechComponents(Promise.resolve(true))[0]!;
 
-		expect(await stt.status()).toBe("parakeet");
-		expect(cached).toHaveBeenLastCalledWith("parakeet");
+		await stt.pick?.();
 
-		cached.mockResolvedValue(false);
-		expect(await stt.status()).toBe("parakeet — local fallback not downloaded");
+		expect(picker.mock.calls[0]?.[1]?.map(option => option.value)).toEqual([
+			"gpt-4o-transcribe",
+			"gpt-4o-mini-transcribe",
+			"gpt-transcribe",
+			"whisper-1",
+		]);
+		expect(settings.get("stt.cloudModel")).toBe("gpt-4o-mini-transcribe");
+		expect(settings.get("stt.localModel")).toBe("fast");
+		expect(await stt.status()).toBe("cloud (gpt-4o-mini-transcribe, no download)");
 	});
 
 	it("offers local fallback models when cloud credentials are unavailable", async () => {
@@ -212,7 +215,7 @@ describe("omp setup speech", () => {
 				{ value: "turbo", label: "Turbo (Whisper large-v3)", description: expect.any(String) },
 			]),
 		);
-		expect(settings.get("stt.modelName")).toBe("turbo");
+		expect(settings.get("stt.localModel")).toBe("turbo");
 	});
 });
 

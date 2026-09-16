@@ -3,7 +3,7 @@
  * model rosters plus their selection helpers.
  *
  * Kept free of imports on purpose. `config/settings-schema` needs these values
- * to declare `stt.backend` / `stt.modelName`, and it is imported before
+ * to declare `stt.backend` / `stt.cloudModel`, and it is imported before
  * `config/settings` by tests and public consumers; pulling them from the
  * runtime transcription client instead would close the cycle
  * `settings-schema → cloud-transcribe-client → tools/render-utils → settings →
@@ -20,7 +20,7 @@
  */
 export const DEFAULT_CLOUD_STT_MODEL = "gpt-4o-transcribe";
 
-/** Transcription models selectable via `stt.modelName` when `stt.backend` is `cloud`. */
+/** Transcription models selectable via `stt.cloudModel`. */
 export const CLOUD_STT_MODEL_VALUES = [
 	"gpt-4o-transcribe",
 	"gpt-4o-mini-transcribe",
@@ -49,7 +49,7 @@ export function isCloudSttModel(value: string): value is CloudSttModel {
 }
 
 /**
- * Resolve `stt.modelName` onto a cloud model. Local tier keys are not
+ * Resolve `stt.cloudModel` onto a cloud model. Local tier keys are not
  * transcription ids, so they fall back to the default rather than 400ing.
  */
 export function resolveCloudSttModel(name: string | undefined): CloudSttModel {
@@ -77,7 +77,7 @@ export const STT_BACKEND_OPTIONS = [
  * Which OpenAI credential the cloud backend dictates with. `auto` keeps the
  * "subscription first, else API key" default; the explicit values exist
  * because a connected ChatGPT login would otherwise shadow a configured API
- * key forever, and only the API-key route honours `stt.modelName`,
+ * key forever, and only the API-key route honours `stt.cloudModel`,
  * `stt.language`, and `stt.keywords`.
  */
 export const STT_CLOUD_CREDENTIAL_VALUES = ["auto", "subscription", "api-key"] as const;

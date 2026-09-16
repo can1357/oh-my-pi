@@ -21,7 +21,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { CLOUD_STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
+import { CLOUD_STT_MODEL_OPTIONS, DEFAULT_CLOUD_STT_MODEL } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1095,7 +1095,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("lists static speech models for ACP mobile voice settings", async () => {
+	it("scopes the speech-to-text catalog to the active STT backend", async () => {
 		const harness = await createHarness();
 		const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 
@@ -1103,7 +1103,7 @@ describe("ACP agent", () => {
 
 		expect(result).toEqual({
 			settings: {
-				speechToTextModel: "stt.modelName",
+				speechToTextModel: "stt.localModel",
 				textToSpeechModel: "tts.localModel",
 				textToSpeechVoice: "tts.localVoice",
 				speechVoice: "speech.voice",
@@ -1114,13 +1114,9 @@ describe("ACP agent", () => {
 				voice: DEFAULT_TTS_VOICE,
 			},
 			speechToText: {
-				setting: "stt.modelName",
+				setting: "stt.localModel",
 				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: [...STT_MODEL_OPTIONS, ...CLOUD_STT_MODEL_OPTIONS].map(({ value, label, description }) => ({
-					value,
-					label,
-					description,
-				})),
+				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
 			},
 			textToSpeech: {
 				modelSetting: "tts.localModel",
@@ -1136,6 +1132,19 @@ describe("ACP agent", () => {
 				})),
 				voices,
 			},
+		});
+
+		// Cloud backend: the client must be pointed at the cloud setting and
+		// offered transcription ids only — the local tiers cannot be sent to the
+		// transcription endpoint.
+		Settings.instance.set("stt.backend", "cloud");
+		const cloudResult = await harness.agent.extMethod("speech.models.list", {});
+
+		expect(cloudResult.settings).toMatchObject({ speechToTextModel: "stt.cloudModel" });
+		expect(cloudResult.speechToText).toEqual({
+			setting: "stt.cloudModel",
+			defaultValue: DEFAULT_CLOUD_STT_MODEL,
+			models: CLOUD_STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
 		});
 
 		harness.abortController.abort();

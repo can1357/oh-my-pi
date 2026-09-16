@@ -161,6 +161,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	sttCloudBackend: () => {
+		try {
+			return Settings.instance.get("stt.backend") === "cloud";
+		} catch {
+			return false;
+		}
+	},
 	unexpectedStopSmart: () => {
 		try {
 			return Settings.instance.get("features.unexpectedStopDetection") === "smart";

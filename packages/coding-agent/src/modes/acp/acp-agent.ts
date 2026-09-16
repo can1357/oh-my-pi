@@ -71,7 +71,7 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
-import { CLOUD_STT_MODEL_OPTIONS } from "../../stt/cloud-models";
+import { CLOUD_STT_MODEL_OPTIONS, DEFAULT_CLOUD_STT_MODEL, type SttBackend } from "../../stt/cloud-models";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
@@ -253,28 +253,35 @@ type AcpSpeechTtsModelOption = AcpSpeechOption & {
 	voices: AcpSpeechVoiceOption[];
 };
 
-function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
+/**
+ * Speech catalog for ACP clients. The speech-to-text half is scoped to the
+ * active backend: the local tiers and the OpenAI transcription ids are
+ * disjoint families stored in separate settings, so the client gets the
+ * setting and model list that actually apply instead of a merged list where
+ * half the entries do nothing.
+ */
+function buildAcpSpeechModelsCatalog(sttBackend: SttBackend): Record<string, unknown> {
 	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
+	const cloud = sttBackend === "cloud";
+	const sttSetting = cloud ? "stt.cloudModel" : "stt.localModel";
+	const sttDefault = cloud ? DEFAULT_CLOUD_STT_MODEL : DEFAULT_STT_MODEL_KEY;
+	const sttOptions: ReadonlyArray<AcpSpeechOption> = cloud ? CLOUD_STT_MODEL_OPTIONS : STT_MODEL_OPTIONS;
 	return {
 		settings: {
-			speechToTextModel: "stt.modelName",
+			speechToTextModel: sttSetting,
 			textToSpeechModel: "tts.localModel",
 			textToSpeechVoice: "tts.localVoice",
 			speechVoice: "speech.voice",
 		},
 		defaults: {
-			speechToTextModel: DEFAULT_STT_MODEL_KEY,
+			speechToTextModel: sttDefault,
 			textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
 			voice: DEFAULT_TTS_VOICE,
 		},
 		speechToText: {
-			setting: "stt.modelName",
-			defaultValue: DEFAULT_STT_MODEL_KEY,
-			models: [...STT_MODEL_OPTIONS, ...CLOUD_STT_MODEL_OPTIONS].map(({ value, label, description }) => ({
-				value,
-				label,
-				description,
-			})),
+			setting: sttSetting,
+			defaultValue: sttDefault,
+			models: sttOptions.map(({ value, label, description }) => ({ value, label, description })),
 		},
 		textToSpeech: {
 			modelSetting: "tts.localModel",
@@ -1133,7 +1140,7 @@ export class AcpAgent implements Agent {
 	async extMethod(method: string, params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
 		switch (method) {
 			case SPEECH_MODELS_LIST_METHOD:
-				return buildAcpSpeechModelsCatalog();
+				return buildAcpSpeechModelsCatalog((await Settings.init()).get("stt.backend"));
 			case "_omp/sessions/listAll": {
 				const limit = typeof params.limit === "number" ? Math.max(1, Math.min(5000, params.limit as number)) : 1000;
 				const sessions = await SessionManager.listAll();

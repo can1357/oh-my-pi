@@ -169,34 +169,35 @@ export function buildSpeechComponents(hasCloudCredential: Promise<boolean>): Spe
 			name: "Speech-to-Text model",
 			isReady: async () =>
 				(settings.get("stt.backend") === "cloud" && (await hasCloudCredential)) ||
-				isSttModelCached(settings.get("stt.modelName")),
+				isSttModelCached(settings.get("stt.localModel")),
 			status: async () => {
-				const key = settings.get("stt.modelName");
 				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential))
-					return `cloud (${resolveCloudSttModel(key)}, no download)`;
-				// `key` may hold a cloud id (or a stale key) that the local path
-				// silently maps onto the default spec: report the model actually probed.
-				const local = resolveSttModelSpec(key).key;
+					return `cloud (${resolveCloudSttModel(settings.get("stt.cloudModel"))}, no download)`;
+				// A stale key from an older build still maps onto the default spec:
+				// report the model actually probed.
+				const local = resolveSttModelSpec(settings.get("stt.localModel")).key;
 				return (await isSttModelCached(local)) ? local : `${local} — local fallback not downloaded`;
 			},
 			pick: async () => {
+				// Each backend offers only its own family and writes its own
+				// setting, so picking a cloud model never clobbers the local model
+				// the cloud backend falls back to.
 				const cloud = settings.get("stt.backend") === "cloud" && (await hasCloudCredential);
-				const options = cloud ? CLOUD_STT_MODEL_OPTIONS : STT_MODEL_OPTIONS;
 				const chosen = await setupModelPicker.selectSetupModel(
-					"Speech-to-Text model",
-					[...options],
-					cloud ? resolveCloudSttModel(settings.get("stt.modelName")) : settings.get("stt.modelName"),
+					cloud ? "Cloud speech-to-text model" : "Local speech-to-text model",
+					cloud ? [...CLOUD_STT_MODEL_OPTIONS] : [...STT_MODEL_OPTIONS],
+					cloud ? resolveCloudSttModel(settings.get("stt.cloudModel")) : settings.get("stt.localModel"),
 				);
 				if (chosen === null) return false;
-				if ((cloud && isCloudSttModel(chosen)) || (!cloud && isSttModelKey(chosen))) {
-					settings.set("stt.modelName", chosen);
-					await settings.flush();
-				}
+				if (cloud && isCloudSttModel(chosen)) settings.set("stt.cloudModel", chosen);
+				else if (!cloud && isSttModelKey(chosen)) settings.set("stt.localModel", chosen);
+				else return true;
+				await settings.flush();
 				return true;
 			},
 			ensure: async onProgress => {
 				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential)) return;
-				await downloadSttModel(settings.get("stt.modelName"), progress =>
+				await downloadSttModel(settings.get("stt.localModel"), progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
 				);
 			},

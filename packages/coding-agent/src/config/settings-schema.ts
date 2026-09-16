@@ -17,6 +17,7 @@ import {
 import {
 	CLOUD_STT_MODEL_OPTIONS,
 	CLOUD_STT_MODEL_VALUES,
+	DEFAULT_CLOUD_STT_MODEL,
 	DEFAULT_STT_BACKEND,
 	DEFAULT_STT_CLOUD_CREDENTIAL,
 	STT_BACKEND_OPTIONS,
@@ -2655,7 +2656,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Speech Backend",
 			description:
-				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI on release (credential chosen by stt.cloudCredential; no live preview) and falls back to local without credentials.",
+				"Local runs on-device Whisper/Parakeet with no network. Cloud records mic audio and transcribes it with OpenAI on release (credential chosen by Cloud Speech Credential; no live preview) and falls back to the local model without credentials.",
 			options: STT_BACKEND_OPTIONS,
 		},
 	},
@@ -2669,8 +2670,9 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Cloud Speech Credential",
 			description:
-				"Which OpenAI credential cloud dictation uses. auto prefers a connected ChatGPT subscription and otherwise uses the OpenAI API key; api-key forces the platform endpoint, which is the only route that honours the speech model, language, and keywords.",
+				"Which OpenAI credential cloud dictation uses. Auto prefers a connected ChatGPT subscription and otherwise uses the OpenAI API key. The subscription route transcribes with the model ChatGPT picks and ignores Cloud Speech Model, language, and keywords; api-key is the only route that honours them.",
 			options: STT_CLOUD_CREDENTIAL_OPTIONS,
+			condition: "sttCloudBackend",
 		},
 	},
 
@@ -2679,17 +2681,32 @@ export const SETTINGS_SCHEMA = {
 		default: "",
 	},
 
-	"stt.modelName": {
+	"stt.localModel": {
 		type: "enum",
-		values: [...STT_MODEL_VALUES, ...CLOUD_STT_MODEL_VALUES],
+		values: STT_MODEL_VALUES,
 		default: DEFAULT_STT_MODEL_KEY,
 		ui: {
 			tab: "interaction",
 			group: "Speech",
-			label: "Speech Model",
+			label: "Local Speech Model",
 			description:
-				"Local tiers (fast/balanced/turbo/parakeet) apply when stt.backend is local; transcription ids (gpt-4o-transcribe, gpt-4o-mini-transcribe, gpt-transcribe, whisper-1) apply when it is cloud. Parakeet is the local default.",
-			options: [...STT_MODEL_OPTIONS, ...CLOUD_STT_MODEL_OPTIONS],
+				"On-device model used when Speech Backend is Local, and as the fallback when cloud dictation has no usable credential.",
+			options: STT_MODEL_OPTIONS,
+		},
+	},
+
+	"stt.cloudModel": {
+		type: "enum",
+		values: CLOUD_STT_MODEL_VALUES,
+		default: DEFAULT_CLOUD_STT_MODEL,
+		ui: {
+			tab: "interaction",
+			group: "Speech",
+			label: "Cloud Speech Model",
+			description:
+				"OpenAI transcription model for cloud dictation. Honoured only on the api-key credential route; the ChatGPT subscription route always uses its own server-chosen model.",
+			options: CLOUD_STT_MODEL_OPTIONS,
+			condition: "sttCloudBackend",
 		},
 	},
 	"stt.submitTrigger": {
@@ -6590,10 +6607,11 @@ export interface ThinkingBudgetsSettings {
 export interface SttSettings {
 	backend: "local" | "cloud";
 	cloudCredential: "auto" | "subscription" | "api-key";
+	cloudModel: string;
 	enabled: boolean;
 	keywords: string;
 	language: string | undefined;
-	modelName: string;
+	localModel: string;
 	streaming: boolean;
 }
 

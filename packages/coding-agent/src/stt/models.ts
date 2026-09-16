@@ -18,7 +18,7 @@ import type { TinyModelDtype } from "../tiny/dtype";
 export type SttEngine = "transformers" | "sherpa";
 
 interface SttModelBase {
-	/** Stable key persisted in `stt.modelName` and sent over the worker protocol. */
+	/** Stable key persisted in `stt.localModel` and sent over the worker protocol. */
 	key: string;
 	engine: SttEngine;
 	/** Hugging Face repo id (transformers.js ONNX repo, or sherpa-onnx model repo). */
@@ -142,7 +142,7 @@ export function getSttModelSpec(key: string): SttModel | undefined {
 }
 
 /**
- * Resolve a (possibly stale or legacy) `stt.modelName` value onto a concrete
+ * Resolve a (possibly stale or legacy) `stt.localModel` value onto a concrete
  * spec, falling back to the SoTA default when the key is unknown.
  */
 export function resolveSttModelSpec(key: string | undefined): SttModel {

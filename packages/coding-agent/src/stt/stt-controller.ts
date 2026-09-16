@@ -9,7 +9,6 @@ import {
 	DEFAULT_CLOUD_STT_MODEL,
 	DEFAULT_STT_BACKEND,
 	DEFAULT_STT_CLOUD_CREDENTIAL,
-	isCloudSttModel,
 	isSttBackend,
 	isSttCloudCredentialRoute,
 	type SttBackend,
@@ -342,8 +341,8 @@ export class STTController {
 	#warnIgnoredCloudOptions(credential: CloudSttCredential, options: ToggleOptions): void {
 		if (credential.kind !== "codex" || this.#didWarnIgnoredCloudOptions) return;
 		const ignored: string[] = [];
-		const model = settings.get("stt.modelName") as string | undefined;
-		if (model !== undefined && isCloudSttModel(model) && model !== DEFAULT_CLOUD_STT_MODEL) ignored.push("model");
+		const model = settings.get("stt.cloudModel") as string | undefined;
+		if (model !== undefined && model !== DEFAULT_CLOUD_STT_MODEL) ignored.push("model");
 		if (settings.get("stt.language")) ignored.push("language");
 		if (String(settings.get("stt.keywords") ?? "").trim()) ignored.push("keywords");
 		if (ignored.length === 0) return;
@@ -376,8 +375,8 @@ export class STTController {
 	 * fallback through the stream's `stop()` rejection.
 	 */
 	async #prepareLocalModel(options: ToggleOptions, signal?: AbortSignal): Promise<void> {
-		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
-		// Keyed on the model rather than a one-shot flag: switching stt.modelName
+		const modelKey = resolveSttModelSpec(settings.get("stt.localModel") as string | undefined).key;
+		// Keyed on the model rather than a one-shot flag: switching stt.localModel
 		// mid-session must re-run preflight so an uncached new tier downloads here
 		// (with progress) instead of blocking silently at stop.
 		if (this.#resolvedModelKey === modelKey) return;
@@ -453,7 +452,7 @@ export class STTController {
 	}
 
 	async #startStreaming(editor: Editor, options: ToggleOptions, cloud = false): Promise<void> {
-		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
+		const modelKey = resolveSttModelSpec(settings.get("stt.localModel") as string | undefined).key;
 		const language = settings.get("stt.language") as string | undefined;
 		const keywords = String(settings.get("stt.keywords") ?? "")
 			.split(",")
@@ -487,7 +486,7 @@ export class STTController {
 						if (credential) {
 							return startCloudSttStream({
 								credential,
-								model: settings.get("stt.modelName") as string | undefined,
+								model: settings.get("stt.cloudModel") as string | undefined,
 								language: language || undefined,
 								keywords: keywords.length ? keywords : undefined,
 								signal: streamAbort.signal,

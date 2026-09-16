@@ -170,7 +170,7 @@ describe("cloud STT stream", () => {
 		});
 		codex.pushAudio(sine16kHz(160));
 		await expect(codex.stop()).resolves.toBe("subscription");
-		expect(codexStub.calls[0]!.url).toBe("https://chatgpt.com/backend-api/codex/transcribe");
+		expect(codexStub.calls[0]!.url).toBe("https://chatgpt.com/backend-api/transcribe");
 		expect(codexStub.calls[0]!.init.headers).toMatchObject({
 			Authorization: "Bearer subscription-token",
 			"chatgpt-account-id": "account-1",
@@ -525,7 +525,7 @@ describe("cloud backend in STTController", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.set("stt.backend", "cloud");
-		settings.set("stt.modelName", "gpt-4o-mini-transcribe");
+		settings.set("stt.cloudModel", "gpt-4o-mini-transcribe");
 	});
 
 	afterEach(() => {
@@ -784,7 +784,6 @@ describe("cloud backend in STTController", () => {
 	});
 
 	it("aborts an uncached local fallback download when disposed", async () => {
-		settings.set("stt.modelName", "gpt-4o-transcribe");
 		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
 		const downloadStarted = Promise.withResolvers<AbortSignal>();
 		const downloadSpy = spyOn(downloader, "downloadSttModel").mockImplementation((_key, _onProgress, options) => {
@@ -835,7 +834,6 @@ describe("cloud backend in STTController", () => {
 	});
 
 	it("aborts a cached local fallback warmup when disposed", async () => {
-		settings.set("stt.modelName", "gpt-4o-transcribe");
 		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		const warmStarted = Promise.withResolvers<AbortSignal | undefined>();
 		const downloadSpy = spyOn(downloader, "downloadSttModel").mockImplementation((_key, _onProgress, options) => {
@@ -886,7 +884,6 @@ describe("cloud backend in STTController", () => {
 	});
 
 	it("reports a microphone failure once when it cancels the local fallback download", async () => {
-		settings.set("stt.modelName", "gpt-4o-transcribe");
 		const captureError = new Error("microphone unavailable");
 		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
 		// Wrapped so resolving does not adopt (and therefore reject with) the download itself.
@@ -1092,7 +1089,6 @@ describe("cloud backend in STTController", () => {
 	});
 
 	it("reports a failed local fallback download exactly once", async () => {
-		settings.set("stt.modelName", "gpt-4o-transcribe");
 		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
 		const downloadSpy = spyOn(downloader, "downloadSttModel").mockRejectedValue(
 			new Error("Download failed: 503 Service Unavailable"),
