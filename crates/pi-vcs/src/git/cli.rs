@@ -504,7 +504,7 @@ impl GitRepo {
 	}
 }
 
-/// Clone `url` into `target_dir`, removing the partial clone on any failure.
+/// Clone `url` in owned staging space and publish only a successful checkout.
 ///
 /// Shallow (`--depth 1 --single-branch`) unless a specific SHA is pinned:
 /// a shallow clone only fetches the tip, so checking out a non-tip commit
@@ -520,6 +520,10 @@ pub async fn clone(
 		.parent()
 		.map_or_else(|| absolute.clone(), Path::to_owned);
 	tokio::fs::create_dir_all(&parent).await?;
+	let staging = tempfile::Builder::new()
+		.prefix(".pi-clone-")
+		.tempdir_in(&parent)?;
+	let checkout_dir = staging.path().join("repo");
 
 	let shallow = options.sha.is_none();
 	let mut args = vec!["clone".to_owned()];
@@ -535,31 +539,35 @@ pub async fn clone(
 		args.push("--single-branch".to_owned());
 	}
 	args.push(url.to_owned());
-	args.push(absolute.to_string_lossy().into_owned());
+	args.push(checkout_dir.to_string_lossy().into_owned());
 
 	let run_options = RunOptions {
 		timeout: Some(options.timeout.unwrap_or(NETWORK_TIMEOUT)),
 		cancel: cancel.clone(),
 		..RunOptions::default()
 	};
-	let outcome = run_checked(&parent, &args, &run_options).await;
-	if let Err(err) = outcome {
-		let _ = tokio::fs::remove_dir_all(&absolute).await;
-		return Err(err);
-	}
+	run_checked(&parent, &args, &run_options).await?;
 
 	if let Some(sha) = &options.sha {
-		let checkout = run_checked(&absolute, &["checkout".to_owned(), sha.clone()], &RunOptions {
-			cancel,
-			..RunOptions::default()
-		})
-		.await;
+		let checkout =
+			run_checked(&checkout_dir, &["checkout".to_owned(), sha.clone()], &RunOptions {
+				cancel,
+				..RunOptions::default()
+			})
+			.await;
 		if checkout.is_err() {
-			let _ = tokio::fs::remove_dir_all(&absolute).await;
 			return Err(Error::backend(
 				"git clone",
 				format!("failed to checkout SHA {sha} in cloned repository {url}"),
 			));
+		}
+	}
+	if let Err(err) = tokio::fs::rename(&checkout_dir, &absolute).await {
+		// Windows cannot replace an existing directory, even when empty.
+		if cfg!(windows) && tokio::fs::remove_dir(&absolute).await.is_ok() {
+			tokio::fs::rename(&checkout_dir, &absolute).await?;
+		} else {
+			return Err(err.into());
 		}
 	}
 	Ok(())
@@ -568,6 +576,114 @@ pub async fn clone(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn clone_source(root: &Path) -> std::path::PathBuf {
+		let source = root.join("source");
+		std::fs::create_dir(&source).unwrap();
+		for args in [vec!["init", "-q", "-b", "main"], vec![
+			"-c",
+			"user.name=Test",
+			"-c",
+			"user.email=test@example.com",
+			"commit",
+			"--allow-empty",
+			"-qm",
+			"initial",
+		]] {
+			assert!(
+				std::process::Command::new("git")
+					.args(args)
+					.current_dir(&source)
+					.status()
+					.unwrap()
+					.success()
+			);
+		}
+		source
+	}
+
+	#[tokio::test]
+	async fn clone_preserves_existing_destination_on_failure() {
+		let root = tempfile::tempdir().unwrap();
+		let source = clone_source(root.path());
+		let target = root.path().join("target");
+		std::fs::create_dir(&target).unwrap();
+		std::fs::write(target.join("sentinel"), b"owned by caller").unwrap();
+		assert!(
+			clone(source.to_str().unwrap(), &target, &CloneOptions::default(), None)
+				.await
+				.is_err()
+		);
+		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"owned by caller");
+		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+	}
+
+	#[tokio::test]
+	async fn clone_missing_remote_preserves_destination_and_removes_staging() {
+		let root = tempfile::tempdir().unwrap();
+		let target = root.path().join("target");
+		std::fs::create_dir(&target).unwrap();
+		std::fs::write(target.join("sentinel"), b"keep remote failure").unwrap();
+		let missing = root.path().join("missing-remote");
+		assert!(
+			clone(missing.to_str().unwrap(), &target, &CloneOptions::default(), None)
+				.await
+				.is_err()
+		);
+		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep remote failure");
+		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+	}
+
+	#[tokio::test]
+	async fn clone_publishes_only_successful_checkouts() {
+		let root = tempfile::tempdir().unwrap();
+		let source = clone_source(root.path());
+		let target = root.path().join("target");
+		let options =
+			CloneOptions { sha: Some("invalid-revision".to_owned()), ..CloneOptions::default() };
+		assert!(
+			clone(source.to_str().unwrap(), &target, &options, None)
+				.await
+				.is_err()
+		);
+		assert!(!target.exists());
+		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+		std::fs::create_dir(&target).unwrap();
+		clone(source.to_str().unwrap(), &target, &CloneOptions::default(), None)
+			.await
+			.unwrap();
+		let output = std::process::Command::new("git")
+			.args(["rev-parse", "HEAD"])
+			.current_dir(&target)
+			.output()
+			.unwrap();
+		assert!(output.status.success());
+		let expected = std::process::Command::new("git")
+			.args(["rev-parse", "HEAD"])
+			.current_dir(&source)
+			.output()
+			.unwrap();
+		assert_eq!(output.stdout, expected.stdout);
+		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+	}
+
+	#[tokio::test]
+	async fn clone_cancelled_before_dispatch_leaves_destination_untouched() {
+		let root = tempfile::tempdir().unwrap();
+		let source = clone_source(root.path());
+		let target = root.path().join("target");
+		std::fs::create_dir(&target).unwrap();
+		std::fs::write(target.join("sentinel"), b"keep").unwrap();
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		assert!(
+			clone(source.to_str().unwrap(), &target, &CloneOptions::default(), Some(cancel))
+				.await
+				.is_err()
+		);
+		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep");
+		assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+	}
 
 	/// Set on the re-executed child; carries the fixture repository it should
 	/// probe. Its presence is what tells the test body which side it is on.
