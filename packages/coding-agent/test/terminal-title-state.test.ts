@@ -8,7 +8,6 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
@@ -42,10 +41,10 @@ describe("buildTerminalTitleWithState", () => {
 		expect(wrapped).not.toContain("undefined");
 	});
 
-	it("uses a static colon while working on Windows", () => {
-		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32")).toBe(`${BRAND} : ${LABEL}`);
-		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "win32")).toBe(`${BRAND} : ${LABEL}`);
-		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "win32")).toBe(`${BRAND} :`);
+	it("animates spinner frames in the separator slot while working on Windows", () => {
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32")).toBe(`${BRAND} ⠋ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "win32")).toBe(`${BRAND} ⠙ ${LABEL}`);
+		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "win32")).toBe(`${BRAND} ⠙`);
 	});
 
 	it("keeps the state visible as a trailing separator when there is no label", () => {
@@ -68,9 +67,27 @@ describe("buildTerminalTitleWithState", () => {
 		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "linux", "line")).toBe(`${BRAND} \\ ${LABEL}`);
 	});
 
-	it("keeps the static colon on Windows regardless of style", () => {
-		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "dots")).toBe(`${BRAND} : ${LABEL}`);
-		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "line")).toBe(`${BRAND} : ${LABEL}`);
+	it("cycles the pulse glyph set while working", () => {
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "linux", "pulse")).toBe(`${BRAND} ○ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 4, true, "linux", "pulse")).toBe(`${BRAND} ● ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 8, true, "linux", "pulse")).toBe(`${BRAND} ○ ${LABEL}`);
+	});
+
+	it("cycles the selected style on Windows too", () => {
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "dots")).toBe(`${BRAND} ⠁ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "pulse")).toBe(`${BRAND} ○ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32", "line")).toBe(`${BRAND} - ${LABEL}`);
+	});
+
+	it("keeps a static colon under WSL regardless of style", () => {
+		const wslEnv = { WSL_DISTRO_NAME: "Ubuntu" };
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "linux", "braille", wslEnv)).toBe(
+			`${BRAND} : ${LABEL}`,
+		);
+		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "linux", "dots", wslEnv)).toBe(
+			`${BRAND} : ${LABEL}`,
+		);
+		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "linux", "line", wslEnv)).toBe(`${BRAND} :`);
 	});
 });
 
@@ -139,7 +156,7 @@ describe("disposeTerminalTitleState", () => {
 		vi.useRealTimers();
 	});
 
-	it.skipIf(isConPTYHosted())("stops the spinner so no further OSC-title write fires on a tick after dispose", () => {
+	it("stops the spinner so no further OSC-title write fires on a tick after dispose", () => {
 		// CONTRACT (the fix): entering `working` arms the spinner interval; once
 		// `disposeTerminalTitleState()` runs, advancing the clock across many tick
 		// periods must produce ZERO additional OSC-title writes. A pending tick
@@ -252,7 +269,7 @@ describe("disposeTerminalTitleState", () => {
 		expect(writes.some(payload => payload.includes("same-session"))).toBe(true);
 	});
 
-	it.skipIf(isConPTYHosted())("emits the selected glyph set on the next spinner tick", () => {
+	it("emits the selected glyph set on the next spinner tick", () => {
 		setTerminalTitleSpinnerStyle("line");
 		setTerminalTitleState("working");
 		writes.length = 0;
@@ -268,7 +285,7 @@ describe("disposeTerminalTitleState", () => {
 		}
 	});
 
-	it.skipIf(isConPTYHosted())("falls back to braille for an unknown style", () => {
+	it("falls back to braille for an unknown style", () => {
 		setTerminalTitleSpinnerStyle("line");
 		setTerminalTitleSpinnerStyle("nope");
 		setTerminalTitleState("working");
@@ -281,27 +298,39 @@ describe("disposeTerminalTitleState", () => {
 		expect(titles.some(title => title?.includes("⠋") || title?.includes("⠙"))).toBe(true);
 	});
 
-	it.skipIf(isConPTYHosted())(
-		"releases the latch and re-arms a live spinner when the terminal is claimed again",
-		() => {
-			// CONTRACT: the latch is teardown-scoped, not permanent. Claiming the
-			// terminal again owns the title, so it must resume — including a LIVE
-			// spinner if the run state is still `working`. Releasing the flag alone
-			// would leave a stopped timer behind a `working` state: a frozen frame.
-			setTerminalTitleState("working");
-			disposeTerminalTitleState();
+	it("emits pulse frames on live ticks", () => {
+		setTerminalTitleSpinnerStyle("pulse");
+		setTerminalTitleState("working");
+		writes.length = 0;
 
-			writes.length = 0;
-			initTerminalTitleState();
-			setSessionTerminalTitle("next-session");
+		vi.advanceTimersByTime(400);
 
-			// The new session's title emitted...
-			expect(writes.some(payload => payload.includes("next-session"))).toBe(true);
+		const titles = writes.map(payload => /\x1b\]0;([\s\S]*?)\x07/.exec(payload)?.[1]);
+		expect(titles.length).toBeGreaterThan(0);
+		for (const title of titles) {
+			expect(title).toContain("my-project");
+			expect(title).toMatch(/^π [○◔◑◕●] my-project$/);
+		}
+	});
 
-			// ...and the spinner is genuinely ticking again, not frozen on one frame.
-			writes.length = 0;
-			vi.advanceTimersByTime(400);
-			expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ)).length).toBeGreaterThan(0);
-		},
-	);
+	it("releases the latch and re-arms a live spinner when the terminal is claimed again", () => {
+		// CONTRACT: the latch is teardown-scoped, not permanent. Claiming the
+		// terminal again owns the title, so it must resume — including a LIVE
+		// spinner if the run state is still `working`. Releasing the flag alone
+		// would leave a stopped timer behind a `working` state: a frozen frame.
+		setTerminalTitleState("working");
+		disposeTerminalTitleState();
+
+		writes.length = 0;
+		initTerminalTitleState();
+		setSessionTerminalTitle("next-session");
+
+		// The new session's title emitted...
+		expect(writes.some(payload => payload.includes("next-session"))).toBe(true);
+
+		// ...and the spinner is genuinely ticking again, not frozen on one frame.
+		writes.length = 0;
+		vi.advanceTimersByTime(400);
+		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ)).length).toBeGreaterThan(0);
+	});
 });

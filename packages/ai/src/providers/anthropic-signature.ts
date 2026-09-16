@@ -17,7 +17,7 @@ const HEADER_MODEL_FIELD = 6;
 const MAX_MODEL_ID_LENGTH = 128;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 
-/** Returns the first length-delimited field `field` in `message`, or undefined. */
+/** Finds a length-delimited field, rejecting tags and lengths that exceed uint32. */
 function lengthDelimitedField(message: Uint8Array, field: number): Uint8Array | undefined {
 	let offset = 0;
 	while (offset < message.length) {
@@ -27,6 +27,7 @@ function lengthDelimitedField(message: Uint8Array, field: number): Uint8Array | 
 		do {
 			if (offset >= message.length) return undefined;
 			byte = message[offset++];
+			if (shift === 28 && byte > 0x0f) return undefined;
 			tag |= (byte & 0x7f) << shift;
 			shift += 7;
 		} while (byte & 0x80);
@@ -49,10 +50,12 @@ function lengthDelimitedField(message: Uint8Array, field: number): Uint8Array | 
 				do {
 					if (offset >= message.length) return undefined;
 					byte = message[offset++];
+					if (shift === 28 && byte > 0x0f) return undefined;
 					length |= (byte & 0x7f) << shift;
 					shift += 7;
 				} while (byte & 0x80);
-				if (offset + length > message.length) return undefined;
+				length >>>= 0;
+				if (length > message.length - offset) return undefined;
 				if (fieldNumber === field) return message.subarray(offset, offset + length);
 				offset += length;
 				break;
