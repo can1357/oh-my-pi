@@ -388,7 +388,7 @@ Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs
 
 ## Twenty-three backends. _One tool the agent already knows_.
 
-`web_search` is built in, not bolted on. `auto` walks a twenty-three-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
+`web_search` is built in, not bolted on. `auto` defaults to Parallel unless you have chosen another provider; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
 
 ### Search providers
 
@@ -397,6 +397,7 @@ Twenty-three backends. Pin one, or let `auto` walk the chain in order.
 | provider     | auth                                      |
 | ------------ | ----------------------------------------- |
 | `auto`       | chain                                     |
+| `parallel`   | no key required; optional `PARALLEL_API_KEY` |
 | `perplexity` | `PERPLEXITY_API_KEY` (anonymous fallback) |
 | `gemini`     | oauth                                     |
 | `anthropic`  | oauth                                     |
@@ -411,7 +412,6 @@ Twenty-three backends. Pin one, or let `auto` walk the chain in order.
 | `firecrawl`  | `FIRECRAWL_API_KEY` (keyless fallback)    |
 | `brave`      | `BRAVE_API_KEY`                           |
 | `kimi`       | `/login kimi-code` or search key          |
-| `parallel`   | `PARALLEL_API_KEY`                        |
 | `synthetic`  | `SYNTHETIC_API_KEY`                       |
 | `searxng`    | self-hosted                               |
 | `duckduckgo` | no key                                    |

@@ -140,7 +140,7 @@ export class WebSearchTab implements SetupTab {
 
 	#readinessLines(value: string): string[] {
 		if (value === "auto") {
-			return [theme.fg("dim", "Automatically uses the first configured provider.")];
+			return [theme.fg("dim", "Uses Parallel by default, or your preferred provider.")];
 		}
 		const state = this.#availability.get(value as SearchProviderId);
 		if (state === undefined || state === "checking") {

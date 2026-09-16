@@ -86,6 +86,25 @@ describe("resolveProviderCandidates", () => {
 });
 
 describe("resolveProviderChain", () => {
+	it("defaults to keyless Parallel when no provider preference is saved", async () => {
+		enableKeyBackedProviders();
+		setExcludedSearchProviders(SEARCH_PROVIDER_ORDER.filter(id => id !== "parallel" && id !== "jina"));
+
+		const providers = await resolveProviderChain(authStorage);
+
+		expect(providers.map(provider => provider.id)).toEqual(["parallel", "jina"]);
+	});
+
+	it("keeps a configured provider ahead of the Parallel default", async () => {
+		enableKeyBackedProviders();
+		setSearchProviderOrder(["jina"]);
+		setExcludedSearchProviders(SEARCH_PROVIDER_ORDER.filter(id => id !== "parallel" && id !== "jina"));
+
+		const providers = await resolveProviderChain(authStorage);
+
+		expect(providers.map(provider => provider.id)).toEqual(["jina", "parallel"]);
+	});
+
 	it("omits excluded providers from the fallback chain", async () => {
 		enableKeyBackedProviders();
 		setExcludedSearchProviders(SEARCH_PROVIDER_ORDER.filter(id => id !== "jina"));
