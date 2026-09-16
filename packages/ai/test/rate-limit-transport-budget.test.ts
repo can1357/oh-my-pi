@@ -239,6 +239,14 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.errorStatus).toBe(429);
 	});
 
+	it("spends the bounded retry on an opaque 429 with a credible header hint", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const outcome = await countCompletionsRequests(() => rateLimited({ "retry-after-ms": "20" }, "{}"));
+		expect(outcome.requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
+		expect(outcome.stopReason).toBe("error");
+		expect(outcome.errorStatus).toBe(429);
+	});
+
 	it("still recovers in-place when a short-hinted 429 clears on the next attempt", async () => {
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const outcome = await countCompletionsRequests(request =>
@@ -395,7 +403,7 @@ describe("transport rate-limit budget", () => {
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const outcome = await countCompletionsRequests(() =>
 			rateLimited(
-				{ "retry-after-ms": "1" },
+				{ "retry-after-ms": "20" },
 				'{"error":{"message":"You have hit your usage limit","type":"insufficient_quota"}}',
 			),
 		);
@@ -529,6 +537,33 @@ describe("transport rate-limit budget", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello");
 		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
+	});
+
+	it("does not let an injected Anthropic short header mask a long body hint", async () => {
+		let requests = 0;
+		const client: AnthropicMessagesClientLike = {
+			messages: {
+				create: () =>
+					({
+						async asResponse() {
+							requests++;
+							throw new AnthropicApiError(
+								429,
+								"Too many requests. Please retry in 300s",
+								new Headers({ "retry-after-ms": "20" }),
+							);
+						},
+					}) as never,
+			},
+		};
+		const result = await streamAnthropic(anthropicModel, context, {
+			client,
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
 	});
 
 	// An in-band `rate_limit_error` frame arrives on a 200 stream, so it carries

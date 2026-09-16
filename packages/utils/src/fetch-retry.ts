@@ -47,7 +47,7 @@ export interface RetryHintOptions {
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
  *
- * Header sources (checked in order):
+ * Header sources (merged conservatively with each other and the body):
  *  - `retry-after-ms` (milliseconds)
  *  - `Retry-After` (numeric seconds, or HTTP date)
  *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms/s for large values)
@@ -73,19 +73,37 @@ export function extractRetryHint(
 	body?: string,
 	options?: RetryHintOptions,
 ): number | undefined {
+	let longestMs: number | undefined;
+	// A parsed-but-non-positive signal is a provider "retry now": an explicit
+	// `retry-after…=0` or an absolute reset that already elapsed. It must
+	// survive as 0 rather than collapse into "no hint found" — consumers
+	// substitute a heuristic wait when the parse returns undefined.
+	let retryNow = false;
+	const consider = (ms: number | undefined): void => {
+		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
+	};
+	const considerClamped = (ms: number | undefined): void => {
+		if (ms === undefined) return;
+		if (ms > 0) consider(ms);
+		else retryNow = true;
+	};
+
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	if (headers) {
 		const retryAfterMs = headers.get("retry-after-ms");
 		if (retryAfterMs) {
 			const ms = Number(retryAfterMs);
-			if (Number.isFinite(ms) && ms >= 0) return ms;
+			if (Number.isFinite(ms) && ms >= 0) considerClamped(ms);
 		}
 		const retryAfter = headers.get("retry-after");
 		if (retryAfter) {
 			const seconds = Number(retryAfter);
-			if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-			const parsedDate = Date.parse(retryAfter);
-			if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+			if (Number.isFinite(seconds)) {
+				considerClamped(seconds * 1000);
+			} else {
+				const parsedDate = Date.parse(retryAfter);
+				if (!Number.isNaN(parsedDate)) considerClamped(parsedDate - Date.now());
+			}
 		}
 		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
 		if (rateLimitResetMs) {
@@ -93,9 +111,11 @@ export function extractRetryHint(
 			if (Number.isFinite(value) && value > 0) {
 				// > 1e12 → epoch ms; > 1e9 → epoch s; otherwise a delta in ms.
 				const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
-				if (targetMs === undefined) return value;
-				const delta = targetMs - Date.now();
-				if (delta > 0) return delta;
+				if (targetMs === undefined) consider(value);
+				else {
+					const delta = targetMs - Date.now();
+					if (delta > 0) consider(delta);
+				}
 			}
 		}
 		const rateLimitReset = headers.get("x-ratelimit-reset");
@@ -103,31 +123,21 @@ export function extractRetryHint(
 			const resetSeconds = Number.parseInt(rateLimitReset, 10);
 			if (!Number.isNaN(resetSeconds)) {
 				const delta = resetSeconds * 1000 - Date.now();
-				if (delta > 0) return delta;
+				if (delta > 0) consider(delta);
 			}
 		}
 		const rateLimitResetAfter = headers.get("x-ratelimit-reset-after");
 		if (rateLimitResetAfter) {
 			const seconds = Number(rateLimitResetAfter);
-			if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+			if (Number.isFinite(seconds) && seconds > 0) consider(seconds * 1000);
 		}
 	}
 
-	if (!body) return undefined;
+	if (!body) return longestMs ?? (retryNow ? 0 : undefined);
 
-	// A body can carry several timing signals at once: the account-reset
-	// window plus header timing folded into the message text (already the
-	// max across response headers — see getRetryAfterMsFromHeaders in
-	// pi-ai). Honor the longest: retrying before either window clears
-	// re-hits a still-blocked credential and burns the retry budget.
-	let longestMs: number | undefined;
-	// A parsed-but-non-positive signal is a provider "retry now": an explicit
-	// `retry-after…=0` or an absolute reset that already elapsed. It must
-	// survive as 0 rather than collapse into "no hint found" — consumers
-	// substitute a heuristic wait (30-minute quota guess, default backoff)
-	// when the parse returns undefined, which would sleep a session the
-	// provider told to retry immediately.
-	let retryNow = false;
+	// Headers and a body can each carry several timing signals. Honor the
+	// longest: retrying before any promised window clears re-hits a still-blocked
+	// route and burns the retry budget.
 
 	// Timezone-naive `reset at` stamps (no `Z`/offset) are the provider's
 	// wall clock in an unknown zone — converting them to a delay requires
@@ -136,14 +146,6 @@ export function extractRetryHint(
 	let longestNaiveMs: number | undefined;
 	const considerNaive = (ms: number | undefined): void => {
 		if (ms !== undefined && ms > 0 && (longestNaiveMs === undefined || ms > longestNaiveMs)) longestNaiveMs = ms;
-	};
-	const consider = (ms: number | undefined): void => {
-		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
-	};
-	const considerClamped = (ms: number | undefined): void => {
-		if (ms === undefined) return;
-		if (ms > 0) consider(ms);
-		else retryNow = true;
 	};
 
 	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);

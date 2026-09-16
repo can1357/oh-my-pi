@@ -150,6 +150,25 @@ describe("fetchWithRetry", () => {
 		expect(attempt).toBe(MAX_RATE_LIMIT_ATTEMPTS);
 	});
 
+	it("uses the longest header or body hint before spending the bounded 429 retry", async () => {
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/provider-conflicting-rate-limit-hints", {
+			fetch: async () => {
+				attempt += 1;
+				return new Response("Too many requests. Please retry in 300s", {
+					status: 429,
+					headers: { "retry-after-ms": "20" },
+				});
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 6,
+			rateLimitBudget: true,
+		});
+
+		expect(response.status).toBe(429);
+		expect(attempt).toBe(1);
+	});
+
 	it("keeps the full attempt budget for 5xx even when the rate-limit budget is enabled", async () => {
 		let attempt = 0;
 		const response = await fetchWithRetry("https://example.invalid/provider-capacity", {

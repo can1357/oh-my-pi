@@ -79,7 +79,7 @@ import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { getHeadersFromError } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
@@ -3472,10 +3472,10 @@ const streamAnthropicOnce = (
 						streamFailure === idleTimeoutAbortError ||
 						(streamFailure instanceof Error && streamFailure.message === idleTimeoutAbortError.message);
 					const rateLimited = AIError.status(streamFailure) === 429;
-					const headerRetryHintMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
-					const retryHintMs =
-						headerRetryHintMs ??
-						extractRetryHint(undefined, streamFailure instanceof Error ? streamFailure.message : undefined);
+					const retryHintMs = extractRetryHint(
+						getHeadersFromError(streamFailure),
+						streamFailure instanceof Error ? streamFailure.message : undefined,
+					);
 					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
 					const rateLimitHintCapMs =
 						maxRetryDelayMs > 0
