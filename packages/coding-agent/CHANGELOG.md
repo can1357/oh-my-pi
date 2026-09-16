@@ -51,6 +51,7 @@
 
 ### Changed
 
+- Web search defaults to Parallel without an API key unless you have chosen another provider ([#12201](https://github.com/can1357/oh-my-pi/pull/12201) by [@georgeatparallel](https://github.com/georgeatparallel)).
 - Eval status rows for `browser`/`computer` calls now say what happened (`open main https://…`, `main.id(5).click()`, `close all`) with a globe/computer icon instead of a bare `browser` label; preludes with nothing to show record no row, while failures still surface.
 - Codex Spark, all MiniMax models, and GLM-5.3-Flash now default to replace edits instead of hashline; explicit edit-mode overrides remain honored.
 - Storage maintenance streams large session journals and gzip archives instead of loading complete files into memory.

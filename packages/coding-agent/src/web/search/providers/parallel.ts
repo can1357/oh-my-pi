@@ -1,4 +1,4 @@
-import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { callMCP } from "../../../mcp/json-rpc";
 import type { SearchResponse } from "../../../web/search/types";
@@ -181,7 +181,7 @@ async function searchWithAuthStorage(
 	const hasConfiguredAuth = authStorage.hasAuth("parallel");
 	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
-		// A failed credential lookup must not admit anonymous search to the automatic chain.
+		// Configured credentials must never silently downgrade to anonymous search.
 		if (hasConfiguredAuth) {
 			throw new ParallelApiError(
 				"Parallel credentials could not be resolved. Check your configured API key or credential helper.",
@@ -289,11 +289,7 @@ export class ParallelProvider extends SearchProvider {
 	readonly id = "parallel";
 	readonly label = "Parallel";
 
-	isAvailable(authStorage: AuthStorage) {
-		return !!getEnvApiKey("parallel") || authStorage.hasAuth("parallel");
-	}
-
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	isAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

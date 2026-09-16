@@ -8,7 +8,12 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "auto",
 		label: "Auto",
-		description: "Automatically uses the first configured web-search provider",
+		description: "Uses Parallel by default, or your preferred provider",
+	},
+	{
+		value: "parallel",
+		label: "Parallel",
+		description: "Ready to use without an API key; optional API key via /login parallel or PARALLEL_API_KEY",
 	},
 	{
 		value: "perplexity",
@@ -53,11 +58,6 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "Kimi",
 		description:
 			"Kimi Code search (requires a Kimi Code Console key via KIMI_SEARCH_API_KEY/MOONSHOT_SEARCH_API_KEY or /login kimi-code; not MOONSHOT_API_KEY)",
-	},
-	{
-		value: "parallel",
-		label: "Parallel",
-		description: "API via /login parallel or PARALLEL_API_KEY; explicit keyless fallback via MCP",
 	},
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "ollama", label: "Ollama", description: "Requires OLLAMA_CLOUD_API_KEY" },
