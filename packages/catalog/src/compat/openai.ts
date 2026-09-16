@@ -367,7 +367,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				? "openrouter"
 				: isQwen && isNvidiaNim
 					? "qwen-chat-template"
-					: isQwen && isFireworks
+					: isQwen && (isFireworks || isCerebras)
 						? "openai"
 						: isAlibaba || isQwen
 							? "qwen"
@@ -418,6 +418,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// (`chat_template_kwargs.enable_thinking`); top-level `enable_thinking`
 		// is rejected by NIM's `additionalProperties: false` request schema
 		// (issue #2299).
+		// Cerebras serves Qwen (`qwen-3.8-27b`) but is an OpenAI-dialect host:
+		// its reasoning guide explicitly forbids Qwen-native `enable_thinking`
+		// / `preserve_thinking` / `thinking_budget` and drives effort through
+		// `reasoning_effort` (none|low|medium|high), so it stays on the
+		// "openai" path like Fireworks.
 		thinkingFormat,
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,

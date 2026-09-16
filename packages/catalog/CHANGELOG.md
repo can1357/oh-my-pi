@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bundled the generated `cerebras/qwen-3.8-27b` catalog entry (models.dev source: 64k context, 32k output, text+image, `effort` low/medium/high). Live `/v1/models` discovery now inherits the reasoning dial from the bundled reference like every other cerebras SKU, so the interim discovery-side reasoning flag for the id was removed.
+- Cerebras-hosted Qwen (`qwen-3.8-27b`) now resolves `thinkingFormat: "openai"` instead of the id-derived `"qwen"` format, so the effort dial reaches the wire as `reasoning_effort` (none|low|medium|high) and no Qwen-native `enable_thinking` / `preserve_thinking` / `thinking_budget` fields are sent — Cerebras's reasoning guide rejects those, mirroring the existing Fireworks rule.
+
 ## [16.4.19] - 2026-09-15
 
 ### Added

@@ -1,13 +1,13 @@
 /**
- * Live endpoint contract for the new 2026-09 Cerebras SKU `qwen-3.8-27b`,
- * which predates its bundled catalog entry.
+ * Live endpoint contract for the Cerebras SKU `qwen-3.8-27b` (added to the
+ * endpoint 2026-09) — the only bundled cerebras model with an effort dial.
  *
- * `createBundledReferenceMap` is sourced only from `models.json`, so without
- * a reference the generic discovery default would ship the discovered model
- * with `reasoning: false` and no thinking surface. The cerebras mapper flags
- * exactly this id so `buildModel` bakes the low/medium/high effort dial from
- * the `model-thinking.ts` deriver — verified here through the real
- * manager/discovery path against the unchanged bundled catalog.
+ * Cerebras `/v1/models` is a bare id listing: no reasoning flag, no limits,
+ * no pricing. `createBundledReferenceMap` sources that metadata from
+ * `models.json`, so the discovered spec must inherit the bundled reference's
+ * `reasoning` and low/medium/high `thinking` surface, while ids without a
+ * reference stay on the generic discovery defaults. Verified through the real
+ * manager/discovery path plus `buildModel`.
  */
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
@@ -24,9 +24,10 @@ const LIVE_ENDPOINT_MODELS = [
 
 describe("cerebras /v1/models discovery", () => {
 	const runDiscovery = async () => {
-		let requestedUrl = "";
-		const fetchMock = (async (input: string | Request | URL): Promise<Response> => {
-			requestedUrl = input instanceof Request ? input.url : String(input);
+		const request = { url: "", authorization: null as string | null };
+		const fetchMock = (async (input: string | Request | URL, init?: RequestInit): Promise<Response> => {
+			request.url = input instanceof Request ? input.url : String(input);
+			request.authorization = new Headers(init?.headers).get("authorization");
 			return new Response(JSON.stringify({ data: LIVE_ENDPOINT_MODELS }), {
 				headers: { "content-type": "application/json" },
 			});
@@ -34,25 +35,31 @@ describe("cerebras /v1/models discovery", () => {
 
 		const options = cerebrasModelManagerOptions({ apiKey: "cerebras-test-key", fetch: fetchMock });
 		const specs = await options.fetchDynamicModels?.();
-		return { requestedUrl, specs };
+		return { request, specs };
 	};
 
-	test("hits the endpoint and flags only the unreferenced reasoning SKU", async () => {
-		const { requestedUrl, specs } = await runDiscovery();
+	test("hits the endpoint and inherits the reasoning dial only from the bundled reference", async () => {
+		const { request, specs } = await runDiscovery();
 
-		expect(requestedUrl).toBe(CEREBRAS_MODELS_URL);
+		expect(request.url).toBe(CEREBRAS_MODELS_URL);
+		expect(request.authorization).toBe("Bearer cerebras-test-key");
 		expect(specs).toHaveLength(3);
 
 		const sku = specs?.find(spec => spec.id === "qwen-3.8-27b");
 		expect(sku).toBeDefined();
 		expect(sku?.reasoning).toBe(true);
+		expect(sku?.input).toEqual(["text", "image"]);
+		// The listing carries no limits; the bundled reference fills them.
+		expect(sku?.contextWindow).toBe(65_536);
+		expect(sku?.maxTokens).toBe(32_768);
 
-		// A still-unreferenced sibling id stays on the generic defaults.
+		// An unreferenced id stays on the generic discovery defaults.
 		const sibling = specs?.find(spec => spec.id === "live-only-model");
 		expect(sibling?.reasoning).toBe(false);
+		expect(sibling?.thinking).toBeUndefined();
 	});
 
-	test("buildModel bakes the low/medium/high effort dial for the SKU", async () => {
+	test("buildModel exposes the low/medium/high effort dial for the SKU", async () => {
 		const { specs } = await runDiscovery();
 		const sku = specs?.find(spec => spec.id === "qwen-3.8-27b");
 		if (!sku) throw new Error("expected qwen-3.8-27b in the discovered catalog");
