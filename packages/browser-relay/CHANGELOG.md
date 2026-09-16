@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed orphaned debugger attachments and the Chrome debugging infobar surviving relay outages or extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed reconnect races that could lose, duplicate, or misclassify recovered browser-relay attachments ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+
 ## [18.0.7] - 2026-08-26
 
 ### Changed
