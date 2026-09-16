@@ -781,7 +781,7 @@ describe("AgentSession aside delivery", () => {
 			isStreaming: () => false,
 			planModeEnabled: () => false,
 			emitSessionEvent: async () => {},
-			wakeForIrc: () => {},
+			wakeForIrc: () => true,
 			runEphemeralTurn: async () => ({ replyText: "" }),
 		};
 		const irc = new IrcBridge(host);
@@ -825,7 +825,7 @@ describe("AgentSession aside delivery", () => {
 			isStreaming: () => false,
 			planModeEnabled: () => false,
 			emitSessionEvent: async () => {},
-			wakeForIrc: () => {},
+			wakeForIrc: () => true,
 			runEphemeralTurn: async () => ({ replyText: "" }),
 		};
 		const irc = new IrcBridge(host);
@@ -861,7 +861,7 @@ describe("AgentSession aside delivery", () => {
 			isStreaming: () => false,
 			planModeEnabled: () => false,
 			emitSessionEvent: async () => {},
-			wakeForIrc: () => {},
+			wakeForIrc: () => true,
 			runEphemeralTurn: async () => ({ replyText: "" }),
 		};
 		const irc = new IrcBridge(host);

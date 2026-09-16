@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { ShakeMode } from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import type { ShakeMode, ShakeResult } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import {
 	ACP_BUILTIN_SLASH_COMMANDS,
 	executeAcpBuiltinSlashCommand,
@@ -68,6 +68,20 @@ describe("/shake dispatch (ACP)", () => {
 	it("advertises /shake images as the image-stripping path and no longer advertises /drop-images", () => {
 		expect(ACP_BUILTIN_SLASH_COMMANDS.some(c => c.name === "shake")).toBe(true);
 		expect(ACP_BUILTIN_SLASH_COMMANDS.some(c => c.name === "drop-images")).toBe(false);
+	});
+
+	it("reports a rejected shake on the command instead of rejecting unhandled", async () => {
+		// Neither dispatcher wraps `handle`, so an unguarded await here escapes as
+		// an unhandled rejection and the user sees nothing on the command they ran.
+		const shake = vi.fn(async (): Promise<ShakeResult> => {
+			throw new Error("session restart is in progress");
+		});
+		const output = vi.fn();
+		const runtime = { session: { shake }, output } as unknown as SlashCommandRuntime;
+
+		const result = await executeAcpBuiltinSlashCommand("/shake elide", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect((output.mock.calls[0]?.[0] as string) ?? "").toContain("session restart is in progress");
 	});
 });
 

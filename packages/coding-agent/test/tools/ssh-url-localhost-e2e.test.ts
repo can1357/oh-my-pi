@@ -147,7 +147,7 @@ describe.skipIf(!SSH_OK)("ssh:// handler against a real localhost ssh", () => {
 	});
 
 	// GNU `stat -c` is Linux-only; `ssh localhost` targets this same machine, so
-	// gate on the local platform. Defends finding 2: overwriting an existing
+	// gate on the local platform. Defends overwriting an existing
 	// regular file preserves its ordinary permission bits and inode (in place),
 	// rather than resetting them via an inode-replacing temp+rename.
 	it.skipIf(process.platform !== "linux")(

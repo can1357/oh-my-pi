@@ -49,6 +49,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 			moveSession: vi.fn(async (cwd: string) => {
 				state.cwd = cwd;
 				state.artifactCwd = cwd;
+				return true;
 			}),
 		},
 		sessionManager: {

@@ -557,6 +557,27 @@ export class SessionAdvisors {
 		return this.#buildAdvisorRuntime(seedToCurrent);
 	}
 
+	/** Whether any advisor has a review in flight or deltas queued for one. */
+	get hasActiveReviews(): boolean {
+		return this.#advisors.some(advisor => advisor.runtime.reviewInFlight);
+	}
+
+	/**
+	 * Force preserve-only routing for a live caller that must let the current
+	 * review COMPLETE (keeping its note) rather than tear it down — the restart
+	 * recycle draining its own turn's review. Returns a restore that reinstates
+	 * the prior routing, for the paths that leave the session live (a refused
+	 * recycle). `stopRuntime()`/`drainAndDetachRecorders()` abort the prompt
+	 * instead, which discards an accepted review and the note it was producing.
+	 */
+	beginPreserveOnlyAdvisorDrain(): () => void {
+		const previous = this.#preserveAdvisorAdvice;
+		this.#preserveAdvisorAdvice = true;
+		return () => {
+			this.#preserveAdvisorAdvice = previous;
+		};
+	}
+
 	/** Stops every advisor runtime and starts recorder shutdown. */
 	stopRuntime(): void {
 		this.#stopAdvisorRuntime();

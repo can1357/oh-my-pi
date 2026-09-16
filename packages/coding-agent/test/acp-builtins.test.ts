@@ -42,7 +42,7 @@ interface FakeAcpBuiltinSession {
 	model: { provider: string; id: string } | undefined;
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
-	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
+	moveSession(newCwd: string, targetSessionDir?: string): Promise<boolean>;
 	markMovedFromEmptySessionFile(sessionFile: string): void;
 	fork(): Promise<boolean>;
 	handoff(instr?: string): Promise<{ document: string; savedPath?: string } | undefined>;
@@ -125,6 +125,7 @@ function createRuntime() {
 		async moveSession(newCwd: string, _targetSessionDir?: string) {
 			if (!fakeSessionManager) throw new Error("fake session manager not initialized");
 			await fakeSessionManager.moveTo(newCwd);
+			return true;
 		},
 		markMovedFromEmptySessionFile(sessionFile: string) {
 			this._movedFromEmptySessionFile = path.resolve(sessionFile);

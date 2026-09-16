@@ -334,6 +334,29 @@ export class AdvisorRuntime {
 	get backlog(): number {
 		return this.#backlog;
 	}
+	/**
+	 * Whether a model request is genuinely in flight, or deltas are queued for a
+	 * request that can still be made.
+	 *
+	 * The advisor runs with the PRIMARY agent idle (the default
+	 * `advisor.syncBacklog: "off"` lets a terminal turn's review outlive it), so
+	 * a caller asking "is this session quiescent" cannot see this work through
+	 * the primary agent at all.
+	 *
+	 * A TERMINAL runtime is not in flight even with a non-empty backlog. On a
+	 * usage-limit hit {@link #drain} sets {@link #quotaExhausted}, requeues the
+	 * failed batch and stops draining until an explicit {@link reset}; a
+	 * hard-stop sets {@link #halted} the same way. The queued deltas are then
+	 * FROZEN, not pending — no request will ever be made for them — so the same
+	 * `disposed || #quotaExhausted || #halted` terminal test {@link yielded}
+	 * uses excludes them here. Without it the getter stays true forever, and a
+	 * caller gating on it (the restart quiescence predicate) refuses the very
+	 * recycle that would rebuild or reset the advisor — a permanent deadlock.
+	 */
+	get reviewInFlight(): boolean {
+		if (this.disposed || this.#quotaExhausted || this.#halted) return false;
+		return this.#promptInFlight !== undefined || this.#backlog > 0;
+	}
 	get quotaExhausted(): boolean {
 		return this.#quotaExhausted;
 	}
