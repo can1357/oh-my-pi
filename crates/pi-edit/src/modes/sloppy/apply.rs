@@ -923,11 +923,17 @@ fn closest_fragment(content: &str, pattern: &str) -> (String, usize, f64) {
 	if pattern.len() <= 160 {
 		for (line, line_offset, normalized, _) in ranked {
 			let width = pattern.len().min(normalized.text.len());
+			// The tail window only adds coverage when `len - width` lands on a
+			// char boundary (e.g. width 0 appends `len`); `char_indices` already
+			// yields every other boundary, and an unaligned fallback slices
+			// inside multibyte chars (e.g. CJK) and panics.
+			let tail = normalized.text.len().saturating_sub(width);
+			let tail = normalized.text.is_char_boundary(tail).then_some(tail);
 			for start in normalized
 				.text
 				.char_indices()
 				.map(|(index, _)| index)
-				.chain(std::iter::once(normalized.text.len().saturating_sub(width)))
+				.chain(tail)
 			{
 				let end = start + width;
 				if end > normalized.text.len() || !normalized.text.is_char_boundary(end) {
