@@ -4,20 +4,22 @@
  * particular JSON-Schema constructs it happens to use internally.
  *
  * The schema uses `allOf` to combine a shared `serverBase` (enabled, lazy,
- * timeout, requestIdFormat, auth, oauth) with a transport-specific branch,
- * closed off with `unevaluatedProperties: false` on the combined schema
- * (rather than `additionalProperties: false` on the transport branch, which
- * would reject every `serverBase` field as "additional" since `allOf`
- * branches validate independently). That's an implementation detail; what
- * matters is that real configs validate and malformed ones don't.
+ * timeout, requestIdFormat, instructions, auth, oauth) with a
+ * transport-specific branch closed by `additionalProperties: false`. Because
+ * `allOf` branches validate independently, each transport branch must also
+ * list every `serverBase` field (as `{}`) or it rejects them as
+ * "additional" (upstream's da3c8f1c82 allowlists the shared fields this way;
+ * `lazy` joins that list). That's an implementation detail; what matters is
+ * that real configs validate and malformed ones don't.
  *
- * This file implements a small local validator covering only the
- * JSON-Schema (2020-12) keywords `mcp-schema.json` actually uses: `type`,
- * `properties`, `required`, `additionalProperties`, `propertyNames`,
- * `items`, `uniqueItems`, `minLength`, `pattern`, `minimum`, `maximum`,
- * `enum`, `allOf`, `oneOf`, `not`, `unevaluatedProperties`, and `$ref`
- * (resolved only within `#/$defs/...`). No schema-validation dependency is
- * added; this is intentionally scoped to this one file's schema.
+ * This file implements a small local validator covering the JSON-Schema
+ * (2020-12) keywords `mcp-schema.json` uses: `type`, `properties`,
+ * `required`, `additionalProperties`, `propertyNames`, `items`,
+ * `uniqueItems`, `minLength`, `pattern`, `minimum`, `maximum`, `enum`,
+ * `allOf`, `oneOf`, `not`, and `$ref` (resolved only within
+ * `#/$defs/...`), plus `unevaluatedProperties`. No schema-validation
+ * dependency is added; this is intentionally scoped to this one file's
+ * schema.
  */
 import { describe, expect, test } from "bun:test";
 import schema from "../src/config/mcp-schema.json" with { type: "json" };
@@ -207,11 +209,11 @@ describe("mcp-schema.json", () => {
 		).toBe(true);
 	});
 
-	test("validates an http server config with a url", () => {
+	test("validates an http server config with a url and lazy", () => {
 		expect(
 			validate({
 				mcpServers: {
-					example: { type: "http", url: "https://example.com/mcp" },
+					example: { type: "http", url: "https://example.com/mcp", lazy: true },
 				},
 			}),
 		).toBe(true);

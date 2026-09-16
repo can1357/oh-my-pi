@@ -216,6 +216,29 @@ describe("MCP lazy connect", () => {
 			await manager.disconnectAll();
 		}
 	});
+
+	it("regression: the headless startup barrier does not report a dormant lazy server as unavailable", async () => {
+		// Print mode warns on stderr for every server `waitForStartup` lists as
+		// pending or failed, and exits 1 under OMP_MCP_REQUIRE_READY=1. A lazy
+		// server is dormant on purpose; only an invalid lazy config is a failure.
+		const marker = path.join(workDir, "spawned.marker");
+		const config = lazyConfig(marker);
+		const cache = new MCPToolCache(fakeStorage());
+		await cache.set("lazyfixture", config, [TOOL_DEF]);
+		const manager = new MCPManager(workDir, cache);
+
+		try {
+			await manager.connectServers({ lazyfixture: config, broken: { type: "stdio", command: "", lazy: true } }, {});
+			const status = await manager.waitForStartup(1_000);
+
+			expect(status.pending).toEqual([]);
+			expect(status.failed.map(entry => entry.name)).toEqual(["broken"]);
+			expect(status.failed[0]?.error).toContain('requires "command"');
+			expect(await Bun.file(marker).exists()).toBe(false);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
 });
 
 /**

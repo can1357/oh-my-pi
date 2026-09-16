@@ -158,9 +158,11 @@
         },
         {
           "type": "object",
+          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "enabled": {},
+            "lazy": {},
             "timeout": {},
             "requestIdFormat": {},
             "instructions": {},
@@ -196,8 +198,7 @@
             "required": ["url"]
           }
         }
-      ],
-      "unevaluatedProperties": false
+      ]
     },
     "httpServer": {
       "allOf": [
@@ -206,9 +207,11 @@
         },
         {
           "type": "object",
+          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "enabled": {},
+            "lazy": {},
             "timeout": {},
             "requestIdFormat": {},
             "instructions": {},
@@ -233,8 +236,7 @@
             "required": ["command"]
           }
         }
-      ],
-      "unevaluatedProperties": false
+      ]
     },
     "sseServer": {
       "allOf": [
@@ -243,9 +245,11 @@
         },
         {
           "type": "object",
+          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "enabled": {},
+            "lazy": {},
             "timeout": {},
             "requestIdFormat": {},
             "instructions": {},
@@ -270,8 +274,7 @@
             "required": ["command"]
           }
         }
-      ],
-      "unevaluatedProperties": false
+      ]
     },
     "serverConfig": {
       "oneOf": [

@@ -729,6 +729,12 @@ export class MCPManager {
 					reportedErrors.add(name);
 					continue;
 				}
+				// Dormant by design, so not part of the startup barrier: left in
+				// `#startupServers`, `waitForStartup` would report it failed, and
+				// headless print mode would warn (or, under OMP_MCP_REQUIRE_READY,
+				// exit) about a server nobody asked to connect yet. A lazy config
+				// that fails validation stays in the set and reports its error.
+				this.#startupServers.delete(name);
 				this.#serverConfigs.set(name, config);
 				lazyServers.push({ name, config });
 				continue;
