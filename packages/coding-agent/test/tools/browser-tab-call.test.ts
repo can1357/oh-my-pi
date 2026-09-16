@@ -37,7 +37,16 @@ describe("renderTabCall", () => {
 		).toBe("return await (await tab.id(5)).evaluate((node => node.textContent));");
 	});
 
-	it("rejects invalid call chains with actionable errors", () => {
+	it("renders the waitFor duration form as a direct await, not a null check", () => {
+		// tab.waitFor(ms) sleeps and resolves to undefined — coercing through the
+		// presence `!== null` check would invert its meaning (#12137).
+		expect(renderTabCall([{ method: "waitFor", args: [500] }])).toBe("return await tab.waitFor(500);");
+		expect(renderTabCall([{ method: "waitFor", args: ["#x", { timeout: 1_000 }] }])).toBe(
+			'return (await tab.waitFor("#x", {"timeout":1000})) !== null;',
+		);
+	});
+
+	it("reports every invalid chain with its exact public error", () => {
 		expect(errorMessage(() => renderTabCall([]))).toBe("Action 'call' requires a non-empty 'chain'.");
 		expect(errorMessage(() => renderTabCall([{ method: "notAHelper", args: [] }]))).toContain(
 			'Unknown tab helper "notAHelper".',

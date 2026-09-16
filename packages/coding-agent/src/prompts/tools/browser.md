@@ -13,7 +13,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
   - Screenshot options: `screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?})`; `diffScreenshot(baselinePath, {threshold?, output?})`; `pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})`.
   - Extraction options: `extract(format?, {selector?, outline?, filter?})`.
   - Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `type`, `fill`, `press`, `keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`, `clickAt`, `wheel`, `scroll`, `drag`, `highlight`, `scrollIntoView`, `select`, `uploadFile`.
-  - Waiting: `waitFor`, `waitForSelector`, `waitForUrl`, `waitForText`.
+  - Waiting: `waitFor` (selector, or a number of milliseconds to sleep), `waitForSelector`, `waitForUrl`, `waitForText`.
   - Frames: `frames()` lists the frame tree; `frame(selectorOrNameOrUrl)` returns a scoped handle with `click`, `fill`, `type`, `press`, `text`, `html`, `value`, `attr`, `count`, `isVisible`, `ariaSnapshot`, `evaluate`, `waitFor`, `waitForSelector`, and `screenshot`.
   - Dialogs: `dialog`, `handleDialog`, `setDialogs`. Without a policy, alerts and beforeunload prompts are accepted automatically; confirms and prompts remain pending for `handleDialog`.
   - Emulation: `emulate(options?)` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides; `devices()` lists valid device names.

@@ -201,6 +201,12 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
 			);
 		}
+		// The duration form of waitFor (`tab.waitFor(ms)`) resolves to undefined,
+		// not handle-or-null — return it directly instead of coercing through
+		// the null check.
+		if (root.method === "waitFor" && typeof root.args[0] === "number") {
+			return `return await tab.${renderCallChain([root])};`;
+		}
 		return `return (await tab.${renderCallChain([root])}) !== null;`;
 	}
 	if (TAB_HANDLE_METHODS.includes(root.method)) {
