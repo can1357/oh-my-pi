@@ -33,10 +33,23 @@ import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
+	SEARCH_PROVIDER_PREFERENCES,
 	SearchProviderError,
 	type SearchProviderId,
 	type SearchResponse,
 } from "./types";
+
+/**
+ * Per-request provider override. Explicit selection is terminal — it bypasses
+ * the configured chain, the exclusion list, and the credential gate that keeps
+ * keyless fallbacks out of the auto chain — so the agent can reach a specific
+ * corpus or engine instead of whatever the chain ranks first.
+ */
+const searchProviderSchema = type
+	.enumerated(...SEARCH_PROVIDER_PREFERENCES)
+	.describe(
+		"search provider for this request; overrides the providers.webSearch setting (default: auto = configured fallback chain)",
+	);
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
@@ -46,11 +59,12 @@ export const webSearchSchema = type({
 	max_tokens: "number?",
 	temperature: "number?",
 	num_search_results: "number?",
+	"provider?": searchProviderSchema,
 });
 
 export type SearchToolParams = typeof webSearchSchema.infer;
 
-export interface SearchQueryParams extends SearchToolParams {
+export interface SearchQueryParams extends Omit<SearchToolParams, "provider"> {
 	provider?: SearchProviderId | "auto";
 }
 
