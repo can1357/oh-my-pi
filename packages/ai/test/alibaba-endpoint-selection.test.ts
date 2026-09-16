@@ -205,7 +205,9 @@ describe("alibaba-coding-plan endpoint selection", () => {
 			},
 		};
 
-		await expect(loginAlibabaCodingPlan(options)).rejects.toThrow(/sk-sp-/);
+		const error = await loginAlibabaCodingPlan(options).catch((e: unknown) => e as Error);
+		expect(error.message).toMatch(/sk-sp-/);
+		expect(error.message).toMatch(/alibaba-token-plan/);
 	});
 });
 

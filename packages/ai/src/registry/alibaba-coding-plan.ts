@@ -9,7 +9,7 @@ const DEFAULT_API_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1";
 const CHINA_API_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1";
 const VALIDATION_MODEL = "qwen3.5-plus";
 const CODING_PLAN_KEY_HINT =
-	"Use the Coding Plan exclusive API key (starts with sk-sp-), not a general Model Studio sk- key or a Token Plan key. Match China vs International to the key's region, and confirm the Coding Plan subscription is active.";
+	"Use the Coding Plan exclusive API key (starts with sk-sp-), not a general Model Studio sk- key or a Token Plan key. Match China vs International to the key's region, and confirm the Coding Plan subscription is active. For a Token Plan subscription, log in with the QwenCloud Token Plan provider (alibaba-token-plan) instead — Token Plan keys and base URLs are separate from Coding Plan.";
 
 export async function loginAlibabaCodingPlan(options: OAuthController): Promise<OAuthCredentials> {
 	if (!options.onPrompt) {

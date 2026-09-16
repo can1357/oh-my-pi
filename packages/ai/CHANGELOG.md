@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Alibaba Coding Plan `401` validation failures now also point Token Plan subscribers to the `alibaba-token-plan` provider, instead of only warning them away from Token Plan keys.
+
 ## [16.4.20] - 2026-09-16
 
 ### Fixed
