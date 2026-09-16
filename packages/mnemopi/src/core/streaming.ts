@@ -349,7 +349,7 @@ export class DeltaSync {
 			updated = 0,
 			skipped = 0,
 			filteredKeys = 0,
-			maxRowid = 0;
+			maxRowid = this.getCheckpoint(peerId, table)?.lastRowid ?? 0;
 		const qname = QUALIFIED_TABLE_NAMES[table];
 		for (const row of delta) {
 			const id = row.id;
@@ -357,8 +357,6 @@ export class DeltaSync {
 				skipped++;
 				continue;
 			}
-			const remoteRowid = typeof row.rowid === "number" ? row.rowid : 0;
-			if (remoteRowid > maxRowid) maxRowid = remoteRowid;
 			const exists = this.db.query(`SELECT 1 FROM ${qname} WHERE id = ?`).get(id) !== null;
 			if (exists) {
 				const entries: [string, SQLQueryBindings][] = [];
@@ -397,6 +395,10 @@ export class DeltaSync {
 				const params: SQLQueryBindings[] = entries.map(([, value]) => value);
 				this.db.run(`INSERT INTO ${qname} (${columns.join(", ")}) VALUES (${placeholders})`, params);
 				inserted++;
+			}
+			const remoteRowid = row.rowid;
+			if (typeof remoteRowid === "number" && Number.isSafeInteger(remoteRowid) && remoteRowid > maxRowid) {
+				maxRowid = remoteRowid;
 			}
 		}
 		this.saveCheckpoint(

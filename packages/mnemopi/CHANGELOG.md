@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Empty and older synchronization batches no longer move peer checkpoints backward.
+
 ## [18.2.1] - 2026-09-15
 
 ### Fixed

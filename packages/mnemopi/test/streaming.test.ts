@@ -93,6 +93,73 @@ describe("DeltaSync", () => {
 		}
 	});
 
+	it("preserves persisted watermarks across empty and older batches and advances on applied rows", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 100 }));
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 500 }), "episodic_memory");
+			sync.applyDelta("peer", []);
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(100);
+
+			expect(sync.applyDelta("peer", [{ id: "old", content: "Older", rowid: 50 }]).inserted).toBe(1);
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(100);
+
+			expect(sync.applyDelta("peer", [{ id: "new", content: "Newer", rowid: 120 }]).inserted).toBe(1);
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(120);
+			expect(sync.applyDelta("peer", [{ id: "old", content: "Updated", rowid: 130 }]).updated).toBe(1);
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(130);
+			expect(sync.getCheckpoint("peer", "episodic_memory")?.lastRowid).toBe(500);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not advance checkpoints for skipped rows", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			sync.applyDelta("peer", [{ id: "existing", content: "Original", rowid: 100 }]);
+			const stats = sync.applyDelta("peer", [
+				{ id: "", content: "Invalid id", rowid: 200 },
+				{ id: "missing-content", rowid: 300 },
+				{ id: "existing", rowid: 400 },
+			]);
+			expect(stats.skipped).toBe(3);
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(100);
+			sync.applyDelta("peer", [
+				{ id: "accepted", content: "Accepted", rowid: 150 },
+				{ id: "still-missing-content", rowid: 500 },
+			]);
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(150);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores invalid rowids without rejecting otherwise applicable rows", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			const invalidRowids = [undefined, "200", NaN, Infinity, -Infinity, 200.5, Number.MAX_SAFE_INTEGER + 1, -1];
+			for (const [index, rowid] of invalidRowids.entries()) {
+				expect(sync.applyDelta("peer", [{ id: `invalid-${index}`, content: "Applied", rowid }]).inserted).toBe(1);
+				expect(sync.getCheckpoint("peer")?.lastRowid).toBe(0);
+			}
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("serializes checkpoints", () => {
 		const checkpoint = new SyncCheckpoint({
 			peer_id: "p1",
